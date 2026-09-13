@@ -17,6 +17,14 @@
 - Use named constants instead of naked protocol or status values.
 - Verify claims from Microsoft, DVV, ICAO, eIDAS, or another primary source.
 - Always run formatting (`cargo fmt`, `csharpier`), clippy (`-D warnings` on both host and Windows targets), and unit tests before committing (`.githooks/pre-commit` enforces this). Keep `Cargo.lock` Git dependencies synchronized with upstream (`.githooks/pre-push` enforces this). Never bypass verification with `--no-verify`. Hardware claims additionally require a real reader and card.
+- One task, one worktree (`~/src/wt/refineid-windows-<topic>`) on one
+  `agent/<topic>` branch, one pull request per branch. Each worktree carries
+  a `WHATSUP.md` work log; run `scripts/agent-housekeeping.sh` when starting
+  and keep the house clean. Merge the pull request once CI is green, then
+  remove the worktree and branch and fast-forward `main`. Full workflow:
+  `docs/process/agent-worktrees.md`.
+- Never put a git worktree under `/tmp` or directly in `~/src/`; all worktrees
+  must live under `~/src/wt/`.
 - Do not publish unsigned or test-signed binaries as production releases.
 
 ## Source comments
