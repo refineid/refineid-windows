@@ -984,7 +984,8 @@ fn matching_handles(
     token: &TokenObjects,
     template: &[(CkMechanismType, Vec<u8>)],
 ) -> Vec<CkObjectHandle> {
-    ObjectKind::ALL
+    token
+        .all_object_kinds()
         .into_iter()
         .filter(|kind| token.matches(*kind, template))
         .map(ObjectKind::handle)
@@ -1084,6 +1085,9 @@ unsafe extern "C" fn c_get_attribute_value(
         Ok(token) => token,
         Err(err) => return err,
     };
+    if !token.object_exists(kind) {
+        return CKR_OBJECT_HANDLE_INVALID;
+    }
     drop(guard);
     // SAFETY: caller guarantees `template`/`count` describe a valid,
     // writable attribute array.

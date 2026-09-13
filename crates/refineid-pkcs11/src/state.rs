@@ -356,18 +356,16 @@ impl ModuleState {
         let pairs: Vec<_> = store.usable_pairing().into_iter().collect();
         for pair in pairs {
             let name = format!("rapp:{}", hex::encode(pair.pair_id.0));
-            let parsed_objects = pair
-                .auth_cert
-                .as_ref()
-                .and_then(|cert| TokenObjects::from_cert_der(cert.clone()).ok());
+            let serial = format!("REMOTE-{}", &hex::encode(pair.pair_id.0)[..8]);
+            let parsed_objects = pair.auth_cert.as_ref().and_then(|cert| {
+                crate::token::remote_token_objects(cert.clone(), serial.clone()).ok()
+            });
             let card_present = parsed_objects.is_some();
             if let Some(pos) = self.slots.iter().position(|s| s.reader_name == name) {
                 if let Some(slot) = self.slots.get_mut(pos) {
                     slot.card_present = card_present;
                 }
-                if let Some(mut objects) = parsed_objects {
-                    let serial = format!("REMOTE-{}", &hex::encode(pair.pair_id.0)[..8]);
-                    objects.set_token_serial(serial);
+                if let Some(objects) = parsed_objects {
                     let id = self.slots[pos].id;
                     self.token_cache.insert(id, objects);
                 }
@@ -388,9 +386,7 @@ impl ModuleState {
                         ifd_version: None,
                     },
                 });
-                if let Some(mut objects) = parsed_objects {
-                    let serial = format!("REMOTE-{}", &hex::encode(pair.pair_id.0)[..8]);
-                    objects.set_token_serial(serial);
+                if let Some(objects) = parsed_objects {
                     self.token_cache.insert(id, objects);
                 }
             }
@@ -615,9 +611,8 @@ impl ModuleState {
                     .ok_or(crate::ck::CKR_TOKEN_NOT_PRESENT)?
                     .clone();
 
-                let mut objects = TokenObjects::from_cert_der(cert_der)?;
                 let serial = format!("REMOTE-{}", &hex_id[..std::cmp::min(8, hex_id.len())]);
-                objects.set_token_serial(serial);
+                let objects = crate::token::remote_token_objects(cert_der, serial)?;
                 self.token_cache.insert(slot_id, objects.clone());
                 return Ok(objects);
             }
