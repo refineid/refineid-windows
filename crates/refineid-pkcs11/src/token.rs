@@ -28,6 +28,7 @@
 //! holds a PC/SC handle across PKCS#11 calls, so the desktop CLI
 //! shares the reader.
 
+use std::io::Write as _;
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "pin-change")]
@@ -158,9 +159,8 @@ impl ObjectKind {
             Self::Certificate => OBJ_CERTIFICATE,
             Self::PrivateKey => OBJ_PRIVATE_KEY,
             Self::PublicKey => OBJ_PUBLIC_KEY,
-            Self::Ca(idx) => {
-                OBJ_CA_BASE + CkObjectHandle::try_from(idx).unwrap_or(CkObjectHandle::MAX)
-            }
+            Self::Ca(idx) => OBJ_CA_BASE
+                .saturating_add(CkObjectHandle::try_from(idx).unwrap_or(CkObjectHandle::MAX)),
         }
     }
 }
@@ -742,6 +742,11 @@ impl TokenObjects {
 }
 
 /// Resolve the filesystem directory used for caching on-card CA certificates.
+///
+/// Cache-directory integrity relies on the OS user profile's access control
+/// lists (ACLs) to prevent unauthorized modification of cached CA certificates
+/// by other users. Local attackers possessing access to the user profile are
+/// out of scope.
 fn persistent_ca_dir() -> Option<std::path::PathBuf> {
     if let Ok(dir) = std::env::var("REFINEID_CA_CACHE_DIR")
         && !dir.is_empty()
@@ -808,7 +813,7 @@ fn is_cert_valid(cert: &OwnedCert) -> bool {
         return false;
     };
     let view = cert.view();
-    view.not_before.unix_duration() <= now && now < view.not_after.unix_duration()
+    view.not_before.unix_duration() <= now && now <= view.not_after.unix_duration()
 }
 
 /// Check if an X.509 certificate asserts certificate authority status (either via `BasicConstraints` CA:TRUE or self-signed).
@@ -845,6 +850,9 @@ fn load_persisted_ca_certs_from(dir: &std::path::Path) -> Vec<OwnedCert> {
 
     let mut certs = Vec::new();
     for path in paths {
+        if certs.len() >= MAX_CA_CERTS {
+            break;
+        }
         let Ok(metadata) = std::fs::symlink_metadata(&path) else {
             continue;
         };
@@ -867,9 +875,7 @@ fn load_persisted_ca_certs_from(dir: &std::path::Path) -> Vec<OwnedCert> {
             let _ = std::fs::remove_file(&path);
             continue;
         }
-        if certs.len() < MAX_CA_CERTS {
-            certs.push(cert);
-        }
+        certs.push(cert);
     }
     certs
 }
@@ -883,7 +889,7 @@ pub(super) fn load_persisted_ca_certs() -> Vec<OwnedCert> {
     persistent_ca_dir().map_or_else(Vec::new, |dir| load_persisted_ca_certs_from(&dir))
 }
 
-/// Persist an authentic, unexpired CA certificate to a specific directory.
+/// Persist a policy-conformant CA certificate to a specific directory.
 fn persist_ca_cert_to(dir: &std::path::Path, cert: &OwnedCert) {
     if !meets_ca_persistence_policy(cert) {
         return;
@@ -895,15 +901,29 @@ fn persist_ca_cert_to(dir: &std::path::Path, cert: &OwnedCert) {
     let fingerprint = Sha256::of(der);
     let hex_name = hex::encode(fingerprint.as_bytes());
     let final_path = dir.join(format!("{hex_name}.der"));
+    if final_path.exists() {
+        return;
+    }
     let temp_name = format!(".{hex_name}.tmp.{}", std::process::id());
     let temp_path = dir.join(temp_name);
-    if std::fs::write(&temp_path, der).is_ok() && std::fs::rename(&temp_path, &final_path).is_err()
-    {
+    let write_res = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .and_then(|mut f| {
+            f.write_all(der)?;
+            f.flush()
+        });
+    if write_res.is_ok() {
+        if std::fs::rename(&temp_path, &final_path).is_err() {
+            let _ = std::fs::remove_file(&temp_path);
+        }
+    } else {
         let _ = std::fs::remove_file(&temp_path);
     }
 }
 
-/// Persist an authentic, unexpired CA certificate to disk.
+/// Persist a policy-conformant CA certificate to disk.
 fn persist_ca_cert(cert: &OwnedCert) {
     if let Some(dir) = persistent_ca_dir() {
         persist_ca_cert_to(&dir, cert);
@@ -964,6 +984,7 @@ pub(super) fn build_token_objects(reader_name: &str) -> Result<TokenObjects, CkR
     let on_card_cas: Vec<OwnedCert> = [CertSlot::IssuingCaEcc, CertSlot::RootCa]
         .into_iter()
         .filter_map(|slot| read_optional_ca_cert(&mut card, slot))
+        .filter(meets_ca_persistence_policy)
         .collect();
     for ca in &on_card_cas {
         persist_ca_cert(ca);
@@ -1733,7 +1754,8 @@ mod tests {
 
         // Plant an oversized file (> 64 KB) to verify purging
         let oversized_path = temp_dir.join("oversized.der");
-        let _ = std::fs::write(&oversized_path, vec![0u8; 70000]);
+        let oversized_len = usize::try_from(super::MAX_CA_CERT_BYTES).unwrap_or(usize::MAX) + 1;
+        let _ = std::fs::write(&oversized_path, vec![0u8; oversized_len]);
 
         let loaded = super::load_persisted_ca_certs_from(&temp_dir);
         assert_eq!(loaded.len(), 1);
@@ -1752,6 +1774,66 @@ mod tests {
         assert!(objects.object_exists(ObjectKind::Ca(0)));
         assert!(!objects.object_exists(ObjectKind::Ca(1)));
         assert_eq!(objects.all_object_kinds().len(), 4);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn leaf_cert_rejected_by_ca_policy() {
+        const LEAF_DER: &[u8] = include_bytes!("../../refineid-rapp-cli/src/mock_cert.der");
+        let leaf = OwnedCert::from_der(LEAF_DER).expect("valid leaf cert DER");
+        assert!(!super::is_ca_cert(&leaf));
+        assert!(!super::meets_ca_persistence_policy(&leaf));
+
+        let unique_name = format!("refineid-test-leaf-rejection-{}", std::process::id());
+        let temp_dir = std::env::temp_dir().join(unique_name);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        // Directly plant the leaf certificate DER in cache dir
+        let leaf_path = temp_dir.join("leaf.der");
+        std::fs::write(&leaf_path, LEAF_DER).expect("write leaf");
+
+        let loaded = super::load_persisted_ca_certs_from(&temp_dir);
+        assert!(loaded.is_empty());
+        assert!(
+            !leaf_path.exists(),
+            "leaf certificate must be purged from cache"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn expired_ca_cert_purged_from_cache() {
+        const CA_DER: &[u8] = include_bytes!("../../refineid-rapp-cli/src/mock_ca.der");
+        let mut expired_der = CA_DER.to_vec();
+        // Replace 360904092249Z (2036) with 200101000000Z (2020)
+        let pos = expired_der
+            .windows(13)
+            .position(|w| w == b"360904092249Z")
+            .expect("notAfter found in mock CA");
+        expired_der[pos..pos + 13].copy_from_slice(b"200101000000Z");
+
+        let expired_cert = OwnedCert::from_der(&expired_der).expect("valid DER structure");
+        assert!(super::is_ca_cert(&expired_cert));
+        assert!(!super::is_cert_valid(&expired_cert));
+        assert!(!super::meets_ca_persistence_policy(&expired_cert));
+
+        let unique_name = format!("refineid-test-expired-purge-{}", std::process::id());
+        let temp_dir = std::env::temp_dir().join(unique_name);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        let expired_path = temp_dir.join("expired.der");
+        std::fs::write(&expired_path, &expired_der).expect("write expired CA");
+
+        let loaded = super::load_persisted_ca_certs_from(&temp_dir);
+        assert!(loaded.is_empty());
+        assert!(
+            !expired_path.exists(),
+            "expired CA must be purged from cache"
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
