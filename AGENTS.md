@@ -40,4 +40,4 @@
 - Complete the integration without waiting for another instruction: push
   the task branch, open a pull request, and merge it into `main` once the
   required checks pass. Sync local `main` with the merged remote.
-  Use merge commits to preserve the branch history; do not squash it.
+  Use squash merges to keep the `main` history linear; do not use merge commits.
