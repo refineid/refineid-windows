@@ -85,8 +85,8 @@ in seconds whether to resume work or clean up. In particular:
    `cargo test -p refineid-lib-core`) in the worktree.
 2. Commit on the task branch (subject and body only) and push.
 3. Open one pull request for the branch.
-4. Merge once CI is green, using the merge (not squash) so the branch
-   history survives.
+4. Squash-merge once CI is green, so the `main` history stays
+   linear. The pull request preserves the branch history.
 5. Remove the worktree (`git worktree remove`), delete the branch, and
    fast-forward local main.
 
