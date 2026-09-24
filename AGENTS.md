@@ -33,6 +33,18 @@
   Past bugs, previous implementations, and explanations of what a fix changed
   belong in commit messages, not source comments.
 
+## Code reviews and AI reviewers
+
+- For automated code reviews and multi-turn pull request discussions with the Muse Code agent (`muse`), always invoke with:
+  ```bash
+  muse --model muse-spark-1.3-contributor --reasoning-effort max
+  ```
+  Helper scripts `discuss-with-muse` and `review-with-muse` default to these options.
+- Codex review is reserved strictly for maintainer-requested reviews (invoked only on explicit maintainer request due to expense and low quota). When requested, invoke with:
+  ```bash
+  codex --model gpt-6-astra -c model_reasoning_effort=high
+  ```
+
 ## Commits and integration
 
 - Commits are cheap backups. Make small, focused commits often, without
