@@ -425,6 +425,13 @@ fn parse_tbs_cert_list<'a>(
     //     revokedCertificates     SEQUENCE OF ... OPTIONAL,
     //     crlExtensions           [0] EXPLICIT Extensions OPTIONAL
     // }
+    // crlExtensions [0] EXPLICIT, matched as a value rather than as
+    // a pattern so the tag number stays one expression.
+    const CRL_EXTENSIONS_TAG: Tag = Tag::ContextSpecific {
+        constructed: true,
+        number: TagNumber(0),
+    };
+
     let tbs = AnyRef::from_der(tbs_der)
         .map_err(|_ignored| X509Error::UnexpectedStructure("tbsCertList not a TLV"))?;
     if tbs.tag() != Tag::Sequence {
@@ -490,10 +497,7 @@ fn parse_tbs_cert_list<'a>(
                 revoked_seq_value = Some(any.value());
             }
             // crlExtensions [0] EXPLICIT -- not interpreted.
-            Tag::ContextSpecific {
-                number: TagNumber::N0,
-                ..
-            } => {}
+            tag if tag == CRL_EXTENSIONS_TAG => {}
             _ => return Err(X509Error::UnexpectedStructure("unexpected CRL field")),
         }
     }
@@ -553,7 +557,9 @@ impl Iterator for RevokedIter<'_> {
         }
         // Peel one RevokedCert TLV and decode it with the typed
         // x509-cert structure -- trust the type for field validation.
-        let revoked = RevokedCert::from_der(reader.tlv_bytes().ok()?).ok()?;
+        let revoked =
+            RevokedCert::<x509_cert::certificate::Rfc5280>::from_der(reader.tlv_bytes().ok()?)
+                .ok()?;
         let serial = CertSerial::from_bytes(revoked.serial_number.as_bytes().to_vec());
         let revocation_date = revoked.revocation_date.to_date_time();
         let reason = revoked
