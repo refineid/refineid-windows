@@ -32,7 +32,7 @@ getrandom.workspace = true
 hmac.workspace = true
 # Secret-material zeroize-on-drop -- `PinBytes` in `pin`.
 zeroize.workspace = true
-x509-cert = { version = "0.2", default-features = false }
+x509-cert = { version = "0.3", default-features = false }
 x509-ocsp = { version = "0.2", default-features = false }
 
 [dev-dependencies]
