@@ -15,12 +15,12 @@ members = [
 ]
 
 [workspace.package]
-version = "26.9.8"
+version = "26.9.24"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["Petri Koistinen"]
 repository = "https://github.com/refineid/refineid-windows"
-rust-version = "1.91"
+
 
 [workspace.dependencies]
 refineid-lib-core = { path = "crates/refineid-lib-core", version = "26" }

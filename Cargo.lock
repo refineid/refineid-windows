@@ -843,7 +843,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-card-manager-core"
-version = "26.9.8"
+version = "26.9.24"
 dependencies = [
  "hex",
  "refineid-lib-core",
@@ -853,7 +853,7 @@ dependencies = [
 [[package]]
 name = "refineid-digest"
 version = "26.9.24"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#4bbdbb392f711fda9d303e273f0e110f2b4b00c2"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#97332c8e8b0b7869b7bd8d4043838d096f73151d"
 dependencies = [
  "sha1",
  "sha2 0.11.0",
@@ -861,7 +861,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-lib-core"
-version = "26.9.8"
+version = "26.9.24"
 dependencies = [
  "aes 0.9.3",
  "cbc",
@@ -884,7 +884,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-lib-pcsc"
-version = "26.9.8"
+version = "26.9.24"
 dependencies = [
  "pcsc",
  "refineid-lib-core",
@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-minidriver"
-version = "26.9.8"
+version = "26.9.24"
 dependencies = [
  "refineid-lib-core",
  "refineid-rapp-core",
@@ -901,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-msi"
-version = "26.9.8"
+version = "26.9.24"
 dependencies = [
  "sha1",
  "windows-sys",
@@ -909,7 +909,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-pkcs11"
-version = "26.9.8"
+version = "26.9.24"
 dependencies = [
  "hex",
  "refineid-lib-core",
@@ -921,7 +921,7 @@ dependencies = [
 [[package]]
 name = "refineid-rapp"
 version = "26.9.24"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#4bbdbb392f711fda9d303e273f0e110f2b4b00c2"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#97332c8e8b0b7869b7bd8d4043838d096f73151d"
 dependencies = [
  "sha2 0.11.0",
  "snow",
@@ -930,7 +930,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-rapp-cli"
-version = "26.9.8"
+version = "26.9.24"
 dependencies = [
  "hex",
  "p384",
@@ -943,7 +943,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-rapp-core"
-version = "26.9.8"
+version = "26.9.24"
 dependencies = [
  "getrandom 0.4.3",
  "refineid-rapp",
@@ -958,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-rapp-ffi"
-version = "26.9.8"
+version = "26.9.24"
 dependencies = [
  "hex",
  "refineid-rapp-core",
@@ -970,14 +970,14 @@ dependencies = [
 [[package]]
 name = "refineid-remote"
 version = "26.9.24"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#4bbdbb392f711fda9d303e273f0e110f2b4b00c2"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#97332c8e8b0b7869b7bd8d4043838d096f73151d"
 dependencies = [
  "refineid-digest",
 ]
 
 [[package]]
 name = "refineid-settings-ffi"
-version = "26.9.8"
+version = "26.9.24"
 dependencies = [
  "refineid-card-manager-core",
  "refineid-lib-core",
@@ -989,7 +989,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-windows-credential-store"
-version = "26.9.8"
+version = "26.9.24"
 dependencies = [
  "refineid-lib-core",
  "refineid-rapp-core",
