@@ -33,12 +33,12 @@
 //! lives a layer up) and the HTTP transport (lib-core stays HTTP-free
 //! per the crate's charter).
 
+use crate::ber::tlv;
 use crate::identity::CertSerial;
 use crate::oid::known;
 use crate::x509::{DateTime, X509Error};
 use spki::der::asn1::{AnyRef, ObjectIdentifier};
-use spki::der::{Decode as _, Reader as _, SliceReader, Tag, TagNumber, Tagged as _};
-use x509_cert::ext::pkix::CrlReason as X509CrlReason;
+use spki::der::{Decode as _, Reader as _, SliceReader, Tag, Tagged as _};
 
 /// `id-sha1` OID (`1.3.14.3.2.26`), the default and
 /// MUST-support `CertID.hashAlgorithm` per RFC 6960 §4.3.
@@ -47,6 +47,42 @@ use x509_cert::ext::pkix::CrlReason as X509CrlReason;
 /// an attacker forge responses (the responder also signs over
 /// `tbsResponseData`).
 const OID_SHA1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.14.3.2.26");
+
+/// What [`OcspHelpers::parse_response_data`] takes out of a
+/// `ResponseData`: when the responder spoke, what it said about each
+/// certificate, and the nonce it echoed back if it echoed one.
+type ResponseDataParts = (DateTime, Vec<SingleResponse>, Option<Vec<u8>>);
+
+/// `id-pkix-ocsp-nonce` (RFC 8954 sec.2.1).
+const OID_OCSP_NONCE: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.48.1.2");
+
+/// DER tags this module writes, and dispatches on when reading.
+/// Reading a tag is a byte comparison rather than a `der::Tag`
+/// match: the byte is what is on the wire, and it does not move when
+/// the `der` crate reorganises its tag types.
+const TAG_INTEGER: u8 = 0x02;
+/// `OCTET STRING`.
+const TAG_OCTET_STRING: u8 = 0x04;
+/// `NULL`, always zero-length.
+const TAG_NULL: u8 = 0x05;
+/// `OBJECT IDENTIFIER`.
+const TAG_OID: u8 = 0x06;
+/// `GeneralizedTime`.
+const TAG_GENERALIZED_TIME: u8 = 0x18;
+/// `SEQUENCE`, constructed.
+const TAG_SEQUENCE: u8 = 0x30;
+/// `[0]` primitive -- `certStatus` `good`, an IMPLICIT NULL.
+const TAG_CONTEXT_0_PRIMITIVE: u8 = 0x80;
+/// `[0]` constructed -- `responseBytes`, `nextUpdate`, and
+/// `revocationReason` inside `RevokedInfo`.
+const TAG_CONTEXT_0: u8 = 0xA0;
+/// `[1]` constructed -- `certStatus` `revoked`, `responderID` byName,
+/// and `responseExtensions`. Which one is meant is decided by where
+/// it appears, not by the tag.
+const TAG_CONTEXT_1: u8 = 0xA1;
+/// `[2]` constructed -- `requestExtensions`, EXPLICIT so the inner
+/// `Extensions` SEQUENCE is written whole inside it.
+const TAG_CONTEXT_2: u8 = 0xA2;
 
 // The `BasicOCSPResponse` `responseType` (`id-pkix-ocsp-basic`,
 // RFC 6960 §4.2.1) is `known::BASIC_OCSP_RESPONSE`; the parser asserts
@@ -78,6 +114,12 @@ impl IssuerNameHash {
     pub const fn new(digest: [u8; 20]) -> Self {
         Self(digest)
     }
+
+    /// The raw SHA-1 digest bytes.
+    #[must_use]
+    pub const fn as_bytes(self) -> [u8; 20] {
+        self.0
+    }
 }
 
 impl IssuerKeyHash {
@@ -85,6 +127,12 @@ impl IssuerKeyHash {
     #[must_use]
     pub const fn new(digest: [u8; 20]) -> Self {
         Self(digest)
+    }
+
+    /// The raw SHA-1 digest bytes.
+    #[must_use]
+    pub const fn as_bytes(self) -> [u8; 20] {
+        self.0
     }
 
     /// Compute the issuer-key hash from a typed
@@ -168,18 +216,24 @@ impl OcspRequest {
 /// and calls in here. That helper lives outside lib-core to
 /// keep this crate dep-light.
 ///
-/// # Errors
-/// [`spki::der::Error`] if a `CertID` field or the request body
-/// fails DER construction. Unreachable for a parser-validated
-/// [`CertSerial`] and a fixed-size SHA-1 hash -- surfaced rather
-/// than panicked, since DER encoding is fallible in principle.
+/// Infallible: the body is a fixed nesting of SEQUENCEs over a
+/// fixed-size hash and a serial the parser already validated, and
+/// the writer imposes no length ceiling. It returned a `Result`
+/// while a typed encoder was doing the work, and the error was
+/// unreachable then too.
 #[inline]
+#[must_use]
 pub fn build_request(
     issuer_name_sha1: IssuerNameHash,
     issuer_key_sha1: IssuerKeyHash,
     serial: &CertSerial,
-) -> Result<OcspRequest, spki::der::Error> {
-    OcspHelpers::encode_request(&issuer_name_sha1, &issuer_key_sha1, serial, None).map(OcspRequest)
+) -> OcspRequest {
+    OcspRequest(OcspHelpers::encode_request(
+        &issuer_name_sha1,
+        &issuer_key_sha1,
+        serial,
+        None,
+    ))
 }
 
 /// `build_request` plus an OCSP nonce extension (RFC 8954).
@@ -189,17 +243,21 @@ pub fn build_request(
 /// responder echoes it back, defeating replay of an old signed
 /// response.
 ///
-/// # Errors
-/// As for [`build_request`].
+/// Infallible, as [`build_request`].
 #[inline]
+#[must_use]
 pub fn build_request_with_nonce(
     issuer_name_sha1: IssuerNameHash,
     issuer_key_sha1: IssuerKeyHash,
     serial: &CertSerial,
     nonce: &OcspNonce,
-) -> Result<OcspRequest, spki::der::Error> {
-    OcspHelpers::encode_request(&issuer_name_sha1, &issuer_key_sha1, serial, Some(nonce))
-        .map(OcspRequest)
+) -> OcspRequest {
+    OcspRequest(OcspHelpers::encode_request(
+        &issuer_name_sha1,
+        &issuer_key_sha1,
+        serial,
+        Some(nonce),
+    ))
 }
 
 /// Helpers hosted on a unit struct (typing-discipline: no
@@ -208,62 +266,311 @@ pub fn build_request_with_nonce(
 struct OcspHelpers;
 
 impl OcspHelpers {
-    /// Encode an `OCSPRequest` for one cert lookup via x509-ocsp,
-    /// SHA-1 as the `CertID.hashAlgorithm`, the optional signature
-    /// omitted (RFC 6960 §4.1.1 -- responders accept unsigned
-    /// requests). With `nonce`, appends the `id-pkix-ocsp-nonce`
-    /// extension (RFC 8954 §2.1); the nonce bytes are the caller's,
-    /// drawn through the `crate::rng` seam, not a second RNG path.
+    /// Encode an `OCSPRequest` for one cert lookup: SHA-1 as the
+    /// `CertID.hashAlgorithm`, the optional signature omitted (RFC
+    /// 6960 sec.4.1.1 -- responders accept unsigned requests).
+    ///
+    /// Written out rather than delegated to a typed encoder. The
+    /// structure is four nested SEQUENCEs and one extension, and the
+    /// serial goes out as the exact INTEGER body the certificate
+    /// carried: an encoder that renormalised it would build a
+    /// `CertID` the responder answers `unknown` to, which is a hard
+    /// failure to diagnose from the far end.
     fn encode_request(
         issuer_name_sha1: &IssuerNameHash,
         issuer_key_sha1: &IssuerKeyHash,
         serial: &CertSerial,
         nonce: Option<&OcspNonce>,
-    ) -> Result<Vec<u8>, spki::der::Error> {
-        use spki::AlgorithmIdentifierOwned;
-        use spki::der::Encode as _;
-        use spki::der::asn1::{Null, OctetString};
-        use x509_cert::ext::AsExtension as _;
-        use x509_cert::name::Name;
-        use x509_cert::serial_number::SerialNumber;
-        use x509_ocsp::{CertId, OcspRequest as X509OcspRequest, Request, TbsRequest, ext::Nonce};
+    ) -> Vec<u8> {
+        // CertID ::= SEQUENCE { hashAlgorithm AlgorithmIdentifier,
+        //   issuerNameHash OCTET STRING, issuerKeyHash OCTET STRING,
+        //   serialNumber CertificateSerialNumber }
+        let mut algorithm = tlv(TAG_OID, OID_SHA1.as_bytes());
+        // Explicit NULL parameters: a responder in the field is
+        // likelier to match a CertID carrying them than one that
+        // leaves the field absent.
+        algorithm.extend_from_slice(&tlv(TAG_NULL, []));
+        let mut cert_id = tlv(TAG_SEQUENCE, algorithm);
+        cert_id.extend_from_slice(&tlv(TAG_OCTET_STRING, issuer_name_sha1.as_bytes()));
+        cert_id.extend_from_slice(&tlv(TAG_OCTET_STRING, issuer_key_sha1.as_bytes()));
+        cert_id.extend_from_slice(&tlv(TAG_INTEGER, serial.as_bytes()));
 
-        let cert_id = CertId {
-            hash_algorithm: AlgorithmIdentifierOwned {
-                oid: OID_SHA1,
-                parameters: Some(Null.into()),
-            },
-            issuer_name_hash: OctetString::new(issuer_name_sha1.0.to_vec())?,
-            issuer_key_hash: OctetString::new(issuer_key_sha1.0.to_vec())?,
-            serial_number: SerialNumber::new(serial.as_bytes())?,
-        };
-        // `request_extensions` is x509-cert's `Option<Extensions>`
-        // (`Extensions = SEQUENCE OF Extension`); build it as a value,
-        // not by poking a mutable field.
-        let request_extensions = match nonce {
-            None => None,
-            // x509-ocsp owns the RFC 8954 nonce-extension encoding; the
-            // entropy is the caller's seam-drawn bytes, not a new draw.
-            // `to_extension`'s subject-DN / sibling-extension args exist
-            // for extensions that derive from them -- the nonce derives
-            // from neither, hence the empty defaults.
-            Some(nonce) => Some(vec![
-                Nonce::new(nonce.as_bytes())?.to_extension(&Name::default(), &[])?,
-            ]),
-        };
-        let tbs = TbsRequest {
-            request_list: vec![Request {
-                req_cert: cert_id,
-                single_request_extensions: None,
-            }],
-            request_extensions,
-            ..TbsRequest::default()
-        };
-        X509OcspRequest {
-            tbs_request: tbs,
-            optional_signature: None,
+        // Request ::= SEQUENCE { reqCert CertID, ... } and
+        // requestList ::= SEQUENCE OF Request -- one of each here.
+        let request = tlv(TAG_SEQUENCE, tlv(TAG_SEQUENCE, cert_id));
+        let mut tbs_request = tlv(TAG_SEQUENCE, request);
+
+        if let Some(nonce) = nonce {
+            // RFC 8954: extnValue is an OCTET STRING whose content is
+            // itself the DER OCTET STRING holding the nonce.
+            let mut extension = tlv(TAG_OID, OID_OCSP_NONCE.as_bytes());
+            extension.extend_from_slice(&tlv(
+                TAG_OCTET_STRING,
+                tlv(TAG_OCTET_STRING, nonce.as_bytes()),
+            ));
+            let extensions = tlv(TAG_SEQUENCE, tlv(TAG_SEQUENCE, extension));
+            // requestExtensions [2] EXPLICIT.
+            tbs_request.extend_from_slice(&tlv(TAG_CONTEXT_2, extensions));
         }
-        .to_der()
+
+        // OCSPRequest ::= SEQUENCE { tbsRequest TBSRequest, ... }
+        tlv(TAG_SEQUENCE, tlv(TAG_SEQUENCE, tbs_request))
+    }
+
+    /// Decode `ResponseData` (RFC 6960 sec.4.2.1) into the three
+    /// things this crate takes from it.
+    ///
+    /// ```text
+    /// ResponseData ::= SEQUENCE {
+    ///   version [0] EXPLICIT Version DEFAULT v1,
+    ///   responderID ResponderID,
+    ///   producedAt GeneralizedTime,
+    ///   responses SEQUENCE OF SingleResponse,
+    ///   responseExtensions [1] EXPLICIT Extensions OPTIONAL }
+    /// ```
+    ///
+    /// `[1]` cannot be read from the tag alone -- `responderID`
+    /// byName is `[1]` too -- so the two are told apart by position,
+    /// which is exactly what the ordering of a SEQUENCE guarantees: a
+    /// `[1]` before `producedAt` is the responder's name, one after
+    /// the responses is the extensions. Fields this crate does not
+    /// read are skipped rather than refused, so a responder adding
+    /// one it is entitled to add does not make its answer unreadable.
+    fn parse_response_data(der: &[u8]) -> Result<ResponseDataParts, X509Error> {
+        let mut reader = Self::sequence_reader(der, "OCSP tbsResponseData")?;
+        let mut produced_at: Option<DateTime> = None;
+        let mut responses: Vec<SingleResponse> = Vec::new();
+        let mut nonce: Option<Vec<u8>> = None;
+
+        while !reader.is_finished() {
+            let field = reader
+                .tlv_bytes()
+                .map_err(|_ignored| X509Error::UnexpectedStructure("OCSP ResponseData field"))?;
+            match field.first() {
+                Some(&TAG_GENERALIZED_TIME) => produced_at = Some(Self::generalized_time(field)?),
+                Some(&TAG_SEQUENCE) => {
+                    let mut list = Self::sequence_reader(field, "OCSP responses")?;
+                    while !list.is_finished() {
+                        let entry = list.tlv_bytes().map_err(|_ignored| {
+                            X509Error::UnexpectedStructure("OCSP SingleResponse")
+                        })?;
+                        responses.push(Self::parse_single_response(entry)?);
+                    }
+                }
+                // responseExtensions, but only once producedAt has
+                // been seen; before that, a [1] is the responder name.
+                Some(&TAG_CONTEXT_1) if produced_at.is_some() => {
+                    nonce = Self::nonce_from_extensions(Self::value_of(field, "OCSP extensions")?)?;
+                }
+                _ => {}
+            }
+        }
+
+        Ok((
+            produced_at.ok_or(X509Error::UnexpectedStructure("OCSP producedAt missing"))?,
+            responses,
+            nonce,
+        ))
+    }
+
+    /// Decode one `SingleResponse` (RFC 6960 sec.4.2.1).
+    fn parse_single_response(der: &[u8]) -> Result<SingleResponse, X509Error> {
+        let mut reader = Self::sequence_reader(der, "OCSP SingleResponse")?;
+        let cert_id = Self::parse_cert_id(
+            reader
+                .tlv_bytes()
+                .map_err(|_ignored| X509Error::UnexpectedStructure("OCSP certID"))?,
+        )?;
+        let status = Self::parse_cert_status(
+            reader
+                .tlv_bytes()
+                .map_err(|_ignored| X509Error::UnexpectedStructure("OCSP certStatus"))?,
+        )?;
+        let this_update = Self::generalized_time(
+            reader
+                .tlv_bytes()
+                .map_err(|_ignored| X509Error::UnexpectedStructure("OCSP thisUpdate"))?,
+        )?;
+
+        // nextUpdate [0] EXPLICIT, then singleExtensions [1] EXPLICIT.
+        let mut next_update = None;
+        while !reader.is_finished() {
+            let field = reader
+                .tlv_bytes()
+                .map_err(|_ignored| X509Error::UnexpectedStructure("OCSP SingleResponse tail"))?;
+            if field.first() == Some(&TAG_CONTEXT_0) {
+                next_update = Some(Self::generalized_time(Self::value_of(
+                    field,
+                    "OCSP nextUpdate",
+                )?)?);
+            }
+        }
+
+        Ok(SingleResponse {
+            cert_id,
+            status,
+            this_update,
+            next_update,
+        })
+    }
+
+    /// Decode a `CertID` (RFC 6960 sec.4.1.1).
+    fn parse_cert_id(der: &[u8]) -> Result<CertId, X509Error> {
+        let mut reader = Self::sequence_reader(der, "OCSP CertID")?;
+        // hashAlgorithm AlgorithmIdentifier -- the OID only; the
+        // parameters are not consulted.
+        let algorithm = reader
+            .tlv_bytes()
+            .map_err(|_ignored| X509Error::UnexpectedStructure("CertID hashAlgorithm"))?;
+        let mut algorithm_reader = Self::sequence_reader(algorithm, "CertID hashAlgorithm")?;
+        let oid_tlv = algorithm_reader
+            .tlv_bytes()
+            .map_err(|_ignored| X509Error::UnexpectedStructure("CertID hashAlgorithm OID"))?;
+        if oid_tlv.first() != Some(&TAG_OID) {
+            return Err(X509Error::UnexpectedStructure("CertID hashAlgorithm OID"));
+        }
+        let hash_algorithm_oid = Self::value_of(oid_tlv, "CertID hashAlgorithm OID")?.to_vec();
+        let issuer_name_hash = Self::octet_string(&mut reader, "CertID issuerNameHash")?;
+        let issuer_key_hash = Self::octet_string(&mut reader, "CertID issuerKeyHash")?;
+        let serial_tlv = reader
+            .tlv_bytes()
+            .map_err(|_ignored| X509Error::UnexpectedStructure("CertID serialNumber"))?;
+        if serial_tlv.first() != Some(&TAG_INTEGER) {
+            return Err(X509Error::UnexpectedStructure("CertID serialNumber"));
+        }
+        let serial =
+            CertSerial::from_bytes(Self::value_of(serial_tlv, "CertID serialNumber")?.to_vec());
+
+        Ok(CertId {
+            hash_algorithm_oid,
+            issuer_name_hash,
+            issuer_key_hash,
+            serial,
+        })
+    }
+
+    /// Decode the `certStatus` CHOICE (RFC 6960 sec.4.2.1).
+    ///
+    /// ```text
+    /// CertStatus ::= CHOICE {
+    ///   good    [0] IMPLICIT NULL,
+    ///   revoked [1] IMPLICIT RevokedInfo,
+    ///   unknown [2] IMPLICIT UnknownInfo }
+    /// RevokedInfo ::= SEQUENCE {
+    ///   revocationTime GeneralizedTime,
+    ///   revocationReason [0] EXPLICIT CRLReason OPTIONAL }
+    /// ```
+    ///
+    /// An alternative this crate does not know reads as `Unknown`
+    /// rather than as an error, which is the safe direction: the
+    /// reading of a status nobody here understands is that the
+    /// responder vouched for nothing.
+    fn parse_cert_status(der: &[u8]) -> Result<CertStatus, X509Error> {
+        match der.first() {
+            Some(&TAG_CONTEXT_0_PRIMITIVE) => Ok(CertStatus::Good),
+            Some(&TAG_CONTEXT_1) => {
+                let mut reader = SliceReader::new(Self::value_of(der, "OCSP RevokedInfo")?)
+                    .map_err(|_ignored| X509Error::UnexpectedStructure("OCSP RevokedInfo body"))?;
+                let revoked_at = Self::generalized_time(
+                    reader
+                        .tlv_bytes()
+                        .map_err(|_ignored| X509Error::UnexpectedStructure("revocationTime"))?,
+                )?;
+                let mut reason = None;
+                while !reader.is_finished() {
+                    let field = reader.tlv_bytes().map_err(|_ignored| {
+                        X509Error::UnexpectedStructure("OCSP RevokedInfo tail")
+                    })?;
+                    if field.first() == Some(&TAG_CONTEXT_0) {
+                        let enumerated = Self::value_of(field, "revocationReason")?;
+                        reason = Self::value_of(enumerated, "CRLReason")?
+                            .first()
+                            .and_then(|code| crate::crl::CrlReason::from_code(*code));
+                    }
+                }
+                Ok(CertStatus::Revoked { revoked_at, reason })
+            }
+            _ => Ok(CertStatus::Unknown),
+        }
+    }
+
+    /// The nonce out of an `Extensions` SEQUENCE, if it carries one.
+    ///
+    /// RFC 8954: `extnValue` is an OCTET STRING whose content is
+    /// itself the DER OCTET STRING holding the nonce, so the value
+    /// sits two layers in.
+    fn nonce_from_extensions(extensions: &[u8]) -> Result<Option<Vec<u8>>, X509Error> {
+        let mut reader = Self::sequence_reader(extensions, "OCSP Extensions")?;
+        while !reader.is_finished() {
+            let extension = reader
+                .tlv_bytes()
+                .map_err(|_ignored| X509Error::UnexpectedStructure("OCSP Extension"))?;
+            let mut fields = Self::sequence_reader(extension, "OCSP Extension body")?;
+            let oid_tlv = fields
+                .tlv_bytes()
+                .map_err(|_ignored| X509Error::UnexpectedStructure("OCSP Extension OID"))?;
+            if Self::value_of(oid_tlv, "OCSP Extension OID")? != OID_OCSP_NONCE.as_bytes() {
+                continue;
+            }
+            // Step past the optional critical BOOLEAN to extnValue.
+            while !fields.is_finished() {
+                let field = fields
+                    .tlv_bytes()
+                    .map_err(|_ignored| X509Error::UnexpectedStructure("OCSP extnValue"))?;
+                if field.first() == Some(&TAG_OCTET_STRING) {
+                    let inner = Self::value_of(field, "OCSP extnValue")?;
+                    // A responder that omits RFC 8954's inner wrapper
+                    // is read as having sent the bytes bare, rather
+                    // than as having sent nothing.
+                    return Ok(Some(if inner.first() == Some(&TAG_OCTET_STRING) {
+                        Self::value_of(inner, "OCSP nonce")?.to_vec()
+                    } else {
+                        inner.to_vec()
+                    }));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// A reader over the body of a TLV that must be a SEQUENCE.
+    fn sequence_reader<'d>(
+        der: &'d [u8],
+        what: &'static str,
+    ) -> Result<SliceReader<'d>, X509Error> {
+        if der.first() != Some(&TAG_SEQUENCE) {
+            return Err(X509Error::UnexpectedStructure(what));
+        }
+        SliceReader::new(Self::value_of(der, what)?)
+            .map_err(|_ignored| X509Error::UnexpectedStructure(what))
+    }
+
+    /// The value bytes of one TLV.
+    fn value_of<'d>(der: &'d [u8], what: &'static str) -> Result<&'d [u8], X509Error> {
+        Ok(AnyRef::from_der(der)
+            .map_err(|_ignored| X509Error::UnexpectedStructure(what))?
+            .value())
+    }
+
+    /// The next TLV, which must be an OCTET STRING, as its contents.
+    fn octet_string(
+        reader: &mut SliceReader<'_>,
+        what: &'static str,
+    ) -> Result<Vec<u8>, X509Error> {
+        let tlv_bytes = reader
+            .tlv_bytes()
+            .map_err(|_ignored| X509Error::UnexpectedStructure(what))?;
+        if tlv_bytes.first() != Some(&TAG_OCTET_STRING) {
+            return Err(X509Error::UnexpectedStructure(what));
+        }
+        Ok(Self::value_of(tlv_bytes, what)?.to_vec())
+    }
+
+    /// A `GeneralizedTime` TLV as a [`DateTime`].
+    fn generalized_time(der: &[u8]) -> Result<DateTime, X509Error> {
+        Ok(spki::der::asn1::GeneralizedTime::from_der(der)
+            .map_err(|_ignored| X509Error::InvalidTime)?
+            .to_date_time())
     }
 }
 
@@ -447,7 +754,7 @@ impl<'a> VerifiedOcspResponse<'a> {
     /// read is proof of a checked signature.
     #[inline]
     #[must_use]
-    pub(crate) fn single_responses(&self) -> &[SingleResponse] {
+    pub fn single_responses(&self) -> &[SingleResponse] {
         self.basic.single_responses()
     }
 
@@ -480,15 +787,33 @@ pub struct SingleResponse {
 }
 
 /// `CertID` -- which certificate a [`SingleResponse`] is about.
-///
-/// Only the serial is surfaced: matching is by serial against the
-/// cert the request asked about. The issuer name/key hashes echo
-/// the request's `CertID` and are not consumed.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CertId {
+    /// `hashAlgorithm.algorithm` OID body.
+    pub hash_algorithm_oid: Vec<u8>,
+    /// `issuerNameHash`.
+    pub issuer_name_hash: Vec<u8>,
+    /// `issuerKeyHash`.
+    pub issuer_key_hash: Vec<u8>,
     /// `serialNumber` of the certificate this entry is about.
     pub serial: CertSerial,
+}
+
+impl CertId {
+    /// Whether this entry answers the exact request this module builds.
+    #[must_use]
+    pub fn matches_request(
+        &self,
+        issuer_name_hash: IssuerNameHash,
+        issuer_key_hash: IssuerKeyHash,
+        serial: &CertSerial,
+    ) -> bool {
+        self.hash_algorithm_oid == OID_SHA1.as_bytes()
+            && self.issuer_name_hash == issuer_name_hash.as_bytes()
+            && self.issuer_key_hash == issuer_key_hash.as_bytes()
+            && &self.serial == serial
+    }
 }
 
 /// `CertStatus` CHOICE.
@@ -611,19 +936,12 @@ impl<'a> OcspResponse<'a> {
         // responseBytes [0] EXPLICIT { responseType OID, response OCTET STRING }.
         let mut basic: Option<BasicOcspResponse<'_>> = None;
         if status == OcspResponseStatus::Successful && !reader.is_finished() {
-            let rb_explicit = AnyRef::from_der(
-                reader
-                    .tlv_bytes()
-                    .map_err(|_ignored| X509Error::UnexpectedStructure("OCSP responseBytes"))?,
-            )
-            .map_err(|_ignored| X509Error::UnexpectedStructure("OCSP responseBytes"))?;
-            if matches!(
-                rb_explicit.tag(),
-                Tag::ContextSpecific {
-                    number: TagNumber::N0,
-                    ..
-                }
-            ) {
+            let rb_explicit_der = reader
+                .tlv_bytes()
+                .map_err(|_ignored| X509Error::UnexpectedStructure("OCSP responseBytes"))?;
+            let rb_explicit = AnyRef::from_der(rb_explicit_der)
+                .map_err(|_ignored| X509Error::UnexpectedStructure("OCSP responseBytes"))?;
+            if rb_explicit_der.first() == Some(&TAG_CONTEXT_0) {
                 let rb_seq = AnyRef::from_der(rb_explicit.value()).map_err(|_ignored| {
                     X509Error::UnexpectedStructure("OCSP responseBytes not SEQUENCE")
                 })?;
@@ -732,19 +1050,12 @@ impl<'a> BasicOcspResponse<'a> {
         // Optional [0] EXPLICIT certs SEQUENCE OF Certificate.
         let mut embedded_cert_ders: Vec<&[u8]> = Vec::new();
         if !reader.is_finished() {
-            let certs_explicit = AnyRef::from_der(
-                reader
-                    .tlv_bytes()
-                    .map_err(|_ignored| X509Error::UnexpectedStructure("OCSP certs field"))?,
-            )
-            .map_err(|_ignored| X509Error::UnexpectedStructure("OCSP certs field"))?;
-            if matches!(
-                certs_explicit.tag(),
-                Tag::ContextSpecific {
-                    number: TagNumber::N0,
-                    ..
-                }
-            ) {
+            let certs_explicit_der = reader
+                .tlv_bytes()
+                .map_err(|_ignored| X509Error::UnexpectedStructure("OCSP certs field"))?;
+            let certs_explicit = AnyRef::from_der(certs_explicit_der)
+                .map_err(|_ignored| X509Error::UnexpectedStructure("OCSP certs field"))?;
+            if certs_explicit_der.first() == Some(&TAG_CONTEXT_0) {
                 let certs_seq = AnyRef::from_der(certs_explicit.value()).map_err(|_ignored| {
                     X509Error::UnexpectedStructure("OCSP certs not SEQUENCE")
                 })?;
@@ -759,12 +1070,8 @@ impl<'a> BasicOcspResponse<'a> {
             }
         }
 
-        // Structured tbsResponseData via x509-ocsp -- trust the type.
-        let rd = x509_ocsp::ResponseData::from_der(tbs_response_data_der)
-            .map_err(|_ignored| X509Error::UnexpectedStructure("OCSP tbsResponseData decode"))?;
-        let produced_at = Self::ocsp_date_time(&rd.produced_at);
-        let nonce = rd.nonce().map(|n| n.0.as_bytes().to_vec());
-        let responses = rd.responses.iter().map(Self::map_single_response).collect();
+        let (produced_at, responses, nonce) =
+            OcspHelpers::parse_response_data(tbs_response_data_der)?;
 
         Ok(BasicOcspResponse {
             produced_at,
@@ -776,80 +1083,37 @@ impl<'a> BasicOcspResponse<'a> {
             nonce,
         })
     }
-
-    /// Bridge x509-ocsp's `OcspGeneralizedTime` to a [`DateTime`].
-    fn ocsp_date_time(t: &x509_ocsp::OcspGeneralizedTime) -> DateTime {
-        t.0.to_date_time()
-    }
-
-    /// Map an x509-ocsp `SingleResponse` to our owned view.
-    fn map_single_response(sr: &x509_ocsp::SingleResponse) -> SingleResponse {
-        SingleResponse {
-            cert_id: CertId {
-                serial: CertSerial::from_bytes(sr.cert_id.serial_number.as_bytes().to_vec()),
-            },
-            status: Self::map_cert_status(&sr.cert_status),
-            this_update: Self::ocsp_date_time(&sr.this_update),
-            next_update: sr.next_update.as_ref().map(Self::ocsp_date_time),
-        }
-    }
-
-    /// Map an x509-ocsp `CertStatus` to ours, bridging x509-cert's
-    /// `CrlReason` to our [`crate::crl::CrlReason`] by RFC 5280 code.
-    fn map_cert_status(cs: &x509_ocsp::CertStatus) -> CertStatus {
-        match cs {
-            x509_ocsp::CertStatus::Good(_) => CertStatus::Good,
-            x509_ocsp::CertStatus::Revoked(info) => CertStatus::Revoked {
-                revoked_at: Self::ocsp_date_time(&info.revocation_time),
-                reason: info.revocation_reason.map(Self::map_crl_reason),
-            },
-            x509_ocsp::CertStatus::Unknown(_) => CertStatus::Unknown,
-        }
-    }
-
-    /// Bridge x509-cert's `CrlReason` to our [`crate::crl::CrlReason`]
-    /// (same RFC 5280 sec.5.3.1 set; total, no numeric cast).
-    const fn map_crl_reason(reason: X509CrlReason) -> crate::crl::CrlReason {
-        use crate::crl::CrlReason as Ours;
-        match reason {
-            X509CrlReason::Unspecified => Ours::Unspecified,
-            X509CrlReason::KeyCompromise => Ours::KeyCompromise,
-            X509CrlReason::CaCompromise => Ours::CaCompromise,
-            X509CrlReason::AffiliationChanged => Ours::AffiliationChanged,
-            X509CrlReason::Superseded => Ours::Superseded,
-            X509CrlReason::CessationOfOperation => Ours::CessationOfOperation,
-            X509CrlReason::CertificateHold => Ours::CertificateHold,
-            X509CrlReason::RemoveFromCRL => Ours::RemoveFromCrl,
-            X509CrlReason::PrivilegeWithdrawn => Ours::PrivilegeWithdrawn,
-            X509CrlReason::AaCompromise => Ours::AaCompromise,
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
-
-    use super::{CertStatus, IssuerKeyHash, IssuerNameHash, OcspResponseStatus, build_request};
-    use crate::identity::CertSerial;
-    use core::str::FromStr as _;
-    use spki::AlgorithmIdentifierOwned;
-    use spki::der::asn1::{Any, BitString, Null, ObjectIdentifier, OctetString};
-    use spki::der::{DateTime, Tag};
-    use spki::der::{Decode as _, Encode as _};
-    use x509_cert::ext::pkix::CrlReason as X509CrlReason;
-    use x509_cert::name::Name;
-    use x509_cert::serial_number::SerialNumber;
-    use x509_ocsp::{
-        BasicOcspResponse, CertId, CertStatus as OcspCertStatus, OcspGeneralizedTime, OcspResponse,
-        ResponderId, ResponseBytes, ResponseData, RevokedInfo, SingleResponse, Version,
+    use super::{
+        CertStatus, IssuerKeyHash, IssuerNameHash, OID_OCSP_NONCE, OID_SHA1, ObjectIdentifier,
+        OcspHelpers, OcspNonce, OcspResponseStatus, TAG_CONTEXT_0, TAG_CONTEXT_0_PRIMITIVE,
+        TAG_CONTEXT_1, TAG_CONTEXT_2, TAG_GENERALIZED_TIME, TAG_INTEGER, TAG_NULL,
+        TAG_OCTET_STRING, TAG_OID, TAG_SEQUENCE, build_request, build_request_with_nonce,
     };
 
+    /// `BIT STRING` -- only the fixtures write one.
+    const TAG_BIT_STRING: u8 = 0x03;
+    /// `ENUMERATED` -- `responseStatus` and `CRLReason`, likewise.
+    const TAG_ENUMERATED: u8 = 0x0A;
+    /// `[2]` primitive -- `certStatus` `unknown`. The parser reaches
+    /// `Unknown` through its fallback arm rather than by naming this,
+    /// so only a fixture writes it.
+    const TAG_CONTEXT_2_PRIMITIVE: u8 = 0x82;
+    use crate::ber::tlv;
+    use crate::identity::CertSerial;
+    use spki::der::{DateTime, Reader as _};
+
     /// Arbitrary distinct issuer hashes -- the values are irrelevant
-    /// to these tests; only name-vs-key distinctness matters.
+    /// here; only name-vs-key distinctness matters.
     const FILL_NAME_HASH: [u8; 20] = [0xAA; 20];
     const FILL_KEY_HASH: [u8; 20] = [0xBB; 20];
-    /// Serial whose DER INTEGER the roundtrip test searches for.
+    /// Serial the round-trip tests follow through the encoding.
     const ROUNDTRIP_SERIAL: [u8; 3] = [0x12, 0x34, 0x56];
+    /// `id-pkix-ocsp-basic`, the only responseType this crate reads.
+    const OID_BASIC: &str = "1.3.6.1.5.5.7.48.1.1";
 
     /// A distinct cert serial for fixtures. The value is arbitrary
     /// -- only uniqueness matters; OCSP matching keys on serial
@@ -858,127 +1122,176 @@ mod tests {
         CertSerial::from_bytes(vec![n])
     }
 
-    /// A `GeneralizedTime` at the given civil-time components.
-    fn ogtime(
-        year: u16,
-        month: u8,
-        day: u8,
-        hour: u8,
-        minute: u8,
-        second: u8,
-    ) -> OcspGeneralizedTime {
-        OcspGeneralizedTime::from(
-            DateTime::new(year, month, day, hour, minute, second)
-                .expect("fixture passes a valid civil date"),
-        )
+    /// A `GeneralizedTime` TLV for a civil time, `YYYYMMDDHHMMSSZ`.
+    fn gtime(year: u16, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> Vec<u8> {
+        let text = format!("{year:04}{month:02}{day:02}{hour:02}{minute:02}{second:02}Z");
+        tlv(TAG_GENERALIZED_TIME, text.as_bytes())
     }
 
-    /// An `AlgorithmIdentifier` carrying just the given OID.
-    fn alg(oid: ObjectIdentifier) -> AlgorithmIdentifierOwned {
-        AlgorithmIdentifierOwned {
-            oid,
-            parameters: None,
+    /// A `CertID` about `serial`.
+    fn cert_id_der(serial: &CertSerial) -> Vec<u8> {
+        let mut algorithm = tlv(TAG_OID, OID_SHA1.as_bytes());
+        algorithm.extend_from_slice(&tlv(TAG_NULL, []));
+        let mut body = tlv(TAG_SEQUENCE, algorithm);
+        body.extend_from_slice(&tlv(TAG_OCTET_STRING, FILL_NAME_HASH));
+        body.extend_from_slice(&tlv(TAG_OCTET_STRING, FILL_KEY_HASH));
+        body.extend_from_slice(&tlv(TAG_INTEGER, serial.as_bytes()));
+        tlv(TAG_SEQUENCE, body)
+    }
+
+    /// One `SingleResponse`; `status` is the `certStatus` alternative.
+    fn single_response_der(serial: &CertSerial, status: &[u8]) -> Vec<u8> {
+        let mut body = cert_id_der(serial);
+        body.extend_from_slice(status);
+        body.extend_from_slice(&gtime(2026, 5, 20, 12, 0, 0));
+        tlv(TAG_SEQUENCE, body)
+    }
+
+    /// A successful `OCSPResponse` around one `ResponseData` body.
+    ///
+    /// The signature is never checked here -- `parse` reads bytes and
+    /// `verify` is a separate door -- so it is three filler octets.
+    fn wrap_response(response_data: Vec<u8>) -> Vec<u8> {
+        let mut basic = tlv(TAG_SEQUENCE, response_data);
+        basic.extend_from_slice(&tlv(TAG_SEQUENCE, tlv(TAG_OID, OID_SHA1.as_bytes())));
+        basic.extend_from_slice(&tlv(TAG_BIT_STRING, [0x00, b's', b'i', b'g']));
+        let basic = tlv(TAG_SEQUENCE, basic);
+
+        let mut response_bytes = tlv(TAG_OID, ObjectIdentifier::new_unwrap(OID_BASIC).as_bytes());
+        response_bytes.extend_from_slice(&tlv(TAG_OCTET_STRING, basic));
+        let mut outer = tlv(TAG_ENUMERATED, [0x00]);
+        outer.extend_from_slice(&tlv(TAG_CONTEXT_0, tlv(TAG_SEQUENCE, response_bytes)));
+        tlv(TAG_SEQUENCE, outer)
+    }
+
+    /// `ResponseData` carrying `singles`, plus optional extensions.
+    fn response_data(singles: &[u8], extensions: Option<Vec<u8>>) -> Vec<u8> {
+        // responderID byName [1], empty Name -- never read.
+        let mut body = tlv(TAG_CONTEXT_1, tlv(TAG_SEQUENCE, []));
+        body.extend_from_slice(&gtime(2026, 5, 20, 12, 0, 0));
+        body.extend_from_slice(&tlv(TAG_SEQUENCE, singles));
+        if let Some(extensions) = extensions {
+            body.extend_from_slice(&tlv(TAG_CONTEXT_1, extensions));
         }
+        body
     }
 
-    /// A `SingleResponse` about `serial` carrying `status`.
-    fn single_response(serial: &CertSerial, status: OcspCertStatus) -> SingleResponse {
-        SingleResponse {
-            cert_id: CertId {
-                hash_algorithm: alg(ObjectIdentifier::new_unwrap("1.3.14.3.2.26")), // id-sha1
-                issuer_name_hash: OctetString::new(FILL_NAME_HASH.to_vec())
-                    .expect("name hash fits an OCTET STRING"),
-                issuer_key_hash: OctetString::new(FILL_KEY_HASH.to_vec())
-                    .expect("key hash fits an OCTET STRING"),
-                serial_number: SerialNumber::new(serial.as_bytes())
-                    .expect("fixture serial encodes"),
-            },
-            cert_status: status,
-            this_update: ogtime(2026, 5, 20, 12, 0, 0),
-            next_update: None,
-            single_extensions: None,
-        }
+    /// A successful response carrying exactly one `SingleResponse`,
+    /// built by hand so the parser is checked against an encoder that
+    /// is not the one under test.
+    fn build_response(single: &[u8]) -> Vec<u8> {
+        wrap_response(response_data(single, None))
     }
 
-    /// Encode a *successful* `OCSPResponse` carrying one
-    /// `SingleResponse`, via x509-ocsp's typed encoder.
-    fn build_response(single: SingleResponse) -> Vec<u8> {
-        let response_data = ResponseData {
-            version: Version::default(),
-            responder_id: ResponderId::ByName(
-                Name::from_str("CN=Responder").expect("responder name parses"),
-            ),
-            produced_at: ogtime(2026, 5, 20, 12, 0, 0),
-            responses: vec![single],
-            response_extensions: None,
-        };
-        let basic = BasicOcspResponse {
-            tbs_response_data: response_data,
-            signature_algorithm: alg(ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11")), // sha256WithRSA
-            signature: BitString::new(0, b"sig").expect("signature bits encode"),
-            certs: None,
-        };
-        OcspResponse {
-            response_status: x509_ocsp::OcspResponseStatus::Successful,
-            response_bytes: Some(ResponseBytes {
-                response_type: ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.48.1.1"),
-                response: OctetString::new(basic.to_der().expect("basic response encodes to DER"))
-                    .expect("basic response DER fits an OCTET STRING"),
-            }),
-        }
-        .to_der()
-        .expect("fixture OCSP response encodes to DER")
-    }
-
-    /// Encode a bare `OCSPResponse` SEQUENCE { responseStatus } with
-    /// the raw status byte -- covers non-successful statuses and the
-    /// out-of-range byte x509-ocsp's closed enum cannot represent.
+    /// A bare `OCSPResponse` SEQUENCE { responseStatus }.
     fn status_only_response(status_byte: u8) -> Vec<u8> {
-        let enumerated = Any::new(Tag::Enumerated, vec![status_byte])
-            .expect("status byte fits an ENUMERATED")
-            .to_der()
-            .expect("ENUMERATED encodes to DER");
-        Any::new(Tag::Sequence, enumerated)
-            .expect("status body fits a SEQUENCE")
-            .to_der()
-            .expect("status-only response encodes to DER")
+        tlv(TAG_SEQUENCE, tlv(TAG_ENUMERATED, [status_byte]))
+    }
+
+    /// The `CertID` bytes out of a built request.
+    ///
+    /// `OCSPRequest > tbsRequest > requestList > Request > CertID`,
+    /// every layer a SEQUENCE taking the first element.
+    fn cert_id_of(request_der: &[u8]) -> Vec<u8> {
+        let mut current = request_der.to_vec();
+        for _ in 0_u8..4 {
+            let mut reader =
+                OcspHelpers::sequence_reader(&current, "test").expect("each layer is a SEQUENCE");
+            current = reader.tlv_bytes().expect("a first element").to_vec();
+        }
+        current
     }
 
     #[test]
-    fn build_request_decodes_as_one_request_ocsp_request() {
-        let req = build_request(
+    fn a_built_request_parses_back_to_what_went_in() {
+        // Deconstruct what the encoder constructed. The two are
+        // separate code, so their agreement is evidence about both.
+        let serial = CertSerial::from_bytes(ROUNDTRIP_SERIAL.to_vec());
+        let request = build_request(
             IssuerNameHash::new(FILL_NAME_HASH),
             IssuerKeyHash::new(FILL_KEY_HASH),
-            &CertSerial::from_bytes(ROUNDTRIP_SERIAL.to_vec()),
-        )
-        .expect("request encodes");
-        // Round-trips through x509-ocsp's own decoder -- a stronger
-        // check than byte-grepping the hand-built TLV ever was.
-        let decoded = x509_ocsp::OcspRequest::from_der(req.as_der()).expect("decodes");
-        assert_eq!(decoded.tbs_request.request_list.len(), 1);
+            &serial,
+        );
+        let parsed = OcspHelpers::parse_cert_id(&cert_id_of(request.as_der()))
+            .expect("the encoder's CertID parses");
+        assert_eq!(parsed.hash_algorithm_oid, OID_SHA1.as_bytes());
+        assert_eq!(parsed.issuer_name_hash, FILL_NAME_HASH);
+        assert_eq!(parsed.issuer_key_hash, FILL_KEY_HASH);
+        assert_eq!(parsed.serial.as_bytes(), ROUNDTRIP_SERIAL);
     }
 
     #[test]
-    fn build_request_roundtrips_serial() {
-        let req = build_request(
+    fn a_parsed_cert_id_re_encodes_to_the_same_bytes() {
+        // ...and reconstruct it. Byte equality after the round trip
+        // catches what field-by-field equality cannot: a field read
+        // into the right place from the wrong offset.
+        let serial = CertSerial::from_bytes(ROUNDTRIP_SERIAL.to_vec());
+        let original = cert_id_der(&serial);
+        let parsed = OcspHelpers::parse_cert_id(&original).expect("parses");
+        let mut algorithm = tlv(TAG_OID, &parsed.hash_algorithm_oid);
+        algorithm.extend_from_slice(&tlv(TAG_NULL, []));
+        let mut body = tlv(TAG_SEQUENCE, algorithm);
+        body.extend_from_slice(&tlv(TAG_OCTET_STRING, &parsed.issuer_name_hash));
+        body.extend_from_slice(&tlv(TAG_OCTET_STRING, &parsed.issuer_key_hash));
+        body.extend_from_slice(&tlv(TAG_INTEGER, parsed.serial.as_bytes()));
+        assert_eq!(
+            tlv(TAG_SEQUENCE, body),
+            original,
+            "CertID did not survive a decode-then-encode round trip"
+        );
+    }
+
+    #[test]
+    fn a_requested_nonce_comes_back_out_of_the_request() {
+        let nonce = OcspNonce::random().expect("the test host has randomness");
+        let request = build_request_with_nonce(
             IssuerNameHash::new(FILL_NAME_HASH),
             IssuerKeyHash::new(FILL_KEY_HASH),
             &CertSerial::from_bytes(ROUNDTRIP_SERIAL.to_vec()),
-        )
-        .expect("request encodes");
-        let decoded = x509_ocsp::OcspRequest::from_der(req.as_der()).expect("decodes");
-        let request = decoded
-            .tbs_request
-            .request_list
-            .first()
-            .expect("one request");
-        assert_eq!(request.req_cert.serial_number.as_bytes(), ROUNDTRIP_SERIAL);
+            &nonce,
+        );
+        let mut outer = OcspHelpers::sequence_reader(request.as_der(), "OCSPRequest")
+            .expect("OCSPRequest is a SEQUENCE");
+        let tbs = outer.tlv_bytes().expect("tbsRequest");
+        let mut fields =
+            OcspHelpers::sequence_reader(tbs, "tbsRequest").expect("tbsRequest is a SEQUENCE");
+        let mut found = None;
+        while !fields.is_finished() {
+            let field = fields.tlv_bytes().expect("a field");
+            if field.first() == Some(&TAG_CONTEXT_2) {
+                let extensions =
+                    OcspHelpers::value_of(field, "extensions").expect("[2] has a value");
+                found = OcspHelpers::nonce_from_extensions(extensions).expect("parses");
+            }
+        }
+        assert_eq!(
+            found.as_deref(),
+            Some(nonce.as_bytes()),
+            "the nonce did not survive encode then decode"
+        );
+    }
+
+    #[test]
+    fn a_request_without_a_nonce_names_no_nonce_extension() {
+        let request = build_request(
+            IssuerNameHash::new(FILL_NAME_HASH),
+            IssuerKeyHash::new(FILL_KEY_HASH),
+            &CertSerial::from_bytes(ROUNDTRIP_SERIAL.to_vec()),
+        );
+        let needle = OID_OCSP_NONCE.as_bytes();
+        assert!(
+            !request.as_der().windows(needle.len()).any(|w| w == needle),
+            "a request built without a nonce named the nonce extension"
+        );
     }
 
     #[test]
     fn parse_response_decodes_good_status() {
         let serial = fixture_serial(1);
-        let der = build_response(single_response(&serial, OcspCertStatus::Good(Null)));
+        let der = build_response(&single_response_der(
+            &serial,
+            &tlv(TAG_CONTEXT_0_PRIMITIVE, []),
+        ));
         let resp = super::OcspResponse::parse(&der).expect("parses");
         assert_eq!(resp.status, OcspResponseStatus::Successful);
         let basic = resp.basic.expect("basic present");
@@ -994,12 +1307,15 @@ mod tests {
 
     #[test]
     fn parse_response_decodes_revoked_status_with_reason() {
-        let revoked = OcspCertStatus::Revoked(RevokedInfo {
-            revocation_time: ogtime(2026, 5, 1, 8, 0, 0),
-            revocation_reason: Some(X509CrlReason::KeyCompromise),
-        });
+        // RevokedInfo ::= SEQUENCE { revocationTime GeneralizedTime,
+        //   revocationReason [0] EXPLICIT CRLReason OPTIONAL }
+        let mut revoked_info = gtime(2026, 5, 1, 8, 0, 0);
+        revoked_info.extend_from_slice(&tlv(TAG_CONTEXT_0, tlv(TAG_ENUMERATED, [0x01])));
         let serial = fixture_serial(2);
-        let der = build_response(single_response(&serial, revoked));
+        let der = build_response(&single_response_der(
+            &serial,
+            &tlv(TAG_CONTEXT_1, revoked_info),
+        ));
         let resp = super::OcspResponse::parse(&der).expect("parses");
         let basic = resp.basic.expect("basic present");
         let sr = basic.find_serial(&serial).expect("serial found");
@@ -1019,7 +1335,10 @@ mod tests {
     #[test]
     fn parse_response_decodes_unknown_status() {
         let serial = fixture_serial(3);
-        let der = build_response(single_response(&serial, OcspCertStatus::Unknown(Null)));
+        let der = build_response(&single_response_der(
+            &serial,
+            &tlv(TAG_CONTEXT_2_PRIMITIVE, []),
+        ));
         let resp = super::OcspResponse::parse(&der).expect("parses");
         let basic = resp.basic.expect("basic present");
         let sr = basic.find_serial(&serial).expect("serial found");
@@ -1035,9 +1354,53 @@ mod tests {
     }
 
     #[test]
-    fn unknown_status_byte_falls_into_other() {
-        let der = status_only_response(99);
+    fn a_next_update_is_read_when_the_responder_gives_one() {
+        let serial = fixture_serial(4);
+        let mut body = cert_id_der(&serial);
+        body.extend_from_slice(&tlv(TAG_CONTEXT_0_PRIMITIVE, []));
+        body.extend_from_slice(&gtime(2026, 5, 20, 12, 0, 0));
+        body.extend_from_slice(&tlv(TAG_CONTEXT_0, gtime(2026, 6, 20, 12, 0, 0)));
+        let der = build_response(&tlv(TAG_SEQUENCE, body));
         let resp = super::OcspResponse::parse(&der).expect("parses");
-        assert_eq!(resp.status, OcspResponseStatus::Other(99));
+        let basic = resp.basic.expect("basic present");
+        let sr = basic.find_serial(&serial).expect("serial found");
+        assert_eq!(
+            sr.next_update,
+            Some(DateTime::new(2026, 6, 20, 12, 0, 0).expect("valid"))
+        );
+    }
+
+    #[test]
+    fn a_responder_nonce_is_read_back_from_the_response() {
+        let serial = fixture_serial(5);
+        let single = single_response_der(&serial, &tlv(TAG_CONTEXT_0_PRIMITIVE, []));
+        let mut extension = tlv(TAG_OID, OID_OCSP_NONCE.as_bytes());
+        extension.extend_from_slice(&tlv(
+            TAG_OCTET_STRING,
+            tlv(TAG_OCTET_STRING, [0xDE, 0xAD, 0xBE, 0xEF]),
+        ));
+        let extensions = tlv(TAG_SEQUENCE, tlv(TAG_SEQUENCE, extension));
+        let der = wrap_response(response_data(&single, Some(extensions)));
+        let resp = super::OcspResponse::parse(&der).expect("parses");
+        let basic = resp.basic.expect("basic present");
+        assert_eq!(basic.nonce.as_deref(), Some(&[0xDE, 0xAD, 0xBE, 0xEF][..]));
+    }
+
+    #[test]
+    fn a_responder_id_before_produced_at_is_not_read_as_extensions() {
+        // Both are [1]; only position separates them. A parser that
+        // matched on the tag alone would read the responder's name as
+        // an extension list and lose the nonce.
+        let serial = fixture_serial(6);
+        let single = single_response_der(&serial, &tlv(TAG_CONTEXT_0_PRIMITIVE, []));
+        let mut extension = tlv(TAG_OID, OID_OCSP_NONCE.as_bytes());
+        extension.extend_from_slice(&tlv(TAG_OCTET_STRING, tlv(TAG_OCTET_STRING, [0x01, 0x02])));
+        let extensions = tlv(TAG_SEQUENCE, tlv(TAG_SEQUENCE, extension));
+        let der = wrap_response(response_data(&single, Some(extensions)));
+        let basic = super::OcspResponse::parse(&der)
+            .expect("parses")
+            .basic
+            .expect("basic present");
+        assert_eq!(basic.nonce.as_deref(), Some(&[0x01, 0x02][..]));
     }
 }

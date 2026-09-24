@@ -604,11 +604,11 @@ fn parse_tbs<'a>(
     // context tags (constructed).
     const VERSION_TAG: Tag = Tag::ContextSpecific {
         constructed: true,
-        number: TagNumber::N0,
+        number: TagNumber(0),
     };
     const EXTENSIONS_TAG: Tag = Tag::ContextSpecific {
         constructed: true,
-        number: TagNumber::N3,
+        number: TagNumber(3),
     };
 
     let tbs = AnyRef::from_der(tbs_der)
@@ -661,8 +661,9 @@ fn parse_tbs<'a>(
     let validity_tlv = reader
         .tlv_bytes()
         .map_err(|_ignored| X509Error::UnexpectedStructure("validity"))?;
-    let validity = x509_cert::time::Validity::from_der(validity_tlv)
-        .map_err(|_ignored| X509Error::InvalidTime)?;
+    let validity =
+        x509_cert::time::Validity::<x509_cert::certificate::Rfc5280>::from_der(validity_tlv)
+            .map_err(|_ignored| X509Error::InvalidTime)?;
     let (not_before, not_after) = (
         validity.not_before.to_date_time(),
         validity.not_after.to_date_time(),
@@ -748,7 +749,7 @@ impl X509Helpers {
         // GeneralName uniformResourceIdentifier [6] IMPLICIT IA5String.
         const GN_URI: Tag = Tag::ContextSpecific {
             constructed: false,
-            number: TagNumber::N6,
+            number: TagNumber(6),
         };
 
         let mut urls = Vec::new();
@@ -1146,6 +1147,45 @@ impl core::fmt::Display for VerifyError {
 
 impl core::error::Error for VerifyError {}
 
+/// `RSAPublicKey ::= SEQUENCE { modulus INTEGER, publicExponent
+/// INTEGER }` (RFC 8017 A.1.1) as the two canonical big-endian
+/// magnitudes.
+///
+/// Written out rather than delegated to `pkcs1`, whose only released
+/// version speaks the previous `der`. It is two INTEGERs, and the one
+/// subtlety is theirs rather than ours: DER prepends a zero octet
+/// when the top bit of the magnitude would otherwise read as a sign,
+/// and PKCS#1 magnitudes carry no such octet. Stripping it here means
+/// callers get what `try_from_pkcs1` expects.
+fn rsa_public_key_parts(der: &[u8]) -> Option<(&[u8], &[u8])> {
+    use spki::der::asn1::AnyRef;
+    use spki::der::{Decode as _, Reader as _, SliceReader, Tag, Tagged as _};
+
+    /// One INTEGER, as its magnitude.
+    fn magnitude<'a>(reader: &mut SliceReader<'a>) -> Option<&'a [u8]> {
+        let any = AnyRef::from_der(reader.tlv_bytes().ok()?).ok()?;
+        if any.tag() != Tag::Integer {
+            return None;
+        }
+        Some(match any.value() {
+            // Only for a valid encoding: a leading zero is minimal
+            // DER only when the next octet has its top bit set, and a
+            // lone zero is the value zero rather than a sign octet.
+            [0x00, rest @ ..] if !rest.is_empty() => rest,
+            whole => whole,
+        })
+    }
+
+    let sequence = AnyRef::from_der(der).ok()?;
+    if sequence.tag() != Tag::Sequence {
+        return None;
+    }
+    let mut reader = SliceReader::new(sequence.value()).ok()?;
+    let modulus = magnitude(&mut reader)?;
+    let exponent = magnitude(&mut reader)?;
+    Some((modulus, exponent))
+}
+
 /// Parse an RSA public key out of a `SubjectPublicKeyInfo` DER
 /// blob. Returns `None` if the SPKI is not an RSA key or the
 /// structure is malformed.
@@ -1156,19 +1196,16 @@ pub fn extract_rsa_public_key<B: AsRef<[u8]>>(spki_der: B) -> Option<RsaPublicKe
     use spki::der::Decode as _;
 
     // Standards-based decode: `spki` for the envelope, the typed
-    // `pkcs1::RsaPublicKey` for the `SEQUENCE { modulus, exponent }`
+    // The `SEQUENCE { modulus, exponent }`
     // inside the BIT STRING -- no hand-rolled BerTlv walk.
     let info = SubjectPublicKeyInfoRef::from_der(spki_der.as_ref()).ok()?;
     if info.algorithm.oid.as_bytes() != OID_RSA_ENCRYPTION {
         return None;
     }
-    let key = pkcs1::RsaPublicKey::from_der(info.subject_public_key.raw_bytes()).ok()?;
-    // `UintRef::as_bytes` is the canonical big-endian magnitude (no
-    // leading sign octet) -- exactly the PKCS#1 form
-    // `RsaModulus::try_from_pkcs1` / `RsaPublicExponent::try_from_pkcs1`
-    // expect.
-    let modulus = RsaModulus::try_from_pkcs1(key.modulus.as_bytes()).ok()?;
-    let exponent = RsaPublicExponent::try_from_pkcs1(key.public_exponent.as_bytes()).ok()?;
+    let (modulus_bytes, exponent_bytes) =
+        rsa_public_key_parts(info.subject_public_key.raw_bytes())?;
+    let modulus = RsaModulus::try_from_pkcs1(modulus_bytes).ok()?;
+    let exponent = RsaPublicExponent::try_from_pkcs1(exponent_bytes).ok()?;
     Some(RsaPublicKey { modulus, exponent })
 }
 
@@ -1503,19 +1540,13 @@ impl PublicKeyAlgorithm {
     /// [`parse_subject_public_key_info`] and `SpkiDer::try_from`, so a
     /// constructed `SpkiDer` decodes the envelope exactly once.
     fn from_spki(info: &spki::SubjectPublicKeyInfoRef<'_>) -> Option<Self> {
-        use spki::der::Decode as _;
         use spki::der::asn1::ObjectIdentifier;
 
         let alg_oid = info.algorithm.oid;
         if alg_oid.as_bytes() == OID_RSA_ENCRYPTION {
             // The subjectPublicKey BIT STRING wraps
             // `RSAPublicKey ::= SEQUENCE { modulus, publicExponent }`.
-            // Read it as the typed `pkcs1::RsaPublicKey` rather than
-            // hand-decoding the INTEGER.
-            let key = pkcs1::RsaPublicKey::from_der(info.subject_public_key.raw_bytes()).ok()?;
-            // `modulus.as_bytes()` is the canonical big-endian magnitude
-            // (no leading sign octet); its bit length is the modulus size.
-            let magnitude = key.modulus.as_bytes();
+            let (magnitude, _exponent) = rsa_public_key_parts(info.subject_public_key.raw_bytes())?;
             let first = *magnitude.first()?;
             // `u8::leading_zeros` is in 0..=8; widens to usize losslessly.
             let leading_zeros = usize::try_from(first.leading_zeros()).ok()?;
