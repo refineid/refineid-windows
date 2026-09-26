@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/refineid-card-manager-core",
     "crates/refineid-doc-sign",
+    "crates/refineid-win-gui",
     "crates/refineid-lib-core",
     "crates/refineid-lib-pcsc",
     "crates/refineid-minidriver",
