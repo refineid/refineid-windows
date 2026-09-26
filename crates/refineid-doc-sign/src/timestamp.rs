@@ -1166,6 +1166,10 @@ impl EssHashAlgorithm {
     /// Digest a complete certificate DER value.
     fn digest(self, input: &[u8]) -> Vec<u8> {
         match self {
+            // codeql[rust/weak-sensitive-data-hashing]: ESSCertID
+            // (RFC 5035 s4) fixes SHA-1 as the signer-cert
+            // identifier; verifiers must implement it to check
+            // existing signatures. New signatures use SHA-256.
             Self::Sha1 => Sha1::digest(input).to_vec(),
             Self::Sha256 => Sha256::digest(input).to_vec(),
             Self::Sha384 => Sha384::digest(input).to_vec(),

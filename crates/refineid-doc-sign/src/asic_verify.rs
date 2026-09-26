@@ -961,6 +961,8 @@ mod tests {
             .args(args)
             .output()
             .expect("openssl runs");
+        // codeql[rust/cleartext-logging]: test-only openssl failure
+        // diagnostic; argv holds temp file paths, never key material.
         assert!(output.status.success(), "{program} {args:?} failed");
         output.stdout
     }

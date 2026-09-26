@@ -2226,6 +2226,8 @@ mod tests {
     #[test]
     fn timestamp_credentials_are_encoded_and_redacted() -> TestResult {
         let user = "test-user";
+        // codeql[rust/hard-coded-cryptographic-value]: fixture
+        // credential for the redaction unit test.
         let pass = "test-pass";
         let credentials =
             TimestampCredentials::new(user.to_owned(), pass.to_owned()).map_err(str::to_owned)?;
@@ -2367,6 +2369,8 @@ mod tests {
             "archive with authority is normalized to LT",
         )?;
         request.timestamp_credentials = Some(
+            // codeql[rust/hard-coded-cryptographic-value]: fixture
+            // credential for the policy-validation unit test.
             TimestampCredentials::new("user".to_owned(), "password".to_owned())
                 .map_err(str::to_owned)?,
         );
