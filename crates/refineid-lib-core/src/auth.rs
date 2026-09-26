@@ -278,8 +278,12 @@ impl core::fmt::Display for PinPolicyReason {
             Self::WrongLength { got: _, min, max } => {
                 write!(f, "pin length outside accepted range {min}..={max}")
             }
-            Self::NonDigit { byte_offset } => {
-                write!(f, "pin contains a non-digit byte at offset {byte_offset}")
+            // The offending offset stays out of `Display`: this text
+            // reaches user-facing surfaces through card-operation
+            // errors, where positions inside secret material must
+            // not appear (`Debug` keeps it for tests).
+            Self::NonDigit { byte_offset: _ } => {
+                write!(f, "pin contains a non-digit byte")
             }
         }
     }
