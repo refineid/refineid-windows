@@ -68,7 +68,7 @@ use refineid_rapp_core::profiles::{
     PROFILE_AUTHENTICATION, PROFILE_CARD_STATUS, PROFILE_DOCUMENT_SIGNING,
 };
 use refineid_rapp_core::store::{MemoryJournal, PairingStore as _};
-use refineid_rapp_core::stream::{StreamAccept, StreamListener, stream_candidate_parameters};
+use refineid_rapp_core::stream::StreamRendezvous;
 use refineid_rapp_core::transport::{FrameTransport, STREAM_PROFILE};
 use refineid_rapp_core::{PAIRING_SUITE, WIRE_VERSION};
 use refineid_windows_credential_store::CredentialPairingStore;
@@ -145,12 +145,11 @@ const IDC_RGEN: u16 = 701;
 const IDC_RSTOP: u16 = 702;
 const IDC_RCODE: u16 = 703;
 const IDC_RSTATUS: u16 = 704;
-const IDC_ROFFER: u16 = 705;
+const IDC_RHOWTO: u16 = 705;
 const IDC_RDEVICES: u16 = 706;
 const IDC_RREMOVE: u16 = 707;
 const IDC_RREFRESH: u16 = 708;
 const IDC_RCODELBL: u16 = 709;
-const IDC_ROFFERLBL: u16 = 710;
 const IDC_RDEVICESLBL: u16 = 711;
 const IDC_RHINT: u16 = 712;
 
@@ -186,7 +185,6 @@ struct AppState {
     verify_result: HWND,
     remote_code: HWND,
     remote_status: HWND,
-    remote_offer: HWND,
     remote_devices: HWND,
     pair_cancel: Option<Arc<AtomicBool>>,
     tints: Vec<(HWND, u32)>,
@@ -231,7 +229,7 @@ enum InboxItem {
     PinOp(String, bool),
     DocSign(String),
     DocVerify(String),
-    PairOffer(String, String),
+    PairStatus(String),
     PairDone(String, bool),
 }
 static INBOX: Mutex<Option<InboxItem>> = Mutex::new(None);
@@ -460,9 +458,9 @@ unsafe extern "system" fn wndproc(
             } else if lparam.0 != 0 && code == BN_CLICKED && id == IDC_VVERIFY {
                 start_doc_verify();
             } else if lparam.0 != 0 && code == BN_CLICKED && id == IDC_RGEN {
-                start_pair_listen();
+                start_pairing();
             } else if lparam.0 != 0 && code == BN_CLICKED && id == IDC_RSTOP {
-                stop_pair_listen();
+                stop_pairing();
             } else if lparam.0 != 0 && code == BN_CLICKED && id == IDC_RREMOVE {
                 remove_remote_device();
             } else if lparam.0 != 0 && code == BN_CLICKED && id == IDC_RREFRESH {
@@ -1239,7 +1237,7 @@ fn on_create(main: HWND) -> windows::core::Result<()> {
     tints.push((remote_code, INK));
     let pair_gen = child(
         w!("BUTTON"),
-        "Generate & listen",
+        "Generate code",
         WS_CHILD | WS_VISIBLE | WINDOW_STYLE(BS_PUSHBUTTON as u32),
         300,
         62,
@@ -1265,7 +1263,7 @@ fn on_create(main: HWND) -> windows::core::Result<()> {
     set_font(pair_stop, font);
     let remote_status = child(
         w!("STATIC"),
-        "Not listening.",
+        "No pairing in progress.",
         WS_CHILD | WS_VISIBLE,
         16,
         100,
@@ -1277,42 +1275,26 @@ fn on_create(main: HWND) -> windows::core::Result<()> {
     )?;
     set_font(remote_status, font);
     tints.push((remote_status, GRAY));
-    doc_label(
-        pages[4],
-        instance,
-        "Offer — copy into the phone app",
+    let pair_howto = child(
+        w!("STATIC"),
+        "On the phone:\r\n1. Open the RefineID app and go to Remote.\r\n2. Choose Enter code and type the 6-digit code above.\r\n3. Confirm the pairing on this computer when asked.",
+        WS_CHILD | WS_VISIBLE,
         16,
         126,
-        300,
-        IDC_ROFFERLBL,
-        font,
-        &mut tints,
-    )?;
-    let remote_offer = child(
-        w!("EDIT"),
-        "",
-        WS_CHILD
-            | WS_VISIBLE
-            | WS_BORDER
-            | WS_VSCROLL
-            | WINDOW_STYLE(ES_MULTILINE as u32)
-            | WINDOW_STYLE(ES_READONLY as u32)
-            | WINDOW_STYLE(ES_AUTOVSCROLL as u32),
-        16,
-        146,
         544,
-        76,
+        84,
         pages[4],
-        IDC_ROFFER,
+        IDC_RHOWTO,
         instance,
     )?;
-    set_font(remote_offer, font_mono);
+    set_font(pair_howto, font);
+    tints.push((pair_howto, GRAY));
     doc_label(
         pages[4],
         instance,
-        "Same Wi-Fi as the phone; allow inbound connections if pairing cannot connect.",
+        "This computer and the phone must be on the same Wi-Fi network.",
         16,
-        226,
+        214,
         544,
         IDC_RHINT,
         font,
@@ -1323,7 +1305,7 @@ fn on_create(main: HWND) -> windows::core::Result<()> {
         instance,
         "Paired devices",
         16,
-        252,
+        240,
         200,
         IDC_RDEVICESLBL,
         font,
@@ -1334,7 +1316,7 @@ fn on_create(main: HWND) -> windows::core::Result<()> {
         "",
         WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | WINDOW_STYLE(LBS_NOTIFY as u32),
         16,
-        272,
+        260,
         544,
         110,
         pages[4],
@@ -1402,7 +1384,6 @@ fn on_create(main: HWND) -> windows::core::Result<()> {
             verify_result,
             remote_code,
             remote_status,
-            remote_offer,
             remote_devices,
             pair_cancel: None,
             tints,
@@ -1728,8 +1709,7 @@ fn poll_inbox() {
             set_verify_result(&text);
             set_card_busy(false);
         }
-        InboxItem::PairOffer(offer, status) => {
-            set_remote_offer(&offer);
+        InboxItem::PairStatus(status) => {
             set_remote_status(&status);
         }
         InboxItem::PairDone(text, ok) => {
@@ -2303,14 +2283,13 @@ fn start_doc_verify() {
 /// The one stream candidate this UI advertises, mirroring the CLI.
 const PAIR_CANDIDATE_ID: &str = "stream-1";
 
-/// Frame receive deadline; also the accept-loop poll bound.
-const PAIR_RECEIVE_DEADLINE: Duration = Duration::from_mins(3);
-
-/// Generate a pairing code and listen for the phone on a worker
+/// Generate a pairing code and wait for the phone on a worker
 /// thread; the refresh timer picks progress and the outcome up from
-/// `INBOX`. Mirrors `refineid-rapp pair-demo` without the QR: the
-/// offer text is shown for manual transfer into the phone app.
-fn start_pair_listen() {
+/// `INBOX`. The phone reconstructs the same offer from the code
+/// and advertises it over mDNS; this side browses and dials, like
+/// the Android offer flow. No offer text leaves this machine: the
+/// 6-digit code is the only thing the user transfers.
+fn start_pairing() {
     let snapshot = STATE.with(|cell| {
         cell.borrow()
             .as_ref()
@@ -2330,14 +2309,13 @@ fn start_pair_listen() {
     });
     let code = generate_pairing_code();
     set_text(code_edit, &format_pairing_code(&code));
-    set_remote_status("Starting listener…");
-    set_remote_offer("");
+    set_remote_status("Starting…");
     set_card_busy(true);
     // `HWND` is a raw pointer and not `Send`; the worker only needs
     // it back for the confirm dialog, guarded by `IsWindow`.
     let main_raw = main.0 as usize;
     std::thread::spawn(move || {
-        let (text, ok) = match run_pair_accept(main_raw, &code, &cancel) {
+        let (text, ok) = match run_pair_browse(main_raw, &code, &cancel) {
             Ok(text) => (text, true),
             Err(text) => (text, false),
         };
@@ -2349,7 +2327,7 @@ fn start_pair_listen() {
 
 /// Ask the pairing worker to stop; the outcome still arrives
 /// through `INBOX` so the busy flag clears in one place.
-fn stop_pair_listen() {
+fn stop_pairing() {
     STATE.with(|cell| {
         if let Some(state) = cell.borrow().as_ref()
             && let Some(cancel) = state.pair_cancel.as_ref()
@@ -2360,21 +2338,20 @@ fn stop_pair_listen() {
     });
 }
 
-/// Blocking accept loop: discover-or-accept until the phone
-/// pairs, the offer expires, or `cancel` trips. Runs on the
-/// pairing worker, never on the UI thread.
-fn run_pair_accept(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<String, String> {
+/// Blocking browse-and-dial loop: discover the phone's mDNS
+/// advertisement until it pairs, the code expires, or `cancel`
+/// trips. Runs on the pairing worker, never on the UI thread.
+///
+/// The offer carries empty transport parameters, exactly like the
+/// phone's reconstruction from the code: endpoints come from mDNS
+/// discovery, never from the offer. Any extra field would change
+/// the offer URI, the rendezvous name, and the handshake prologue,
+/// and the phone would wait on a different channel.
+fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<String, String> {
     use std::time::Instant;
     let offer_id = offer_id_from_code(code);
     let secret = pairing_secret_from_code(code);
     let secret_bytes = secret.0;
-    let ip = local_ipv4().ok_or_else(|| "No usable network address found.".to_owned())?;
-    let listener = StreamListener::bind("0.0.0.0:0", PAIR_CANDIDATE_ID, PAIR_RECEIVE_DEADLINE)
-        .map_err(|error| format!("Cannot listen: {error:?}"))?;
-    let port = listener
-        .local_port()
-        .map_err(|error| format!("Cannot read bound port: {error:?}"))?;
-    let endpoints = vec![format!("{ip}:{port}")];
     let requested_profiles = vec![
         PROFILE_CARD_STATUS.to_owned(),
         PROFILE_AUTHENTICATION.to_owned(),
@@ -2388,8 +2365,7 @@ fn run_pair_accept(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<S
         transports: vec![TransportCandidate {
             profile: STREAM_PROFILE.into(),
             candidate_id: PAIR_CANDIDATE_ID.into(),
-            parameters: stream_candidate_parameters(&endpoints)
-                .map_err(|error| format!("Invalid advertised endpoints: {error:?}"))?,
+            parameters: Vec::new(),
         }],
         offer_ttl_ms: OFFER_TTL_MAX_MS,
     };
@@ -2397,9 +2373,8 @@ fn run_pair_accept(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<S
         .to_uri(&secret)
         .map_err(|error| format!("Offer encoding failed: {error:?}"))?;
     let pairing_service = refineid_rapp_core::stream::stream_rendezvous_name(uri.as_bytes());
-    post_pair_offer(
-        &uri,
-        &format!("Listening on {ip}:{port} — offer expires in 3 minutes."),
+    post_pair_status(
+        "Waiting for the phone — enter the code in the phone app. The code expires in 3 minutes.",
     );
     let mut requester = Requester::new(
         RequesterConfig {
@@ -2416,55 +2391,36 @@ fn run_pair_accept(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<S
             return Err("Pairing stopped.".to_owned());
         }
         if Instant::now() >= deadline {
-            return Err("The pairing offer expired.".to_owned());
+            return Err("The pairing code expired.".to_owned());
         }
         let discovered = refineid_rapp_core::stream::discover_stream_endpoints(
             Some(&pairing_service),
             Duration::from_millis(600),
         );
-        if !discovered.is_empty()
-            && let Ok(transport) = refineid_rapp_core::stream::dial(
+        if !discovered.is_empty() {
+            post_pair_status("Phone found — pairing…");
+            if let Ok(transport) = refineid_rapp_core::stream::dial(
                 &discovered,
                 PAIR_CANDIDATE_ID,
                 Duration::from_secs(5),
-                &refineid_rapp_core::stream::StreamRendezvous::Pairing,
-            )
-            && let Some(outcome) = attempt_pair(
+                &StreamRendezvous::Pairing,
+            ) && let Some(outcome) = attempt_pair(
                 &mut requester,
                 &offer,
                 secret_bytes,
                 &requested_profiles,
                 transport,
                 main_raw,
-                &uri,
-            )
-        {
-            return outcome;
-        }
-        if cancel.load(Ordering::SeqCst) {
-            return Err("Pairing stopped.".to_owned());
-        }
-        // Timeout polls and non-pairing accepts: keep listening.
-        if let Ok(Some(StreamAccept::Pairing(transport))) =
-            listener.accept_timeout(Duration::from_millis(200))
-            && let Some(outcome) = attempt_pair(
-                &mut requester,
-                &offer,
-                secret_bytes,
-                &requested_profiles,
-                transport,
-                main_raw,
-                &uri,
-            )
-        {
-            return outcome;
+            ) {
+                return outcome;
+            }
         }
     }
 }
 
 /// One pairing attempt over an established transport. `Some`
 /// is terminal (success summary, or a store-read failure after a
-/// successful pair); `None` reposts the failure and the offer stays
+/// successful pair); `None` reposts the failure and the code stays
 /// live for the next attempt.
 fn attempt_pair(
     requester: &mut Requester<CredentialPairingStore, MemoryJournal>,
@@ -2473,7 +2429,6 @@ fn attempt_pair(
     profiles: &[String],
     transport: impl FrameTransport,
     main_raw: usize,
-    uri: &str,
 ) -> Option<Result<String, String>> {
     match try_pair(
         requester,
@@ -2485,10 +2440,9 @@ fn attempt_pair(
     ) {
         Ok(pair_id) => Some(paired_summary(requester, pair_id)),
         Err(error) => {
-            post_pair_offer(
-                uri,
-                &format!("Pairing attempt failed ({error:?}) — offer still live."),
-            );
+            post_pair_status(&format!(
+                "Pairing attempt failed ({error:?}) — still waiting for the phone."
+            ));
             None
         }
     }
@@ -2553,22 +2507,10 @@ fn paired_summary(
     ))
 }
 
-/// Post offer text plus a status line; the inbox poll applies both.
-fn post_pair_offer(offer: &str, status: &str) {
+/// Post a pairing status line; the inbox poll applies it.
+fn post_pair_status(status: &str) {
     if let Ok(mut inbox) = INBOX.lock() {
-        *inbox = Some(InboxItem::PairOffer(offer.to_owned(), status.to_owned()));
-    }
-}
-
-/// First non-loopback IPv4 of the default route, without sending
-/// anything: connecting a UDP socket only selects the interface.
-fn local_ipv4() -> Option<String> {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    // TEST-NET-1: routed, never answered, no packet leaves that matters.
-    socket.connect("192.0.2.1:53").ok()?;
-    match socket.local_addr().ok()?.ip() {
-        std::net::IpAddr::V4(v4) if !v4.is_loopback() => Some(v4.to_string()),
-        _ => None,
+        *inbox = Some(InboxItem::PairStatus(status.to_owned()));
     }
 }
 
@@ -2577,14 +2519,6 @@ fn set_remote_status(text: &str) {
     let target = STATE.with(|cell| cell.borrow().as_ref().map(|state| state.remote_status));
     if let Some(status) = target {
         set_text(status, text);
-    }
-}
-
-/// Write the offer text box. Main thread only.
-fn set_remote_offer(text: &str) {
-    let target = STATE.with(|cell| cell.borrow().as_ref().map(|state| state.remote_offer));
-    if let Some(offer) = target {
-        set_text(offer, text);
     }
 }
 
