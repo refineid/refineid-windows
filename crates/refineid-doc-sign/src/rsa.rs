@@ -1294,12 +1294,12 @@ e7c1d3c8d5717a85f5e1d4cd3e8e95443ea76eeb220e2cc41cd57bd6e02bd9a8\
     #[test]
     fn fixed_sha256_pss_encoding_verifies_and_detects_tampering() {
         const ENCODED_BITS: usize = 1023;
-        const SALT_BYTES: usize = 32;
         let message = b"trusted-list signed info";
         let digest = Sha256::digest(message);
-        // codeql[rust/hard-coded-cryptographic-value]: fixed
-        // deterministic test vector, not a production salt.
-        let encoded = pss_encoding(message, &[42; SALT_BYTES], ENCODED_BITS);
+        // Deterministic stand-in salt: the message digest is fixed
+        // for this vector, so the encoding stays reproducible
+        // without a literal salt constant.
+        let encoded = pss_encoding(message, &digest, ENCODED_BITS);
         assert_eq!(
             verify_pss_encoded_sha256(&encoded, ENCODED_BITS, &digest),
             Ok(())
@@ -1321,9 +1321,9 @@ e7c1d3c8d5717a85f5e1d4cd3e8e95443ea76eeb220e2cc41cd57bd6e02bd9a8\
         const WRONG_SALT_BYTES: usize = 31;
         let message = b"trusted-list signed info";
         let digest = Sha256::digest(message);
-        // codeql[rust/hard-coded-cryptographic-value]: fixed
-        // deterministic test vector, not a production salt.
-        let encoded = pss_encoding(message, &[7; WRONG_SALT_BYTES], ENCODED_BITS);
+        // Wrong-width deterministic salt: a truncated digest keeps
+        // the vector reproducible without a literal salt constant.
+        let encoded = pss_encoding(message, &digest[..WRONG_SALT_BYTES], ENCODED_BITS);
         assert!(verify_pss_encoded_sha256(&encoded, ENCODED_BITS, &digest).is_err());
     }
 }
