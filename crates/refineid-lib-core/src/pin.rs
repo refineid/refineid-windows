@@ -198,10 +198,14 @@ impl core::fmt::Display for PinRoleError {
                     )
                 }
             }
-            Self::NonDigit { at } => write!(
-                f,
-                "PIN code must be ASCII digits only; non-digit at offset {at}"
-            ),
+            // The offending offset stays out of `Display`: this text
+            // reaches user-facing surfaces, where positions inside
+            // secret material must not appear (`Debug` keeps it for
+            // tests). Matches `WrongLength`, which already redacts
+            // `got`.
+            Self::NonDigit { at: _ } => {
+                write!(f, "PIN code must be ASCII digits only")
+            }
         }
     }
 }

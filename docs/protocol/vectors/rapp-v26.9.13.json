@@ -235,20 +235,20 @@
   ],
   "noise_handshake": [
     {
-      "handshake_hash_hex": "26c88db8b4b15a2e9207eadfe7d3a44baa76e95ed7043cc8ae554801d8ac38ad",
+      "handshake_hash_hex": "0835fa3aec3ef7bc573fab3b11852a6c4bbed94cbc2cbf5d48c11a44c0869989",
       "initiator_static_public_hex": "7b4e909bbe7ffe44c465a220037d608ee35897d31ef972f07f74892cb0f73f13",
       "messages_hex": [
-        "7b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b14c39ed1a7b43d496d347fb846f5365410",
-        "ff2ee45601ec1b67310c7790404585ae697331eee1c1f8cf2419731c1fff3e6bb4712c535811f1814a3ee14a04239a32ee25c3521502654abbd395d62e65ece46e512819e31781d08eb1be95d6d4e4a221cfef1e564cc5b00b522bdb74c9ceb4",
-        "6978c61fdae9fad0b8f507d861127efade3990f6d7068522ef68c443e789ce5bdcdd9ff705ccadb6e1164eef764feb82f84f393e15ad7e4f81286dd46606b15a"
+        "7b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b14b354465254feeb4723c17758444305ed",
+        "ff2ee45601ec1b67310c7790404585ae697331eee1c1f8cf2419731c1fff3e6bb4712c535811f1814a3ee14a04239a32ee25c3521502654abbd395d62e65ece47c482572b134dfdf00f7b40b9c59ce3930d629c77552d386eaf9fb7c9aa0153b",
+        "6978c61fdae9fad0b8f507d861127efade3990f6d7068522ef68c443e789ce5b516b5a0399f1ba1a1951687850f2397e3eca5b5d20fe4cca73b46ebf3a74f9a4"
       ],
       "name": "pairing-xxpsk3-fixed-transcript",
       "offer_hash_hex": "6666666666666666666666666666666666666666666666666666666666666666",
-      "pair_id_hex": "530fb39eb6952143e447d22676433933",
-      "prologue_hex": "856f524150502d70616972696e672d763182181a0978244e6f6973655f585870736b335f32353531395f436861436861506f6c795f534841323536582066666666666666666666666666666666666666666666666666666666666666666d6170706c652d706565722d7631",
-      "rendezvous_token_hex": "5cb16f7cdfe37e0643cd38f5f19cbbe6",
+      "pair_id_hex": "cfc6f9df438f3568afef30ad96aa85ab",
+      "prologue_hex": "856f524150502d70616972696e672d763183181a090d78244e6f6973655f585870736b335f32353531395f436861436861506f6c795f534841323536582066666666666666666666666666666666666666666666666666666666666666666d6170706c652d706565722d7631",
+      "rendezvous_token_hex": "4a27a0e95fe13de601c614b0f760c52b",
       "responder_static_public_hex": "0faa684ed28867b97f4a6a2dee5df8ce974e76b7018e3f22a1c4cf2678570f20",
-      "session_id_hex": "6b3a4ccfbd28070fcbe750d62a159f69",
+      "session_id_hex": "686b6836c66a9b15abcff2b3045ae7b8",
       "suite": "Noise_XXpsk3_25519_ChaChaPoly_SHA256",
       "test_only_initiator_ephemeral_private_hex": "3333333333333333333333333333333333333333333333333333333333333333",
       "test_only_initiator_static_private_hex": "1111111111111111111111111111111111111111111111111111111111111111",
@@ -259,17 +259,17 @@
     },
     {
       "grants_hash_hex": "7777777777777777777777777777777777777777777777777777777777777777",
-      "handshake_hash_hex": "ddfb5f54228c4f777ba7f180176bdc910c5cea380b4683830ff91ea2f556f742",
+      "handshake_hash_hex": "504fdeccfe6eb610a65ac20084feace7fe8db4a2c095608a9fadba860b719b67",
       "initiator_static_public_hex": "7b4e909bbe7ffe44c465a220037d608ee35897d31ef972f07f74892cb0f73f13",
       "messages_hex": [
-        "30d3c865a48fceb3d6118577cf2e5f228d6ff69866264757785b253cb7a4806ab5b0cd8b63c0553d63b24a1da111e678",
-        "ba193836cff1f4e866c139715d306408d26a76f76d638a39afc1001084d254114c6f082bb3bd7256dc8aab04f57ad5e2"
+        "30d3c865a48fceb3d6118577cf2e5f228d6ff69866264757785b253cb7a4806a8621ca423ddb169002efc20acbc2797d",
+        "ba193836cff1f4e866c139715d306408d26a76f76d638a39afc1001084d254110d4183da2be3fd723b96af129c20015f"
       ],
       "name": "session-kk-fixed-transcript",
       "pair_id_hex": "8efec9e731ea092045a0007903555097",
-      "prologue_hex": "866f524150502d73657373696f6e2d763182181a0978204e6f6973655f4b4b5f32353531395f436861436861506f6c795f534841323536508efec9e731ea092045a0007903555097582077777777777777777777777777777777777777777777777777777777777777776d6170706c652d706565722d7631",
+      "prologue_hex": "866f524150502d73657373696f6e2d763183181a090d78204e6f6973655f4b4b5f32353531395f436861436861506f6c795f534841323536508efec9e731ea092045a0007903555097582077777777777777777777777777777777777777777777777777777777777777776d6170706c652d706565722d7631",
       "responder_static_public_hex": "0faa684ed28867b97f4a6a2dee5df8ce974e76b7018e3f22a1c4cf2678570f20",
-      "session_id_hex": "577e889d28d4b747c14f077cee2eb858",
+      "session_id_hex": "ba0176a0bdaee793be9ef0be058398d2",
       "suite": "Noise_KK_25519_ChaChaPoly_SHA256",
       "test_only_initiator_ephemeral_private_hex": "8888888888888888888888888888888888888888888888888888888888888888",
       "test_only_initiator_static_private_hex": "1111111111111111111111111111111111111111111111111111111111111111",
@@ -278,7 +278,7 @@
       "transport_profile": "apple-peer-v1"
     }
   ],
-  "protocol_document_version": "26.9.7.70",
+  "protocol_document_version": "26.9.13",
   "rejected_cbor": [
     {
       "encoded_hex": "1817",
@@ -329,7 +329,7 @@
       "supported_critical": []
     },
     {
-      "canonical_cbor_hex": "a664626f6479a2696368616c6c656e67655820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb766c6173745f72656365697665645f73657175656e63650064747970656d6c6976656e6573732e70696e6766667574757265016776657273696f6e82181a096873657175656e6365006a73657373696f6e5f696450aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "canonical_cbor_hex": "a664626f6479a2696368616c6c656e67655820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb766c6173745f72656365697665645f73657175656e63650064747970656d6c6976656e6573732e70696e6766667574757265016776657273696f6e83181a090d6873657175656e6365006a73657373696f6e5f696450aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "error": "UnknownField",
       "name": "unknown-envelope-field",
       "supported_critical": []
@@ -347,49 +347,49 @@
       "supported_critical": []
     },
     {
-      "canonical_cbor_hex": "a564626f6479a2696368616c6c656e67655820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb766c6173745f72656365697665645f73657175656e63650064747970656e6675747572652e6d6573736167656776657273696f6e82181a096873657175656e6365006a73657373696f6e5f696450aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "canonical_cbor_hex": "a564626f6479a2696368616c6c656e67655820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb766c6173745f72656365697665645f73657175656e63650064747970656e6675747572652e6d6573736167656776657273696f6e83181a090d6873657175656e6365006a73657373696f6e5f696450aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "error": "UnknownMessageType",
       "name": "unknown-message-type",
       "supported_critical": []
     },
     {
-      "canonical_cbor_hex": "a564626f6479a2696368616c6c656e67655820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb766c6173745f72656365697665645f73657175656e63650064747970656d6c6976656e6573732e70696e676776657273696f6e82181a096873657175656e6365006a73657373696f6e5f69644faaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "canonical_cbor_hex": "a564626f6479a2696368616c6c656e67655820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb766c6173745f72656365697665645f73657175656e63650064747970656d6c6976656e6573732e70696e676776657273696f6e83181a090d6873657175656e6365006a73657373696f6e5f69644faaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "error": "WrongLength { field: \"session_id\", expected: 16, got: 15 }",
       "name": "wrong-session-id-length",
       "supported_critical": []
     },
     {
-      "canonical_cbor_hex": "a564626f6479a2696368616c6c656e67655820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb766c6173745f72656365697665645f73657175656e63650064747970656d6c6976656e6573732e70696e676776657273696f6e82181a096873657175656e6365647a65726f6a73657373696f6e5f696450aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "canonical_cbor_hex": "a564626f6479a2696368616c6c656e67655820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb766c6173745f72656365697665645f73657175656e63650064747970656d6c6976656e6573732e70696e676776657273696f6e83181a090d6873657175656e6365647a65726f6a73657373696f6e5f696450aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "error": "WrongType { field: \"sequence\" }",
       "name": "wrong-sequence-type",
       "supported_critical": []
     },
     {
-      "canonical_cbor_hex": "a564626f64798064747970656d6c6976656e6573732e70696e676776657273696f6e82181a096873657175656e6365006a73657373696f6e5f696450aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "canonical_cbor_hex": "a564626f64798064747970656d6c6976656e6573732e70696e676776657273696f6e83181a090d6873657175656e6365006a73657373696f6e5f696450aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "error": "WrongType { field: \"body\" }",
       "name": "wrong-body-type",
       "supported_critical": []
     },
     {
-      "canonical_cbor_hex": "a664626f6479a2696368616c6c656e67655820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb766c6173745f72656365697665645f73657175656e63650064747970656d6c6976656e6573732e70696e676776657273696f6e82181a0968637269746963616c6f6675747572652e72657175697265646873657175656e6365006a73657373696f6e5f696450aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "canonical_cbor_hex": "a664626f6479a2696368616c6c656e67655820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb766c6173745f72656365697665645f73657175656e63650064747970656d6c6976656e6573732e70696e676776657273696f6e83181a090d68637269746963616c6f6675747572652e72657175697265646873657175656e6365006a73657373696f6e5f696450aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "error": "WrongType { field: \"critical\" }",
       "name": "wrong-critical-type",
       "supported_critical": []
     },
     {
-      "canonical_cbor_hex": "a664626f6479a2696368616c6c656e67655820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb766c6173745f72656365697665645f73657175656e63650064747970656d6c6976656e6573732e70696e676776657273696f6e82181a096873657175656e6365006a657874656e73696f6e73806a73657373696f6e5f696450aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "canonical_cbor_hex": "a664626f6479a2696368616c6c656e67655820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb766c6173745f72656365697665645f73657175656e63650064747970656d6c6976656e6573732e70696e676776657273696f6e83181a090d6873657175656e6365006a657874656e73696f6e73806a73657373696f6e5f696450aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "error": "WrongType { field: \"extensions\" }",
       "name": "wrong-extensions-type",
       "supported_critical": []
     },
     {
-      "canonical_cbor_hex": "a664626f6479a2696368616c6c656e67655820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb766c6173745f72656365697665645f73657175656e63650064747970656d6c6976656e6573732e70696e676776657273696f6e82181a0968637269746963616c816f6675747572652e72657175697265646873657175656e6365006a73657373696f6e5f696450aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "canonical_cbor_hex": "a664626f6479a2696368616c6c656e67655820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb766c6173745f72656365697665645f73657175656e63650064747970656d6c6976656e6573732e70696e676776657273696f6e83181a090d68637269746963616c816f6675747572652e72657175697265646873657175656e6365006a73657373696f6e5f696450aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "error": "CriticalExtensionMissing",
       "name": "critical-extension-missing",
       "supported_critical": []
     },
     {
-      "canonical_cbor_hex": "a764626f6479a2696368616c6c656e67655820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb766c6173745f72656365697665645f73657175656e63650064747970656d6c6976656e6573732e70696e676776657273696f6e82181a0968637269746963616c816f6675747572652e72657175697265646873657175656e6365006a657874656e73696f6e73a16f6675747572652e7265717569726564016a73657373696f6e5f696450aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "canonical_cbor_hex": "a764626f6479a2696368616c6c656e67655820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb766c6173745f72656365697665645f73657175656e63650064747970656d6c6976656e6573732e70696e676776657273696f6e83181a090d68637269746963616c816f6675747572652e72657175697265646873657175656e6365006a657874656e73696f6e73a16f6675747572652e7265717569726564016a73657373696f6e5f696450aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "error": "UnsupportedCriticalExtension",
       "name": "unsupported-critical-extension",
       "supported_critical": []
@@ -545,7 +545,17 @@
       "name": "current-version",
       "version": [
         26,
-        9
+        9,
+        13
+      ]
+    },
+    {
+      "expected": "unsupported_version",
+      "name": "downgrade-to-earlier-patch",
+      "version": [
+        26,
+        9,
+        12
       ]
     },
     {
@@ -553,13 +563,15 @@
       "name": "downgrade-to-26-8",
       "version": [
         26,
-        8
+        8,
+        0
       ]
     },
     {
       "expected": "unsupported_version",
       "name": "downgrade-to-pre-release-zero",
       "version": [
+        0,
         0,
         0
       ]
@@ -569,7 +581,8 @@
       "name": "unknown-future-minor",
       "version": [
         26,
-        10
+        10,
+        0
       ]
     },
     {
@@ -577,8 +590,32 @@
       "name": "unknown-major",
       "version": [
         27,
+        0,
         0
       ]
+    },
+    {
+      "expected": "unsupported_version",
+      "name": "historical-two-element-version",
+      "version": [
+        26,
+        9
+      ]
+    },
+    {
+      "expected": "unsupported_version",
+      "name": "four-element-version",
+      "version": [
+        26,
+        9,
+        13,
+        1
+      ]
+    },
+    {
+      "expected": "unsupported_version",
+      "name": "empty-version",
+      "version": []
     }
   ]
 }

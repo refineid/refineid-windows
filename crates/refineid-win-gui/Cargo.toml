@@ -1,0 +1,37 @@
+[package]
+name = "refineid-win-gui"
+description = "Native Win32 companion GUI: card status, identity, PIN, documents, remote"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "refineid-win-gui"
+path = "src/main.rs"
+
+[dependencies]
+pcsc.workspace = true
+zeroize.workspace = true
+refineid-card-manager-core.workspace = true
+refineid-doc-sign.workspace = true
+refineid-lib-core.workspace = true
+refineid-lib-pcsc.workspace = true
+refineid-rapp-core.workspace = true
+refineid-windows-credential-store.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_GdiPlus",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemServices",
+    "Win32_UI_Controls",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[lints]
+workspace = true

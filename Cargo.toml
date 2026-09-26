@@ -2,6 +2,8 @@
 resolver = "3"
 members = [
     "crates/refineid-card-manager-core",
+    "crates/refineid-doc-sign",
+    "crates/refineid-win-gui",
     "crates/refineid-lib-core",
     "crates/refineid-lib-pcsc",
     "crates/refineid-minidriver",
@@ -26,6 +28,8 @@ repository = "https://github.com/refineid/refineid-windows"
 refineid-lib-core = { path = "crates/refineid-lib-core", version = "26" }
 refineid-lib-pcsc = { path = "crates/refineid-lib-pcsc", version = "26" }
 refineid-card-manager-core = { path = "crates/refineid-card-manager-core", version = "26" }
+refineid-doc-sign = { path = "crates/refineid-doc-sign", version = "26" }
+refineid-win-gui = { path = "crates/refineid-win-gui", version = "26" }
 refineid-rapp-core = { path = "crates/refineid-rapp-core", version = "26" }
 refineid-windows-credential-store = { path = "crates/refineid-windows-credential-store", version = "26" }
 
@@ -55,6 +59,7 @@ hex = "0.4"
 # Pure Rust; the image and SVG render features stay off.
 qrcode = { version = "0.14", default-features = false }
 hmac = "0.13"
+miniz_oxide = "0.9"
 pcsc = "2.9"
 proptest = "1"
 serde = { version = "1", features = ["derive"] }
@@ -64,6 +69,10 @@ sha1 = "0.11"
 sha2 = "0.11"
 spki = "0.8"
 subtle = "2"
+# No default features: the `std` feature pulls `windows-future`,
+# which does not compile for non-Windows hosts and would break
+# host-side `cargo check` of the GUI crate.
+windows = { version = "0.62", default-features = false }
 zeroize = { version = "1", features = ["zeroize_derive"] }
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",

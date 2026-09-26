@@ -26,7 +26,7 @@ use corpus_util::{CORPUS_JSON, decode_hex, fixed};
 /// The corpus self-description this replay is written against.
 const CORPUS_FORMAT: &str = "fi.refineid.rapp.conformance-v1";
 /// The protocol document revision the corpus is derived from.
-const PROTOCOL_DOCUMENT_VERSION: &str = "26.9.7.70";
+const PROTOCOL_DOCUMENT_VERSION: &str = "26.9.13";
 
 /// Vectors in the `deterministic_cbor` section.
 const DETERMINISTIC_CBOR_COUNT: usize = 15;
@@ -43,7 +43,7 @@ const REQUEST_HASH_COUNT: usize = 1;
 /// Vectors in the `sequence_guard` section.
 const SEQUENCE_GUARD_COUNT: usize = 6;
 /// Vectors in the `wire_version` section.
-const WIRE_VERSION_COUNT: usize = 5;
+const WIRE_VERSION_COUNT: usize = 9;
 /// Vectors in the `grant_enforcement` section.
 const GRANT_ENFORCEMENT_COUNT: usize = 3;
 /// Vectors in the `noise_handshake` section.

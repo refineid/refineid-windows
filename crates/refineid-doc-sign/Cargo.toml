@@ -1,0 +1,33 @@
+[package]
+name = "refineid-doc-sign"
+description = "Document signing for the Windows companion: ASiC-E and PAdES over the FINEID card"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "refineid_doc_sign"
+path = "src/lib.rs"
+
+[dependencies]
+const-oid.workspace = true
+crypto-bigint.workspace = true
+refineid-lib-core.workspace = true
+refineid-lib-pcsc.workspace = true
+hex.workspace = true
+miniz_oxide.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+spki.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinHttp",
+] }
+
+[lints]
+workspace = true

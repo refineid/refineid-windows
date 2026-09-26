@@ -264,9 +264,8 @@ impl<Transport: FrameTransport> MessageChannel<Transport> {
             Ok(envelope) => envelope,
             Err(SchemaViolation::UnknownCriticalField | _) => return Inbound::Violation,
         };
-        // A major-version difference is incompatible; a minor version may
-        // only add non-critical fields (Section 6).
-        if envelope.version.0 != WIRE_VERSION.0
+        // Any version difference is incompatible (Section 6).
+        if envelope.version != WIRE_VERSION
             || envelope.session_id != self.session_id
             || envelope.sequence != self.receive_sequence
         {

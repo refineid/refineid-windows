@@ -205,7 +205,7 @@ impl ResultStatus {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NegotiatedParameters {
     /// The bound wire version.
-    pub version: (u64, u64),
+    pub version: (u64, u64, u64),
     /// The bound cryptographic suite name.
     pub suite: String,
     /// The bound offer hash.
@@ -220,7 +220,7 @@ pub struct NegotiatedParameters {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionParameters {
     /// The bound wire version.
-    pub version: (u64, u64),
+    pub version: (u64, u64, u64),
     /// The bound cryptographic suite name.
     pub suite: String,
     /// The transport profile in use.
@@ -397,7 +397,7 @@ impl Body {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Envelope {
     /// The wire version.
-    pub version: (u64, u64),
+    pub version: (u64, u64, u64),
     /// The derived identifier of the carrying channel.
     pub session_id: SessionId,
     /// The per-direction sequence number.
@@ -421,6 +421,7 @@ impl Envelope {
                 Value::Array(vec![
                     Value::Unsigned(self.version.0),
                     Value::Unsigned(self.version.1),
+                    Value::Unsigned(self.version.2),
                 ]),
             ),
             (
@@ -488,13 +489,18 @@ impl Envelope {
     }
 }
 
-/// Reads a `[major, minor]` version array.
-const fn read_version(value: &Value) -> Result<(u64, u64), SchemaViolation> {
+/// Reads a `[major, minor, patch]` version array.
+const fn read_version(value: &Value) -> Result<(u64, u64, u64), SchemaViolation> {
     let Value::Array(parts) = value else {
         return Err(SchemaViolation::WrongFieldType);
     };
-    if let [Value::Unsigned(major), Value::Unsigned(minor)] = parts.as_slice() {
-        Ok((*major, *minor))
+    if let [
+        Value::Unsigned(major),
+        Value::Unsigned(minor),
+        Value::Unsigned(patch),
+    ] = parts.as_slice()
+    {
+        Ok((*major, *minor, *patch))
     } else {
         Err(SchemaViolation::WrongFieldType)
     }
@@ -554,6 +560,7 @@ fn encode_negotiated(parameters: &NegotiatedParameters) -> Value {
             Value::Array(vec![
                 Value::Unsigned(parameters.version.0),
                 Value::Unsigned(parameters.version.1),
+                Value::Unsigned(parameters.version.2),
             ]),
         ),
         (KEY_SUITE.into(), Value::Text(parameters.suite.clone())),
@@ -609,6 +616,7 @@ fn encode_session_parameters(parameters: &SessionParameters) -> Value {
             Value::Array(vec![
                 Value::Unsigned(parameters.version.0),
                 Value::Unsigned(parameters.version.1),
+                Value::Unsigned(parameters.version.2),
             ]),
         ),
         (KEY_SUITE.into(), Value::Text(parameters.suite.clone())),
@@ -656,6 +664,14 @@ fn decode_session_parameters(value: &Value) -> Result<SessionParameters, SchemaV
     })
 }
 
+/// Encodes a profile list in canonical byte-wise name order, so all
+/// peers emit identical arrays regardless of caller order.
+fn profile_array(profiles: &[String]) -> Value {
+    let mut sorted = profiles.to_vec();
+    sorted.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    Value::Array(sorted.into_iter().map(Value::Text).collect())
+}
+
 /// Encodes one body as its wire map.
 #[allow(
     clippy::too_many_lines,
@@ -675,16 +691,13 @@ fn encode_body(body: &Body) -> Value {
                 (KEY_PLATFORM.into(), Value::Text(platform.clone())),
             ];
             if let Some(profiles) = requested_profiles {
-                entries.push((
-                    KEY_REQUESTED_PROFILES.into(),
-                    Value::Array(profiles.iter().cloned().map(Value::Text).collect()),
-                ));
+                entries.push((KEY_REQUESTED_PROFILES.into(), profile_array(profiles)));
             }
             Value::Map(entries)
         }
         Body::PairingConfirm { granted_profiles } => Value::Map(vec![(
             KEY_GRANTED_PROFILES.into(),
-            Value::Array(granted_profiles.iter().cloned().map(Value::Text).collect()),
+            profile_array(granted_profiles),
         )]),
         Body::PairingAbort { reason } => {
             Value::Map(vec![(KEY_REASON.into(), Value::Text(reason.clone()))])
@@ -1241,7 +1254,11 @@ mod tests {
         Value::Map(vec![
             (
                 "version".into(),
-                Value::Array(vec![Value::Unsigned(0), Value::Unsigned(1)]),
+                Value::Array(vec![
+                    Value::Unsigned(0),
+                    Value::Unsigned(1),
+                    Value::Unsigned(2),
+                ]),
             ),
             ("type".into(), Value::Text(message_type.into())),
             ("session_id".into(), Value::Bytes(vec![0xAB; 16])),
@@ -1282,7 +1299,11 @@ mod tests {
         let with_critical = Value::Map(vec![
             (
                 "version".into(),
-                Value::Array(vec![Value::Unsigned(0), Value::Unsigned(1)]),
+                Value::Array(vec![
+                    Value::Unsigned(0),
+                    Value::Unsigned(1),
+                    Value::Unsigned(2),
+                ]),
             ),
             ("type".into(), Value::Text("pairing.abort".into())),
             ("session_id".into(), Value::Bytes(vec![0xAB; 16])),
@@ -1306,7 +1327,11 @@ mod tests {
         let with_extension = Value::Map(vec![
             (
                 "version".into(),
-                Value::Array(vec![Value::Unsigned(0), Value::Unsigned(1)]),
+                Value::Array(vec![
+                    Value::Unsigned(0),
+                    Value::Unsigned(1),
+                    Value::Unsigned(2),
+                ]),
             ),
             ("type".into(), Value::Text("pairing.abort".into())),
             ("session_id".into(), Value::Bytes(vec![0xAB; 16])),

@@ -563,13 +563,16 @@ pub fn read_reader_identity(reader: &ReaderId) -> ReaderIdentity {
 /// reference manuals specify `0x310000 + 3500 * 4`, the Windows
 /// `SCARD_CTL_CODE(3500)` value (ACR1581U Reference Manual
 /// s5.1.4).
-const CCID_ESCAPE_CONTROL_CODE_WINDOWS: u32 = 0x0031_0000 + 3500 * 4;
+/// Typed as the PC/SC `DWORD` the control call takes, which is
+/// 32 bits on Windows/macOS and 64 on Linux (`u32` constants no
+/// longer convert there since pcsc 2.9).
+const CCID_ESCAPE_CONTROL_CODE_WINDOWS: pcsc::ffi::DWORD = 0x0031_0000 + 3500 * 4;
 
 /// CCID escape control code, pcsc-lite convention:
 /// `SCARD_CTL_CODE(x)` is `0x42000000 + x` there, and Apple's
 /// PC/SC follows it -- the Windows code is rejected with an
 /// invalid-value error on macOS (measured against an ACR1581).
-const CCID_ESCAPE_CONTROL_CODE_PCSC_LITE: u32 = 0x4200_0000 + 3500;
+const CCID_ESCAPE_CONTROL_CODE_PCSC_LITE: pcsc::ffi::DWORD = 0x4200_0000 + 3500;
 
 /// Send a vendor escape command to the reader itself over a
 /// direct-mode (card-less) connection and return the raw
