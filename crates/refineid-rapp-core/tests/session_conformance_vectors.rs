@@ -22,7 +22,7 @@ use corpus_util::{CORPUS_JSON, fixed};
 /// Vectors in the `sequence_guard` section.
 const SEQUENCE_GUARD_COUNT: usize = 6;
 /// Vectors in the `wire_version` section.
-const WIRE_VERSION_COUNT: usize = 5;
+const WIRE_VERSION_COUNT: usize = 9;
 /// Vectors in the `grant_enforcement` section.
 const GRANT_ENFORCEMENT_COUNT: usize = 3;
 
@@ -51,11 +51,12 @@ struct SequenceVector {
     expected_next_receive: u64,
 }
 
-/// One wire-version vector.
+/// One wire-version vector. Arity varies: the corpus pins
+/// rejection of empty, two-element, and four-element arrays.
 #[derive(Deserialize)]
 struct VersionVector {
     name: String,
-    version: [u64; 2],
+    version: Vec<u64>,
     expected: String,
 }
 
@@ -116,7 +117,7 @@ fn corpus() -> Corpus {
 }
 
 /// A minimal schema-valid envelope routed through the public wire codec.
-fn replay_envelope(version: (u64, u64), session_id: SessionId, sequence: u64) -> Envelope {
+fn replay_envelope(version: (u64, u64, u64), session_id: SessionId, sequence: u64) -> Envelope {
     let envelope = Envelope {
         version,
         session_id,
@@ -129,6 +130,34 @@ fn replay_envelope(version: (u64, u64), session_id: SessionId, sequence: u64) ->
     let decoded = Envelope::decode(&encoded).expect("replay envelope must decode");
     assert_eq!(decoded, envelope, "replay envelope must round-trip");
     decoded
+}
+
+/// Encodes the replay envelope, then swaps its version entry for an
+/// arbitrary array. Used by the wire-version vectors, whose arities
+/// the typed `Envelope` cannot itself represent.
+fn envelope_bytes_with_version(version: &[u64]) -> Vec<u8> {
+    use refineid_rapp_core::cbor::Value;
+    let envelope = Envelope {
+        version: WIRE_VERSION,
+        session_id: VERSION_TEST_SESSION_ID,
+        sequence: 0,
+        body: Body::PairingAbort {
+            reason: REPLAY_ABORT_REASON.into(),
+        },
+    };
+    let encoded = envelope.encode().expect("replay envelope must encode");
+    let Value::Map(mut entries) = Value::decode(&encoded).expect("replay envelope must decode")
+    else {
+        panic!("replay envelope must be a map");
+    };
+    for (key, value) in &mut entries {
+        if key == "version" {
+            *value = Value::Array(version.iter().map(|part| Value::Unsigned(*part)).collect());
+        }
+    }
+    Value::Map(entries)
+        .encode()
+        .expect("version-swapped envelope must encode")
 }
 
 /// A replay envelope under the published wire version.
@@ -189,26 +218,29 @@ fn wire_version_admission_matches_the_corpus() {
     assert_eq!(corpus.wire_version.len(), WIRE_VERSION_COUNT);
     for vector in &corpus.wire_version {
         // The corpus carries no encoded envelopes for this section, so a
-        // minimal envelope is constructed with the vector's version.
-        // `Envelope::decode` carries the version field through; the corpus
-        // classifies every version other than the published pair as
-        // unsupported, asserted here with the explicit comparison against
-        // `WIRE_VERSION`.
-        let version = (vector.version[0], vector.version[1]);
-        let decoded = replay_envelope(version, VERSION_TEST_SESSION_ID, 0);
-        assert_eq!(decoded.version, version, "{} carried version", vector.name);
-        let accepted = decoded.version == WIRE_VERSION;
+        // minimal envelope is encoded with the real codec and its version
+        // entry is swapped for the vector's array. Malformed arities must
+        // fail `Envelope::decode`; well-formed arrays decode and face the
+        // admission comparison against `WIRE_VERSION`, exactly as the
+        // engine applies it.
+        let bytes = envelope_bytes_with_version(&vector.version);
         match vector.expected.as_str() {
-            "accepted" => assert!(
-                accepted,
-                "{} must carry the published wire version",
-                vector.name
-            ),
-            "unsupported_version" => assert!(
-                !accepted,
-                "{} must fail the version admission comparison",
-                vector.name
-            ),
+            "accepted" => {
+                let decoded = Envelope::decode(&bytes).expect("the accepted version decodes");
+                assert_eq!(
+                    decoded.version, WIRE_VERSION,
+                    "{} must carry the published wire version",
+                    vector.name
+                );
+            }
+            "unsupported_version" => match Envelope::decode(&bytes) {
+                Err(_) => {}
+                Ok(decoded) => assert_ne!(
+                    decoded.version, WIRE_VERSION,
+                    "{} must fail the version admission comparison",
+                    vector.name
+                ),
+            },
             expected => panic!("{} unknown version expectation {expected}", vector.name),
         }
     }

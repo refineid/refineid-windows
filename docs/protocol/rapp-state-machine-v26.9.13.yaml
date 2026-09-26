@@ -1,7 +1,7 @@
 protocol: RAPP
-document_version: "26.9.7.70"
-supersedes: "26.9.4.181"
-wire_version: "26.9"
+document_version: "26.9.13"
+supersedes: "26.9.7.70"
+wire_version: "26.9.13"
 status: external-review
 
 semantics:
@@ -148,6 +148,7 @@ actions:
   revoke_pair_after_credential_rejection: "durably destroy pair keys and write a tombstone after sealing the bounded credential_rejected result, or immediately when receiving that authenticated result"
   request_session_close_ambiguous: "raise card_completion_ambiguous for the session"
   send_operation_cancel: "send operation.cancel with the request_hash echo"
+  send_operation_progress: "send advisory operation.progress with the request_hash echo and event"
   durably_write_commit_before_transmission: "write the non-secret commit record before any transmission"
   consume_non_clonable_command: "consume the one-shot command object"
   increment_transmission_count_once: "increment the physical transmission count exactly once"

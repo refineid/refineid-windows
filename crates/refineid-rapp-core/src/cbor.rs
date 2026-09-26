@@ -121,8 +121,9 @@ pub enum DecodeError {
 impl Value {
     /// Encodes the value as deterministic CBOR.
     ///
-    /// Map entries are sorted here by their encoded key bytes, so callers may
-    /// build maps in schema order and still emit the canonical order.
+    /// Map entries are sorted here by encoded key length first, then by
+    /// encoded key bytes (RFC 8949 Section 4.2.1), so callers may build
+    /// maps in schema order and still emit the canonical order.
     ///
     /// # Errors
     ///
@@ -224,7 +225,12 @@ fn encode_into(value: &Value, out: &mut Vec<u8>, depth: usize) -> Result<(), Enc
                 encode_into(entry, &mut value_bytes, depth + 1)?;
                 encoded.push((key_bytes, value_bytes));
             }
-            encoded.sort_by(|left, right| left.0.cmp(&right.0));
+            encoded.sort_by(|left, right| {
+                left.0
+                    .len()
+                    .cmp(&right.0.len())
+                    .then_with(|| left.0.cmp(&right.0))
+            });
             if encoded.windows(2).any(|pair| pair[0].0 == pair[1].0) {
                 return Err(EncodeError::DuplicateMapKey);
             }
@@ -376,19 +382,22 @@ fn decode_item(reader: &mut Reader<'_>, depth: usize) -> Result<Value, DecodeErr
             }
             let length = declared_length(argument)?;
             let mut entries: Vec<(String, Value)> = Vec::new();
-            let mut previous_key_bytes: Option<Vec<u8>> = None;
+            let mut previous_key: Option<(usize, Vec<u8>)> = None;
             for _ in 0..length {
                 let key_start = reader.at;
                 let Value::Text(key) = decode_item(reader, depth + 1)? else {
                     return Err(DecodeError::NonTextMapKey);
                 };
                 let key_bytes = reader.input[key_start..reader.at].to_vec();
-                if let Some(previous) = &previous_key_bytes
-                    && *previous >= key_bytes
+                // Length-first, then byte-wise (RFC 8949 Section 4.2.1),
+                // mirroring the encoder above.
+                let order_key = (key_bytes.len(), key_bytes);
+                if let Some(previous) = &previous_key
+                    && *previous >= order_key
                 {
                     return Err(DecodeError::MapKeyOrder);
                 }
-                previous_key_bytes = Some(key_bytes);
+                previous_key = Some(order_key);
                 let value = decode_item(reader, depth + 1)?;
                 entries.push((key, value));
             }
@@ -478,6 +487,34 @@ mod tests {
         // {"b": 0, "a": 0} violates encoded-key order.
         let raw = [0xA2, 0x61, b'b', 0x00, 0x61, b'a', 0x00];
         assert_eq!(Value::decode(&raw), Err(DecodeError::MapKeyOrder));
+    }
+
+    #[test]
+    fn map_key_order_is_length_first() {
+        // "profiles" (9 encoded bytes) sorts before "pairing_secret"
+        // (15 bytes) by length, although "pairing_secret" is smaller
+        // byte-wise. RFC 8949 Section 4.2.1 pins length-first.
+        let map = Value::Map(vec![
+            ("pairing_secret".into(), Value::Unsigned(2)),
+            ("profiles".into(), Value::Unsigned(1)),
+        ]);
+        let encoded = map.encode().unwrap();
+        let decoded = Value::decode(&encoded).unwrap();
+        let Value::Map(entries) = decoded else {
+            panic!("expected a map");
+        };
+        assert_eq!(entries[0].0, "profiles");
+        assert_eq!(entries[1].0, "pairing_secret");
+        // The byte-wise order is shorter-key-last, hence not
+        // canonical, and must be rejected.
+        let mut wrong_order = vec![0xA2];
+        wrong_order.push(0x6E);
+        wrong_order.extend_from_slice(b"pairing_secret");
+        wrong_order.push(0x02);
+        wrong_order.push(0x68);
+        wrong_order.extend_from_slice(b"profiles");
+        wrong_order.push(0x01);
+        assert_eq!(Value::decode(&wrong_order), Err(DecodeError::MapKeyOrder));
     }
 
     #[test]

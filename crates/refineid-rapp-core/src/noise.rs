@@ -98,13 +98,17 @@ fn session_parameters() -> Result<snow::params::NoiseParams, HandshakeError> {
 ///
 /// Fails only when a component exceeds an encoding limit.
 pub fn pairing_prologue(
-    version: (u64, u64),
+    version: (u64, u64, u64),
     offer_hash: &[u8; 32],
     transport_profile: &str,
 ) -> Result<Vec<u8>, HandshakeError> {
     Value::Array(vec![
         Value::Text(PAIRING_PROLOGUE_DOMAIN.into()),
-        Value::Array(vec![Value::Unsigned(version.0), Value::Unsigned(version.1)]),
+        Value::Array(vec![
+            Value::Unsigned(version.0),
+            Value::Unsigned(version.1),
+            Value::Unsigned(version.2),
+        ]),
         Value::Text(PAIRING_SUITE.into()),
         Value::Bytes(offer_hash.to_vec()),
         Value::Text(transport_profile.into()),
@@ -119,14 +123,18 @@ pub fn pairing_prologue(
 ///
 /// Fails only when a component exceeds an encoding limit.
 pub fn session_prologue(
-    version: (u64, u64),
+    version: (u64, u64, u64),
     pair_id: PairId,
     grants_hash: &[u8; 32],
     transport_profile: &str,
 ) -> Result<Vec<u8>, HandshakeError> {
     Value::Array(vec![
         Value::Text(SESSION_PROLOGUE_DOMAIN.into()),
-        Value::Array(vec![Value::Unsigned(version.0), Value::Unsigned(version.1)]),
+        Value::Array(vec![
+            Value::Unsigned(version.0),
+            Value::Unsigned(version.1),
+            Value::Unsigned(version.2),
+        ]),
         Value::Text(SESSION_SUITE.into()),
         Value::Bytes(pair_id.0.to_vec()),
         Value::Bytes(grants_hash.to_vec()),

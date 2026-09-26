@@ -20,7 +20,7 @@ use refineid_rapp_core::states::{
 };
 use serde::Deserialize;
 
-const MODEL: &str = include_str!("../../../docs/protocol/rapp-state-machine-v26.9.7.70.yaml");
+const MODEL: &str = include_str!("../../../docs/protocol/rapp-state-machine-v26.9.13.yaml");
 
 #[derive(Debug, Deserialize)]
 struct Model {
@@ -133,7 +133,7 @@ fn assert_same(machine_name: &str, model_rows: &BTreeSet<Row>, table_rows: &BTre
 
 #[test]
 fn document_version_is_the_vendored_revision() {
-    assert_eq!(model().document_version, "26.9.7.70");
+    assert_eq!(model().document_version, "26.9.13");
 }
 
 #[test]

@@ -103,8 +103,8 @@ impl TransportCandidate {
 /// zeroizing type, and `offer_hash` is defined over the secret-free map.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PairingOffer {
-    /// The two-element wire version.
-    pub version: (u64, u64),
+    /// The three-element wire version.
+    pub version: (u64, u64, u64),
     /// The random offer identifier.
     pub offer_id: OfferId,
     /// Offered cryptographic suites, most preferred first.
@@ -159,6 +159,7 @@ impl PairingOffer {
                 Value::Array(vec![
                     Value::Unsigned(self.version.0),
                     Value::Unsigned(self.version.1),
+                    Value::Unsigned(self.version.2),
                 ]),
             ),
             (KEY_OFFER_ID.into(), Value::Bytes(self.offer_id.0.to_vec())),
@@ -256,8 +257,13 @@ impl PairingOffer {
             match (key.as_str(), entry) {
                 (KEY_SCHEME, Value::Text(text)) if text == OFFER_SCHEME => scheme_seen = true,
                 (KEY_VERSION, Value::Array(parts)) => {
-                    if let [Value::Unsigned(major), Value::Unsigned(minor)] = parts.as_slice() {
-                        version = Some((*major, *minor));
+                    if let [
+                        Value::Unsigned(major),
+                        Value::Unsigned(minor),
+                        Value::Unsigned(patch),
+                    ] = parts.as_slice()
+                    {
+                        version = Some((*major, *minor, *patch));
                     } else {
                         return Err(OfferError::Malformed);
                     }

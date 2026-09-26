@@ -9,7 +9,7 @@ use refineid_rapp_core::ids::RendezvousToken;
 use refineid_rapp_core::stream::{StreamError, StreamRendezvous};
 use serde::Deserialize;
 
-const CORPUS: &str = include_str!("../../../docs/protocol/vectors/rapp-v26.9.7.70.json");
+const CORPUS: &str = include_str!("../../../docs/protocol/vectors/rapp-v26.9.13.json");
 
 #[derive(Debug, Deserialize)]
 struct Corpus {
