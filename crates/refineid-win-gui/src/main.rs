@@ -25,6 +25,9 @@
 #[path = "win_main.rs"]
 pub(crate) mod win_main;
 
+#[cfg(any(windows, test))]
+mod version;
+
 #[cfg(windows)]
 mod card;
 #[cfg(windows)]

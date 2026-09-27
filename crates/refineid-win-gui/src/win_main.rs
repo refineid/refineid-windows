@@ -2,7 +2,7 @@
 //! Win32 implementation behind the crate root's platform dispatch.
 //! See `main.rs`: this module only compiles for the Windows target.
 
-use crate::{card, identity, pin};
+use crate::{card, identity, pin, version};
 use std::cell::RefCell;
 use std::os::windows::ffi::OsStrExt as _;
 use std::sync::Mutex;
@@ -85,6 +85,7 @@ const IDC_TAB: u16 = 10;
 const IDC_STATUSBAR: u16 = 11;
 const IDC_READERS: u16 = 101;
 const IDC_REFRESH: u16 = 102;
+const IDC_SVERSION: u16 = 103;
 const IDC_IREAD: u16 = 111;
 const IDC_ICAN: u16 = 113;
 const IDC_IPHOTO: u16 = 114;
@@ -680,6 +681,20 @@ fn on_create(main: HWND) -> windows::core::Result<()> {
         &mut tints,
     )?;
     set_font(detail_atr, font_mono);
+    let stamp = child(
+        w!("STATIC"),
+        &version::build_label(),
+        WS_CHILD | WS_VISIBLE,
+        16,
+        310,
+        640,
+        20,
+        pages[0],
+        IDC_SVERSION,
+        instance,
+    )?;
+    set_font(stamp, font);
+    tints.push((stamp, GRAY));
 
     add_header(
         pages[1],
