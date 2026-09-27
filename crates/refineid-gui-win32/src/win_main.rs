@@ -270,7 +270,7 @@ fn create_main_window() -> windows::core::Result<HWND> {
     register_class(instance, w!("RefineIDWinGui"), Some(wndproc))?;
     register_class(instance, w!("RefineIDWinGuiPage"), Some(page_proc))?;
 
-    let title = HSTRING::from("RefineID");
+    let title = HSTRING::from(version::build_label());
     unsafe {
         CreateWindowExW(
             WINDOW_EX_STYLE::default(),
