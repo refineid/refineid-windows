@@ -1,5 +1,5 @@
 [package]
-name = "refineid-win-gui"
+name = "refineid-gui-win32"
 description = "Native Win32 companion GUI: card status, identity, PIN, documents, remote"
 version.workspace = true
 edition.workspace = true
@@ -8,7 +8,7 @@ authors.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "refineid-win-gui"
+name = "refineid-gui-win32"
 path = "src/main.rs"
 
 [dependencies]
