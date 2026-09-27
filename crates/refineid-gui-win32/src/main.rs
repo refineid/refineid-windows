@@ -43,6 +43,6 @@ fn main() {
 /// Non-Windows stub: the GUI is Win32-only.
 #[cfg(not(windows))]
 fn main() {
-    eprintln!("refineid-win-gui runs on Windows only.");
+    eprintln!("refineid-gui-win32 runs on Windows only.");
     std::process::exit(2);
 }

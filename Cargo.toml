@@ -3,7 +3,7 @@ resolver = "3"
 members = [
     "crates/refineid-card-manager-core",
     "crates/refineid-doc-sign",
-    "crates/refineid-win-gui",
+    "crates/refineid-gui-win32",
     "crates/refineid-lib-core",
     "crates/refineid-lib-pcsc",
     "crates/refineid-minidriver",
@@ -29,7 +29,7 @@ refineid-lib-core = { path = "crates/refineid-lib-core", version = "26" }
 refineid-lib-pcsc = { path = "crates/refineid-lib-pcsc", version = "26" }
 refineid-card-manager-core = { path = "crates/refineid-card-manager-core", version = "26" }
 refineid-doc-sign = { path = "crates/refineid-doc-sign", version = "26" }
-refineid-win-gui = { path = "crates/refineid-win-gui", version = "26" }
+refineid-gui-win32 = { path = "crates/refineid-gui-win32", version = "26" }
 refineid-rapp-core = { path = "crates/refineid-rapp-core", version = "26" }
 refineid-windows-credential-store = { path = "crates/refineid-windows-credential-store", version = "26" }
 

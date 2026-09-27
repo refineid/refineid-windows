@@ -866,6 +866,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "refineid-gui-win32"
+version = "26.9.24"
+dependencies = [
+ "pcsc",
+ "refineid-card-manager-core",
+ "refineid-doc-sign",
+ "refineid-lib-core",
+ "refineid-lib-pcsc",
+ "refineid-rapp-core",
+ "refineid-windows-credential-store",
+ "windows",
+ "zeroize",
+]
+
+[[package]]
 name = "refineid-lib-core"
 version = "26.9.24"
 dependencies = [
@@ -988,21 +1003,6 @@ dependencies = [
  "refineid-windows-credential-store",
  "serde",
  "serde_json",
- "zeroize",
-]
-
-[[package]]
-name = "refineid-win-gui"
-version = "26.9.24"
-dependencies = [
- "pcsc",
- "refineid-card-manager-core",
- "refineid-doc-sign",
- "refineid-lib-core",
- "refineid-lib-pcsc",
- "refineid-rapp-core",
- "refineid-windows-credential-store",
- "windows",
  "zeroize",
 ]
 

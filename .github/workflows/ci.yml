@@ -59,7 +59,7 @@ jobs:
       # project, so a clean build is itself the analyzer gate.
       - name: Build requester
         run: >-
-          dotnet build apps/RefineID/RefineID.csproj
+          dotnet build apps/RefineID-winui/RefineID.csproj
           -c Debug -p:Platform=x64 -p:SkipRustBuild=true
           -p:WindowsPackageType=None -p:EnableMsixTooling=false
 
