@@ -11,6 +11,11 @@
 
 set -e
 
+if git ls-files | grep -i -E '(^|/)WHATSUP\.md$' >/dev/null; then
+    echo "pre-commit: error: WHATSUP.md files are forbidden."
+    exit 1
+fi
+
 echo "pre-commit: cargo fmt --all --check"
 cargo fmt --all --check
 

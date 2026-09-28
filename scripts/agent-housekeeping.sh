@@ -11,8 +11,8 @@
 # Without flags the script only reports. With --clean it removes worktrees
 # whose branch is merged into main, whose tree is clean, and that hold no
 # unpushed commits, then deletes the merged branch. Anything else —
-# uncommitted changes, unpushed commits, a fresh WHATSUP.md claim — is
-# reported with its recorded purpose and never destroyed.
+# uncommitted changes, unpushed commits, or an unmerged branch — is
+# reported with its latest commit message and never destroyed.
 
 set -euo pipefail
 
@@ -38,10 +38,6 @@ file_mtime() {
   else
     stat -f %m "$1"
   fi
-}
-
-claim_field() {
-  grep -m1 -E "^$2:" "$1" 2>/dev/null | sed -E "s/^$2:[[:space:]]*//" || true
 }
 
 while IFS= read -r line; do
@@ -70,30 +66,33 @@ while IFS= read -r line; do
         dirty="yes"
       fi
       unpushed="$(git -C "${path}" rev-list --count "main..${branch}" 2>/dev/null || echo "?")"
-      claim="${path}/WHATSUP.md"
-      if [[ -f "${claim}" ]]; then
-        age=$((now - $(file_mtime "${claim}")))
-        if [[ "${age}" -gt "${stale_after_seconds}" ]]; then
-          claim_state="stale (${age}s since heartbeat)"
-        else
-          claim_state="fresh (${age}s since heartbeat)"
-        fi
-        purpose="$(claim_field "${claim}" purpose)"
-        status="$(claim_field "${claim}" status)"
+      branch_commits="$(git -C "${path}" rev-list --count "main..${branch}" 2>/dev/null || echo "0")"
+
+      tree_mtime=$(file_mtime "${path}")
+      last_commit_time=0
+      if [[ "${branch_commits}" -gt 0 ]]; then
+        last_commit_time=$(git -C "${path}" log -1 --format=%ct 2>/dev/null || echo "0")
+        latest_subject=$(git -C "${path}" log -1 --format=%s 2>/dev/null || true)
       else
-        claim_state="absent"
-        purpose=""
-        status=""
+        latest_subject="(no commits on branch yet)"
       fi
+
+      latest_activity=$(( last_commit_time > tree_mtime ? last_commit_time : tree_mtime ))
+      age=$((now - latest_activity))
+      if [[ "${age}" -gt "${stale_after_seconds}" ]]; then
+        activity="stale (${age}s since activity)"
+      else
+        activity="fresh (${age}s since activity)"
+      fi
+
       size="$(du -sh "${path}" 2>/dev/null | cut -f1)"
       echo "--- ${path} [${size}]"
       if [[ "${path}" != *"/src/wt/"* ]]; then
         echo "  policy: NON-COMPLIANT (worktree must live under ~/src/wt/)"
       fi
       echo "  branch: ${branch} (merged: ${merged}, dirty: ${dirty}, unpushed: ${unpushed})"
-      echo "  claim: ${claim_state}"
-      [[ -n "${purpose}" ]] && echo "  purpose: ${purpose}"
-      [[ -n "${status}" ]] && echo "  status: ${status}"
+      echo "  activity: ${activity}"
+      [[ -n "${latest_subject}" ]] && echo "  latest: ${latest_subject}"
       if [[ "${merged}" == "yes" && "${dirty}" == "no" && "${unpushed}" == "0" ]]; then
         if [[ "${clean}" == "1" ]]; then
           git worktree remove "${path}"
@@ -102,7 +101,7 @@ while IFS= read -r line; do
         else
           echo "  verdict: REMOVE (rerun with --clean)"
         fi
-      elif [[ "${claim_state}" == fresh* ]]; then
+      elif [[ "${activity}" == fresh* || "${dirty}" == "yes" ]]; then
         echo "  verdict: KEEP (live claim)"
       else
         echo "  verdict: REVIEW (needs an owner decision)"
