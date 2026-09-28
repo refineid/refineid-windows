@@ -14,7 +14,7 @@
 use zeroize::Zeroizing;
 
 use crate::ids::{OperationId, PairId, RendezvousToken};
-use crate::states::OperationState;
+pub use refineid_rapp::OperationState;
 
 /// The fail-stop disposition of a stored pairing (Section 14.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +63,10 @@ pub struct PairingRecord {
     pub root_ca: Option<Vec<u8>>,
     /// Cached DER bytes of the intermediate CA certificate, if populated.
     pub intermediate_ca: Option<Vec<u8>>,
+    /// Candidate identifier used by this pairing.
+    pub candidate_id: Option<String>,
+    /// Transport profile used by this pairing.
+    pub transport_profile: Option<String>,
 }
 
 impl core::fmt::Debug for PairingRecord {
@@ -72,6 +76,178 @@ impl core::fmt::Debug for PairingRecord {
             .field("pair_id", &self.pair_id)
             .field("disposition", &self.disposition)
             .finish_non_exhaustive()
+    }
+}
+
+/// Default display name when peer display name is unspecified.
+pub const DEFAULT_PEER_DISPLAY_NAME: &str = "Peer";
+/// Default platform when peer platform is unspecified.
+pub const DEFAULT_PEER_PLATFORM: &str = "Unknown";
+/// Default candidate identifier for single-channel stream transport.
+pub const DEFAULT_STREAM_CANDIDATE_ID: &str = "stream-1";
+
+impl PairingRecord {
+    /// Convert to canonical core [`refineid_rapp::PairRecord`].
+    ///
+    /// # Errors
+    /// Returns [`refineid_rapp::PairRecordError`] if keys or profiles are invalid.
+    pub fn to_core_pair_record(
+        &self,
+    ) -> Result<refineid_rapp::PairRecord, refineid_rapp::PairRecordError> {
+        let local_private: [u8; 32] = self
+            .local_private
+            .as_slice()
+            .try_into()
+            .map_err(|_| refineid_rapp::PairRecordError::InvalidStaticKey)?;
+        let local_public: [u8; 32] = self
+            .local_public
+            .as_slice()
+            .try_into()
+            .map_err(|_| refineid_rapp::PairRecordError::InvalidStaticKey)?;
+        let peer_public: [u8; 32] = self
+            .peer_public
+            .as_slice()
+            .try_into()
+            .map_err(|_| refineid_rapp::PairRecordError::InvalidStaticKey)?;
+        let mut profiles: Vec<refineid_rapp::ProfileName> = Vec::new();
+        for p in &self.granted_profiles {
+            let parsed = refineid_rapp::ProfileName::parse(p)
+                .ok_or(refineid_rapp::PairRecordError::NoNegotiatedProfiles)?;
+            profiles.push(parsed);
+        }
+        if profiles.is_empty() {
+            return Err(refineid_rapp::PairRecordError::NoNegotiatedProfiles);
+        }
+        let grants_hash = refineid_rapp::GrantsHash::from_array(self.grants_hash);
+        refineid_rapp::PairRecord::new(
+            self.pair_id,
+            self.rendezvous_token,
+            refineid_rapp::EndpointRole::Requester,
+            local_private,
+            local_public,
+            peer_public,
+            grants_hash,
+            profiles,
+            refineid_rapp::PairTransportBinding {
+                profile: self
+                    .transport_profile
+                    .clone()
+                    .unwrap_or_else(|| refineid_rapp::STREAM_PROFILE.to_owned()),
+                candidate_id: self
+                    .candidate_id
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_STREAM_CANDIDATE_ID.to_owned()),
+                parameters: std::collections::BTreeMap::new(),
+            },
+            0,
+        )
+    }
+
+    /// Construct from canonical core [`refineid_rapp::PairRecord`].
+    #[must_use]
+    pub fn from_core_pair_record(
+        core: &refineid_rapp::PairRecord,
+        peer_display_name: String,
+        peer_platform: String,
+    ) -> Self {
+        Self {
+            pair_id: core.pair_id(),
+            rendezvous_token: core.rendezvous_token(),
+            local_private: Zeroizing::new(core.local_static_private().to_vec()),
+            local_public: core.local_static_public().to_vec(),
+            peer_public: core.remote_static_public().to_vec(),
+            granted_profiles: core
+                .profiles()
+                .iter()
+                .map(|p| p.as_str().to_owned())
+                .collect(),
+            grants_hash: *core.grants_hash().as_bytes(),
+            peer_display_name,
+            peer_platform,
+            disposition: PairingDisposition::Paired,
+            peer_initiated_termination: false,
+            candidate_failures: 0,
+            auth_cert: None,
+            signature_cert: None,
+            root_ca: None,
+            intermediate_ca: None,
+            candidate_id: Some(core.transport().candidate_id.clone()),
+            transport_profile: Some(core.transport().profile.clone()),
+        }
+    }
+}
+
+/// Adapter bridging [`PairingStore`] to canonical core [`refineid_rapp::PairStore`].
+#[derive(Debug)]
+pub struct CorePairStoreAdapter<'a, S: PairingStore> {
+    /// Backing pairing store.
+    pub inner: &'a mut S,
+}
+
+impl<'a, S: PairingStore> CorePairStoreAdapter<'a, S> {
+    /// Creates a new adapter over the given pairing store.
+    pub const fn new(inner: &'a mut S) -> Self {
+        Self { inner }
+    }
+}
+
+impl<S: PairingStore> refineid_rapp::PairStore for CorePairStoreAdapter<'_, S> {
+    type Error = StoreError;
+
+    fn load(&mut self, pair_id: PairId) -> Result<Option<refineid_rapp::PairRecord>, Self::Error> {
+        match self.inner.get(pair_id) {
+            Ok(rec) => {
+                if rec.disposition == PairingDisposition::Paired {
+                    rec.to_core_pair_record()
+                        .map(Some)
+                        .map_err(|_| StoreError::Unknown)
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(StoreError::Unknown) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn insert(
+        &mut self,
+        record: refineid_rapp::PairRecord,
+    ) -> Result<(), refineid_rapp::PairStoreError<Self::Error>> {
+        let (display_name, platform) = self.inner.get(record.pair_id()).map_or_else(
+            |_| {
+                (
+                    DEFAULT_PEER_DISPLAY_NAME.to_owned(),
+                    DEFAULT_PEER_PLATFORM.to_owned(),
+                )
+            },
+            |r| (r.peer_display_name.clone(), r.peer_platform.clone()),
+        );
+        let pairing_record = PairingRecord::from_core_pair_record(&record, display_name, platform);
+        self.inner
+            .insert(pairing_record)
+            .map_err(refineid_rapp::PairStoreError::Backend)
+    }
+
+    fn revoke(
+        &mut self,
+        tombstone: refineid_rapp::PairTombstone,
+    ) -> Result<(), refineid_rapp::PairStoreError<Self::Error>> {
+        self.inner
+            .update(tombstone.pair_id, &mut |r| {
+                r.disposition = PairingDisposition::Revoked;
+                r.local_private = Zeroizing::new(Vec::new());
+                r.peer_public = Vec::new();
+            })
+            .map_err(refineid_rapp::PairStoreError::Backend)
+    }
+
+    fn is_revoked(&mut self, pair_id: PairId) -> Result<bool, Self::Error> {
+        match self.inner.get(pair_id) {
+            Ok(rec) => Ok(rec.disposition == PairingDisposition::Revoked),
+            Err(StoreError::Unknown) => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -260,17 +436,16 @@ impl OperationJournal for MemoryJournal {
 )]
 mod tests {
     use super::{
-        JournalEntry, MemoryJournal, MemoryPairingStore, OperationJournal, PairingDisposition,
-        PairingRecord, PairingStore, StoreError,
+        JournalEntry, MemoryJournal, MemoryPairingStore, OperationJournal, OperationState,
+        PairingDisposition, PairingRecord, PairingStore, StoreError,
     };
     use crate::ids::{OperationId, PairId, RendezvousToken};
-    use crate::states::OperationState;
     use zeroize::Zeroizing;
 
     fn record(pair_id: PairId) -> PairingRecord {
         PairingRecord {
             pair_id,
-            rendezvous_token: RendezvousToken([9; 16]),
+            rendezvous_token: RendezvousToken::from_array([9; 16]),
             local_private: Zeroizing::new(vec![1; 32]),
             local_public: vec![2; 32],
             peer_public: vec![3; 32],
@@ -285,13 +460,15 @@ mod tests {
             signature_cert: None,
             root_ca: None,
             intermediate_ca: None,
+            candidate_id: None,
+            transport_profile: None,
         }
     }
 
     #[test]
     fn pairing_records_round_trip_and_update() {
         let mut store = MemoryPairingStore::new();
-        let pair_id = PairId([7; 16]);
+        let pair_id = PairId::from_array([7; 16]);
         store.insert(record(pair_id)).unwrap();
         store
             .update(pair_id, &mut |entry| entry.candidate_failures += 1)
@@ -305,8 +482,8 @@ mod tests {
     fn journal_reports_open_entries_only() {
         let mut journal = MemoryJournal::new();
         let open = JournalEntry {
-            operation_id: OperationId([1; 16]),
-            pair_id: PairId([7; 16]),
+            operation_id: OperationId::from_array([1; 16]),
+            pair_id: PairId::from_array([7; 16]),
             request_hash: [0; 32],
             profile: "fi.refineid.authentication.v1".into(),
             action: "sign".into(),
@@ -315,7 +492,7 @@ mod tests {
             reconciled_proxy_state: None,
         };
         let done = JournalEntry {
-            operation_id: OperationId([2; 16]),
+            operation_id: OperationId::from_array([2; 16]),
             state: OperationState::Completed,
             ..open.clone()
         };
@@ -328,7 +505,7 @@ mod tests {
 
     #[test]
     fn pairing_record_debug_redacts_keys() {
-        let text = format!("{:?}", record(PairId([7; 16])));
+        let text = format!("{:?}", record(PairId::from_array([7; 16])));
         assert!(!text.contains('1'));
         assert!(text.contains("pair_id"));
     }

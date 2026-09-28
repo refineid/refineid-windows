@@ -12,17 +12,11 @@ refineid-rapp.workspace = true
 refineid-remote.workspace = true
 getrandom.workspace = true
 sha2.workspace = true
-# Default features drag the ring C backend in through snow's std feature;
-# the pure-Rust default resolver is the only one this crate uses.
-snow = { version = "0.10", default-features = false, features = [
-    "default-resolver-crypto",
-] }
 zeroize.workspace = true
 
 [dev-dependencies]
 serde = { workspace = true }
 serde_json.workspace = true
-serde_yaml.workspace = true
 
 [lints]
 workspace = true

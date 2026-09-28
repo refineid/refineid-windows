@@ -12,9 +12,11 @@ name = "refineid-rapp"
 path = "src/main.rs"
 
 [dependencies]
+getrandom.workspace = true
 hex.workspace = true
 p384 = { version = "0.14", default-features = false, features = ["ecdsa"] }
 qrcode.workspace = true
+refineid-rapp.workspace = true
 refineid-rapp-core.workspace = true
 refineid-windows-credential-store.workspace = true
 zeroize.workspace = true

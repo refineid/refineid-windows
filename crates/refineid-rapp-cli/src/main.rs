@@ -19,15 +19,18 @@ use std::time::{Duration, Instant};
 
 use refineid_rapp_cli::mock_proxy::{MockProxyOptions, run_mock_proxy};
 use refineid_rapp_core::engine::{OperationOutcome, PeerIntroduction, Requester, RequesterConfig};
-use refineid_rapp_core::ids::{Challenge, PairId, PairingSecret, RendezvousToken};
+use refineid_rapp_core::ids::{
+    Challenge, OfferId, PairId, PairingSecret, RandomIdExt as _, RendezvousToken,
+};
 use refineid_rapp_core::limits::OFFER_TTL_MAX_MS;
 use refineid_rapp_core::message::CloseReason;
 use refineid_rapp_core::offer::{
-    PairingOffer, TransportCandidate, format_pairing_code, generate_pairing_code,
-    is_valid_pairing_code, normalize_pairing_code, offer_id_from_code, pairing_secret_from_code,
+    PRE_CPACE_DUMMY_SECRET, PairingOffer, TransportCandidate, format_pairing_code,
+    is_valid_pairing_code, normalize_pairing_code, offer_id_from_code,
 };
 use refineid_rapp_core::operations::{
-    CardOperation, CardOperationResult, CertificateKind, KeyProfile, SignatureAlgorithm,
+    CardOperation, CardOperationExt, CardOperationResult, CertificateKind, KeyProfile,
+    SignatureAlgorithm, SignatureAlgorithmExt,
 };
 use refineid_rapp_core::persistence::{decode_pairing_records, encode_pairing_records};
 use refineid_rapp_core::profiles::{
@@ -36,7 +39,6 @@ use refineid_rapp_core::profiles::{
 use refineid_rapp_core::store::{MemoryJournal, MemoryPairingStore, PairingStore};
 use refineid_rapp_core::stream::{StreamAccept, StreamListener, stream_candidate_parameters};
 use refineid_rapp_core::transport::STREAM_PROFILE;
-use refineid_rapp_core::{PAIRING_SUITE, WIRE_VERSION};
 use refineid_windows_credential_store::CredentialPairingStore;
 
 /// The one stream candidate this CLI advertises.
@@ -255,50 +257,84 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
         PROFILE_DOCUMENT_SIGNING.to_owned(),
     ];
 
-    let raw_code = options.code.clone().unwrap_or_else(generate_pairing_code);
-    let pairing_code = format_pairing_code(&raw_code);
-    let offer_id = offer_id_from_code(&raw_code);
-    let secret = pairing_secret_from_code(&raw_code);
-    let secret_bytes = secret.0;
-
-    let offer = PairingOffer {
-        version: WIRE_VERSION,
-        offer_id,
-        suites: vec![PAIRING_SUITE.into()],
-        profiles: requested_profiles.clone(),
-        transports: vec![TransportCandidate {
-            profile: STREAM_PROFILE.into(),
-            candidate_id: CANDIDATE_ID.into(),
-            parameters: stream_candidate_parameters(&options.advertise)
-                .map_err(|error| format!("invalid advertised endpoints: {error:?}"))?,
-        }],
-        offer_ttl_ms: OFFER_TTL_MAX_MS,
+    let (offer, pairing_service, manual_code) = if let Some(code) = &options.code {
+        let raw_code = normalize_pairing_code(code);
+        let pairing_code = format_pairing_code(&raw_code);
+        let offer_id = offer_id_from_code(&raw_code).map_err(|e| format!("invalid code: {e:?}"))?;
+        let secret = PairingSecret::from_random_bytes(PRE_CPACE_DUMMY_SECRET);
+        let candidate_params = stream_candidate_parameters(&options.advertise)
+            .map_err(|error| format!("invalid advertised endpoints: {error:?}"))?;
+        let offer = PairingOffer::reconstruct(
+            offer_id,
+            secret,
+            vec![refineid_rapp::MANDATORY_PAIRING_SUITE.into()],
+            requested_profiles.clone(),
+            vec![TransportCandidate {
+                profile: STREAM_PROFILE.into(),
+                candidate_id: CANDIDATE_ID.into(),
+                parameters: candidate_params,
+            }],
+            OFFER_TTL_MAX_MS,
+        )
+        .map_err(|error| format!("offer reconstruct failed: {error:?}"))?;
+        let uri = offer
+            .to_uri()
+            .map_err(|error| format!("offer encoding failed: {error:?}"))?;
+        let service = refineid_rapp_core::stream::stream_rendezvous_name(uri.expose().as_bytes());
+        println!(
+            "manual-code pairing mode: enter code in RefineID on the phone; expires in 3 minutes"
+        );
+        println!("pairing code: {pairing_code}");
+        flush_now();
+        (offer, service, Some(raw_code))
+    } else {
+        let offer_id =
+            OfferId::random().map_err(|_| "csprng failed: random offer_id".to_owned())?;
+        let secret = PairingSecret::random()
+            .map_err(|_| "csprng failed: random pairing_secret".to_owned())?;
+        let candidate_params = stream_candidate_parameters(&options.advertise)
+            .map_err(|error| format!("invalid advertised endpoints: {error:?}"))?;
+        let offer = PairingOffer::reconstruct(
+            offer_id,
+            secret,
+            vec![refineid_rapp::MANDATORY_PAIRING_SUITE.into()],
+            requested_profiles.clone(),
+            vec![TransportCandidate {
+                profile: STREAM_PROFILE.into(),
+                candidate_id: CANDIDATE_ID.into(),
+                parameters: candidate_params,
+            }],
+            OFFER_TTL_MAX_MS,
+        )
+        .map_err(|error| format!("offer reconstruct failed: {error:?}"))?;
+        let uri = offer
+            .to_uri()
+            .map_err(|error| format!("offer encoding failed: {error:?}"))?;
+        let qr = qrcode::QrCode::new(uri.expose().as_bytes())
+            .map_err(|error| format!("QR encoding failed: {error}"))?;
+        println!(
+            "{}",
+            qr.render::<qrcode::render::unicode::Dense1x2>().build()
+        );
+        println!("scan QR with RefineID on the phone; the offer expires in three minutes");
+        println!();
+        println!("offer text (the QR encodes exactly this):");
+        println!("{}", uri.expose());
+        flush_now();
+        let service = refineid_rapp_core::stream::stream_rendezvous_name(uri.expose().as_bytes());
+        (offer, service, None)
     };
-    let uri = offer
-        .to_uri(&secret)
-        .map_err(|error| format!("offer encoding failed: {error:?}"))?;
-
-    let qr = qrcode::QrCode::new(uri.as_bytes())
-        .map_err(|error| format!("QR encoding failed: {error}"))?;
-    println!(
-        "{}",
-        qr.render::<qrcode::render::unicode::Dense1x2>().build()
-    );
-    println!("scan with RefineID on the iPhone; the offer expires in three minutes");
-    println!("pairing code: {pairing_code}");
-    println!();
-    println!("offer text (the QR encodes exactly this):");
-    println!("{uri}");
-    flush_now();
-
-    let pairing_service = refineid_rapp_core::stream::stream_rendezvous_name(uri.as_bytes());
     println!("pairing service instance: {pairing_service}");
     flush_now();
 
+    let mut offer_slot = Some(offer);
     let deadline = Instant::now() + Duration::from_millis(OFFER_TTL_MAX_MS);
     let pair_id = loop {
         if Instant::now() >= deadline {
             return Err("the pairing offer expired".into());
+        }
+        if offer_slot.is_none() {
+            return Err("the pairing offer was consumed by a failed attempt".into());
         }
 
         // 1. Discover if the proxy is listening under the offer's derived service name
@@ -318,28 +354,50 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
                 &refineid_rapp_core::stream::StreamRendezvous::Pairing,
             ) {
                 let auto_confirm = options.auto_confirm;
-                match requester.pair(
-                    &offer,
-                    PairingSecret(secret_bytes),
-                    &requested_profiles,
-                    transport,
-                    |peer, requested| {
-                        if auto_confirm {
-                            println!();
-                            println!(
-                                "auto-confirming pairing request from {} ({})",
-                                peer.display_name, peer.platform
-                            );
-                            println!("granted: {}", requested.join(", "));
-                            Some(requested.to_vec())
-                        } else {
-                            confirm_grants(peer, requested)
-                        }
-                    },
-                ) {
+                let outcome = if let Some(code) = &manual_code {
+                    requester.pair_with_code(
+                        &mut offer_slot,
+                        code,
+                        &requested_profiles,
+                        transport,
+                        |peer, requested| {
+                            if auto_confirm {
+                                println!();
+                                println!(
+                                    "auto-confirming pairing request from {} ({})",
+                                    peer.display_name, peer.platform
+                                );
+                                println!("granted: {}", requested.join(", "));
+                                Some(requested.to_vec())
+                            } else {
+                                confirm_grants(peer, requested)
+                            }
+                        },
+                    )
+                } else {
+                    requester.pair(
+                        &mut offer_slot,
+                        &requested_profiles,
+                        transport,
+                        |peer, requested| {
+                            if auto_confirm {
+                                println!();
+                                println!(
+                                    "auto-confirming pairing request from {} ({})",
+                                    peer.display_name, peer.platform
+                                );
+                                println!("granted: {}", requested.join(", "));
+                                Some(requested.to_vec())
+                            } else {
+                                confirm_grants(peer, requested)
+                            }
+                        },
+                    )
+                };
+                match outcome {
                     Ok(pair_id) => break pair_id,
                     Err(error) => {
-                        println!("pairing attempt failed: {error:?}; the offer stays live");
+                        println!("pairing attempt failed: {error:?}");
                     }
                 }
             }
@@ -349,28 +407,50 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
         match listener.accept_timeout(Duration::from_millis(200)) {
             Ok(Some(StreamAccept::Pairing(transport))) => {
                 let auto_confirm = options.auto_confirm;
-                match requester.pair(
-                    &offer,
-                    PairingSecret(secret_bytes),
-                    &requested_profiles,
-                    transport,
-                    |peer, requested| {
-                        if auto_confirm {
-                            println!();
-                            println!(
-                                "auto-confirming pairing request from {} ({})",
-                                peer.display_name, peer.platform
-                            );
-                            println!("granted: {}", requested.join(", "));
-                            Some(requested.to_vec())
-                        } else {
-                            confirm_grants(peer, requested)
-                        }
-                    },
-                ) {
+                let outcome = if let Some(code) = &manual_code {
+                    requester.pair_with_code(
+                        &mut offer_slot,
+                        code,
+                        &requested_profiles,
+                        transport,
+                        |peer, requested| {
+                            if auto_confirm {
+                                println!();
+                                println!(
+                                    "auto-confirming pairing request from {} ({})",
+                                    peer.display_name, peer.platform
+                                );
+                                println!("granted: {}", requested.join(", "));
+                                Some(requested.to_vec())
+                            } else {
+                                confirm_grants(peer, requested)
+                            }
+                        },
+                    )
+                } else {
+                    requester.pair(
+                        &mut offer_slot,
+                        &requested_profiles,
+                        transport,
+                        |peer, requested| {
+                            if auto_confirm {
+                                println!();
+                                println!(
+                                    "auto-confirming pairing request from {} ({})",
+                                    peer.display_name, peer.platform
+                                );
+                                println!("granted: {}", requested.join(", "));
+                                Some(requested.to_vec())
+                            } else {
+                                confirm_grants(peer, requested)
+                            }
+                        },
+                    )
+                };
+                match outcome {
                     Ok(pair_id) => break pair_id,
                     Err(error) => {
-                        println!("pairing attempt failed: {error:?}; the offer stays live");
+                        println!("pairing attempt failed: {error:?}");
                     }
                 }
             }
@@ -383,7 +463,6 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
             }
         }
     };
-    drop(PairingSecret(secret_bytes));
 
     let expected_token = {
         let record = requester
@@ -503,7 +582,8 @@ fn serve_sessions<S: PairingStore>(
     sign_profile: Option<(KeyProfile, SignatureAlgorithm)>,
     count: Option<usize>,
 ) -> Result<(), String> {
-    let service_name = refineid_rapp_core::stream::stream_rendezvous_name(&expected_token.0);
+    let service_name =
+        refineid_rapp_core::stream::stream_rendezvous_name(expected_token.as_bytes());
     println!("session service instance: {service_name}");
     flush_now();
     let mut served = 0;
@@ -722,16 +802,16 @@ fn demo_digest(algorithm: SignatureAlgorithm) -> Result<Vec<u8>, String> {
 fn report(operation: &CardOperation, outcome: &OperationOutcome) {
     match outcome {
         OperationOutcome::Completed(result) => match result {
-            CardOperationResult::Inspection {
-                pin1_factory,
-                pin2_factory,
-                pin1_attempts,
-                pin2_attempts,
-                puk_attempts,
-            } => {
+            CardOperationResult::Inspection(inspection) => {
                 println!(
-                    "ok: pin1 factory {pin1_factory}, pin2 factory {pin2_factory}, attempts {}",
-                    attempts_label(*pin1_attempts, *pin2_attempts, *puk_attempts)
+                    "ok: pin1 factory {}, pin2 factory {}, attempts {}",
+                    inspection.pin1_factory,
+                    inspection.pin2_factory,
+                    attempts_label(
+                        inspection.pin1_attempts,
+                        inspection.pin2_attempts,
+                        inspection.puk_attempts
+                    )
                 );
             }
             CardOperationResult::Identity {
@@ -827,9 +907,8 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
     };
 
     let test_code = "654321";
-    let offer_id = offer_id_from_code(test_code);
-    let secret = pairing_secret_from_code(test_code);
-    let secret_bytes = secret.0;
+    let offer_id = offer_id_from_code(test_code).map_err(|e| format!("invalid code: {e:?}"))?;
+    let secret = PairingSecret::from_random_bytes(PRE_CPACE_DUMMY_SECRET);
 
     let requested_profiles = vec![
         PROFILE_CARD_STATUS.to_owned(),
@@ -844,19 +923,21 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
         .map_err(|e| format!("cannot get port: {e:?}"))?;
     let local_endpoint = format!("127.0.0.1:{port}");
 
-    let offer = PairingOffer {
-        version: WIRE_VERSION,
+    let stream_params = stream_candidate_parameters(std::slice::from_ref(&local_endpoint))
+        .map_err(|e| format!("parameters: {e:?}"))?;
+    let offer = PairingOffer::reconstruct(
         offer_id,
-        suites: vec![PAIRING_SUITE.into()],
-        profiles: requested_profiles.clone(),
-        transports: vec![TransportCandidate {
+        secret,
+        vec![refineid_rapp::MANDATORY_PAIRING_SUITE.into()],
+        requested_profiles.clone(),
+        vec![TransportCandidate {
             profile: STREAM_PROFILE.into(),
             candidate_id: CANDIDATE_ID.into(),
-            parameters: stream_candidate_parameters(std::slice::from_ref(&local_endpoint))
-                .map_err(|e| format!("parameters: {e:?}"))?,
+            parameters: stream_params,
         }],
-        offer_ttl_ms: OFFER_TTL_MAX_MS,
-    };
+        OFFER_TTL_MAX_MS,
+    )
+    .map_err(|e| format!("offer reconstruct failed: {e:?}"))?;
 
     let proxy_endpoint = local_endpoint;
     let proxy_cert = cert_der.clone();
@@ -898,10 +979,11 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
         return Err("expected StreamAccept::Pairing".into());
     };
 
+    let mut offer_slot = Some(offer);
     let pair_id = requester
-        .pair(
-            &offer,
-            PairingSecret(secret_bytes),
+        .pair_with_code(
+            &mut offer_slot,
+            test_code,
             &requested_profiles,
             transport,
             |_peer, requested| Some(requested.to_vec()),
@@ -919,7 +1001,7 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
         .map_err(|e| format!("failed to update pairing record: {e:?}"))?;
 
     println!("Mock pairing established and stored in Windows Credential Store:");
-    println!("  pair_id: {}", hex::encode(pair_id.0));
+    println!("  pair_id: {}", hex::encode(pair_id.as_bytes()));
     println!("  auth_cert: {} bytes", cert_der.len());
     if let Some(r) = &root_ca_der {
         println!("  root_ca: {} bytes", r.len());
@@ -951,7 +1033,7 @@ fn remove_pairing(arguments: &[String]) -> Result<(), String> {
     }
     let mut arr = [0u8; 16];
     arr.copy_from_slice(&raw);
-    let pair_id = PairId(arr);
+    let pair_id = PairId::from_array(arr);
     let mut store = CredentialPairingStore::load()
         .map_err(|e| format!("cannot load CredentialPairingStore: {e}"))?;
     store
@@ -979,7 +1061,7 @@ fn list_pairing() -> Result<(), String> {
         let marker = if is_current { "* " } else { "  " };
         println!(
             "{marker}[{index}] Pair ID: {}",
-            hex::encode(record.pair_id.0)
+            hex::encode(record.pair_id.as_bytes())
         );
         println!(
             "      Peer: {} ({})",
@@ -987,11 +1069,11 @@ fn list_pairing() -> Result<(), String> {
         );
         println!(
             "      Rendezvous Token: {}",
-            hex::encode(record.rendezvous_token.0)
+            hex::encode(record.rendezvous_token.as_bytes())
         );
         println!(
             "      Service Name: {}",
-            refineid_rapp_core::stream::stream_rendezvous_name(&record.rendezvous_token.0)
+            refineid_rapp_core::stream::stream_rendezvous_name(record.rendezvous_token.as_bytes())
         );
         println!("      Profiles: {}", record.granted_profiles.join(", "));
         println!("      Has Auth Cert: {}", record.auth_cert.is_some());

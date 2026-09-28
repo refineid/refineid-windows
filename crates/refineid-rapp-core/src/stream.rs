@@ -8,109 +8,16 @@
 //! token: it enables nothing but the selection, and every anomaly closes
 //! the connection without touching stored state (Section 14.5, class 1).
 
+use std::collections::BTreeMap;
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
-use crate::cbor::Value;
 use crate::ids::RendezvousToken;
 use crate::transport::{FrameTransport, TcpFrameTransport, TransportError};
-
-/// Domain string opening every stream rendezvous preamble.
-const STREAM_RENDEZVOUS_DOMAIN: &str = "RAPP-stream-v1";
-
-/// Preamble purpose naming a pairing attempt.
-const PURPOSE_PAIRING: &str = "pairing";
-
-/// Preamble purpose naming a session attempt for a stored pairing.
-const PURPOSE_SESSION: &str = "session";
-
-/// Upper bound on an encoded rendezvous preamble frame; the listener
-/// rejects a longer preamble before parsing it.
-pub const MAX_STREAM_RENDEZVOUS_FRAME: usize = 64;
-
-/// Candidate parameter key carrying the listener endpoint list.
-const PARAMETER_ENDPOINTS: &str = "endpoints";
-
-/// Maximum listener endpoints one stream candidate may carry.
-pub const MAX_STREAM_ENDPOINTS: usize = 8;
-
-/// Maximum UTF-8 bytes of one `host:port` endpoint literal.
-pub const MAX_STREAM_ENDPOINT_BYTES: usize = 255;
-
-/// One plaintext rendezvous preamble, the first frame on a fresh stream
-/// connection before any Noise message.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StreamRendezvous {
-    /// Connect to the listener's currently active pairing offer.
-    Pairing,
-    /// Connect for a fresh session with the stored pairing this token
-    /// names.
-    Session(RendezvousToken),
-}
-
-impl StreamRendezvous {
-    /// Encodes the preamble frame payload.
-    ///
-    /// # Errors
-    ///
-    /// Fails only when the value cannot be encoded within the wire limits.
-    pub fn encode(&self) -> Result<Vec<u8>, StreamError> {
-        let (purpose, token_bytes) = match self {
-            Self::Pairing => (PURPOSE_PAIRING, Vec::new()),
-            Self::Session(token) => (PURPOSE_SESSION, token.0.to_vec()),
-        };
-        Value::Array(vec![
-            Value::Text(STREAM_RENDEZVOUS_DOMAIN.to_owned()),
-            Value::Text(purpose.to_owned()),
-            Value::Bytes(token_bytes),
-        ])
-        .encode()
-        .map_err(|_| StreamError::Malformed)
-    }
-
-    /// Decodes and validates one received preamble frame payload.
-    ///
-    /// # Errors
-    ///
-    /// Every failure is pre-authentication invalid input: the caller closes
-    /// the connection and changes no stored state.
-    pub fn decode(bytes: &[u8]) -> Result<Self, StreamError> {
-        if bytes.len() > MAX_STREAM_RENDEZVOUS_FRAME {
-            return Err(StreamError::Oversized);
-        }
-        let Ok(Value::Array(elements)) = Value::decode(bytes) else {
-            return Err(StreamError::Malformed);
-        };
-        let [
-            Value::Text(domain),
-            Value::Text(purpose),
-            Value::Bytes(token_bytes),
-        ] = elements.as_slice()
-        else {
-            return Err(StreamError::Malformed);
-        };
-        if domain != STREAM_RENDEZVOUS_DOMAIN {
-            return Err(StreamError::Malformed);
-        }
-        match purpose.as_str() {
-            PURPOSE_PAIRING => {
-                if token_bytes.is_empty() {
-                    Ok(Self::Pairing)
-                } else {
-                    Err(StreamError::Malformed)
-                }
-            }
-            PURPOSE_SESSION => {
-                let token: [u8; crate::ids::RENDEZVOUS_TOKEN_LENGTH] = token_bytes
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| StreamError::Malformed)?;
-                Ok(Self::Session(RendezvousToken(token)))
-            }
-            _ => Err(StreamError::UnknownPurpose),
-        }
-    }
-}
+pub use refineid_rapp::{
+    MAX_STREAM_ENDPOINT_BYTES, MAX_STREAM_ENDPOINTS, MAX_STREAM_RENDEZVOUS_FRAME, STREAM_PROFILE,
+    StreamCandidateParameters, StreamRendezvous, WireValue,
+};
 
 /// Builds the stream candidate `parameters` entries for a pairing offer.
 ///
@@ -121,17 +28,9 @@ impl StreamRendezvous {
 /// [`MAX_STREAM_ENDPOINT_BYTES`].
 pub fn stream_candidate_parameters(
     endpoints: &[String],
-) -> Result<Vec<(String, Value)>, StreamError> {
-    validate_endpoints(endpoints)?;
-    Ok(vec![(
-        PARAMETER_ENDPOINTS.to_owned(),
-        Value::Array(
-            endpoints
-                .iter()
-                .map(|endpoint| Value::Text(endpoint.clone()))
-                .collect(),
-        ),
-    )])
+) -> Result<BTreeMap<String, WireValue>, StreamError> {
+    let params = StreamCandidateParameters::new(endpoints.to_vec())?;
+    Ok(params.to_parameters())
 }
 
 /// Reads the listener endpoints back out of stored candidate parameters.
@@ -140,36 +39,10 @@ pub fn stream_candidate_parameters(
 ///
 /// Fails when the parameters are not exactly the registered stream shape.
 pub fn stream_candidate_endpoints(
-    parameters: &[(String, Value)],
+    parameters: &BTreeMap<String, WireValue>,
 ) -> Result<Vec<String>, StreamError> {
-    let [(key, Value::Array(elements))] = parameters else {
-        return Err(StreamError::Malformed);
-    };
-    if key != PARAMETER_ENDPOINTS {
-        return Err(StreamError::Malformed);
-    }
-    let endpoints = elements
-        .iter()
-        .map(|element| match element {
-            Value::Text(endpoint) => Ok(endpoint.clone()),
-            _ => Err(StreamError::Malformed),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    validate_endpoints(&endpoints)?;
-    Ok(endpoints)
-}
-
-fn validate_endpoints(endpoints: &[String]) -> Result<(), StreamError> {
-    if endpoints.is_empty() || endpoints.len() > MAX_STREAM_ENDPOINTS {
-        return Err(StreamError::EndpointCount);
-    }
-    if endpoints
-        .iter()
-        .any(|endpoint| endpoint.is_empty() || endpoint.len() > MAX_STREAM_ENDPOINT_BYTES)
-    {
-        return Err(StreamError::EndpointLength);
-    }
-    Ok(())
+    let params = StreamCandidateParameters::from_parameters(parameters)?;
+    Ok(params.endpoints().to_vec())
 }
 
 /// One accepted, preamble-classified stream connection.
@@ -550,6 +423,43 @@ pub enum StreamError {
     Unreachable,
 }
 
+impl From<refineid_rapp::StreamError> for StreamError {
+    fn from(err: refineid_rapp::StreamError) -> Self {
+        match err {
+            refineid_rapp::StreamError::Malformed => Self::Malformed,
+            refineid_rapp::StreamError::Oversized => Self::Oversized,
+            refineid_rapp::StreamError::UnknownPurpose => Self::UnknownPurpose,
+            refineid_rapp::StreamError::EndpointCount => Self::EndpointCount,
+            refineid_rapp::StreamError::EndpointLength => Self::EndpointLength,
+        }
+    }
+}
+
+impl core::fmt::Display for StreamError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Malformed => write!(f, "malformed stream profile data"),
+            Self::Oversized => write!(f, "oversized stream rendezvous frame"),
+            Self::UnknownPurpose => write!(f, "unknown stream rendezvous purpose"),
+            Self::EndpointCount => write!(f, "invalid stream endpoint count"),
+            Self::EndpointLength => write!(f, "invalid stream endpoint length"),
+            Self::Bind => write!(f, "failed to bind stream listener"),
+            Self::Accept => write!(f, "failed to accept stream connection"),
+            Self::Preamble(e) => write!(f, "failed to move preamble frame: {e}"),
+            Self::Unreachable => write!(f, "stream endpoint unreachable"),
+        }
+    }
+}
+
+impl core::error::Error for StreamError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Preamble(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -569,7 +479,7 @@ mod tests {
     const CANDIDATE: &str = "stream-test";
 
     fn token() -> RendezvousToken {
-        RendezvousToken([0x5A; 16])
+        RendezvousToken::from_array([0x5A; 16])
     }
 
     #[test]
@@ -595,7 +505,7 @@ mod tests {
         let oversized = vec![0u8; super::MAX_STREAM_RENDEZVOUS_FRAME + 1];
         assert_eq!(
             StreamRendezvous::decode(&oversized),
-            Err(StreamError::Oversized)
+            Err(refineid_rapp::StreamError::Oversized)
         );
     }
 
@@ -636,7 +546,7 @@ mod tests {
                 &endpoints,
                 CANDIDATE,
                 DEADLINE,
-                &StreamRendezvous::Session(RendezvousToken([0x5A; 16])),
+                &StreamRendezvous::Session(RendezvousToken::from_array([0x5A; 16])),
             )
             .unwrap();
             // Prove the channel survives the preamble in both directions.
@@ -650,7 +560,7 @@ mod tests {
         else {
             panic!("expected a session accept");
         };
-        assert_eq!(rendezvous_token, RendezvousToken([0x5A; 16]));
+        assert_eq!(rendezvous_token, RendezvousToken::from_array([0x5A; 16]));
         assert_eq!(transport.receive_frame().unwrap(), vec![0x01, 0x02]);
         dialer.join().unwrap();
     }

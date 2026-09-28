@@ -17,39 +17,36 @@
     reason = "tests panic to fail; documenting each panic adds nothing"
 )]
 
-use std::thread::JoinHandle;
 use std::time::Duration;
 
-use refineid_rapp_core::cbor::Value;
+use refineid_rapp::{
+    BinaryFrame, CardInspection, CardKeyProfile as KeyProfile, CardOperation, CardOperationResult,
+    CloseReason, EndpointRole, EstablishedEndpoint, OfferId, OperationReference,
+    OperationResultMessage, PairId, PairRecord, PairStore, PairStoreError, PairTombstone,
+    PairingHandshake, PairingOffer, PairingSecret, ReceiveOutcome, ResultError, ResultStatus,
+    SessionCloseMessage, SessionHandshake, SignatureAlgorithm, TransportCandidate, TypedMessage,
+    generate_pair_key_material,
+};
 use refineid_rapp_core::engine::{
     OperationOutcome, PairingError, Requester, RequesterConfig, SessionError,
 };
-use refineid_rapp_core::hashes::grants_hash;
-use refineid_rapp_core::ids::{
-    Challenge, OfferId, PairId, PairingSecret, SessionId, derive_pair_id, derive_session_id,
-};
-use refineid_rapp_core::message::{
-    Body, CloseReason, Envelope, NegotiatedParameters, ResultStatus, SessionParameters,
-};
-use refineid_rapp_core::noise::{
-    CompletedHandshake, HandshakeRole, PairKeys, SecureChannel, generate_pair_keys,
-    pairing_prologue, run_pairing_handshake, run_session_handshake, session_prologue,
-};
-use refineid_rapp_core::offer::{PairingOffer, TransportCandidate};
-use refineid_rapp_core::operations::{
-    CardOperation, CardOperationResult, KeyProfile, SignatureAlgorithm,
-};
+use refineid_rapp_core::operations::SignatureAlgorithmExt as _;
 use refineid_rapp_core::profiles::{PROFILE_AUTHENTICATION, PROFILE_CARD_STATUS};
 use refineid_rapp_core::store::{
     MemoryJournal, MemoryPairingStore, OperationJournal, PairingDisposition, PairingStore,
 };
-use refineid_rapp_core::transport::{MEMORY_PROFILE, MemoryTransport};
-use refineid_rapp_core::{PAIRING_SUITE, SESSION_SUITE, WIRE_VERSION};
+use refineid_rapp_core::transport::{FrameTransport, MEMORY_PROFILE, MemoryTransport};
 
 /// A generous deadline for scripted exchanges.
 const DEADLINE: Duration = Duration::from_secs(2);
 /// The candidate identifier used by every loopback test.
 const CANDIDATE: &str = "loopback-1";
+/// Test offer TTL in milliseconds.
+const TEST_OFFER_TTL_MS: u64 = 120_000;
+/// Test monotonic timestamp in milliseconds.
+const TEST_MONOTONIC_TIMESTAMP_MS: u64 = 1_000_000;
+/// Static 32-byte offer identifier byte array for loopback tests.
+const TEST_OFFER_ID_BYTES: [u8; 32] = [0x51; 32];
 
 /// The requester engine type under test.
 type TestRequester = Requester<MemoryPairingStore, MemoryJournal>;
@@ -65,19 +62,23 @@ fn test_requester() -> TestRequester {
     )
 }
 
-fn test_offer() -> PairingOffer {
-    PairingOffer {
-        version: WIRE_VERSION,
-        offer_id: OfferId([0x51; 32]),
-        suites: vec![PAIRING_SUITE.into()],
-        profiles: vec![PROFILE_CARD_STATUS.into(), PROFILE_AUTHENTICATION.into()],
-        transports: vec![TransportCandidate {
+fn test_offer(secret_bytes: [u8; 32]) -> PairingOffer {
+    PairingOffer::reconstruct(
+        OfferId::from_array(TEST_OFFER_ID_BYTES),
+        PairingSecret::from_random_bytes(secret_bytes),
+        vec![refineid_rapp::MANDATORY_PAIRING_SUITE.into()],
+        vec![
+            PROFILE_CARD_STATUS.to_owned(),
+            PROFILE_AUTHENTICATION.to_owned(),
+        ],
+        vec![TransportCandidate {
             profile: MEMORY_PROFILE.into(),
             candidate_id: CANDIDATE.into(),
-            parameters: vec![],
+            parameters: std::collections::BTreeMap::new(),
         }],
-        offer_ttl_ms: 120_000,
-    }
+        TEST_OFFER_TTL_MS,
+    )
+    .unwrap()
 }
 
 /// A registered consequential operation for the authentication tests.
@@ -90,201 +91,154 @@ fn authentication_operation() -> CardOperation {
     }
 }
 
-/// A schema-exact completed inspection body for the scripted proxy.
-fn inspection_body() -> Vec<(String, Value)> {
-    vec![
-        ("type".to_owned(), Value::Text("inspection".into())),
-        ("pin1_factory".to_owned(), Value::Bool(false)),
-        ("pin2_factory".to_owned(), Value::Bool(false)),
-        ("pin1_attempts".to_owned(), Value::Unsigned(5)),
-        ("pin2_attempts".to_owned(), Value::Unsigned(5)),
-        ("puk_attempts".to_owned(), Value::Null),
-    ]
-}
+#[derive(Default)]
+struct MockProxyStore;
 
-/// The proxy's durable half of a pairing, kept across sessions.
-struct ProxyPairing {
-    keys: PairKeys,
-    requester_public: Vec<u8>,
-    pair_id: PairId,
-    grants: [u8; 32],
-}
-
-/// An envelope channel with proxy-owned sequence numbers, so tests can
-/// both conform and deliberately misbehave.
-struct ProxyChannel {
-    secure: SecureChannel<MemoryTransport>,
-    session_id: SessionId,
-    send_sequence: u64,
-    receive_sequence: u64,
-}
-
-impl ProxyChannel {
-    fn send(&mut self, body: Body) {
-        let envelope = Envelope {
-            version: WIRE_VERSION,
-            session_id: self.session_id,
-            sequence: self.send_sequence,
-            body,
-        };
-        self.send_sequence += 1;
-        self.secure
-            .send_plaintext(&envelope.encode().unwrap())
-            .unwrap();
+impl PairStore for MockProxyStore {
+    type Error = core::convert::Infallible;
+    fn load(&mut self, _pair_id: PairId) -> Result<Option<PairRecord>, Self::Error> {
+        Ok(None)
     }
-
-    /// Sends a body under a deliberately skipped sequence number: an
-    /// authenticated protocol violation on the receiver.
-    fn send_with_sequence_gap(&mut self, body: Body) {
-        let envelope = Envelope {
-            version: WIRE_VERSION,
-            session_id: self.session_id,
-            sequence: self.send_sequence + 1,
-            body,
-        };
-        self.secure
-            .send_plaintext(&envelope.encode().unwrap())
-            .unwrap();
+    fn insert(&mut self, _record: PairRecord) -> Result<(), PairStoreError<Self::Error>> {
+        Ok(())
     }
-
-    fn receive(&mut self) -> Body {
-        let plaintext = self.secure.receive_plaintext().unwrap();
-        let envelope = Envelope::decode(&plaintext).unwrap();
-        assert_eq!(envelope.session_id, self.session_id);
-        assert_eq!(envelope.sequence, self.receive_sequence);
-        self.receive_sequence += 1;
-        envelope.body
+    fn revoke(&mut self, _tombstone: PairTombstone) -> Result<(), PairStoreError<Self::Error>> {
+        Ok(())
+    }
+    fn is_revoked(&mut self, _pair_id: PairId) -> Result<bool, Self::Error> {
+        Ok(false)
     }
 }
 
 /// Runs the proxy half of the pairing exchange and returns its stored half.
 fn proxy_pair(
+    mut transport: MemoryTransport,
+    offer: PairingOffer,
+    _granted: &[String],
+) -> PairRecord {
+    let now_ms = TEST_MONOTONIC_TIMESTAMP_MS;
+    let local_keys = generate_pair_key_material().unwrap();
+    let mut handshake =
+        PairingHandshake::begin(EndpointRole::Proxy, offer, CANDIDATE, local_keys).unwrap();
+
+    // Message 1 (Requester -> Proxy)
+    let m1_bytes = transport.receive_frame().unwrap();
+    let m1 = BinaryFrame::reconstruct(m1_bytes).unwrap();
+    handshake.read_message(&m1).unwrap();
+
+    // Message 2 (Proxy -> Requester)
+    let m2 = handshake.write_message().unwrap();
+    transport.send_frame(m2.as_bytes()).unwrap();
+
+    // Message 3 (Requester -> Proxy)
+    let m3_bytes = transport.receive_frame().unwrap();
+    let m3 = BinaryFrame::reconstruct(m3_bytes).unwrap();
+    handshake.read_message(&m3).unwrap();
+
+    let mut confirmation = handshake.into_confirmation().unwrap();
+
+    // Message 4: Receive Requester Hello
+    let req_hello_bytes = transport.receive_frame().unwrap();
+    let req_hello_frame = BinaryFrame::reconstruct(req_hello_bytes).unwrap();
+    let _hello = confirmation
+        .receive_hello(&req_hello_frame, now_ms)
+        .unwrap();
+
+    // Message 5: Send Proxy Hello
+    let proxy_hello = confirmation
+        .send_hello("Phone".into(), "iOS".into())
+        .unwrap();
+    transport.send_frame(proxy_hello.as_bytes()).unwrap();
+
+    // Message 6: Receive Requester Confirmation
+    let req_conf_bytes = transport.receive_frame().unwrap();
+    let req_conf_frame = BinaryFrame::reconstruct(req_conf_bytes).unwrap();
+    let req_conf = confirmation
+        .receive_confirmation(&req_conf_frame, now_ms)
+        .unwrap();
+    let granted_profiles = req_conf.to_vec();
+
+    // Message 7: Send Proxy Confirmation
+    let proxy_conf = confirmation.send_confirmation(granted_profiles).unwrap();
+    transport.send_frame(proxy_conf.as_bytes()).unwrap();
+
+    confirmation.into_pair_record(now_ms).unwrap()
+}
+
+struct ProxySession {
+    endpoint: EstablishedEndpoint,
     transport: MemoryTransport,
-    offer: &PairingOffer,
-    secret: PairingSecret,
-    granted: &[String],
-) -> ProxyPairing {
-    let offer_hash = offer.offer_hash().unwrap();
-    let prologue = pairing_prologue(WIRE_VERSION, &offer_hash, MEMORY_PROFILE).unwrap();
-    let keys = generate_pair_keys().unwrap();
-    let done = run_pairing_handshake(
-        HandshakeRole::Responder,
-        transport,
-        &keys,
-        secret,
-        &prologue,
-    )
-    .unwrap();
-    let requester_public = done.peer_static_public.clone().unwrap();
-    let session_id = derive_session_id(&done.handshake_hash);
-    let pair_id = derive_pair_id(&done.handshake_hash);
-    let mut channel = ProxyChannel {
-        secure: done.channel,
-        session_id,
-        send_sequence: 0,
-        receive_sequence: 0,
-    };
-    let parameters = NegotiatedParameters {
-        version: WIRE_VERSION,
-        suite: PAIRING_SUITE.into(),
-        offer_hash,
-        transport_profile: MEMORY_PROFILE.into(),
-        candidate_id: CANDIDATE.into(),
-    };
-    let Body::PairingHello { .. } = channel.receive() else {
-        panic!("expected the requester hello first");
-    };
-    channel.send(Body::PairingHello {
-        parameters,
-        display_name: "Phone".into(),
-        platform: "iOS".into(),
-        requested_profiles: None,
-    });
-    let Body::PairingConfirm { granted_profiles } = channel.receive() else {
-        panic!("expected the requester confirmation");
-    };
-    assert_eq!(granted_profiles, granted);
-    channel.send(Body::PairingConfirm {
-        granted_profiles: granted.to_vec(),
-    });
-    let grants = grants_hash(granted).unwrap();
-    // The requester closes the pairing channel; consume the notice.
-    let Body::SessionClose { .. } = channel.receive() else {
-        panic!("expected the pairing channel to close");
-    };
-    ProxyPairing {
-        keys,
-        requester_public,
-        pair_id,
-        grants,
+}
+
+impl ProxySession {
+    fn send(&mut self, message: &TypedMessage) {
+        let frame = self.endpoint.send(message).unwrap();
+        self.transport.send_frame(frame.as_bytes()).unwrap();
+    }
+
+    fn receive(&mut self) -> TypedMessage {
+        let frame_bytes = self.transport.receive_frame().unwrap();
+        let frame = BinaryFrame::reconstruct(frame_bytes).unwrap();
+        let mut store = MockProxyStore;
+        let outcome = self
+            .endpoint
+            .receive(&mut store, &frame, TEST_MONOTONIC_TIMESTAMP_MS)
+            .unwrap();
+        match outcome {
+            ReceiveOutcome::Message(m) => m,
+            other => panic!("expected message, got {other:?}"),
+        }
     }
 }
 
 /// Accepts one session as the proxy and completes the ready exchange.
-fn proxy_accept_session(pairing: &ProxyPairing, transport: MemoryTransport) -> ProxyChannel {
-    let prologue = session_prologue(
-        WIRE_VERSION,
-        pairing.pair_id,
-        &pairing.grants,
-        MEMORY_PROFILE,
-    )
-    .unwrap();
-    let done: CompletedHandshake<MemoryTransport> = run_session_handshake(
-        HandshakeRole::Responder,
+fn proxy_accept_session(pair_record: &PairRecord, mut transport: MemoryTransport) -> ProxySession {
+    let now_ms = TEST_MONOTONIC_TIMESTAMP_MS;
+    let mut handshake = SessionHandshake::begin_proxy(pair_record).unwrap();
+
+    // Message 1 (Requester -> Proxy)
+    let m1_bytes = transport.receive_frame().unwrap();
+    let m1 = BinaryFrame::reconstruct(m1_bytes).unwrap();
+    handshake.read_message(&m1).unwrap();
+
+    // Message 2 (Proxy -> Requester)
+    let m2 = handshake.write_message().unwrap();
+    transport.send_frame(m2.as_bytes()).unwrap();
+
+    let mut auth = handshake.into_authentication().unwrap();
+
+    // Receive Ready
+    let req_ready_bytes = transport.receive_frame().unwrap();
+    let req_ready_frame = BinaryFrame::reconstruct(req_ready_bytes).unwrap();
+    let mut store = MockProxyStore;
+    auth.receive_ready(&mut store, &req_ready_frame, now_ms)
+        .unwrap();
+
+    // Send Ready
+    let proxy_ready = auth.send_ready([0x55; 32]).unwrap();
+    transport.send_frame(proxy_ready.as_bytes()).unwrap();
+
+    let endpoint = auth.into_established().unwrap();
+    ProxySession {
+        endpoint,
         transport,
-        &pairing.keys.private,
-        &pairing.requester_public,
-        &prologue,
-    )
-    .unwrap();
-    let session_id = derive_session_id(&done.handshake_hash);
-    let mut channel = ProxyChannel {
-        secure: done.channel,
-        session_id,
-        send_sequence: 0,
-        receive_sequence: 0,
-    };
-    let parameters = SessionParameters {
-        version: WIRE_VERSION,
-        suite: SESSION_SUITE.into(),
-        transport_profile: MEMORY_PROFILE.into(),
-        candidate_id: CANDIDATE.into(),
-        grants_hash: pairing.grants,
-    };
-    let Body::SessionReady {
-        parameters: seen, ..
-    } = channel.receive()
-    else {
-        panic!("expected the requester session.ready");
-    };
-    assert_eq!(seen, parameters);
-    channel.send(Body::SessionReady {
-        parameters,
-        nonce: Challenge::random().unwrap().0,
-    });
-    channel
+    }
 }
 
 /// Pairs a fresh requester with a proxy thread and returns both halves.
-fn paired(requester: &mut TestRequester, granted: &[String]) -> (PairId, ProxyPairing) {
-    let offer = test_offer();
-    let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+fn paired(requester: &mut TestRequester, granted: &[String]) -> (PairId, PairRecord) {
     let secret_bytes = [0x77u8; 32];
+    let offer = test_offer(secret_bytes);
+    let proxy_offer = test_offer(secret_bytes);
+    let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
     let granted_for_proxy = granted.to_vec();
-    let offer_for_proxy = offer.clone();
-    let proxy: JoinHandle<ProxyPairing> = std::thread::spawn(move || {
-        proxy_pair(
-            proxy_transport,
-            &offer_for_proxy,
-            PairingSecret(secret_bytes),
-            &granted_for_proxy,
-        )
-    });
+    let proxy =
+        std::thread::spawn(move || proxy_pair(proxy_transport, proxy_offer, &granted_for_proxy));
     let profile_request: Vec<String> = granted.to_vec();
+    let mut offer_slot = Some(offer);
     let pair_id = requester
         .pair(
-            &offer,
-            PairingSecret(secret_bytes),
+            &mut offer_slot,
             &profile_request,
             requester_transport,
             |peer, _requested| {
@@ -293,9 +247,9 @@ fn paired(requester: &mut TestRequester, granted: &[String]) -> (PairId, ProxyPa
             },
         )
         .unwrap();
-    let proxy_pairing = proxy.join().unwrap();
-    assert_eq!(proxy_pairing.pair_id, pair_id);
-    (pair_id, proxy_pairing)
+    let proxy_record = proxy.join().unwrap();
+    assert_eq!(proxy_record.pair_id(), pair_id);
+    (pair_id, proxy_record)
 }
 
 #[test]
@@ -307,31 +261,35 @@ fn pairing_stores_matching_records_on_both_sides() {
     assert_eq!(record.granted_profiles, granted);
     assert_eq!(record.disposition, PairingDisposition::Paired);
     assert_eq!(record.peer_display_name, "Phone");
-    assert_ne!(record.rendezvous_token.0, [0u8; 16]);
-    assert_ne!(record.rendezvous_token.0, record.pair_id.0);
+    assert_ne!(record.rendezvous_token.as_bytes(), &[0u8; 16]);
+    assert_ne!(
+        record.rendezvous_token.as_bytes(),
+        record.pair_id.as_bytes()
+    );
 }
 
 #[test]
 fn wrong_secret_fails_pairing_without_storing() {
     let mut requester = test_requester();
-    let offer = test_offer();
-    let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    let offer = test_offer([0x02; 32]);
+    let proxy_offer = test_offer([0x01; 32]);
+    let (requester_transport, mut proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
     let proxy = std::thread::spawn(move || {
-        let offer = test_offer();
-        let offer_hash = offer.offer_hash().unwrap();
-        let prologue = pairing_prologue(WIRE_VERSION, &offer_hash, MEMORY_PROFILE).unwrap();
-        let keys = generate_pair_keys().unwrap();
-        let _ = run_pairing_handshake(
-            HandshakeRole::Responder,
-            proxy_transport,
-            &keys,
-            PairingSecret([0x01; 32]),
-            &prologue,
-        );
+        let local_keys = generate_pair_key_material().unwrap();
+        let mut handshake =
+            PairingHandshake::begin(EndpointRole::Proxy, proxy_offer, CANDIDATE, local_keys)
+                .unwrap();
+        let m1 = proxy_transport.receive_frame().unwrap();
+        let m1_frame = BinaryFrame::reconstruct(m1).unwrap();
+        if handshake.read_message(&m1_frame).is_ok()
+            && let Ok(m2) = handshake.write_message()
+        {
+            let _ = proxy_transport.send_frame(m2.as_bytes());
+        }
     });
+    let mut offer_slot = Some(offer);
     let outcome = requester.pair(
-        &offer,
-        PairingSecret([0x02; 32]),
+        &mut offer_slot,
         &[PROFILE_CARD_STATUS.to_owned()],
         requester_transport,
         |_, _| panic!("an unauthenticated attempt must never reach confirmation"),
@@ -350,27 +308,31 @@ fn card_status_completes_without_commit() {
     let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
     let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
     let proxy = std::thread::spawn(move || {
-        let mut channel = proxy_accept_session(&proxy_pairing, proxy_transport);
-        let Body::OperationRequest {
-            operation_id,
-            request_hash,
-            profile,
-            ..
-        } = channel.receive()
-        else {
+        let mut session = proxy_accept_session(&proxy_pairing, proxy_transport);
+        let TypedMessage::OperationRequest(request) = session.receive() else {
             panic!("expected an operation request");
         };
-        assert_eq!(profile, PROFILE_CARD_STATUS);
-        channel.send(Body::OperationResult {
-            operation_id,
-            request_hash,
-            status: ResultStatus::Completed,
-            error: None,
-            body: inspection_body(),
-        });
-        let Body::OperationResultAck { .. } = channel.receive() else {
+        assert_eq!(request.profile.as_str(), PROFILE_CARD_STATUS);
+        let reference = OperationReference {
+            operation_id: request.operation_id,
+            request_hash: request.request_hash().unwrap(),
+        };
+        session.send(&TypedMessage::OperationResult(
+            OperationResultMessage::completed(
+                reference,
+                CardOperationResult::Inspection(CardInspection {
+                    pin1_factory: false,
+                    pin2_factory: false,
+                    pin1_attempts: Some(5),
+                    pin2_attempts: Some(5),
+                    puk_attempts: None,
+                }),
+            ),
+        ));
+        let TypedMessage::OperationResultAck(ack_ref) = session.receive() else {
             panic!("expected the completed result to be acknowledged");
         };
+        assert_eq!(ack_ref, reference);
     });
     let mut session = requester.connect(pair_id, requester_transport).unwrap();
     let outcome = requester
@@ -382,13 +344,13 @@ fn card_status_completes_without_commit() {
     };
     assert_eq!(
         result,
-        CardOperationResult::Inspection {
+        CardOperationResult::Inspection(CardInspection {
             pin1_factory: false,
             pin2_factory: false,
             pin1_attempts: Some(5),
             pin2_attempts: Some(5),
             puk_attempts: None,
-        }
+        })
     );
 }
 
@@ -399,41 +361,29 @@ fn authentication_walks_prepare_commit_result() {
     let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
     let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
     let proxy = std::thread::spawn(move || {
-        let mut channel = proxy_accept_session(&proxy_pairing, proxy_transport);
-        let Body::OperationRequest {
-            operation_id,
-            request_hash,
-            ..
-        } = channel.receive()
-        else {
+        let mut session = proxy_accept_session(&proxy_pairing, proxy_transport);
+        let TypedMessage::OperationRequest(request) = session.receive() else {
             panic!("expected an operation request");
         };
-        channel.send(Body::OperationPrepared {
-            operation_id,
-            request_hash,
-        });
-        let Body::OperationCommit {
-            operation_id: echoed_operation,
-            request_hash: echoed_hash,
-        } = channel.receive()
-        else {
+        let reference = OperationReference {
+            operation_id: request.operation_id,
+            request_hash: request.request_hash().unwrap(),
+        };
+        session.send(&TypedMessage::OperationPrepared(reference));
+        let TypedMessage::OperationCommit(echoed) = session.receive() else {
             panic!("expected a commit after prepared");
         };
-        assert_eq!(echoed_operation, operation_id);
-        assert_eq!(echoed_hash, request_hash);
-        channel.send(Body::OperationResult {
-            operation_id,
-            request_hash,
-            status: ResultStatus::Completed,
-            error: None,
-            body: vec![
-                ("type".to_owned(), Value::Text("signature".into())),
-                ("bytes".to_owned(), Value::Bytes(vec![0xAB; 96])),
-            ],
-        });
-        let Body::OperationResultAck { .. } = channel.receive() else {
-            panic!("expected the completed result to be acknowledged");
+        assert_eq!(echoed, reference);
+        session.send(&TypedMessage::OperationResult(
+            OperationResultMessage::completed(
+                reference,
+                CardOperationResult::Signature(vec![0xAB; 96]),
+            ),
+        ));
+        let TypedMessage::OperationResultAck(ack_ref) = session.receive() else {
+            panic!("expected result ack");
         };
+        assert_eq!(ack_ref, reference);
     });
     let mut session = requester.connect(pair_id, requester_transport).unwrap();
     let outcome = requester
@@ -453,23 +403,22 @@ fn denial_leaves_the_session_healthy() {
     let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
     let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
     let proxy = std::thread::spawn(move || {
-        let mut channel = proxy_accept_session(&proxy_pairing, proxy_transport);
+        let mut session = proxy_accept_session(&proxy_pairing, proxy_transport);
         for _ in 0..2 {
-            let Body::OperationRequest {
-                operation_id,
-                request_hash,
-                ..
-            } = channel.receive()
-            else {
+            let TypedMessage::OperationRequest(request) = session.receive() else {
                 panic!("expected an operation request");
             };
-            channel.send(Body::OperationResult {
-                operation_id,
-                request_hash,
-                status: ResultStatus::Denied,
-                error: None,
-                body: vec![],
-            });
+            let reference = OperationReference {
+                operation_id: request.operation_id,
+                request_hash: request.request_hash().unwrap(),
+            };
+            let failure_msg = OperationResultMessage::failure(
+                reference,
+                ResultStatus::Denied,
+                ResultError::UserDenied,
+            )
+            .unwrap();
+            session.send(&TypedMessage::OperationResult(failure_msg));
         }
     });
     let mut session = requester.connect(pair_id, requester_transport).unwrap();
@@ -489,26 +438,25 @@ fn credential_rejection_revokes_the_pairing() {
     let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
     let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
     let proxy = std::thread::spawn(move || {
-        let mut channel = proxy_accept_session(&proxy_pairing, proxy_transport);
-        let Body::OperationRequest {
-            operation_id,
-            request_hash,
-            ..
-        } = channel.receive()
-        else {
+        let mut session = proxy_accept_session(&proxy_pairing, proxy_transport);
+        let TypedMessage::OperationRequest(request) = session.receive() else {
             panic!("expected an operation request");
         };
-        channel.send(Body::OperationResult {
-            operation_id,
-            request_hash,
-            status: ResultStatus::CredentialRejected,
-            error: None,
-            body: vec![],
-        });
-        channel.send(Body::SessionClose {
+        let reference = OperationReference {
+            operation_id: request.operation_id,
+            request_hash: request.request_hash().unwrap(),
+        };
+        let failure_msg = OperationResultMessage::failure(
+            reference,
+            ResultStatus::CredentialRejected,
+            ResultError::CredentialRejected,
+        )
+        .unwrap();
+        session.send(&TypedMessage::OperationResult(failure_msg));
+        session.send(&TypedMessage::SessionClose(SessionCloseMessage {
             reason: CloseReason::CredentialRejected,
             last_received_sequence: 1,
-        });
+        }));
     });
     let mut session = requester.connect(pair_id, requester_transport).unwrap();
     let outcome = requester
@@ -539,24 +487,20 @@ fn committed_close_classifies_as_ambiguous() {
     let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
     let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
     let proxy = std::thread::spawn(move || {
-        let mut channel = proxy_accept_session(&proxy_pairing, proxy_transport);
-        let Body::OperationRequest {
-            operation_id,
-            request_hash,
-            ..
-        } = channel.receive()
-        else {
+        let mut session = proxy_accept_session(&proxy_pairing, proxy_transport);
+        let TypedMessage::OperationRequest(request) = session.receive() else {
             panic!("expected an operation request");
         };
-        channel.send(Body::OperationPrepared {
-            operation_id,
-            request_hash,
-        });
-        let Body::OperationCommit { .. } = channel.receive() else {
+        let reference = OperationReference {
+            operation_id: request.operation_id,
+            request_hash: request.request_hash().unwrap(),
+        };
+        session.send(&TypedMessage::OperationPrepared(reference));
+        let TypedMessage::OperationCommit(_) = session.receive() else {
             panic!("expected a commit");
         };
         // The transport dies with the operation committed.
-        drop(channel);
+        drop(session);
     });
     let mut session = requester.connect(pair_id, requester_transport).unwrap();
     let outcome = requester
@@ -577,24 +521,27 @@ fn first_sequence_violation_revokes_the_pairing() {
 
     let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
     let proxy = std::thread::spawn(move || {
-        let mut channel = proxy_accept_session(&proxy_pairing, proxy_transport);
-        let Body::OperationRequest {
-            operation_id,
-            request_hash,
-            ..
-        } = channel.receive()
-        else {
+        let mut session = proxy_accept_session(&proxy_pairing, proxy_transport);
+        let TypedMessage::OperationRequest(request) = session.receive() else {
             panic!("expected an operation request");
         };
-        // A skipped sequence inside the authenticated channel is an
-        // authenticated protocol violation on the receiver.
-        channel.send_with_sequence_gap(Body::OperationResult {
-            operation_id,
-            request_hash,
-            status: ResultStatus::Completed,
-            error: None,
-            body: vec![],
-        });
+        let bad_reference = OperationReference {
+            operation_id: request.operation_id,
+            request_hash: refineid_rapp::RequestHash::from_array([0xee; 32]),
+        };
+        let result_msg = TypedMessage::OperationResult(OperationResultMessage::completed(
+            bad_reference,
+            CardOperationResult::Inspection(CardInspection {
+                pin1_factory: false,
+                pin2_factory: false,
+                pin1_attempts: Some(5),
+                pin2_attempts: Some(5),
+                puk_attempts: None,
+            }),
+        ));
+        // Send a message with mismatched request_hash: an authenticated protocol violation on the receiver.
+        let f0 = session.endpoint.send(&result_msg).unwrap();
+        session.transport.send_frame(f0.as_bytes()).unwrap();
         // The requester answers with its best-effort close.
     });
     let mut session = requester.connect(pair_id, requester_transport).unwrap();

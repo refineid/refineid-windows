@@ -263,7 +263,7 @@ impl RemoteCardTransport {
         let dial_timeout = Duration::from_secs(5);
         let candidate_id = "stream-1";
         let service_name = refineid_rapp_core::stream::stream_rendezvous_name(
-            &self.pairing_record.rendezvous_token.0,
+            self.pairing_record.rendezvous_token.as_bytes(),
         );
 
         // 1. Discover phone proxy endpoint via mDNS matching our pairing rendezvous token.

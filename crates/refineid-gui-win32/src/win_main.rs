@@ -57,12 +57,13 @@ use refineid_doc_sign::service::{
 use refineid_lib_core::identity::CommonName;
 use refineid_lib_core::pin::PinBytes;
 use refineid_lib_pcsc::PcscBackend;
-use refineid_rapp_core::engine::{PairingError, Requester, RequesterConfig};
-use refineid_rapp_core::ids::{PAIRING_SECRET_LENGTH, PairId, PairingSecret};
+use refineid_rapp_core::PAIRING_SUITE;
+use refineid_rapp_core::engine::{Requester, RequesterConfig};
+use refineid_rapp_core::ids::{PairId, PairingSecret};
 use refineid_rapp_core::limits::OFFER_TTL_MAX_MS;
 use refineid_rapp_core::offer::{
-    PairingOffer, TransportCandidate, format_pairing_code, generate_pairing_code,
-    offer_id_from_code, pairing_secret_from_code,
+    PRE_CPACE_DUMMY_SECRET, PairingOffer, TransportCandidate, format_pairing_code,
+    generate_pairing_code, offer_id_from_code,
 };
 use refineid_rapp_core::profiles::{
     PROFILE_AUTHENTICATION, PROFILE_CARD_STATUS, PROFILE_DOCUMENT_SIGNING,
@@ -70,8 +71,8 @@ use refineid_rapp_core::profiles::{
 use refineid_rapp_core::store::{MemoryJournal, PairingStore as _};
 use refineid_rapp_core::stream::StreamRendezvous;
 use refineid_rapp_core::transport::{FrameTransport, STREAM_PROFILE};
-use refineid_rapp_core::{PAIRING_SUITE, WIRE_VERSION};
 use refineid_windows_credential_store::CredentialPairingStore;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -2364,30 +2365,34 @@ fn stop_pairing() {
 /// and the phone would wait on a different channel.
 fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<String, String> {
     use std::time::Instant;
-    let offer_id = offer_id_from_code(code);
-    let secret = pairing_secret_from_code(code);
-    let secret_bytes = secret.0;
+    let offer_id =
+        offer_id_from_code(code).map_err(|error| format!("Invalid pairing code: {error:?}"))?;
     let requested_profiles = vec![
         PROFILE_CARD_STATUS.to_owned(),
         PROFILE_AUTHENTICATION.to_owned(),
         PROFILE_DOCUMENT_SIGNING.to_owned(),
     ];
-    let offer = PairingOffer {
-        version: WIRE_VERSION,
-        offer_id,
-        suites: vec![PAIRING_SUITE.into()],
-        profiles: requested_profiles.clone(),
-        transports: vec![TransportCandidate {
-            profile: STREAM_PROFILE.into(),
-            candidate_id: PAIR_CANDIDATE_ID.into(),
-            parameters: Vec::new(),
-        }],
-        offer_ttl_ms: OFFER_TTL_MAX_MS,
+    let build_offer = || {
+        PairingOffer::reconstruct(
+            offer_id,
+            // Pre-CPace placeholder secret; overwritten by CPace PAKE exchange in pair_with_code.
+            PairingSecret::from_random_bytes(PRE_CPACE_DUMMY_SECRET),
+            vec![PAIRING_SUITE.into()],
+            requested_profiles.clone(),
+            vec![TransportCandidate {
+                profile: STREAM_PROFILE.into(),
+                candidate_id: PAIR_CANDIDATE_ID.into(),
+                parameters: BTreeMap::new(),
+            }],
+            OFFER_TTL_MAX_MS,
+        )
     };
+    let offer = build_offer().map_err(|error| format!("Offer construct failed: {error:?}"))?;
     let uri = offer
-        .to_uri(&secret)
+        .to_uri()
         .map_err(|error| format!("Offer encoding failed: {error:?}"))?;
-    let pairing_service = refineid_rapp_core::stream::stream_rendezvous_name(uri.as_bytes());
+    let pairing_service =
+        refineid_rapp_core::stream::stream_rendezvous_name(uri.expose().as_bytes());
     post_pair_status(
         "Waiting for the phone — enter the code in the phone app. The code expires in 3 minutes.",
     );
@@ -2400,6 +2405,7 @@ fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<S
             .map_err(|error| format!("Cannot open pairing store: {error}"))?,
         MemoryJournal::new(),
     );
+    let mut offer_slot = Some(offer);
     let deadline = Instant::now() + Duration::from_millis(OFFER_TTL_MAX_MS);
     loop {
         if cancel.load(Ordering::SeqCst) {
@@ -2414,6 +2420,9 @@ fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<S
         );
         if !discovered.is_empty() {
             post_pair_status("Phone found — pairing…");
+            if offer_slot.is_none() {
+                offer_slot = build_offer().ok();
+            }
             if let Ok(transport) = refineid_rapp_core::stream::dial(
                 &discovered,
                 PAIR_CANDIDATE_ID,
@@ -2421,8 +2430,8 @@ fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<S
                 &StreamRendezvous::Pairing,
             ) && let Some(outcome) = attempt_pair(
                 &mut requester,
-                &offer,
-                secret_bytes,
+                &mut offer_slot,
+                code,
                 &requested_profiles,
                 transport,
                 main_raw,
@@ -2439,20 +2448,15 @@ fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<S
 /// live for the next attempt.
 fn attempt_pair(
     requester: &mut Requester<CredentialPairingStore, MemoryJournal>,
-    offer: &PairingOffer,
-    secret_bytes: [u8; PAIRING_SECRET_LENGTH],
+    offer_slot: &mut Option<PairingOffer>,
+    code: &str,
     profiles: &[String],
     transport: impl FrameTransport,
     main_raw: usize,
 ) -> Option<Result<String, String>> {
-    match try_pair(
-        requester,
-        offer,
-        PairingSecret(secret_bytes),
-        profiles,
-        transport,
-        main_raw,
-    ) {
+    match requester.pair_with_code(offer_slot, code, profiles, transport, |peer, requested| {
+        confirm_pairing_dialog(main_raw, &peer.display_name, &peer.platform, requested)
+    }) {
         Ok(pair_id) => Some(paired_summary(requester, pair_id)),
         Err(error) => {
             post_pair_status(&format!(
@@ -2461,21 +2465,6 @@ fn attempt_pair(
             None
         }
     }
-}
-
-/// One pairing attempt over an established transport: the grants
-/// question goes to a message box owned by the main window.
-fn try_pair(
-    requester: &mut Requester<CredentialPairingStore, MemoryJournal>,
-    offer: &PairingOffer,
-    secret: PairingSecret,
-    profiles: &[String],
-    transport: impl FrameTransport,
-    main_raw: usize,
-) -> Result<PairId, PairingError> {
-    requester.pair(offer, secret, profiles, transport, |peer, requested| {
-        confirm_pairing_dialog(main_raw, &peer.display_name, &peer.platform, requested)
-    })
 }
 
 /// Yes/No grants question. Runs on the pairing worker; the dialog
@@ -2592,7 +2581,7 @@ fn remove_remote_device() {
         set_remote_status("Select a device first.");
         return;
     };
-    let pair_id = PairId(record.pair_id.0);
+    let pair_id = record.pair_id;
     match store.remove(pair_id) {
         Ok(()) => {
             refresh_remote_devices();
