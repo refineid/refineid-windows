@@ -333,6 +333,9 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
         if Instant::now() >= deadline {
             return Err("the pairing offer expired".into());
         }
+        if offer_slot.is_none() {
+            return Err("the pairing offer was consumed by a failed attempt".into());
+        }
 
         // 1. Discover if the proxy is listening under the offer's derived service name
         let discovered = refineid_rapp_core::stream::discover_stream_endpoints(
@@ -394,7 +397,7 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
                 match outcome {
                     Ok(pair_id) => break pair_id,
                     Err(error) => {
-                        println!("pairing attempt failed: {error:?}; the offer stays live");
+                        println!("pairing attempt failed: {error:?}");
                     }
                 }
             }
@@ -404,27 +407,50 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
         match listener.accept_timeout(Duration::from_millis(200)) {
             Ok(Some(StreamAccept::Pairing(transport))) => {
                 let auto_confirm = options.auto_confirm;
-                match requester.pair(
-                    &mut offer_slot,
-                    &requested_profiles,
-                    transport,
-                    |peer, requested| {
-                        if auto_confirm {
-                            println!();
-                            println!(
-                                "auto-confirming pairing request from {} ({})",
-                                peer.display_name, peer.platform
-                            );
-                            println!("granted: {}", requested.join(", "));
-                            Some(requested.to_vec())
-                        } else {
-                            confirm_grants(peer, requested)
-                        }
-                    },
-                ) {
+                let outcome = if let Some(code) = &manual_code {
+                    requester.pair_with_code(
+                        &mut offer_slot,
+                        code,
+                        &requested_profiles,
+                        transport,
+                        |peer, requested| {
+                            if auto_confirm {
+                                println!();
+                                println!(
+                                    "auto-confirming pairing request from {} ({})",
+                                    peer.display_name, peer.platform
+                                );
+                                println!("granted: {}", requested.join(", "));
+                                Some(requested.to_vec())
+                            } else {
+                                confirm_grants(peer, requested)
+                            }
+                        },
+                    )
+                } else {
+                    requester.pair(
+                        &mut offer_slot,
+                        &requested_profiles,
+                        transport,
+                        |peer, requested| {
+                            if auto_confirm {
+                                println!();
+                                println!(
+                                    "auto-confirming pairing request from {} ({})",
+                                    peer.display_name, peer.platform
+                                );
+                                println!("granted: {}", requested.join(", "));
+                                Some(requested.to_vec())
+                            } else {
+                                confirm_grants(peer, requested)
+                            }
+                        },
+                    )
+                };
+                match outcome {
                     Ok(pair_id) => break pair_id,
                     Err(error) => {
-                        println!("pairing attempt failed: {error:?}; the offer stays live");
+                        println!("pairing attempt failed: {error:?}");
                     }
                 }
             }
