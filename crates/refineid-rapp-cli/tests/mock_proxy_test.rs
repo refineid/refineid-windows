@@ -8,11 +8,10 @@ use refineid_rapp_core::engine::{OperationOutcome, Requester, RequesterConfig};
 use refineid_rapp_core::ids::PairingSecret;
 use refineid_rapp_core::limits::OFFER_TTL_MAX_MS;
 use refineid_rapp_core::message::CloseReason;
-use refineid_rapp_core::offer::{
-    PairingOffer, TransportCandidate, offer_id_from_code, pairing_secret_from_code,
-};
+use refineid_rapp_core::offer::{PairingOffer, TransportCandidate, offer_id_from_code};
 use refineid_rapp_core::operations::{
     CardOperation, CardOperationResult, CertificateKind, KeyProfile, SignatureAlgorithm,
+    SignatureAlgorithmExt as _,
 };
 use refineid_rapp_core::profiles::{
     PROFILE_AUTHENTICATION, PROFILE_CARD_STATUS, PROFILE_DOCUMENT_SIGNING,
@@ -20,7 +19,6 @@ use refineid_rapp_core::profiles::{
 use refineid_rapp_core::store::{MemoryJournal, MemoryPairingStore, PairingStore};
 use refineid_rapp_core::stream::{StreamAccept, StreamListener, stream_candidate_parameters};
 use refineid_rapp_core::transport::STREAM_PROFILE;
-use refineid_rapp_core::{PAIRING_SUITE, WIRE_VERSION};
 
 const CANDIDATE_ID: &str = "stream-test";
 const DEADLINE: Duration = Duration::from_secs(5);
@@ -39,8 +37,7 @@ fn test_mock_proxy_pairing_and_card_operations() {
 
     let test_code = "654321";
     let offer_id = offer_id_from_code(test_code);
-    let secret = pairing_secret_from_code(test_code);
-    let secret_bytes = secret.0;
+    let secret = PairingSecret::from_random_bytes([0u8; 32]);
 
     let requested_profiles = vec![
         PROFILE_CARD_STATUS.to_owned(),
@@ -48,19 +45,21 @@ fn test_mock_proxy_pairing_and_card_operations() {
         PROFILE_DOCUMENT_SIGNING.to_owned(),
     ];
 
-    let offer = PairingOffer {
-        version: WIRE_VERSION,
+    let stream_params =
+        stream_candidate_parameters(std::slice::from_ref(&endpoint)).expect("parameters");
+    let offer = PairingOffer::reconstruct(
         offer_id,
-        suites: vec![PAIRING_SUITE.into()],
-        profiles: requested_profiles.clone(),
-        transports: vec![TransportCandidate {
+        secret,
+        vec![refineid_rapp::MANDATORY_PAIRING_SUITE.into()],
+        requested_profiles.clone(),
+        vec![TransportCandidate {
             profile: STREAM_PROFILE.into(),
             candidate_id: CANDIDATE_ID.into(),
-            parameters: stream_candidate_parameters(std::slice::from_ref(&endpoint))
-                .expect("parameters"),
+            parameters: stream_params,
         }],
-        offer_ttl_ms: OFFER_TTL_MAX_MS,
-    };
+        OFFER_TTL_MAX_MS,
+    )
+    .expect("offer reconstruct");
 
     let proxy_endpoint = endpoint;
     let proxy_handle = std::thread::spawn(move || {
@@ -93,10 +92,10 @@ fn test_mock_proxy_pairing_and_card_operations() {
         panic!("expected StreamAccept::Pairing");
     };
 
+    let mut offer_slot = Some(offer);
     let pair_id = requester
         .pair(
-            &offer,
-            PairingSecret(secret_bytes),
+            &mut offer_slot,
             &requested_profiles,
             transport,
             |peer, requested| {
@@ -136,21 +135,14 @@ fn test_mock_proxy_pairing_and_card_operations() {
             OPERATION_EXPIRY_MS,
         )
         .expect("execute inspect_card");
-    let OperationOutcome::Completed(CardOperationResult::Inspection {
-        pin1_factory,
-        pin2_factory,
-        pin1_attempts,
-        pin2_attempts,
-        puk_attempts,
-    }) = outcome
-    else {
+    let OperationOutcome::Completed(CardOperationResult::Inspection(inspection)) = outcome else {
         panic!("unexpected outcome for InspectCard: {outcome:?}");
     };
-    assert!(!pin1_factory);
-    assert!(!pin2_factory);
-    assert_eq!(pin1_attempts, Some(3));
-    assert_eq!(pin2_attempts, Some(4));
-    assert_eq!(puk_attempts, None);
+    assert!(!inspection.pin1_factory);
+    assert!(!inspection.pin2_factory);
+    assert_eq!(inspection.pin1_attempts, Some(3));
+    assert_eq!(inspection.pin2_attempts, Some(4));
+    assert_eq!(inspection.puk_attempts, None);
 
     // 2. ReadIdentity
     let outcome = requester
@@ -185,36 +177,21 @@ fn test_mock_proxy_pairing_and_card_operations() {
     };
     assert!(!der.is_empty());
 
-    // 3b. ReadCertificate (RootCa and IntermediateCa)
-    let outcome_root = requester
+    // 3b. ReadCertificate (Signature)
+    let outcome_sig_cert = requester
         .execute(
             &mut session,
             &CardOperation::ReadCertificate {
-                kind: CertificateKind::RootCa,
+                kind: CertificateKind::Signature,
             },
             OPERATION_EXPIRY_MS,
         )
-        .expect("execute read_certificate (root_ca)");
-    let OperationOutcome::Completed(CardOperationResult::Certificate(root_der)) = outcome_root
+        .expect("execute read_certificate (sig)");
+    let OperationOutcome::Completed(CardOperationResult::Certificate(sig_der)) = outcome_sig_cert
     else {
-        panic!("unexpected outcome for ReadCertificate (RootCa): {outcome_root:?}");
+        panic!("unexpected outcome for ReadCertificate (Signature): {outcome_sig_cert:?}");
     };
-    assert!(!root_der.is_empty());
-
-    let outcome_inter = requester
-        .execute(
-            &mut session,
-            &CardOperation::ReadCertificate {
-                kind: CertificateKind::IntermediateCa,
-            },
-            OPERATION_EXPIRY_MS,
-        )
-        .expect("execute read_certificate (intermediate_ca)");
-    let OperationOutcome::Completed(CardOperationResult::Certificate(inter_der)) = outcome_inter
-    else {
-        panic!("unexpected outcome for ReadCertificate (IntermediateCa): {outcome_inter:?}");
-    };
-    assert!(!inter_der.is_empty());
+    assert!(!sig_der.is_empty());
 
     // 4. BrowserAuthenticate (consequential: prepare -> commit -> signature)
     let digest = vec![0x33u8; SignatureAlgorithm::EcdsaSha384.digest_length()];

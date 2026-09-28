@@ -44,12 +44,11 @@ use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use refineid_rapp_core::engine::{OperationOutcome, PeerIntroduction, Requester, RequesterConfig};
-use refineid_rapp_core::ids::{PairId, PairingSecret, RendezvousToken};
+use refineid_rapp_core::ids::{OfferId, PairId, PairingSecret, RendezvousToken};
 use refineid_rapp_core::limits::OFFER_TTL_MAX_MS;
 use refineid_rapp_core::message::CloseReason;
 use refineid_rapp_core::offer::{
     PairingOffer, TransportCandidate, format_pairing_code, generate_pairing_code,
-    offer_id_from_code, pairing_secret_from_code,
 };
 use refineid_rapp_core::operations::{CardOperation, CardOperationResult};
 use refineid_rapp_core::profiles::{
@@ -58,7 +57,6 @@ use refineid_rapp_core::profiles::{
 use refineid_rapp_core::store::{MemoryJournal, PairingStore};
 use refineid_rapp_core::stream::{StreamAccept, StreamListener, stream_candidate_parameters};
 use refineid_rapp_core::transport::STREAM_PROFILE;
-use refineid_rapp_core::{PAIRING_SUITE, WIRE_VERSION};
 use refineid_windows_credential_store::{CredentialPairingStore, delete_pairing_set};
 use serde::Serialize;
 
@@ -457,25 +455,33 @@ fn begin_pairing(
         .map_err(|error| ApiFailure::new("invalid_endpoints", format!("{error:?}")))?;
     let raw_code = generate_pairing_code();
     let pairing_code = format_pairing_code(&raw_code);
-    let secret = pairing_secret_from_code(&raw_code);
-    let offer_id = offer_id_from_code(&raw_code);
+    let mut secret_bytes = [0u8; 32];
+    getrandom::fill(&mut secret_bytes)
+        .map_err(|error| ApiFailure::new("csprng_failed", format!("{error:?}")))?;
+    let secret = PairingSecret::from_random_bytes(secret_bytes);
+    let mut offer_id_bytes = [0u8; 32];
+    getrandom::fill(&mut offer_id_bytes)
+        .map_err(|error| ApiFailure::new("csprng_failed", format!("{error:?}")))?;
+    let offer_id = OfferId::from_array(offer_id_bytes);
 
-    let offer = PairingOffer {
-        version: WIRE_VERSION,
+    let offer = PairingOffer::reconstruct(
         offer_id,
-        suites: vec![PAIRING_SUITE.to_owned()],
-        profiles: requested_profiles.clone(),
-        transports: vec![TransportCandidate {
+        secret,
+        vec![refineid_rapp::MANDATORY_PAIRING_SUITE.to_owned()],
+        requested_profiles.clone(),
+        vec![TransportCandidate {
             profile: STREAM_PROFILE.to_owned(),
             candidate_id: CANDIDATE_ID.to_owned(),
             parameters,
         }],
-        offer_ttl_ms: OFFER_TTL_MAX_MS,
-    };
+        OFFER_TTL_MAX_MS,
+    )
+    .map_err(|error| ApiFailure::new("offer_reconstruct_failed", format!("{error:?}")))?;
     let offer_uri = offer
-        .to_uri(&secret)
-        .map_err(|error| ApiFailure::new("offer_encoding_failed", format!("{error:?}")))?;
-    let secret_bytes = secret.0;
+        .to_uri()
+        .map_err(|error| ApiFailure::new("offer_encoding_failed", format!("{error:?}")))?
+        .expose()
+        .to_owned();
 
     let handle_id = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
     let shared = Mutex::new(Shared {
@@ -498,14 +504,7 @@ fn begin_pairing(
     // The thread reaches the shared state through the registry by handle id,
     // owning the pieces it moves and locking only briefly each time.
     let thread = std::thread::spawn(move || {
-        pairing_thread(
-            handle_id,
-            requester,
-            listener,
-            offer,
-            secret_bytes,
-            requested_profiles,
-        );
+        pairing_thread(handle_id, requester, listener, offer, requested_profiles);
     });
     if let Ok(mut registry) = lock_registry()
         && let Some(entry) = registry.get_mut(&handle_id)
@@ -528,11 +527,11 @@ fn pairing_thread(
     mut requester: StreamRequester,
     listener: StreamListener,
     offer: PairingOffer,
-    secret_bytes: [u8; 32],
     requested_profiles: Vec<String>,
 ) {
+    let mut offer_slot = Some(offer);
     loop {
-        if ended(handle_id) {
+        if ended(handle_id) || offer_slot.is_none() {
             return;
         }
         let Ok(accepted) = listener.accept() else {
@@ -562,13 +561,7 @@ fn pairing_thread(
                 Ok(None) | Err(_) => None,
             }
         };
-        let outcome = requester.pair(
-            &offer,
-            PairingSecret(secret_bytes),
-            &attempt_profiles,
-            transport,
-            confirm,
-        );
+        let outcome = requester.pair(&mut offer_slot, &attempt_profiles, transport, confirm);
         match outcome {
             Ok(pair_id) => {
                 finish_pairing(handle_id, requester, listener, pair_id);
@@ -597,7 +590,7 @@ fn finish_pairing(
         return;
     };
     let rendezvous = record.rendezvous_token;
-    let pair_id_hex = hex::encode(pair_id.0);
+    let pair_id_hex = hex::encode(pair_id.as_bytes());
     // If the handle is gone, the closure is never run and the moved
     // requester and listener are dropped here instead.
     let _stored = registry_entry_apply(handle_id, move |shared| {

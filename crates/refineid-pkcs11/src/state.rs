@@ -355,8 +355,8 @@ impl ModuleState {
         };
         let pairs: Vec<_> = store.usable_pairing().into_iter().collect();
         for pair in pairs {
-            let name = format!("rapp:{}", hex::encode(pair.pair_id.0));
-            let serial = format!("REMOTE-{}", &hex::encode(pair.pair_id.0)[..8]);
+            let name = format!("rapp:{}", hex::encode(pair.pair_id.as_bytes()));
+            let serial = format!("REMOTE-{}", &hex::encode(pair.pair_id.as_bytes())[..8]);
             let parsed_objects = pair.auth_cert.as_ref().and_then(|cert| {
                 crate::token::remote_token_objects(cert.clone(), serial.clone()).ok()
             });
@@ -601,7 +601,7 @@ impl ModuleState {
                 let pair = store
                     .records()
                     .iter()
-                    .find(|p| hex::encode(p.pair_id.0) == hex_id)
+                    .find(|p| hex::encode(p.pair_id.as_bytes()) == hex_id)
                     .cloned()
                     .ok_or(CKR_DEVICE_ERROR)?;
 

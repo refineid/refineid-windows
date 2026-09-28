@@ -1270,7 +1270,7 @@ impl RemoteCardTransport {
 
         let dial_timeout = Duration::from_secs(5);
         let candidate_id = "stream-1";
-        let service_name = stream_rendezvous_name(&self.pairing_record.rendezvous_token.0);
+        let service_name = stream_rendezvous_name(self.pairing_record.rendezvous_token.as_bytes());
 
         crate::diag::diag!("connect_session_transport: discovering proxy for {service_name}...");
         // 1. Discover phone proxy endpoint via mDNS matching our pairing rendezvous token.
@@ -1366,7 +1366,7 @@ fn remote_card_sign(hex_id: &str, mechanism: Mechanism, input: &[u8]) -> Result<
         let pair = store
             .records()
             .iter()
-            .find(|p| hex::encode(p.pair_id.0) == hex_id)
+            .find(|p| hex::encode(p.pair_id.as_bytes()) == hex_id)
             .cloned()
             .ok_or(CKR_DEVICE_ERROR)?;
 

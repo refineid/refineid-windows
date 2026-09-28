@@ -12,36 +12,23 @@
     clippy::assigning_clones,
     clippy::cloned_ref_to_slice_refs,
     clippy::collapsible_if,
+    clippy::cast_possible_truncation,
+    clippy::similar_names,
+    clippy::uninlined_format_args,
     reason = "Mock proxy test harness with mock state serialization and session handling"
 )]
 
 use std::time::{Duration, Instant};
 
-use refineid_rapp_core::cbor::Value;
-use refineid_rapp_core::hashes::grants_hash;
-use refineid_rapp_core::ids::{
-    Challenge, PairId, PairingSecret, SessionId, derive_pair_id, derive_rendezvous_token,
-    derive_session_id,
+use refineid_rapp::{
+    BinaryFrame, CardInspection, CardOperation, CardOperationResult, EndpointRole,
+    EstablishedEndpoint, LivenessMessage, OperationReference, OperationRequest,
+    OperationResultMessage, PairRecord, PairStore, PairStoreError, PairTombstone, PairingHandshake,
+    PairingOffer, PairingOfferUri, PairingSecret, ReceiveOutcome, SessionHandshake, TypedMessage,
+    decode_pair_record, encode_pair_record, generate_pair_key_material,
 };
-use refineid_rapp_core::limits::OFFER_TTL_MAX_MS;
-use refineid_rapp_core::message::{
-    Body, Envelope, NegotiatedParameters, ResultStatus, SessionParameters,
-};
-use refineid_rapp_core::noise::{
-    CompletedHandshake, HandshakeRole, PairKeys, SecureChannel, generate_pair_keys,
-    pairing_prologue, run_pairing_handshake, run_session_handshake, session_prologue,
-};
-use refineid_rapp_core::offer::{
-    PairingOffer, TransportCandidate, offer_id_from_code, pairing_secret_from_code,
-};
-use refineid_rapp_core::profiles::{
-    PROFILE_AUTHENTICATION, PROFILE_CARD_STATUS, PROFILE_DOCUMENT_SIGNING,
-};
-use refineid_rapp_core::stream::{
-    StreamRendezvous, dial, stream_candidate_endpoints, stream_candidate_parameters,
-};
-use refineid_rapp_core::transport::{STREAM_PROFILE, TcpFrameTransport};
-use refineid_rapp_core::{PAIRING_SUITE, SESSION_SUITE, WIRE_VERSION};
+use refineid_rapp_core::stream::{StreamRendezvous, dial};
+use refineid_rapp_core::transport::FrameTransport;
 
 /// Default socket receive deadline.
 const DEADLINE: Duration = Duration::from_secs(10);
@@ -119,80 +106,21 @@ impl Default for MockProxyOptions {
     }
 }
 
-/// A channel with proxy-side sequence tracking.
-struct ProxyChannel {
-    secure: SecureChannel<TcpFrameTransport>,
-    session_id: SessionId,
-    send_sequence: u64,
-    receive_sequence: u64,
-}
-
-impl ProxyChannel {
-    fn send(&mut self, body: Body) -> Result<(), String> {
-        let envelope = Envelope {
-            version: WIRE_VERSION,
-            session_id: self.session_id,
-            sequence: self.send_sequence,
-            body,
-        };
-        self.send_sequence += 1;
-        let encoded = envelope
-            .encode()
-            .map_err(|e| format!("envelope encode failed: {e:?}"))?;
-        self.secure
-            .send_plaintext(&encoded)
-            .map_err(|e| format!("channel send failed: {e:?}"))?;
-        Ok(())
-    }
-
-    fn receive(&mut self) -> Result<Body, String> {
-        let plaintext = self
-            .secure
-            .receive_plaintext()
-            .map_err(|e| format!("channel receive failed: {e:?}"))?;
-        let envelope =
-            Envelope::decode(&plaintext).map_err(|e| format!("envelope decode failed: {e:?}"))?;
-        if envelope.session_id != self.session_id {
-            return Err(format!(
-                "session id mismatch: expected {:?}, got {:?}",
-                self.session_id, envelope.session_id
-            ));
-        }
-        if envelope.sequence != self.receive_sequence {
-            return Err(format!(
-                "sequence gap: expected {}, got {}",
-                self.receive_sequence, envelope.sequence
-            ));
-        }
-        self.receive_sequence += 1;
-        Ok(envelope.body)
-    }
-}
-
 /// The proxy's stored pairing state.
 #[derive(Debug)]
 pub struct ProxyPairing {
-    keys: PairKeys,
-    requester_public: Vec<u8>,
-    pair_id: PairId,
-    grants: [u8; 32],
-    rendezvous_token: refineid_rapp_core::ids::RendezvousToken,
-    endpoint: String,
+    /// Canonical core pair record.
+    pub record: PairRecord,
+    /// Connected remote endpoint address.
+    pub endpoint: String,
 }
 
 impl ProxyPairing {
     /// Saves the proxy pairing state to a simple hex-encoded text file.
     pub fn save_to_file(&self, path: &str) -> Result<(), String> {
-        let content = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
-            hex::encode(self.pair_id.0),
-            hex::encode(&self.keys.private),
-            hex::encode(&self.keys.public),
-            hex::encode(&self.requester_public),
-            hex::encode(self.grants),
-            hex::encode(self.rendezvous_token.0),
-            self.endpoint
-        );
+        let cbor = encode_pair_record(&self.record)
+            .map_err(|e| format!("cannot serialize pair record: {e:?}"))?;
+        let content = format!("{}\n{}\n", hex::encode(cbor), self.endpoint);
         std::fs::write(path, content).map_err(|e| format!("cannot save state to {path}: {e}"))
     }
 
@@ -200,41 +128,14 @@ impl ProxyPairing {
     pub fn load_from_file(path: &str) -> Result<Self, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
         let lines: Vec<&str> = text.lines().collect();
-        if lines.len() < 7 {
+        if lines.len() < 2 {
             return Err("state file is truncated".into());
         }
-        let pair_id_bytes = hex::decode(lines[0]).map_err(|e| format!("invalid pair_id: {e}"))?;
-        let priv_bytes = hex::decode(lines[1]).map_err(|e| format!("invalid private key: {e}"))?;
-        let pub_bytes = hex::decode(lines[2]).map_err(|e| format!("invalid public key: {e}"))?;
-        let req_pub_bytes =
-            hex::decode(lines[3]).map_err(|e| format!("invalid requester public: {e}"))?;
-        let grants_bytes = hex::decode(lines[4]).map_err(|e| format!("invalid grants: {e}"))?;
-        let token_bytes =
-            hex::decode(lines[5]).map_err(|e| format!("invalid rendezvous token: {e}"))?;
-        let endpoint = lines[6].trim().to_owned();
-
-        if pair_id_bytes.len() != 16 || token_bytes.len() != 16 || grants_bytes.len() != 32 {
-            return Err("state file has invalid field lengths".into());
-        }
-
-        let mut pair_id_arr = [0u8; 16];
-        pair_id_arr.copy_from_slice(&pair_id_bytes);
-        let mut token_arr = [0u8; 16];
-        token_arr.copy_from_slice(&token_bytes);
-        let mut grants_arr = [0u8; 32];
-        grants_arr.copy_from_slice(&grants_bytes);
-
-        Ok(Self {
-            keys: PairKeys {
-                private: zeroize::Zeroizing::new(priv_bytes),
-                public: pub_bytes,
-            },
-            requester_public: req_pub_bytes,
-            pair_id: PairId(pair_id_arr),
-            grants: grants_arr,
-            rendezvous_token: refineid_rapp_core::ids::RendezvousToken(token_arr),
-            endpoint,
-        })
+        let cbor = hex::decode(lines[0].trim()).map_err(|e| format!("invalid hex: {e}"))?;
+        let record =
+            decode_pair_record(&cbor).map_err(|e| format!("invalid pair record: {e:?}"))?;
+        let endpoint = lines[1].trim().to_owned();
+        Ok(Self { record, endpoint })
     }
 }
 
@@ -259,8 +160,8 @@ pub fn run_mock_proxy(options: MockProxyOptions) -> Result<(), String> {
 
     println!(
         "pairing active (pair_id: {}, rendezvous_token: {})",
-        hex::encode(pairing.pair_id.0),
-        hex::encode(pairing.rendezvous_token.0)
+        hex::encode(pairing.record.pair_id().as_bytes()),
+        hex::encode(pairing.record.rendezvous_token().as_bytes())
     );
 
     let mut sessions_served = 0;
@@ -280,10 +181,74 @@ pub fn run_mock_proxy(options: MockProxyOptions) -> Result<(), String> {
     Ok(())
 }
 
+fn resolve_offer(options: &MockProxyOptions) -> Result<(PairingOffer, String), String> {
+    if let Some(uri_str) = &options.uri {
+        let offer = PairingOffer::from_uri(PairingOfferUri::from_scanned_text(uri_str.clone()))
+            .map_err(|e| format!("invalid offer URI: {e:?}"))?;
+        let endpoint = if let Some(explicit) = &options.connect {
+            explicit.clone()
+        } else {
+            let candidate = offer
+                .transports
+                .iter()
+                .find(|t| t.profile == refineid_rapp_core::transport::STREAM_PROFILE)
+                .ok_or("offer contains no stream candidate")?;
+            let params =
+                refineid_rapp::StreamCandidateParameters::from_parameters(&candidate.parameters)
+                    .map_err(|e| format!("invalid candidate parameters: {e:?}"))?;
+            params
+                .endpoints()
+                .first()
+                .cloned()
+                .ok_or("offer has empty endpoint list")?
+        };
+        Ok((offer, endpoint))
+    } else if let Some(code) = &options.code {
+        let endpoint = options
+            .connect
+            .clone()
+            .ok_or("--connect <host:port> is required when pairing with --code")?;
+        let normalized = refineid_rapp_core::offer::normalize_pairing_code(code);
+        let offer_id = refineid_rapp::cpace::derive_manual_offer_id(&normalized)
+            .map_err(|e| format!("invalid code: {e:?}"))?;
+        let secret = PairingSecret::from_random_bytes([0u8; 32]);
+        let candidate_params =
+            refineid_rapp::StreamCandidateParameters::new(vec![endpoint.clone()])
+                .map_err(|e| format!("candidate parameters failed: {e:?}"))?;
+        let offer = PairingOffer::reconstruct(
+            offer_id,
+            secret,
+            vec![refineid_rapp::MANDATORY_PAIRING_SUITE.to_owned()],
+            vec![
+                refineid_rapp::ProfileName::CardStatus.as_str().to_owned(),
+                refineid_rapp::ProfileName::Authentication
+                    .as_str()
+                    .to_owned(),
+                refineid_rapp::ProfileName::DocumentSigning
+                    .as_str()
+                    .to_owned(),
+            ],
+            vec![refineid_rapp::TransportCandidate {
+                profile: refineid_rapp_core::transport::STREAM_PROFILE.to_owned(),
+                candidate_id: options.candidate_id.clone(),
+                parameters: candidate_params.to_parameters(),
+            }],
+            refineid_rapp_core::limits::OFFER_TTL_MAX_MS,
+        )
+        .map_err(|e| format!("offer reconstruct failed: {e:?}"))?;
+        Ok((offer, endpoint))
+    } else {
+        Err(
+            "either --uri <rapp:...> or (--connect <host:port> and --code <code>) must be specified"
+                .into(),
+        )
+    }
+}
+
 fn run_pairing(options: &MockProxyOptions) -> Result<ProxyPairing, String> {
-    let (offer, secret, endpoint) = resolve_offer_and_secret(options)?;
+    let (offer, endpoint) = resolve_offer(options)?;
     println!("dialing pairing connection to {endpoint}...");
-    let transport = dial(
+    let mut transport = dial(
         &[endpoint.clone()],
         &options.candidate_id,
         DEADLINE,
@@ -291,164 +256,128 @@ fn run_pairing(options: &MockProxyOptions) -> Result<ProxyPairing, String> {
     )
     .map_err(|e| format!("cannot connect to requester at {endpoint}: {e:?}"))?;
 
-    let offer_hash = offer
-        .offer_hash()
-        .map_err(|e| format!("cannot hash offer: {e:?}"))?;
-    let prologue = pairing_prologue(WIRE_VERSION, &offer_hash, STREAM_PROFILE)
-        .map_err(|e| format!("cannot build pairing prologue: {e:?}"))?;
-    let keys = generate_pair_keys().map_err(|e| format!("key generation failed: {e:?}"))?;
+    let keys = generate_pair_key_material().map_err(|e| format!("key generation failed: {e:?}"))?;
+    let mut handshake =
+        PairingHandshake::begin(EndpointRole::Proxy, offer, &options.candidate_id, keys)
+            .map_err(|fail| format!("pairing handshake failed: {:?}", fail.error()))?;
 
-    println!("running Noise_XXpsk3 pairing handshake...");
-    let done: CompletedHandshake<TcpFrameTransport> = run_pairing_handshake(
-        HandshakeRole::Responder,
-        transport,
-        &keys,
-        secret,
-        &prologue,
-    )
-    .map_err(|e| format!("pairing handshake failed: {e:?}"))?;
+    // Message 1 (Requester -> Proxy)
+    let m1_bytes = transport
+        .receive_frame()
+        .map_err(|e| format!("receive frame 1 failed: {e:?}"))?;
+    let m1 =
+        BinaryFrame::reconstruct(m1_bytes).map_err(|e| format!("frame 1 decode failed: {e:?}"))?;
+    handshake
+        .read_message(&m1)
+        .map_err(|e| format!("handshake read 1 failed: {e:?}"))?;
 
-    let requester_public = done
-        .peer_static_public
-        .ok_or("handshake did not yield requester public key")?;
-    let session_id = derive_session_id(&done.handshake_hash);
-    let pair_id = derive_pair_id(&done.handshake_hash);
-    let rendezvous_token = derive_rendezvous_token(&done.handshake_hash);
+    // Message 2 (Proxy -> Requester)
+    let m2 = handshake
+        .write_message()
+        .map_err(|e| format!("handshake write 2 failed: {e:?}"))?;
+    transport
+        .send_frame(m2.as_bytes())
+        .map_err(|e| format!("send frame 2 failed: {e:?}"))?;
 
-    let mut channel = ProxyChannel {
-        secure: done.channel,
-        session_id,
-        send_sequence: 0,
-        receive_sequence: 0,
-    };
+    // Message 3 (Requester -> Proxy)
+    let m3_bytes = transport
+        .receive_frame()
+        .map_err(|e| format!("receive frame 3 failed: {e:?}"))?;
+    let m3 =
+        BinaryFrame::reconstruct(m3_bytes).map_err(|e| format!("frame 3 decode failed: {e:?}"))?;
+    handshake
+        .read_message(&m3)
+        .map_err(|e| format!("handshake read 3 failed: {e:?}"))?;
 
-    println!("exchanging pairing hello and confirm...");
-    let hello = channel.receive()?;
-    let Body::PairingHello {
-        parameters: req_params,
-        display_name: req_name,
-        platform: req_plat,
-        ..
-    } = hello
-    else {
-        return Err(format!(
-            "expected PairingHello from requester, got {hello:?}"
-        ));
-    };
-    println!("requester hello from: {req_name} ({req_plat})");
+    if !handshake.is_complete() {
+        return Err("handshake incomplete".into());
+    }
 
-    let resp_params = NegotiatedParameters {
-        version: WIRE_VERSION,
-        suite: PAIRING_SUITE.into(),
-        offer_hash: req_params.offer_hash,
-        transport_profile: STREAM_PROFILE.into(),
-        candidate_id: options.candidate_id.clone(),
-    };
-    channel.send(Body::PairingHello {
-        parameters: resp_params,
-        display_name: options.name.clone(),
-        platform: options.platform.clone(),
-        requested_profiles: None,
-    })?;
+    let mut confirmation = handshake
+        .into_confirmation()
+        .map_err(|e| format!("confirmation failed: {e:?}"))?;
 
-    let confirm = channel.receive()?;
-    let Body::PairingConfirm { granted_profiles } = confirm else {
-        return Err(format!(
-            "expected PairingConfirm from requester, got {confirm:?}"
-        ));
-    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+
+    // Receive Requester Hello
+    let req_hello_bytes = transport
+        .receive_frame()
+        .map_err(|e| format!("receive hello failed: {e:?}"))?;
+    let req_hello_frame = BinaryFrame::reconstruct(req_hello_bytes)
+        .map_err(|e| format!("hello frame decode failed: {e:?}"))?;
+    let req_hello = confirmation
+        .receive_hello(&req_hello_frame, now_ms)
+        .map_err(|e| format!("verify hello failed: {e:?}"))?;
     println!(
-        "requester granted profiles: {}",
-        granted_profiles.join(", ")
+        "requester hello from: {} ({})",
+        req_hello.display_name, req_hello.platform
     );
 
-    channel.send(Body::PairingConfirm {
-        granted_profiles: granted_profiles.clone(),
-    })?;
-    let grants =
-        grants_hash(&granted_profiles).map_err(|e| format!("cannot hash grants: {e:?}"))?;
+    // Send Proxy Hello
+    let proxy_hello = confirmation
+        .send_hello(options.name.clone(), options.platform.clone())
+        .map_err(|e| format!("send hello failed: {e:?}"))?;
+    transport
+        .send_frame(proxy_hello.as_bytes())
+        .map_err(|e| format!("send hello frame failed: {e:?}"))?;
 
-    // Consume the pairing channel close.
-    let close = channel.receive()?;
-    let Body::SessionClose { .. } = close else {
-        return Err(format!(
-            "expected SessionClose on pairing channel, got {close:?}"
-        ));
-    };
+    // Receive Requester Confirmation
+    let req_conf_bytes = transport
+        .receive_frame()
+        .map_err(|e| format!("receive confirm failed: {e:?}"))?;
+    let req_conf_frame = BinaryFrame::reconstruct(req_conf_bytes)
+        .map_err(|e| format!("confirm frame decode failed: {e:?}"))?;
+    let req_conf = confirmation
+        .receive_confirmation(&req_conf_frame, now_ms)
+        .map_err(|e| format!("verify confirm failed: {e:?}"))?;
+    let granted_profiles = req_conf.to_vec();
+    println!("requester granted profiles: {:?}", granted_profiles);
 
-    Ok(ProxyPairing {
-        keys,
-        requester_public,
-        pair_id,
-        grants,
-        rendezvous_token,
-        endpoint,
-    })
+    // Send Proxy Confirmation
+    let proxy_conf = confirmation
+        .send_confirmation(granted_profiles)
+        .map_err(|e| format!("send confirm failed: {e:?}"))?;
+    transport
+        .send_frame(proxy_conf.as_bytes())
+        .map_err(|e| format!("send confirm frame failed: {e:?}"))?;
+
+    let record = confirmation
+        .into_pair_record(now_ms)
+        .map_err(|e| format!("into_pair_record failed: {e:?}"))?;
+
+    Ok(ProxyPairing { record, endpoint })
 }
 
-fn resolve_offer_and_secret(
-    options: &MockProxyOptions,
-) -> Result<(PairingOffer, PairingSecret, String), String> {
-    if let Some(uri) = &options.uri {
-        let (offer, secret) =
-            PairingOffer::from_uri(uri).map_err(|e| format!("invalid offer URI: {e:?}"))?;
-        let endpoint = if let Some(explicit) = &options.connect {
-            explicit.clone()
-        } else {
-            let candidate = offer
-                .transports
-                .iter()
-                .find(|t| t.profile == STREAM_PROFILE)
-                .ok_or("offer contains no stream candidate")?;
-            let endpoints = stream_candidate_endpoints(&candidate.parameters)
-                .map_err(|e| format!("invalid candidate endpoints: {e:?}"))?;
-            endpoints
-                .into_iter()
-                .next()
-                .ok_or("offer has empty endpoint list")?
-        };
-        Ok((offer, secret, endpoint))
-    } else if let Some(code) = &options.code {
-        let endpoint = options
-            .connect
-            .clone()
-            .ok_or("--connect <host:port> is required when pairing with --code")?;
-        let secret = pairing_secret_from_code(code);
-        let offer_id = offer_id_from_code(code);
-        let parameters = stream_candidate_parameters(&[endpoint.clone()])
-            .map_err(|e| format!("candidate parameters failed: {e:?}"))?;
-        let offer = PairingOffer {
-            version: WIRE_VERSION,
-            offer_id,
-            suites: vec![PAIRING_SUITE.to_owned()],
-            profiles: vec![
-                PROFILE_CARD_STATUS.to_owned(),
-                PROFILE_AUTHENTICATION.to_owned(),
-                PROFILE_DOCUMENT_SIGNING.to_owned(),
-            ],
-            transports: vec![TransportCandidate {
-                profile: STREAM_PROFILE.to_owned(),
-                candidate_id: options.candidate_id.clone(),
-                parameters,
-            }],
-            offer_ttl_ms: OFFER_TTL_MAX_MS,
-        };
-        Ok((offer, secret, endpoint))
-    } else {
-        Err("either --uri <rapp:...> or (--connect <host:port> and --code <code>) must be specified"
-            .into())
+#[derive(Default)]
+struct MockProxyStore;
+
+impl PairStore for MockProxyStore {
+    type Error = core::convert::Infallible;
+    fn load(&mut self, _pair_id: refineid_rapp::PairId) -> Result<Option<PairRecord>, Self::Error> {
+        Ok(None)
+    }
+    fn insert(&mut self, _record: PairRecord) -> Result<(), PairStoreError<Self::Error>> {
+        Ok(())
+    }
+    fn revoke(&mut self, _tombstone: PairTombstone) -> Result<(), PairStoreError<Self::Error>> {
+        Ok(())
+    }
+    fn is_revoked(&mut self, _pair_id: refineid_rapp::PairId) -> Result<bool, Self::Error> {
+        Ok(false)
     }
 }
 
 fn serve_one_session(pairing: &ProxyPairing, options: &MockProxyOptions) -> Result<(), String> {
     println!("dialing session connection to {}...", pairing.endpoint);
     let deadline = Instant::now() + Duration::from_secs(3600);
-    let transport = loop {
+    let mut transport = loop {
         match dial(
             &[pairing.endpoint.clone()],
             &options.candidate_id,
             Duration::from_secs(2),
-            &StreamRendezvous::Session(pairing.rendezvous_token),
+            &StreamRendezvous::Session(pairing.record.rendezvous_token()),
         ) {
             Ok(t) => break t,
             Err(e) => {
@@ -460,94 +389,118 @@ fn serve_one_session(pairing: &ProxyPairing, options: &MockProxyOptions) -> Resu
         }
     };
 
-    let prologue = session_prologue(
-        WIRE_VERSION,
-        pairing.pair_id,
-        &pairing.grants,
-        STREAM_PROFILE,
-    )
-    .map_err(|e| format!("cannot build session prologue: {e:?}"))?;
-
     println!("running Noise_KK session handshake...");
-    let done: CompletedHandshake<TcpFrameTransport> = run_session_handshake(
-        HandshakeRole::Responder,
-        transport,
-        &pairing.keys.private,
-        &pairing.requester_public,
-        &prologue,
-    )
-    .map_err(|e| format!("session handshake failed: {e:?}"))?;
+    let mut handshake = SessionHandshake::begin_proxy(&pairing.record)
+        .map_err(|e| format!("session handshake failed: {e:?}"))?;
 
-    let session_id = derive_session_id(&done.handshake_hash);
-    let mut channel = ProxyChannel {
-        secure: done.channel,
-        session_id,
-        send_sequence: 0,
-        receive_sequence: 0,
-    };
+    // Message 1 (Requester -> Proxy)
+    let m1_bytes = transport
+        .receive_frame()
+        .map_err(|e| format!("receive frame 1 failed: {e:?}"))?;
+    let m1 =
+        BinaryFrame::reconstruct(m1_bytes).map_err(|e| format!("frame 1 decode failed: {e:?}"))?;
+    handshake
+        .read_message(&m1)
+        .map_err(|e| format!("read message 1 failed: {e:?}"))?;
 
-    println!("exchanging session ready...");
-    let ready = channel.receive()?;
-    let Body::SessionReady {
-        parameters: seen, ..
-    } = ready
-    else {
-        return Err(format!("expected SessionReady, got {ready:?}"));
-    };
+    // Message 2 (Proxy -> Requester)
+    let m2 = handshake
+        .write_message()
+        .map_err(|e| format!("write message 2 failed: {e:?}"))?;
+    transport
+        .send_frame(m2.as_bytes())
+        .map_err(|e| format!("send frame 2 failed: {e:?}"))?;
 
-    let session_params = SessionParameters {
-        version: WIRE_VERSION,
-        suite: SESSION_SUITE.into(),
-        transport_profile: STREAM_PROFILE.into(),
-        candidate_id: options.candidate_id.clone(),
-        grants_hash: pairing.grants,
-    };
-    if seen != session_params {
-        return Err("requester session parameters did not match".into());
+    if !handshake.is_complete() {
+        return Err("handshake incomplete".into());
     }
 
-    let nonce = Challenge::random()
-        .map_err(|_| "random unavailable".to_owned())?
-        .0;
-    channel.send(Body::SessionReady {
-        parameters: session_params,
-        nonce,
-    })?;
+    let mut auth = handshake
+        .into_authentication()
+        .map_err(|e| format!("into_auth failed: {e:?}"))?;
+
+    // Exchange Ready
+    let req_ready_bytes = transport
+        .receive_frame()
+        .map_err(|e| format!("receive ready failed: {e:?}"))?;
+    let req_ready_frame = BinaryFrame::reconstruct(req_ready_bytes)
+        .map_err(|e| format!("ready frame decode failed: {e:?}"))?;
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+
+    let mut store = MockProxyStore;
+    auth.receive_ready(&mut store, &req_ready_frame, now_ms)
+        .map_err(|e| format!("receive ready failed: {e:?}"))?;
+
+    let mut proxy_nonce = [0u8; 32];
+    getrandom::fill(&mut proxy_nonce).map_err(|e| format!("nonce failed: {e:?}"))?;
+    let proxy_ready = auth
+        .send_ready(proxy_nonce)
+        .map_err(|e| format!("send ready failed: {e:?}"))?;
+    transport
+        .send_frame(proxy_ready.as_bytes())
+        .map_err(|e| format!("send ready frame failed: {e:?}"))?;
+
+    let mut endpoint = auth
+        .into_established()
+        .map_err(|e| format!("into_established failed: {e:?}"))?;
     println!("session ready; awaiting operation requests...");
 
     loop {
-        let msg = match channel.receive() {
-            Ok(m) => m,
+        let frame_bytes = match transport.receive_frame() {
+            Ok(b) => b,
             Err(e) => {
-                println!("channel ended or closed: {e}");
+                println!("channel ended or closed: {e:?}");
                 break;
             }
         };
-        match msg {
-            Body::OperationRequest {
-                operation_id,
-                request_hash,
-                profile,
-                action,
-                payload,
-                ..
-            } => {
-                println!("received operation request: action='{action}', profile='{profile}'");
+        let frame = match BinaryFrame::reconstruct(frame_bytes) {
+            Ok(f) => f,
+            Err(e) => {
+                println!("frame decode error: {e:?}");
+                break;
+            }
+        };
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+
+        let outcome = match endpoint.receive(&mut store, &frame, now_ms) {
+            Ok(o) => o,
+            Err(e) => {
+                println!("endpoint receive error: {e:?}");
+                break;
+            }
+        };
+
+        match outcome {
+            ReceiveOutcome::Message(TypedMessage::OperationRequest(request)) => {
+                println!("received operation request: {:?}", request.operation);
                 handle_operation_request(
-                    &mut channel,
-                    operation_id,
-                    request_hash,
-                    &action,
-                    &payload,
+                    &mut transport,
+                    &mut endpoint,
+                    &mut store,
+                    request,
                     options,
                 )?;
             }
-            Body::SessionClose { reason, .. } => {
-                println!("requester closed session gracefully: {reason:?}");
+            ReceiveOutcome::Message(TypedMessage::LivenessPing(ping)) => {
+                let pong = TypedMessage::LivenessPong(LivenessMessage {
+                    challenge: ping.challenge,
+                    last_received_sequence: endpoint.last_received_sequence().unwrap_or(0),
+                });
+                if let Ok(pong_frame) = endpoint.send(&pong) {
+                    let _ = transport.send_frame(pong_frame.as_bytes());
+                }
+            }
+            ReceiveOutcome::Message(TypedMessage::SessionClose(close)) => {
+                println!("requester closed session gracefully: {:?}", close.reason);
                 break;
             }
             other => {
-                eprintln!("unexpected message in session: {other:?}");
+                println!("unexpected outcome in session: {other:?}");
                 break;
             }
         }
@@ -555,194 +508,268 @@ fn serve_one_session(pairing: &ProxyPairing, options: &MockProxyOptions) -> Resu
     Ok(())
 }
 
-fn handle_operation_request(
-    channel: &mut ProxyChannel,
-    operation_id: refineid_rapp_core::ids::OperationId,
-    request_hash: [u8; 32],
-    action: &str,
-    payload: &[(String, Value)],
+fn handle_operation_request<T: FrameTransport>(
+    transport: &mut T,
+    endpoint: &mut EstablishedEndpoint,
+    store: &mut MockProxyStore,
+    request: OperationRequest,
     options: &MockProxyOptions,
 ) -> Result<(), String> {
-    match action {
-        "inspect_card" => {
+    let operation_id = request.operation_id;
+    let request_hash = request
+        .request_hash()
+        .map_err(|e| format!("hash failed: {e:?}"))?;
+    let op_ref = OperationReference {
+        operation_id,
+        request_hash,
+    };
+
+    match request.operation {
+        CardOperation::InspectCard => {
             println!("serving inspect_card operation");
-            channel.send(Body::OperationResult {
-                operation_id,
-                request_hash,
-                status: ResultStatus::Completed,
-                error: None,
-                body: vec![
-                    ("type".to_owned(), Value::Text("inspection".into())),
-                    ("pin1_factory".to_owned(), Value::Bool(false)),
-                    ("pin2_factory".to_owned(), Value::Bool(false)),
-                    (
-                        "pin1_attempts".to_owned(),
-                        Value::Unsigned(options.pin1_attempts.into()),
-                    ),
-                    (
-                        "pin2_attempts".to_owned(),
-                        Value::Unsigned(options.pin2_attempts.into()),
-                    ),
-                    ("puk_attempts".to_owned(), Value::Null),
-                ],
-            })?;
-            let ack = channel.receive()?;
-            let Body::OperationResultAck { .. } = ack else {
-                return Err(format!("expected OperationResultAck, got {ack:?}"));
-            };
-            println!("inspect_card completed and acknowledged");
+            let result = CardOperationResult::Inspection(CardInspection {
+                pin1_factory: false,
+                pin2_factory: false,
+                pin1_attempts: Some(options.pin1_attempts),
+                pin2_attempts: Some(options.pin2_attempts),
+                puk_attempts: None,
+            });
+            let msg =
+                TypedMessage::OperationResult(OperationResultMessage::completed(op_ref, result));
+            let frame = endpoint
+                .send(&msg)
+                .map_err(|e| format!("send result failed: {e:?}"))?;
+            transport
+                .send_frame(frame.as_bytes())
+                .map_err(|e| format!("send frame failed: {e:?}"))?;
+
+            // Await Ack
+            let ack_bytes = transport
+                .receive_frame()
+                .map_err(|e| format!("receive ack failed: {e:?}"))?;
+            let ack_frame = BinaryFrame::reconstruct(ack_bytes)
+                .map_err(|e| format!("ack frame failed: {e:?}"))?;
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
+            if let Ok(ReceiveOutcome::Message(TypedMessage::OperationResultAck(ack_ref))) =
+                endpoint.receive(store, &ack_frame, now_ms)
+            {
+                if ack_ref == op_ref {
+                    println!("inspect_card completed and acknowledged");
+                }
+            }
         }
-        "read_identity" => {
+        CardOperation::ReadIdentity => {
             println!(
-                "serving read_identity operation: '{}' ({})",
+                "serving read_identity: {} ({})",
                 options.identity_name, options.person_id
             );
-            channel.send(Body::OperationResult {
-                operation_id,
-                request_hash,
-                status: ResultStatus::Completed,
-                error: None,
-                body: vec![
-                    ("type".to_owned(), Value::Text("identity".into())),
-                    (
-                        "display_name".to_owned(),
-                        Value::Text(options.identity_name.clone()),
-                    ),
-                    (
-                        "person_id".to_owned(),
-                        Value::Text(options.person_id.clone()),
-                    ),
-                ],
-            })?;
-            let ack = channel.receive()?;
-            let Body::OperationResultAck { .. } = ack else {
-                return Err(format!("expected OperationResultAck, got {ack:?}"));
+            let result = CardOperationResult::Identity {
+                display_name: options.identity_name.clone(),
+                person_id: options.person_id.clone(),
             };
-            println!("read_identity completed and acknowledged");
+            let msg =
+                TypedMessage::OperationResult(OperationResultMessage::completed(op_ref, result));
+            let frame = endpoint
+                .send(&msg)
+                .map_err(|e| format!("send result failed: {e:?}"))?;
+            transport
+                .send_frame(frame.as_bytes())
+                .map_err(|e| format!("send frame failed: {e:?}"))?;
+
+            // Await Ack
+            let ack_bytes = transport
+                .receive_frame()
+                .map_err(|e| format!("receive ack failed: {e:?}"))?;
+            let ack_frame = BinaryFrame::reconstruct(ack_bytes)
+                .map_err(|e| format!("ack frame failed: {e:?}"))?;
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
+            if let Ok(ReceiveOutcome::Message(TypedMessage::OperationResultAck(ack_ref))) =
+                endpoint.receive(store, &ack_frame, now_ms)
+            {
+                if ack_ref == op_ref {
+                    println!("read_identity completed and acknowledged");
+                }
+            }
         }
-        "read_certificate" => {
-            let kind = payload
-                .iter()
-                .find(|(k, _)| k == "kind")
-                .and_then(|(_, v)| match v {
-                    Value::Text(t) => Some(t.as_str()),
-                    _ => None,
-                })
-                .unwrap_or("authentication");
+        CardOperation::ReadCertificate { kind } => {
             let der = match kind {
-                "root_ca" => options
-                    .root_ca_der
-                    .as_deref()
-                    .unwrap_or(DEFAULT_MOCK_CERT_DER),
-                "intermediate_ca" => options
-                    .intermediate_ca_der
-                    .as_deref()
-                    .unwrap_or(DEFAULT_MOCK_CERT_DER),
-                _ => &options.cert_der,
+                refineid_rapp::CertificateKind::Authentication
+                | refineid_rapp::CertificateKind::Signature => &options.cert_der,
             };
             println!(
-                "serving read_certificate ({kind}) operation ({} bytes DER)",
+                "serving read_certificate ({kind:?}) ({} bytes DER)",
                 der.len()
             );
-            channel.send(Body::OperationResult {
-                operation_id,
-                request_hash,
-                status: ResultStatus::Completed,
-                error: None,
-                body: vec![
-                    ("type".to_owned(), Value::Text("certificate".into())),
-                    ("der".to_owned(), Value::Bytes(der.to_vec())),
-                ],
-            })?;
-            let ack = channel.receive()?;
-            let Body::OperationResultAck { .. } = ack else {
-                return Err(format!("expected OperationResultAck, got {ack:?}"));
-            };
-            println!("read_certificate ({kind}) completed and acknowledged");
-        }
-        "browser_authenticate" | "sign_document" => {
-            println!("serving consequential operation '{action}': sending OperationPrepared");
-            channel.send(Body::OperationPrepared {
-                operation_id,
-                request_hash,
-            })?;
+            let result = CardOperationResult::Certificate(der.clone());
+            let msg =
+                TypedMessage::OperationResult(OperationResultMessage::completed(op_ref, result));
+            let frame = endpoint
+                .send(&msg)
+                .map_err(|e| format!("send result failed: {e:?}"))?;
+            transport
+                .send_frame(frame.as_bytes())
+                .map_err(|e| format!("send frame failed: {e:?}"))?;
 
-            let commit = channel.receive()?;
-            let Body::OperationCommit {
-                operation_id: comm_id,
-                request_hash: comm_hash,
-            } = commit
-            else {
-                return Err(format!("expected OperationCommit, got {commit:?}"));
-            };
-            if comm_id != operation_id || comm_hash != request_hash {
-                return Err("commit mismatch with prepared operation".into());
+            // Await Ack
+            let ack_bytes = transport
+                .receive_frame()
+                .map_err(|e| format!("receive ack failed: {e:?}"))?;
+            let ack_frame = BinaryFrame::reconstruct(ack_bytes)
+                .map_err(|e| format!("ack frame failed: {e:?}"))?;
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
+            if let Ok(ReceiveOutcome::Message(TypedMessage::OperationResultAck(ack_ref))) =
+                endpoint.receive(store, &ack_frame, now_ms)
+            {
+                if ack_ref == op_ref {
+                    println!("read_certificate completed and acknowledged");
+                }
             }
-            let sig_len = determine_signature_length(payload);
-            let digest_bytes =
-                payload
-                    .iter()
-                    .find(|(k, _)| k == "digest")
-                    .and_then(|(_, v)| match v {
-                        Value::Bytes(b) => Some(b.as_slice()),
-                        _ => None,
-                    });
-
-            let sig_bytes = digest_bytes
-                .and_then(|digest| {
-                    use p384::ecdsa::signature::hazmat::PrehashSigner;
-                    let signing_key =
-                        p384::ecdsa::SigningKey::from_slice(DEFAULT_MOCK_PRIVATE_KEY_SCALAR)
-                            .ok()?;
-                    let signature: p384::ecdsa::Signature =
-                        signing_key.sign_prehash(digest).ok()?;
-                    Some(signature.to_bytes().to_vec())
-                })
-                .unwrap_or_else(|| vec![0xAB; sig_len]);
-
-            channel.send(Body::OperationResult {
-                operation_id,
-                request_hash,
-                status: ResultStatus::Completed,
-                error: None,
-                body: vec![
-                    ("type".to_owned(), Value::Text("signature".into())),
-                    ("bytes".to_owned(), Value::Bytes(sig_bytes)),
-                ],
-            })?;
-            let ack = channel.receive()?;
-            let Body::OperationResultAck { .. } = ack else {
-                return Err(format!("expected OperationResultAck, got {ack:?}"));
-            };
-            println!("{action} completed and acknowledged (signature {sig_len} bytes)");
         }
-        other => {
-            println!("unsupported action '{other}', denying");
-            channel.send(Body::OperationResult {
-                operation_id,
-                request_hash,
-                status: ResultStatus::Denied,
-                error: Some("unsupported operation".into()),
-                body: Vec::new(),
-            })?;
-            let _ = channel.receive();
+        CardOperation::BrowserAuthenticate {
+            origin,
+            algorithm,
+            digest,
+            ..
+        } => {
+            println!("serving browser_authenticate: origin='{origin}' sending OperationPrepared");
+            let prep_msg = TypedMessage::OperationPrepared(op_ref);
+            let frame = endpoint
+                .send(&prep_msg)
+                .map_err(|e| format!("send prep failed: {e:?}"))?;
+            transport
+                .send_frame(frame.as_bytes())
+                .map_err(|e| format!("send prep frame failed: {e:?}"))?;
+
+            // Await Commit
+            let commit_bytes = transport
+                .receive_frame()
+                .map_err(|e| format!("receive commit failed: {e:?}"))?;
+            let commit_frame = BinaryFrame::reconstruct(commit_bytes)
+                .map_err(|e| format!("commit frame failed: {e:?}"))?;
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
+            let outcome = endpoint
+                .receive(store, &commit_frame, now_ms)
+                .map_err(|e| format!("commit receive failed: {e:?}"))?;
+            let ReceiveOutcome::Message(TypedMessage::OperationCommit(comm_ref)) = outcome else {
+                return Err("expected OperationCommit".into());
+            };
+            if comm_ref != op_ref {
+                return Err("commit mismatch".into());
+            }
+
+            let sig_bytes = sign_digest(&digest, algorithm);
+            let result = CardOperationResult::Signature(sig_bytes);
+            let res_msg =
+                TypedMessage::OperationResult(OperationResultMessage::completed(op_ref, result));
+            let res_frame = endpoint
+                .send(&res_msg)
+                .map_err(|e| format!("send res failed: {e:?}"))?;
+            transport
+                .send_frame(res_frame.as_bytes())
+                .map_err(|e| format!("send res frame failed: {e:?}"))?;
+
+            // Await Ack
+            let ack_bytes = transport
+                .receive_frame()
+                .map_err(|e| format!("receive ack failed: {e:?}"))?;
+            let ack_frame = BinaryFrame::reconstruct(ack_bytes)
+                .map_err(|e| format!("ack frame failed: {e:?}"))?;
+            if let Ok(ReceiveOutcome::Message(TypedMessage::OperationResultAck(ack_ref))) =
+                endpoint.receive(store, &ack_frame, now_ms)
+            {
+                if ack_ref == op_ref {
+                    println!("browser_authenticate completed and acknowledged");
+                }
+            }
+        }
+        CardOperation::SignDocument {
+            document_name,
+            algorithm,
+            digest,
+            ..
+        } => {
+            println!("serving sign_document: document='{document_name}' sending OperationPrepared");
+            let prep_msg = TypedMessage::OperationPrepared(op_ref);
+            let frame = endpoint
+                .send(&prep_msg)
+                .map_err(|e| format!("send prep failed: {e:?}"))?;
+            transport
+                .send_frame(frame.as_bytes())
+                .map_err(|e| format!("send prep frame failed: {e:?}"))?;
+
+            // Await Commit
+            let commit_bytes = transport
+                .receive_frame()
+                .map_err(|e| format!("receive commit failed: {e:?}"))?;
+            let commit_frame = BinaryFrame::reconstruct(commit_bytes)
+                .map_err(|e| format!("commit frame failed: {e:?}"))?;
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
+            let outcome = endpoint
+                .receive(store, &commit_frame, now_ms)
+                .map_err(|e| format!("commit receive failed: {e:?}"))?;
+            let ReceiveOutcome::Message(TypedMessage::OperationCommit(comm_ref)) = outcome else {
+                return Err("expected OperationCommit".into());
+            };
+            if comm_ref != op_ref {
+                return Err("commit mismatch".into());
+            }
+
+            let sig_bytes = sign_digest(&digest, algorithm);
+            let result = CardOperationResult::Signature(sig_bytes);
+            let res_msg =
+                TypedMessage::OperationResult(OperationResultMessage::completed(op_ref, result));
+            let res_frame = endpoint
+                .send(&res_msg)
+                .map_err(|e| format!("send res failed: {e:?}"))?;
+            transport
+                .send_frame(res_frame.as_bytes())
+                .map_err(|e| format!("send res frame failed: {e:?}"))?;
+
+            // Await Ack
+            let ack_bytes = transport
+                .receive_frame()
+                .map_err(|e| format!("receive ack failed: {e:?}"))?;
+            let ack_frame = BinaryFrame::reconstruct(ack_bytes)
+                .map_err(|e| format!("ack frame failed: {e:?}"))?;
+            if let Ok(ReceiveOutcome::Message(TypedMessage::OperationResultAck(ack_ref))) =
+                endpoint.receive(store, &ack_frame, now_ms)
+            {
+                if ack_ref == op_ref {
+                    println!("sign_document completed and acknowledged");
+                }
+            }
         }
     }
     Ok(())
 }
 
-fn determine_signature_length(payload: &[(String, Value)]) -> usize {
-    for (key, val) in payload {
-        if key == "algorithm" {
-            if let Value::Text(algo) = val {
-                return match algo.as_str() {
-                    "ecdsa_sha256" => 64,
-                    "ecdsa_sha512" => 132,
-                    "rsa_pkcs1_sha256" | "rsa_pss_sha256" | "rsa_pkcs1_sha384" => 384,
-                    _ => 96,
-                };
-            }
+fn sign_digest(digest: &[u8], algorithm: refineid_rapp::SignatureAlgorithm) -> Vec<u8> {
+    use p384::ecdsa::signature::hazmat::PrehashSigner;
+    if let Ok(signing_key) = p384::ecdsa::SigningKey::from_slice(DEFAULT_MOCK_PRIVATE_KEY_SCALAR) {
+        if let Ok(sig) = signing_key.sign_prehash(digest) {
+            let signature: p384::ecdsa::Signature = sig;
+            return signature.to_bytes().to_vec();
         }
     }
-    96
+    let sig_len = match algorithm {
+        refineid_rapp::SignatureAlgorithm::EcdsaSha224 => 56,
+        refineid_rapp::SignatureAlgorithm::EcdsaSha256 => 64,
+        refineid_rapp::SignatureAlgorithm::EcdsaSha384 => 96,
+        refineid_rapp::SignatureAlgorithm::EcdsaSha512 => 132,
+        refineid_rapp::SignatureAlgorithm::RsaPkcs1Sha256
+        | refineid_rapp::SignatureAlgorithm::RsaPkcs1Sha384
+        | refineid_rapp::SignatureAlgorithm::RsaPkcs1Sha512
+        | refineid_rapp::SignatureAlgorithm::RsaPssSha256 => 256,
+    };
+    vec![0xAB; sig_len]
 }

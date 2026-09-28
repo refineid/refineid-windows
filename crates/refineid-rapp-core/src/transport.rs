@@ -18,12 +18,10 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::Duration;
 
 use crate::limits;
+pub use refineid_rapp::{BinaryFrame, FrameError};
 
 /// The experimental local byte-stream transport profile name.
-///
-/// Reverse-domain namespacing per specification Section 23; the profile is
-/// private to this implementation until a reviewed profile replaces it.
-pub const STREAM_PROFILE: &str = "fi.refineid.stream.v1";
+pub const STREAM_PROFILE: &str = refineid_rapp::STREAM_PROFILE;
 
 /// The in-memory loopback transport profile name, for tests only.
 pub const MEMORY_PROFILE: &str = "fi.refineid.memory.v1";
@@ -44,6 +42,19 @@ pub enum TransportError {
     /// A blocking receive reached its deadline with no frame.
     TimedOut,
 }
+
+impl core::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Eof => write!(f, "transport reached end of file"),
+            Self::Failed => write!(f, "transport failed"),
+            Self::OversizedFrame => write!(f, "oversized frame"),
+            Self::TimedOut => write!(f, "transport timed out"),
+        }
+    }
+}
+
+impl core::error::Error for TransportError {}
 
 /// Ordered, bounded, reliable frame delivery between two RAPP endpoints.
 pub trait FrameTransport {
@@ -133,6 +144,34 @@ impl FrameTransport for MemoryTransport {
     }
 }
 
+impl refineid_rapp::FrameTransport for MemoryTransport {
+    type Error = TransportError;
+
+    fn candidate_id(&self) -> &str {
+        &self.candidate_id
+    }
+
+    fn send(&mut self, frame: BinaryFrame) -> Result<(), Self::Error> {
+        self.send_frame(frame.as_bytes())
+    }
+
+    fn receive(&mut self) -> Result<Option<BinaryFrame>, Self::Error> {
+        match self.receive_frame() {
+            Ok(bytes) => {
+                let frame =
+                    BinaryFrame::reconstruct(bytes).map_err(|_| TransportError::OversizedFrame)?;
+                Ok(Some(frame))
+            }
+            Err(TransportError::Eof) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn close(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
 /// Length-prefixed framing over one TCP stream.
 ///
 /// Each frame is a two-byte big-endian length followed by that many bytes.
@@ -200,6 +239,36 @@ impl FrameTransport for TcpFrameTransport {
 
     fn candidate_id(&self) -> &str {
         &self.candidate_id
+    }
+}
+
+impl refineid_rapp::FrameTransport for TcpFrameTransport {
+    type Error = TransportError;
+
+    fn candidate_id(&self) -> &str {
+        &self.candidate_id
+    }
+
+    fn send(&mut self, frame: BinaryFrame) -> Result<(), Self::Error> {
+        self.send_frame(frame.as_bytes())
+    }
+
+    fn receive(&mut self) -> Result<Option<BinaryFrame>, Self::Error> {
+        match self.receive_frame() {
+            Ok(bytes) => {
+                let frame =
+                    BinaryFrame::reconstruct(bytes).map_err(|_| TransportError::OversizedFrame)?;
+                Ok(Some(frame))
+            }
+            Err(TransportError::Eof) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn close(&mut self) -> Result<(), Self::Error> {
+        self.stream
+            .shutdown(std::net::Shutdown::Both)
+            .map_err(|_| TransportError::Failed)
     }
 }
 

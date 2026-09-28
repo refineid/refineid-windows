@@ -1,44 +1,29 @@
 //! The requester engine: the Windows side of RAPP.
 //!
-//! The engine drives pairing (Section 9), sessions (Sections 10 and 11),
-//! and operations (Section 12) through the role projection of the Section
-//! 14 model. Every state change consults the transcribed transition tables
-//! first; an input with no modeled transition is handled by exactly one
-//! unexpected-input policy class, and an engine step the model refuses is a
-//! local internal fault, never an invented transition.
+//! The engine drives pairing, sessions, and operations using the canonical
+//! protocol boundaries from `refineid_rapp`.
 //!
-//! The engine is blocking and synchronous: the minidriver and settings
-//! application call it from their own threads, and human time on the proxy
-//! is bounded by the operation's expiry budget rather than by transport
-//! deadlines chosen here.
+//! The engine is blocking and synchronous: the minidriver, PKCS#11 provider,
+//! CLI, and GUI call it from their own threads.
 
 use zeroize::Zeroizing;
 
-use crate::hashes::{grants_hash, request_hash};
-use crate::ids::{
-    Challenge, OperationId, PairId, PairingSecret, SessionId, derive_pair_id,
-    derive_rendezvous_token, derive_session_id,
-};
+use crate::ids::{OperationId, PairId, RandomIdExt, SessionId};
 use crate::limits;
-use crate::message::{
-    Body, CloseReason, ERROR_BUSY, ERROR_UNKNOWN_OPERATION, Envelope, NegotiatedParameters,
-    ResultStatus, SchemaViolation, SessionParameters,
-};
-use crate::noise::{
-    ChannelError, HandshakeRole, SecureChannel, generate_pair_keys, pairing_prologue,
-    run_pairing_handshake, run_session_handshake,
-};
+use crate::message::{CloseReason, ResultStatus};
 use crate::offer::{OfferError, PairingOffer};
 use crate::operations::{CardOperation, CardOperationResult, OperationError};
-use crate::states::{
-    OPERATION_TRANSITIONS, OperationEvent, OperationState, SESSION_TRANSITIONS, SessionEvent,
-    SessionState, requester_transition,
-};
 use crate::store::{
-    JournalEntry, OperationJournal, PairingDisposition, PairingRecord, PairingStore, StoreError,
+    CorePairStoreAdapter, JournalEntry, OperationJournal, PairingDisposition, PairingRecord,
+    PairingStore, StoreError,
 };
-use crate::transport::{FrameTransport, TransportError};
-use crate::{PAIRING_SUITE, SESSION_SUITE, WIRE_VERSION};
+use crate::transport::{BinaryFrame, FrameTransport, TransportError};
+use refineid_rapp::{
+    CancelMessage, EndpointRole, EstablishedEndpoint, ExplicitUserIntent, LivenessMessage,
+    OperationReference, OperationRequest, OperationState, PairingHandshake, PingChallenge,
+    ProfileName, ProtocolErrorMessage, ReceiveOutcome, SessionCloseMessage, SessionHandshake,
+    SessionState, TypedMessage, generate_pair_key_material,
+};
 
 /// Local labels sent inside `pairing.hello`. Labels, not identities.
 #[derive(Clone, Debug)]
@@ -72,7 +57,7 @@ pub enum PairingError {
     /// The peer's parameter echo did not match the local view.
     ParameterMismatch,
     /// The authenticated exchange violated the protocol; the attempt is
-    /// aborted and nothing is recorded (Section 14.5 class 4, pre-store).
+    /// aborted and nothing is recorded.
     ProtocolViolation,
     /// The local user denied the confirmation.
     DeniedLocally,
@@ -88,6 +73,14 @@ pub enum PairingError {
     Channel,
 }
 
+impl core::fmt::Display for PairingError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl core::error::Error for PairingError {}
+
 /// Why a session could not be opened or continued.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionError {
@@ -97,15 +90,14 @@ pub enum SessionError {
     NotPaired(PairingDisposition),
     /// The session handshake failed. When `suggest_repairing` is true,
     /// three consecutive candidates failed authentication and re-pairing
-    /// should be suggested without touching stored keys (Section 14.6).
+    /// should be suggested without touching stored keys.
     HandshakeFailed {
         /// Whether the consecutive-failure threshold was reached.
         suggest_repairing: bool,
     },
     /// The transport failed.
     Transport(TransportError),
-    /// The peer reported `busy`: an existing session survives, this one
-    /// closed (Section 10).
+    /// The peer reported `busy`: an existing session survives, this one closed.
     Busy,
     /// The peer's `session.ready` parameters did not match the local view.
     ParameterMismatch,
@@ -113,19 +105,26 @@ pub enum SessionError {
     ClosedByPeer(CloseReason),
     /// A store operation failed.
     Store(StoreError),
-    /// The engine attempted a transition the model refuses: a local
-    /// internal fault (policy class 5).
+    /// The engine encountered an internal fault.
     EngineFault,
 }
+
+impl core::fmt::Display for SessionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl core::error::Error for SessionError {}
 
 /// Why an operation call could not be admitted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdmissionError {
-    /// The session is not healthy (`INV-02`).
+    /// The session is not healthy.
     SessionNotHealthy,
-    /// The profile is not in the granted set (X-08).
+    /// The profile is not in the granted set.
     ProfileNotGranted,
-    /// An operation is already active (`INV-04`).
+    /// An operation is already active.
     OperationActive,
     /// The journal refused the durable write.
     Store(StoreError),
@@ -133,9 +132,17 @@ pub enum AdmissionError {
     RandomUnavailable,
     /// A component exceeded an encoding limit.
     Encoding,
-    /// The typed operation violated a Section 13.2.1 invariant.
+    /// The typed operation violated an invariant.
     Operation(OperationError),
 }
+
+impl core::fmt::Display for AdmissionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl core::error::Error for AdmissionError {}
 
 /// How a finished operation ended, with the session consequence.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -149,11 +156,9 @@ pub enum OperationOutcome {
     /// A policy or card rejection, with the profile's failure name.
     Rejected(Option<String>),
     /// The card rejected CAN, PIN 1, or PIN 2; the session closes and the
-    /// pairing is durably revoked on both peers (`INV-16`, `INV-17`,
-    /// Section 13.4).
+    /// pairing is durably revoked on both peers.
     CredentialRejected,
-    /// Completion cannot be proven; automatic retry is permanently
-    /// forbidden (`INV-06`).
+    /// Completion cannot be proven; automatic retry is permanently forbidden.
     Ambiguous,
 }
 
@@ -166,25 +171,23 @@ pub enum SessionEnd {
     PeerClose(CloseReason),
     /// The transport failed or ended.
     TransportLoss,
-    /// A frame failed authenticated decryption (policy class 2).
+    /// A frame failed authenticated decryption.
     IntegrityFailure,
-    /// The peer committed an authenticated protocol violation
-    /// (policy class 4); the pairing was revoked immediately.
+    /// The peer committed an authenticated protocol violation;
+    /// the pairing was revoked immediately.
     Violation,
 }
 
-/// The requester engine over its two durable stores.
-#[derive(Debug)]
-pub struct Requester<Store: PairingStore, Journal: OperationJournal> {
-    config: RequesterConfig,
-    store: Store,
-    journal: Journal,
-}
-
-/// One live session and its single operation slot.
+/// One live session and its established endpoint.
+#[allow(
+    clippy::struct_field_names,
+    reason = "session_id disambiguates the RAPP session identifier"
+)]
 pub struct Session<Transport: FrameTransport> {
-    channel: MessageChannel<Transport>,
+    transport: Transport,
+    endpoint: EstablishedEndpoint,
     pair_id: PairId,
+    session_id: SessionId,
     state: SessionState,
     granted_profiles: Vec<String>,
     end: Option<SessionEnd>,
@@ -195,91 +198,20 @@ impl<Transport: FrameTransport> core::fmt::Debug for Session<Transport> {
         formatter
             .debug_struct("Session")
             .field("pair_id", &self.pair_id)
+            .field("session_id", &self.session_id)
             .field("state", &self.state)
+            .field("granted_profiles", &self.granted_profiles)
+            .field("end", &self.end)
             .finish_non_exhaustive()
     }
 }
 
-/// The envelope discipline of Section 7.3 over a secure channel.
-struct MessageChannel<Transport: FrameTransport> {
-    secure: SecureChannel<Transport>,
-    session_id: SessionId,
-    send_sequence: u64,
-    receive_sequence: u64,
-}
-
-/// What reading one envelope produced.
-enum Inbound {
-    /// A schema-valid body in sequence.
-    Message(Body),
-    /// The transport failed or ended.
-    Transport(TransportError),
-    /// Authenticated decryption failed (policy class 2).
-    Integrity,
-    /// A schema, sequence, or session violation (policy class 4).
-    Violation,
-}
-
-impl<Transport: FrameTransport> MessageChannel<Transport> {
-    const fn new(secure: SecureChannel<Transport>, session_id: SessionId) -> Self {
-        Self {
-            secure,
-            session_id,
-            send_sequence: 0,
-            receive_sequence: 0,
-        }
-    }
-
-    /// The highest sequence received, for close and liveness bodies.
-    const fn last_received_sequence(&self) -> u64 {
-        self.receive_sequence.saturating_sub(1)
-    }
-
-    /// Sends one body under the next send sequence.
-    fn send(&mut self, body: Body) -> Result<(), ChannelError> {
-        let envelope = Envelope {
-            version: WIRE_VERSION,
-            session_id: self.session_id,
-            sequence: self.send_sequence,
-            body,
-        };
-        let plaintext = envelope
-            .encode()
-            .map_err(|_| ChannelError::PlaintextTooLarge)?;
-        self.secure.send_plaintext(&plaintext)?;
-        self.send_sequence += 1;
-        Ok(())
-    }
-
-    /// Receives and disciplines one envelope.
-    fn receive(&mut self) -> Inbound {
-        let plaintext = match self.secure.receive_plaintext() {
-            Ok(plaintext) => plaintext,
-            Err(ChannelError::Transport(error)) => return Inbound::Transport(error),
-            Err(ChannelError::Integrity | ChannelError::PlaintextTooLarge) => {
-                return Inbound::Integrity;
-            }
-        };
-        let envelope = match Envelope::decode(&plaintext) {
-            Ok(envelope) => envelope,
-            Err(SchemaViolation::UnknownCriticalField | _) => return Inbound::Violation,
-        };
-        // Any version difference is incompatible (Section 6).
-        if envelope.version != WIRE_VERSION
-            || envelope.session_id != self.session_id
-            || envelope.sequence != self.receive_sequence
-        {
-            return Inbound::Violation;
-        }
-        self.receive_sequence += 1;
-        Inbound::Message(envelope.body)
-    }
-}
-
-/// The three ways the pairing-channel confirmation can end.
-enum ConfirmationAnswer {
-    Granted(Vec<String>),
-    Denied,
+/// The requester engine over its two durable stores.
+#[derive(Debug)]
+pub struct Requester<Store: PairingStore, Journal: OperationJournal> {
+    config: RequesterConfig,
+    store: Store,
+    journal: Journal,
 }
 
 impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
@@ -307,189 +239,175 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         &self.journal
     }
 
-    /// Runs the requester half of the pairing exchange of Section 9.3 over
-    /// an accepted candidate transport.
-    ///
-    /// The caller created the offer, displayed its QR, and accepted one
-    /// candidate connection. `confirm` is the human confirmation control:
-    /// it receives the peer's introduction and the requested profiles, and
-    /// returns the granted set, or `None` to deny. On success the record is
-    /// stored atomically and the pairing channel is closed.
+    /// Runs the requester half of the pairing exchange over an accepted
+    /// candidate transport.
     ///
     /// # Errors
-    ///
-    /// A handshake failure leaves the offer live for further candidates;
-    /// every failure after the handshake invalidates the attempt and stores
-    /// nothing.
+    /// Returns [`PairingError`] on handshake failure, parameter mismatch,
+    /// transport loss, or invalid grant.
     #[allow(
         clippy::too_many_lines,
-        reason = "the pairing exchange is one protocol sequence and reads best unsplit"
+        reason = "pairing handshake walks 7 sequential wire messages"
     )]
     pub fn pair<Transport: FrameTransport>(
         &mut self,
-        offer: &PairingOffer,
-        secret: PairingSecret,
+        offer_slot: &mut Option<PairingOffer>,
         requested_profiles: &[String],
-        transport: Transport,
+        mut transport: Transport,
         confirm: impl FnOnce(&PeerIntroduction, &[String]) -> Option<Vec<String>>,
     ) -> Result<PairId, PairingError> {
-        let offer_hash = offer.offer_hash().map_err(PairingError::Offer)?;
-        let transport_profile = transport.profile().to_owned();
-        let candidate_id = transport.candidate_id().to_owned();
-        let prologue = pairing_prologue(WIRE_VERSION, &offer_hash, &transport_profile)
-            .map_err(|_| PairingError::HandshakeFailed)?;
-        let local_keys = generate_pair_keys().map_err(|_| PairingError::KeyGeneration)?;
-        let completed = run_pairing_handshake(
-            HandshakeRole::Initiator,
-            transport,
-            &local_keys,
-            secret,
-            &prologue,
-        )
-        .map_err(|error| match error {
-            crate::noise::HandshakeError::Transport(transport_error) => {
-                PairingError::Transport(transport_error)
-            }
-            _ => PairingError::HandshakeFailed,
-        })?;
-        let peer_public = completed
-            .peer_static_public
-            .clone()
-            .ok_or(PairingError::HandshakeFailed)?;
-        let session_id = derive_session_id(&completed.handshake_hash);
-        let pair_id = derive_pair_id(&completed.handshake_hash);
-        let rendezvous_token = derive_rendezvous_token(&completed.handshake_hash);
-        let mut channel = MessageChannel::new(completed.channel, session_id);
-
-        // Both peers exchange pairing.hello with the negotiated-parameter
-        // echo (Sections 8.4 and 9.4).
-        let own_parameters = NegotiatedParameters {
-            version: WIRE_VERSION,
-            suite: PAIRING_SUITE.into(),
-            offer_hash,
-            transport_profile,
-            candidate_id,
+        let Some(offer) = offer_slot.take() else {
+            return Err(PairingError::HandshakeFailed);
         };
-        channel
-            .send(Body::PairingHello {
-                parameters: own_parameters.clone(),
-                display_name: self.config.display_name.clone(),
-                platform: self.config.platform.clone(),
-                requested_profiles: Some(requested_profiles.to_vec()),
-            })
-            .map_err(|_| PairingError::Channel)?;
-        let peer = match channel.receive() {
-            Inbound::Message(Body::PairingHello {
-                parameters,
-                display_name,
-                platform,
-                requested_profiles: _,
-            }) => {
-                if parameters != own_parameters {
-                    return Err(PairingError::ParameterMismatch);
-                }
-                PeerIntroduction {
-                    display_name,
-                    platform,
-                }
-            }
-            Inbound::Message(Body::PairingAbort { .. }) => {
-                return Err(PairingError::AbortedByPeer);
-            }
-            Inbound::Message(_) | Inbound::Violation => {
-                return Err(PairingError::ProtocolViolation);
-            }
-            Inbound::Transport(error) => return Err(PairingError::Transport(error)),
-            Inbound::Integrity => return Err(PairingError::Channel),
-        };
-
-        // Human confirmation, then the granted-set agreement.
-        let answer = confirm(&peer, requested_profiles)
-            .map_or(ConfirmationAnswer::Denied, ConfirmationAnswer::Granted);
-        let mut granted = match answer {
-            ConfirmationAnswer::Denied => {
-                let _ = channel.send(Body::PairingAbort {
-                    reason: "denied".into(),
+        let local_keys = generate_pair_key_material().map_err(|_| PairingError::KeyGeneration)?;
+        let mut handshake = match PairingHandshake::begin(
+            EndpointRole::Requester,
+            offer,
+            transport.candidate_id(),
+            local_keys,
+        ) {
+            Ok(h) => h,
+            Err(fail) => {
+                let (err, returned_offer) = fail.into_parts();
+                *offer_slot = Some(returned_offer);
+                return Err(match err {
+                    refineid_rapp::PairingError::Offer(e) => PairingError::Offer(e),
+                    refineid_rapp::PairingError::CandidateNotUnique => {
+                        PairingError::Offer(refineid_rapp::PairingOfferError::InvalidTransport)
+                    }
+                    _ => PairingError::HandshakeFailed,
                 });
-                return Err(PairingError::DeniedLocally);
             }
-            ConfirmationAnswer::Granted(granted) => granted,
         };
-        let permitted =
-            |name: &String| offer.profiles.contains(name) && requested_profiles.contains(name);
-        if granted.is_empty() || !granted.iter().all(permitted) {
-            let _ = channel.send(Body::PairingAbort {
-                reason: "grants".into(),
-            });
+
+        // Noise XX Handshake
+        // Message 1 (Requester -> Proxy)
+        let m1 = handshake
+            .write_message()
+            .map_err(|_| PairingError::HandshakeFailed)?;
+        transport
+            .send_frame(m1.as_bytes())
+            .map_err(PairingError::Transport)?;
+
+        // Message 2 (Proxy -> Requester)
+        let m2_bytes = transport.receive_frame().map_err(PairingError::Transport)?;
+        let m2 = BinaryFrame::reconstruct(m2_bytes).map_err(|_| PairingError::HandshakeFailed)?;
+        handshake
+            .read_message(&m2)
+            .map_err(|_| PairingError::HandshakeFailed)?;
+
+        // Message 3 (Requester -> Proxy)
+        let m3 = handshake
+            .write_message()
+            .map_err(|_| PairingError::HandshakeFailed)?;
+        transport
+            .send_frame(m3.as_bytes())
+            .map_err(PairingError::Transport)?;
+
+        if !handshake.is_complete() {
+            return Err(PairingError::HandshakeFailed);
+        }
+
+        let mut confirmation = handshake
+            .into_confirmation()
+            .map_err(|_| PairingError::HandshakeFailed)?;
+        let pair_id = confirmation.pair_id();
+
+        // Send Requester Hello
+        let hello_frame = confirmation
+            .send_hello(
+                self.config.display_name.clone(),
+                self.config.platform.clone(),
+            )
+            .map_err(|_| PairingError::Channel)?;
+        transport
+            .send_frame(hello_frame.as_bytes())
+            .map_err(PairingError::Transport)?;
+
+        // Receive Proxy Hello
+        let peer_hello_bytes = transport.receive_frame().map_err(PairingError::Transport)?;
+        let peer_hello_frame =
+            BinaryFrame::reconstruct(peer_hello_bytes).map_err(|_| PairingError::Channel)?;
+        let now_ms = current_time_ms();
+        let peer_hello = confirmation
+            .receive_hello(&peer_hello_frame, now_ms)
+            .map_err(|err| match err {
+                refineid_rapp::PairingError::ParameterMismatch => PairingError::ParameterMismatch,
+                _ => PairingError::ProtocolViolation,
+            })?;
+        let intro = PeerIntroduction {
+            display_name: peer_hello.display_name.clone(),
+            platform: peer_hello.platform.clone(),
+        };
+
+        // Confirmation callback
+        let answer = confirm(&intro, requested_profiles);
+        let Some(granted_names) = answer else {
+            return Err(PairingError::DeniedLocally);
+        };
+        let mut granted_profiles = Vec::new();
+        for name in &granted_names {
+            let Some(p) = ProfileName::parse(name) else {
+                return Err(PairingError::GrantsNotSubset);
+            };
+            if !requested_profiles.iter().any(|r| r == name) {
+                return Err(PairingError::GrantsNotSubset);
+            }
+            granted_profiles.push(p);
+        }
+        if granted_profiles.is_empty() {
             return Err(PairingError::GrantsNotSubset);
         }
-        granted.sort_unstable();
-        channel
-            .send(Body::PairingConfirm {
-                granted_profiles: granted.clone(),
-            })
-            .map_err(|_| PairingError::Channel)?;
-        let peer_granted = match channel.receive() {
-            Inbound::Message(Body::PairingConfirm { granted_profiles }) => granted_profiles,
-            Inbound::Message(Body::PairingAbort { .. }) => {
-                return Err(PairingError::AbortedByPeer);
-            }
-            Inbound::Message(_) | Inbound::Violation => {
-                return Err(PairingError::ProtocolViolation);
-            }
-            Inbound::Transport(error) => return Err(PairingError::Transport(error)),
-            Inbound::Integrity => return Err(PairingError::Channel),
-        };
-        let mut sorted_local = granted.clone();
-        sorted_local.sort_unstable();
-        let mut sorted_peer = peer_granted;
-        sorted_peer.sort_unstable();
-        if sorted_local != sorted_peer {
-            return Err(PairingError::GrantsMismatch);
-        }
-        let grants = grants_hash(&granted).map_err(|_| PairingError::Channel)?;
 
-        // Only after both confirmations: the atomic store (Section 9.3
-        // step 8). The pairing channel then closes; operations use fresh
-        // sessions.
+        // Send local confirmation
+        let confirm_frame = confirmation
+            .send_confirmation(granted_profiles)
+            .map_err(|err| match err {
+                refineid_rapp::PairingError::GrantMismatch => PairingError::GrantsMismatch,
+                refineid_rapp::PairingError::InvalidGrantSet => PairingError::GrantsNotSubset,
+                _ => PairingError::Channel,
+            })?;
+        transport
+            .send_frame(confirm_frame.as_bytes())
+            .map_err(PairingError::Transport)?;
+
+        // Receive peer confirmation
+        let peer_confirm_bytes = transport.receive_frame().map_err(PairingError::Transport)?;
+        let peer_confirm_frame =
+            BinaryFrame::reconstruct(peer_confirm_bytes).map_err(|_| PairingError::Channel)?;
+        confirmation
+            .receive_confirmation(&peer_confirm_frame, now_ms)
+            .map_err(|err| match err {
+                refineid_rapp::PairingError::GrantMismatch => PairingError::GrantsMismatch,
+                _ => PairingError::ProtocolViolation,
+            })?;
+
+        // Into PairRecord and store
+        let pair_record = confirmation
+            .into_pair_record(now_ms)
+            .map_err(|_| PairingError::Channel)?;
+        let local_record =
+            PairingRecord::from_core_pair_record(&pair_record, intro.display_name, intro.platform);
         self.store
-            .insert(PairingRecord {
-                pair_id,
-                rendezvous_token,
-                local_private: Zeroizing::new(local_keys.private.to_vec()),
-                local_public: local_keys.public.clone(),
-                peer_public,
-                granted_profiles: granted,
-                grants_hash: grants,
-                peer_display_name: peer.display_name,
-                peer_platform: peer.platform,
-                disposition: PairingDisposition::Paired,
-                peer_initiated_termination: false,
-                candidate_failures: 0,
-                auth_cert: None,
-                signature_cert: None,
-                root_ca: None,
-                intermediate_ca: None,
-            })
+            .insert(local_record)
             .map_err(PairingError::Store)?;
-        let _ = channel.send(Body::SessionClose {
-            reason: CloseReason::Shutdown,
-            last_received_sequence: channel.last_received_sequence(),
-        });
+
         Ok(pair_id)
     }
 
-    /// Opens a session to a paired proxy over a connected transport
-    /// (Section 10).
+    /// Opens a session to a paired proxy over a connected transport.
     ///
     /// # Errors
-    ///
-    /// Fails on the admission guards, the handshake, the parameter echo,
-    /// or a peer `busy`.
+    /// Returns [`SessionError`] on unknown pairing, revoked pairing,
+    /// handshake failure, or transport loss.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "session handshake walks KK handshake and session ready exchange"
+    )]
     pub fn connect<Transport: FrameTransport>(
         &mut self,
         pair_id: PairId,
-        transport: Transport,
+        mut transport: Transport,
     ) -> Result<Session<Transport>, SessionError> {
         let record = self
             .store
@@ -499,151 +417,161 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
             return Err(SessionError::NotPaired(record.disposition));
         }
         let granted_profiles = record.granted_profiles.clone();
-        let grants = record.grants_hash;
-        let local_private = record.local_private.clone();
-        let peer_public = record.peer_public.clone();
-        // Model: absent --connect--> connecting --transport_connected-->
-        // authenticating. The caller hands over a connected transport, so
-        // both requester-side steps happen here.
-        let transport_profile = transport.profile().to_owned();
-        let candidate_id = transport.candidate_id().to_owned();
-        let prologue =
-            crate::noise::session_prologue(WIRE_VERSION, pair_id, &grants, &transport_profile)
+        let core_record = record
+            .to_core_pair_record()
+            .map_err(|_| SessionError::EngineFault)?;
+        let mut handshake =
+            SessionHandshake::begin_requester(&core_record, ExplicitUserIntent::record())
                 .map_err(|_| SessionError::EngineFault)?;
-        let completed = match run_session_handshake(
-            HandshakeRole::Initiator,
-            transport,
-            &local_private,
-            &peer_public,
-            &prologue,
-        ) {
-            Ok(completed) => completed,
-            Err(crate::noise::HandshakeError::Transport(error)) => {
-                return Err(SessionError::Transport(error));
-            }
-            Err(_) => {
-                // Candidate failure: count toward the re-pairing hint
-                // without touching stored keys (Section 14.6, INV-18).
-                let mut failures = 0;
-                self.store
-                    .update(pair_id, &mut |entry| {
-                        entry.candidate_failures += 1;
-                        failures = entry.candidate_failures;
-                    })
-                    .map_err(SessionError::Store)?;
-                return Err(SessionError::HandshakeFailed {
-                    suggest_repairing: failures >= limits::CANDIDATE_FAILURE_HINT_THRESHOLD,
-                });
-            }
-        };
-        let session_id = derive_session_id(&completed.handshake_hash);
-        let mut channel = MessageChannel::new(completed.channel, session_id);
-        let nonce = Challenge::random().map_err(|_| SessionError::EngineFault)?;
-        let own_parameters = SessionParameters {
-            version: WIRE_VERSION,
-            suite: SESSION_SUITE.into(),
-            transport_profile,
-            candidate_id,
-            grants_hash: grants,
-        };
-        channel
-            .send(Body::SessionReady {
-                parameters: own_parameters.clone(),
-                nonce: nonce.0,
-            })
+
+        // Message 1 (Requester -> Proxy)
+        let m1 = handshake
+            .write_message()
+            .map_err(|_| SessionError::EngineFault)?;
+        transport
+            .send_frame(m1.as_bytes())
+            .map_err(SessionError::Transport)?;
+
+        // Message 2 (Proxy -> Requester)
+        let m2_bytes = transport.receive_frame().map_err(SessionError::Transport)?;
+        let m2 = BinaryFrame::reconstruct(m2_bytes)
             .map_err(|_| SessionError::Transport(TransportError::Failed))?;
-        match channel.receive() {
-            Inbound::Message(Body::SessionReady { parameters, .. }) => {
-                if parameters != own_parameters {
-                    return Err(SessionError::ParameterMismatch);
-                }
-            }
-            Inbound::Message(Body::Error { error, .. }) if error == ERROR_BUSY => {
-                return Err(SessionError::Busy);
-            }
-            Inbound::Message(Body::SessionClose { reason, .. }) => {
-                return Err(SessionError::ClosedByPeer(reason));
-            }
-            Inbound::Message(_) | Inbound::Violation => {
-                return Err(SessionError::ParameterMismatch);
-            }
-            Inbound::Transport(error) => return Err(SessionError::Transport(error)),
-            Inbound::Integrity => {
-                return Err(SessionError::Transport(TransportError::Failed));
-            }
+        if handshake.read_message(&m2).is_err() {
+            let mut failures = 0;
+            let _ = self.store.update(pair_id, &mut |entry| {
+                entry.candidate_failures += 1;
+                failures = entry.candidate_failures;
+            });
+            return Err(SessionError::HandshakeFailed {
+                suggest_repairing: failures >= limits::CANDIDATE_FAILURE_HINT_THRESHOLD,
+            });
         }
-        // ready_verified: the session is healthy and the candidate-failure
-        // count resets.
-        self.store
-            .update(pair_id, &mut |entry| entry.candidate_failures = 0)
-            .map_err(SessionError::Store)?;
+
+        if !handshake.is_complete() {
+            return Err(SessionError::EngineFault);
+        }
+
+        let mut auth = handshake
+            .into_authentication()
+            .map_err(|_| SessionError::EngineFault)?;
+        let session_id = auth.session_id();
+
+        let mut nonce = [0u8; 32];
+        getrandom::fill(&mut nonce).map_err(|_| SessionError::EngineFault)?;
+        let ready_frame = auth
+            .send_ready(nonce)
+            .map_err(|_| SessionError::Transport(TransportError::Failed))?;
+        transport
+            .send_frame(ready_frame.as_bytes())
+            .map_err(SessionError::Transport)?;
+
+        let peer_ready_bytes = transport.receive_frame().map_err(SessionError::Transport)?;
+        let peer_ready_frame = BinaryFrame::reconstruct(peer_ready_bytes)
+            .map_err(|_| SessionError::Transport(TransportError::Failed))?;
+        let now_ms = current_time_ms();
+        let mut store_adapter = CorePairStoreAdapter::new(&mut self.store);
+        auth.receive_ready(&mut store_adapter, &peer_ready_frame, now_ms)
+            .map_err(|err| match err {
+                refineid_rapp::SessionError::ParameterMismatch => SessionError::ParameterMismatch,
+                refineid_rapp::SessionError::IntegrityFailure => {
+                    SessionError::Transport(TransportError::Failed)
+                }
+                refineid_rapp::SessionError::AuthenticatedWire(_) => {
+                    SessionError::ParameterMismatch
+                }
+                _ => SessionError::EngineFault,
+            })?;
+
+        let endpoint = auth
+            .into_established()
+            .map_err(|_| SessionError::EngineFault)?;
+        let _ = self
+            .store
+            .update(pair_id, &mut |entry| entry.candidate_failures = 0);
+
         Ok(Session {
-            channel,
+            transport,
+            endpoint,
             pair_id,
+            session_id,
             state: SessionState::Healthy,
             granted_profiles,
             end: None,
         })
     }
 
-    /// Sends one liveness ping and verifies the echoed challenge
-    /// (Section 11).
+    /// Sends one liveness ping and verifies the echoed challenge.
     ///
     /// # Errors
-    ///
-    /// Fails when the session is not healthy or the exchange could not be
-    /// completed; the caller decides checking-state policy from the error.
+    /// Returns [`SessionError`] on closed session, challenge mismatch,
+    /// peer close, or transport loss.
     pub fn check_liveness<Transport: FrameTransport>(
         &mut self,
         session: &mut Session<Transport>,
     ) -> Result<(), SessionError> {
-        if session.state != SessionState::Healthy {
+        if session.state != SessionState::Healthy || session.end.is_some() {
             return Err(SessionError::EngineFault);
         }
-        let challenge = Challenge::random().map_err(|_| SessionError::EngineFault)?;
-        session
-            .channel
-            .send(Body::LivenessPing {
-                challenge,
-                last_received_sequence: session.channel.last_received_sequence(),
-            })
+        let mut challenge_bytes = [0u8; 32];
+        getrandom::fill(&mut challenge_bytes).map_err(|_| SessionError::EngineFault)?;
+        let challenge = PingChallenge::reconstruct(challenge_bytes);
+        let last = session.endpoint.last_received_sequence().unwrap_or(0);
+        let ping_msg = TypedMessage::LivenessPing(LivenessMessage {
+            challenge,
+            last_received_sequence: last,
+        });
+        let frame = session
+            .endpoint
+            .send(&ping_msg)
             .map_err(|_| SessionError::Transport(TransportError::Failed))?;
+        session
+            .transport
+            .send_frame(frame.as_bytes())
+            .map_err(SessionError::Transport)?;
+
         loop {
-            match session.channel.receive() {
-                Inbound::Message(Body::LivenessPong {
-                    challenge: echoed, ..
-                }) => {
-                    if echoed == challenge {
+            let recv_bytes = session.transport.receive_frame().map_err(|e| {
+                finish_close(session, SessionEnd::TransportLoss);
+                SessionError::Transport(e)
+            })?;
+            let frame = BinaryFrame::reconstruct(recv_bytes).map_err(|_| {
+                finish_close(session, SessionEnd::IntegrityFailure);
+                SessionError::Transport(TransportError::Failed)
+            })?;
+            let now_ms = current_time_ms();
+            let mut adapter = CorePairStoreAdapter::new(&mut self.store);
+            match session.endpoint.receive(&mut adapter, &frame, now_ms) {
+                Ok(ReceiveOutcome::Message(TypedMessage::LivenessPong(pong))) => {
+                    if pong.challenge == challenge {
                         return Ok(());
                     }
-                    // A pong whose challenge matches no outstanding ping is
-                    // a stale-reference race: discarded, not liveness proof.
                 }
-                Inbound::Message(Body::LivenessPing {
-                    challenge: peer_challenge,
-                    ..
-                }) => {
-                    session
-                        .channel
-                        .send(Body::LivenessPong {
-                            challenge: peer_challenge,
-                            last_received_sequence: session.channel.last_received_sequence(),
-                        })
-                        .map_err(|_| SessionError::Transport(TransportError::Failed))?;
+                Ok(ReceiveOutcome::Message(TypedMessage::LivenessPing(incoming_ping))) => {
+                    let reply_pong = TypedMessage::LivenessPong(LivenessMessage {
+                        challenge: incoming_ping.challenge,
+                        last_received_sequence: session
+                            .endpoint
+                            .last_received_sequence()
+                            .unwrap_or(0),
+                    });
+                    if let Ok(pong_frame) = session.endpoint.send(&reply_pong) {
+                        let _ = session.transport.send_frame(pong_frame.as_bytes());
+                    }
                 }
-                Inbound::Message(Body::SessionClose { reason, .. }) => {
-                    finish_close(session, SessionEnd::PeerClose(reason));
-                    return Err(SessionError::ClosedByPeer(reason));
+                Ok(ReceiveOutcome::Message(TypedMessage::SessionClose(close_msg))) => {
+                    self.apply_peer_close_reason(session.pair_id, close_msg.reason);
+                    finish_close(session, SessionEnd::PeerClose(close_msg.reason));
+                    return Err(SessionError::ClosedByPeer(close_msg.reason));
                 }
-                Inbound::Message(_) | Inbound::Violation => {
-                    self.handle_violation(session, None);
+                Ok(ReceiveOutcome::Message(_)) => {
+                    self.handle_violation(session);
                     return Err(SessionError::EngineFault);
                 }
-                Inbound::Transport(error) => {
-                    finish_close(session, SessionEnd::TransportLoss);
-                    return Err(SessionError::Transport(error));
+                Ok(ReceiveOutcome::PairRevoked { .. }) => {
+                    finish_close(session, SessionEnd::Violation);
+                    return Err(SessionError::EngineFault);
                 }
-                Inbound::Integrity => {
+                Ok(ReceiveOutcome::SessionClosed(_)) | Err(_) => {
                     finish_close(session, SessionEnd::IntegrityFailure);
                     return Err(SessionError::Transport(TransportError::Failed));
                 }
@@ -657,33 +585,28 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         session: &mut Session<Transport>,
         reason: CloseReason,
     ) {
-        if matches!(session.state, SessionState::Closed) {
+        if session.end.is_some() {
             return;
         }
-        let last = session.channel.last_received_sequence();
-        let _ = session.channel.send(Body::SessionClose {
+        let last = session.endpoint.last_received_sequence().unwrap_or(0);
+        let close_msg = TypedMessage::SessionClose(SessionCloseMessage {
             reason,
             last_received_sequence: last,
         });
+        if let Ok(frame) = session.endpoint.send(&close_msg) {
+            let _ = session.transport.send_frame(frame.as_bytes());
+        }
         finish_close(session, SessionEnd::LocalClose);
     }
 
-    /// Runs one typed operation to its outcome (Section 12).
-    ///
-    /// For a profile with a consequential command the engine sends the
-    /// request, waits for `operation.prepared`, journals its commit intent
-    /// durably, commits, and waits for the result. For a status-class
-    /// profile the proxy answers the request directly. Liveness pings from
-    /// the proxy are answered while waiting.
+    /// Runs one typed operation to its outcome.
     ///
     /// # Errors
-    ///
-    /// Admission failures leave the session untouched. After admission the
-    /// outcome always reflects the model's classification, including the
-    /// close classifications of Section 14.7.
+    /// Returns [`AdmissionError`] on admission failure, profile mismatch,
+    /// or session fault.
     #[allow(
         clippy::too_many_lines,
-        reason = "the operation loop is one state machine and reads best unsplit"
+        reason = "operation execution manages prepare, commit, progress, liveness, and result state transitions"
     )]
     pub fn execute<Transport: FrameTransport>(
         &mut self,
@@ -691,250 +614,91 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         operation: &CardOperation,
         expires_after_ms: u64,
     ) -> Result<OperationOutcome, AdmissionError> {
-        let profile = operation.profile();
-        let action = operation.action();
-        let (context, payload) = operation.wire_parts().map_err(AdmissionError::Operation)?;
-        // Admission (X-08, INV-02, INV-04).
-        if session.state != SessionState::Healthy {
+        let profile_name = operation.required_profile();
+        let profile_wire = profile_name.as_str();
+        if session.state != SessionState::Healthy || session.end.is_some() {
             return Err(AdmissionError::SessionNotHealthy);
         }
-        if !session.granted_profiles.iter().any(|name| name == profile) {
+        if !session
+            .granted_profiles
+            .iter()
+            .any(|name| name == profile_wire)
+        {
             return Err(AdmissionError::ProfileNotGranted);
         }
         let operation_id = OperationId::random().map_err(|_| AdmissionError::RandomUnavailable)?;
-        let hash = request_hash(
-            session.channel.session_id,
+        let now_ms = current_time_ms();
+        let request = OperationRequest::reconstruct(
             operation_id,
-            profile,
-            action,
-            &context,
-            &payload,
+            session.pair_id,
+            session.session_id,
+            profile_name,
+            now_ms,
+            expires_after_ms,
+            operation.clone(),
         )
-        .map_err(|_| AdmissionError::Encoding)?;
-        let consequential = operation.is_consequential();
-        let mut state =
-            advance_operation(OperationState::Idle, OperationEvent::OperationRequestSent)
-                .ok_or(AdmissionError::SessionNotHealthy)?;
+        .map_err(AdmissionError::Operation)?;
+        let req_hash = request
+            .request_hash()
+            .map_err(|_| AdmissionError::Encoding)?;
+        let consequential = request.operation.is_consequential();
+        let (action_wire, _, _) = request.wire_parts();
+
         self.journal
             .record(JournalEntry {
                 operation_id,
                 pair_id: session.pair_id,
-                request_hash: hash,
-                profile: profile.into(),
-                action: action.into(),
-                state,
+                request_hash: *req_hash.as_bytes(),
+                profile: profile_wire.into(),
+                action: action_wire.into(),
+                state: OperationState::Requested,
                 retry_prohibited: false,
                 reconciled_proxy_state: None,
             })
             .map_err(AdmissionError::Store)?;
-        if session
-            .channel
-            .send(Body::OperationRequest {
+
+        let Ok(frame) = session
+            .endpoint
+            .send(&TypedMessage::OperationRequest(request))
+        else {
+            let outcome = self.close_with_operation(
+                session,
                 operation_id,
-                profile: profile.into(),
-                action: action.into(),
-                request_hash: hash,
-                expires_after_ms,
-                context,
-                payload,
-            })
-            .is_err()
-        {
-            let outcome =
-                self.close_with_operation(session, operation_id, state, SessionEnd::TransportLoss);
+                OperationState::Requested,
+                SessionEnd::TransportLoss,
+            );
+            return Ok(outcome);
+        };
+        if session.transport.send_frame(frame.as_bytes()).is_err() {
+            let outcome = self.close_with_operation(
+                session,
+                operation_id,
+                OperationState::Requested,
+                SessionEnd::TransportLoss,
+            );
             return Ok(outcome);
         }
 
+        let mut state = OperationState::Requested;
         loop {
-            match session.channel.receive() {
-                Inbound::Message(Body::LivenessPing { challenge, .. }) => {
-                    let last = session.channel.last_received_sequence();
-                    if session
-                        .channel
-                        .send(Body::LivenessPong {
-                            challenge,
-                            last_received_sequence: last,
-                        })
-                        .is_err()
-                    {
-                        let outcome = self.close_with_operation(
-                            session,
+            let frame_bytes = match session.transport.receive_frame() {
+                Ok(bytes) => bytes,
+                Err(TransportError::TimedOut) if !matches!(state, OperationState::Committed) => {
+                    let cancel_msg = TypedMessage::OperationCancel(CancelMessage {
+                        reference: OperationReference {
                             operation_id,
-                            state,
-                            SessionEnd::TransportLoss,
-                        );
-                        return Ok(outcome);
-                    }
-                }
-                Inbound::Message(Body::OperationPrepared {
-                    operation_id: echoed_id,
-                    request_hash: echoed_hash,
-                }) => {
-                    if echoed_id != operation_id {
-                        // Stale-reference race (policy class 3).
-                        let _ = session.channel.send(Body::Error {
-                            error: ERROR_UNKNOWN_OPERATION.into(),
-                            operation_id: Some(echoed_id),
-                        });
-                        continue;
-                    }
-                    if echoed_hash != hash || !consequential {
-                        self.handle_violation(session, Some((operation_id, state)));
-                        return Ok(self.classify_after_close(operation_id, state));
-                    }
-                    let Some(next) = advance_operation(state, OperationEvent::PreparedReceived)
-                    else {
-                        self.handle_violation(session, Some((operation_id, state)));
-                        return Ok(self.classify_after_close(operation_id, state));
-                    };
-                    state = next;
-                    self.journal_state(operation_id, state, false);
-                    // The durable commit intent precedes operation.commit.
-                    let Some(committed) = advance_operation(state, OperationEvent::CommitSent)
-                    else {
-                        self.handle_violation(session, Some((operation_id, state)));
-                        return Ok(self.classify_after_close(operation_id, state));
-                    };
-                    self.journal_state(operation_id, committed, false);
-                    state = committed;
-                    if session
-                        .channel
-                        .send(Body::OperationCommit {
-                            operation_id,
-                            request_hash: hash,
-                        })
-                        .is_err()
-                    {
-                        let outcome = self.close_with_operation(
-                            session,
-                            operation_id,
-                            state,
-                            SessionEnd::TransportLoss,
-                        );
-                        return Ok(outcome);
-                    }
-                }
-                Inbound::Message(Body::OperationResult {
-                    operation_id: echoed_id,
-                    request_hash: echoed_hash,
-                    status,
-                    error,
-                    body,
-                }) => {
-                    if echoed_id != operation_id {
-                        let _ = session.channel.send(Body::Error {
-                            error: ERROR_UNKNOWN_OPERATION.into(),
-                            operation_id: Some(echoed_id),
-                        });
-                        continue;
-                    }
-                    if echoed_hash != hash {
-                        self.handle_violation(session, Some((operation_id, state)));
-                        return Ok(self.classify_after_close(operation_id, state));
-                    }
-                    let event = match status {
-                        ResultStatus::Completed => OperationEvent::ResultCompletedReceived,
-                        ResultStatus::Denied => OperationEvent::ResultDeniedReceived,
-                        ResultStatus::Cancelled => OperationEvent::ResultCancelledReceived,
-                        ResultStatus::Rejected => OperationEvent::ResultRejectedReceived,
-                        ResultStatus::CredentialRejected => {
-                            OperationEvent::ResultCredentialRejectedReceived
-                        }
-                        ResultStatus::Ambiguous => OperationEvent::ResultAmbiguousReceived,
-                    };
-                    // The completed-in-requested row is guarded by the
-                    // profile having no consequential command.
-                    if status == ResultStatus::Completed
-                        && state == OperationState::Requested
-                        && consequential
-                    {
-                        self.handle_violation(session, Some((operation_id, state)));
-                        return Ok(self.classify_after_close(operation_id, state));
-                    }
-                    let Some(next) = advance_operation(state, event) else {
-                        self.handle_violation(session, Some((operation_id, state)));
-                        return Ok(self.classify_after_close(operation_id, state));
-                    };
-                    // Section 13.2.1: a completed body must answer exactly
-                    // this operation's schema, and every other status
-                    // carries an empty body. A mismatch in a successfully
-                    // decrypted message is an authenticated violation.
-                    if next == OperationState::Completed {
-                        let Ok(result) = CardOperationResult::from_body(operation, body) else {
-                            self.handle_violation(session, Some((operation_id, state)));
-                            return Ok(self.classify_after_close(operation_id, state));
-                        };
-                        state = next;
-                        self.journal_state(operation_id, state, false);
-                        let _ = session.channel.send(Body::OperationResultAck {
-                            operation_id,
-                            request_hash: hash,
-                        });
-                        return Ok(OperationOutcome::Completed(result));
-                    }
-                    if !body.is_empty() {
-                        self.handle_violation(session, Some((operation_id, state)));
-                        return Ok(self.classify_after_close(operation_id, state));
-                    }
-                    state = next;
-                    let retry_prohibited = state == OperationState::Ambiguous;
-                    self.journal_state(operation_id, state, retry_prohibited);
-                    return Ok(match state {
-                        OperationState::Denied => OperationOutcome::Denied,
-                        OperationState::Cancelled => OperationOutcome::Cancelled,
-                        OperationState::Rejected => OperationOutcome::Rejected(error),
-                        OperationState::CredentialRejected => {
-                            // INV-16 and Section 13.4: the authenticated
-                            // credential_rejected result durably revokes the
-                            // pairing on this peer before the terminal
-                            // outcome is reported; the proxy then closes.
-                            self.revoke_pairing(session.pair_id, false);
-                            self.await_close_after_credential_rejection(session);
-                            OperationOutcome::CredentialRejected
-                        }
-                        _ => OperationOutcome::Ambiguous,
-                    });
-                }
-                Inbound::Message(Body::SessionClose { reason, .. }) => {
-                    let end = SessionEnd::PeerClose(reason);
-                    self.apply_peer_close_reason(session.pair_id, reason);
-                    let outcome = self.close_with_operation(session, operation_id, state, end);
-                    return Ok(outcome);
-                }
-                Inbound::Message(Body::Error { error, .. }) if error == ERROR_UNKNOWN_OPERATION => {
-                    // The peer answered something of ours as stale: a race,
-                    // no state change (policy class 3).
-                }
-                Inbound::Message(_) | Inbound::Violation => {
-                    self.handle_violation(session, Some((operation_id, state)));
-                    return Ok(self.classify_after_close(operation_id, state));
-                }
-                Inbound::Transport(TransportError::TimedOut)
-                    if !matches!(state, OperationState::Committed) =>
-                {
-                    // Local expiry before commit cancels safely
-                    // (Section 12.4).
-                    let Some(next) =
-                        advance_operation(state, OperationEvent::CancelSentOrRequestExpired)
-                    else {
-                        let outcome = self.close_with_operation(
-                            session,
-                            operation_id,
-                            state,
-                            SessionEnd::TransportLoss,
-                        );
-                        return Ok(outcome);
-                    };
-                    let _ = session.channel.send(Body::OperationCancel {
-                        operation_id,
-                        request_hash: hash,
+                            request_hash: req_hash,
+                        },
                         reason: Some("expired".into()),
                     });
-                    state = next;
+                    if let Ok(cancel_frame) = session.endpoint.send(&cancel_msg) {
+                        let _ = session.transport.send_frame(cancel_frame.as_bytes());
+                    }
+                    state = OperationState::Cancelled;
                     self.journal_state(operation_id, state, false);
                     return Ok(OperationOutcome::Cancelled);
                 }
-                Inbound::Transport(_) => {
+                Err(_) => {
                     let outcome = self.close_with_operation(
                         session,
                         operation_id,
@@ -943,7 +707,170 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
                     );
                     return Ok(outcome);
                 }
-                Inbound::Integrity => {
+            };
+            let Ok(frame) = BinaryFrame::reconstruct(frame_bytes) else {
+                let outcome = self.close_with_operation(
+                    session,
+                    operation_id,
+                    state,
+                    SessionEnd::IntegrityFailure,
+                );
+                return Ok(outcome);
+            };
+            let now_ms = current_time_ms();
+            let mut store_adapter = CorePairStoreAdapter::new(&mut self.store);
+            let Ok(outcome) = session.endpoint.receive(&mut store_adapter, &frame, now_ms) else {
+                let outcome = self.close_with_operation(
+                    session,
+                    operation_id,
+                    state,
+                    SessionEnd::IntegrityFailure,
+                );
+                return Ok(outcome);
+            };
+            match outcome {
+                ReceiveOutcome::Message(msg) => match msg {
+                    TypedMessage::LivenessPing(incoming_ping) => {
+                        let reply_pong = TypedMessage::LivenessPong(LivenessMessage {
+                            challenge: incoming_ping.challenge,
+                            last_received_sequence: session
+                                .endpoint
+                                .last_received_sequence()
+                                .unwrap_or(0),
+                        });
+                        if let Ok(pong_frame) = session.endpoint.send(&reply_pong) {
+                            let _ = session.transport.send_frame(pong_frame.as_bytes());
+                        }
+                    }
+                    TypedMessage::OperationPrepared(prepared_ref) => {
+                        if prepared_ref.operation_id != operation_id {
+                            let err_msg =
+                                TypedMessage::Error(ProtocolErrorMessage::UnknownOperation(Some(
+                                    prepared_ref.operation_id,
+                                )));
+                            if let Ok(err_frame) = session.endpoint.send(&err_msg) {
+                                let _ = session.transport.send_frame(err_frame.as_bytes());
+                            }
+                            continue;
+                        }
+                        if prepared_ref.request_hash != req_hash
+                            || !consequential
+                            || state != OperationState::Requested
+                        {
+                            self.handle_violation(session);
+                            return Ok(self.classify_after_close(operation_id, state));
+                        }
+                        state = OperationState::Committed;
+                        self.journal_state(operation_id, state, false);
+                        let commit_msg = TypedMessage::OperationCommit(prepared_ref);
+                        let Ok(commit_frame) = session.endpoint.send(&commit_msg) else {
+                            let outcome = self.close_with_operation(
+                                session,
+                                operation_id,
+                                state,
+                                SessionEnd::TransportLoss,
+                            );
+                            return Ok(outcome);
+                        };
+                        if session
+                            .transport
+                            .send_frame(commit_frame.as_bytes())
+                            .is_err()
+                        {
+                            let outcome = self.close_with_operation(
+                                session,
+                                operation_id,
+                                state,
+                                SessionEnd::TransportLoss,
+                            );
+                            return Ok(outcome);
+                        }
+                    }
+                    TypedMessage::OperationResult(result_msg) => {
+                        if result_msg.operation_id != operation_id {
+                            let err_msg =
+                                TypedMessage::Error(ProtocolErrorMessage::UnknownOperation(Some(
+                                    result_msg.operation_id,
+                                )));
+                            if let Ok(err_frame) = session.endpoint.send(&err_msg) {
+                                let _ = session.transport.send_frame(err_frame.as_bytes());
+                            }
+                            continue;
+                        }
+                        if result_msg.request_hash != req_hash {
+                            self.handle_violation(session);
+                            return Ok(self.classify_after_close(operation_id, state));
+                        }
+                        if result_msg.status == ResultStatus::Completed
+                            && state == OperationState::Requested
+                            && consequential
+                        {
+                            self.handle_violation(session);
+                            return Ok(self.classify_after_close(operation_id, state));
+                        }
+                        match result_msg.status {
+                            ResultStatus::Completed => {
+                                let Some(result) = result_msg.result else {
+                                    self.handle_violation(session);
+                                    return Ok(self.classify_after_close(operation_id, state));
+                                };
+                                state = OperationState::Completed;
+                                self.journal_state(operation_id, state, false);
+                                let ack_msg =
+                                    TypedMessage::OperationResultAck(OperationReference {
+                                        operation_id,
+                                        request_hash: req_hash,
+                                    });
+                                if let Ok(ack_frame) = session.endpoint.send(&ack_msg) {
+                                    let _ = session.transport.send_frame(ack_frame.as_bytes());
+                                }
+                                return Ok(OperationOutcome::Completed(result));
+                            }
+                            ResultStatus::Denied => {
+                                state = OperationState::Denied;
+                                self.journal_state(operation_id, state, false);
+                                return Ok(OperationOutcome::Denied);
+                            }
+                            ResultStatus::Cancelled => {
+                                state = OperationState::Cancelled;
+                                self.journal_state(operation_id, state, false);
+                                return Ok(OperationOutcome::Cancelled);
+                            }
+                            ResultStatus::Rejected => {
+                                state = OperationState::Rejected;
+                                self.journal_state(operation_id, state, false);
+                                return Ok(OperationOutcome::Rejected(
+                                    result_msg.error.map(|e| e.as_str().to_owned()),
+                                ));
+                            }
+                            ResultStatus::CredentialRejected => {
+                                state = OperationState::CredentialRejected;
+                                self.revoke_pairing(session.pair_id, false);
+                                self.journal_state(operation_id, state, true);
+                                self.await_close_after_credential_rejection(session);
+                                return Ok(OperationOutcome::CredentialRejected);
+                            }
+                            ResultStatus::Ambiguous => {
+                                state = OperationState::Ambiguous;
+                                self.journal_state(operation_id, state, true);
+                                return Ok(OperationOutcome::Ambiguous);
+                            }
+                        }
+                    }
+                    TypedMessage::SessionClose(close_msg) => {
+                        let end = SessionEnd::PeerClose(close_msg.reason);
+                        self.apply_peer_close_reason(session.pair_id, close_msg.reason);
+                        let outcome = self.close_with_operation(session, operation_id, state, end);
+                        return Ok(outcome);
+                    }
+                    TypedMessage::OperationProgress(_)
+                    | TypedMessage::Error(ProtocolErrorMessage::UnknownOperation(_)) => {}
+                    _ => {
+                        self.handle_violation(session);
+                        return Ok(self.classify_after_close(operation_id, state));
+                    }
+                },
+                ReceiveOutcome::SessionClosed(_) => {
                     let outcome = self.close_with_operation(
                         session,
                         operation_id,
@@ -952,43 +879,63 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
                     );
                     return Ok(outcome);
                 }
+                ReceiveOutcome::PairRevoked { .. } => {
+                    let outcome = self.close_with_operation(
+                        session,
+                        operation_id,
+                        state,
+                        SessionEnd::Violation,
+                    );
+                    return Ok(outcome);
+                }
             }
         }
     }
 
-    /// Queries the proxy journal for an earlier operation (Section 12.6).
-    ///
-    /// The authenticated answer is stored as a journal annotation; it
-    /// transitions nothing.
+    /// Queries the proxy journal for an earlier operation.
     ///
     /// # Errors
-    ///
-    /// Fails when the session is unusable or the answer violates the
-    /// protocol.
+    /// Returns [`SessionError`] on closed session, peer close,
+    /// violation, or transport loss.
     pub fn reconcile_status<Transport: FrameTransport>(
         &mut self,
         session: &mut Session<Transport>,
         operation_id: OperationId,
     ) -> Result<Option<String>, SessionError> {
-        if session.state != SessionState::Healthy {
+        if session.state != SessionState::Healthy || session.end.is_some() {
             return Err(SessionError::EngineFault);
         }
-        session
-            .channel
-            .send(Body::OperationStatusRequest { operation_id })
+        let req_msg = TypedMessage::OperationStatusRequest(operation_id);
+        let frame = session
+            .endpoint
+            .send(&req_msg)
             .map_err(|_| SessionError::Transport(TransportError::Failed))?;
+        session
+            .transport
+            .send_frame(frame.as_bytes())
+            .map_err(SessionError::Transport)?;
+
         loop {
-            match session.channel.receive() {
-                Inbound::Message(Body::OperationStatus {
-                    operation_id: echoed,
-                    known,
-                    state,
-                    ..
-                }) => {
-                    if echoed != operation_id {
+            let recv_bytes = session.transport.receive_frame().map_err(|e| {
+                finish_close(session, SessionEnd::TransportLoss);
+                SessionError::Transport(e)
+            })?;
+            let frame = BinaryFrame::reconstruct(recv_bytes).map_err(|_| {
+                finish_close(session, SessionEnd::IntegrityFailure);
+                SessionError::Transport(TransportError::Failed)
+            })?;
+            let now_ms = current_time_ms();
+            let mut adapter = CorePairStoreAdapter::new(&mut self.store);
+            match session.endpoint.receive(&mut adapter, &frame, now_ms) {
+                Ok(ReceiveOutcome::Message(TypedMessage::OperationStatus(report))) => {
+                    if report.operation_id != operation_id {
                         continue;
                     }
-                    let annotation = known.then_some(state).flatten();
+                    let annotation = if report.known {
+                        report.state.map(|s| format!("{s:?}"))
+                    } else {
+                        None
+                    };
                     if let Ok(entry) = self.journal.get(operation_id) {
                         let mut updated = entry.clone();
                         updated.reconciled_proxy_state.clone_from(&annotation);
@@ -996,30 +943,32 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
                     }
                     return Ok(annotation);
                 }
-                Inbound::Message(Body::LivenessPing { challenge, .. }) => {
-                    let last = session.channel.last_received_sequence();
-                    session
-                        .channel
-                        .send(Body::LivenessPong {
-                            challenge,
-                            last_received_sequence: last,
-                        })
-                        .map_err(|_| SessionError::Transport(TransportError::Failed))?;
+                Ok(ReceiveOutcome::Message(TypedMessage::LivenessPing(incoming_ping))) => {
+                    let reply_pong = TypedMessage::LivenessPong(LivenessMessage {
+                        challenge: incoming_ping.challenge,
+                        last_received_sequence: session
+                            .endpoint
+                            .last_received_sequence()
+                            .unwrap_or(0),
+                    });
+                    if let Ok(pong_frame) = session.endpoint.send(&reply_pong) {
+                        let _ = session.transport.send_frame(pong_frame.as_bytes());
+                    }
                 }
-                Inbound::Message(Body::SessionClose { reason, .. }) => {
-                    self.apply_peer_close_reason(session.pair_id, reason);
-                    finish_close(session, SessionEnd::PeerClose(reason));
-                    return Err(SessionError::ClosedByPeer(reason));
+                Ok(ReceiveOutcome::Message(TypedMessage::SessionClose(close_msg))) => {
+                    self.apply_peer_close_reason(session.pair_id, close_msg.reason);
+                    finish_close(session, SessionEnd::PeerClose(close_msg.reason));
+                    return Err(SessionError::ClosedByPeer(close_msg.reason));
                 }
-                Inbound::Message(_) | Inbound::Violation => {
-                    self.handle_violation(session, None);
+                Ok(ReceiveOutcome::Message(_)) => {
+                    self.handle_violation(session);
                     return Err(SessionError::EngineFault);
                 }
-                Inbound::Transport(error) => {
-                    finish_close(session, SessionEnd::TransportLoss);
-                    return Err(SessionError::Transport(error));
+                Ok(ReceiveOutcome::SessionClosed(_) | ReceiveOutcome::PairRevoked { .. }) => {
+                    finish_close(session, SessionEnd::Violation);
+                    return Err(SessionError::EngineFault);
                 }
-                Inbound::Integrity => {
+                Err(_) => {
                     finish_close(session, SessionEnd::IntegrityFailure);
                     return Err(SessionError::Transport(TransportError::Failed));
                 }
@@ -1049,8 +998,7 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         }
     }
 
-    /// Durably revokes the pairing: destroys both stored keys and leaves
-    /// the record as the tombstone (Section 14.6).
+    /// Durably revokes the pairing.
     fn revoke_pairing(&mut self, pair_id: PairId, peer_initiated: bool) {
         let _ = self.store.update(pair_id, &mut |entry| {
             entry.disposition = PairingDisposition::Revoked;
@@ -1060,8 +1008,7 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         });
     }
 
-    /// Applies a peer close reason's pairing effect (Sections 13.4
-    /// and 14.6).
+    /// Applies a peer close reason's pairing effect.
     fn apply_peer_close_reason(&mut self, pair_id: PairId, reason: CloseReason) {
         match reason {
             CloseReason::PairingRevoked
@@ -1073,21 +1020,17 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         }
     }
 
-    /// Handles an authenticated protocol violation (policy class 4): the
-    /// first violation immediately revokes the pairing, with one
-    /// best-effort close notice (Section 14.6).
-    fn handle_violation<Transport: FrameTransport>(
-        &mut self,
-        session: &mut Session<Transport>,
-        operation: Option<(OperationId, OperationState)>,
-    ) {
-        let last = session.channel.last_received_sequence();
-        let _ = session.channel.send(Body::SessionClose {
+    /// Handles an authenticated protocol violation: revokes pairing and closes session.
+    fn handle_violation<Transport: FrameTransport>(&mut self, session: &mut Session<Transport>) {
+        let last = session.endpoint.last_received_sequence().unwrap_or(0);
+        let close_msg = TypedMessage::SessionClose(SessionCloseMessage {
             reason: CloseReason::ProtocolViolation,
             last_received_sequence: last,
         });
+        if let Ok(frame) = session.endpoint.send(&close_msg) {
+            let _ = session.transport.send_frame(frame.as_bytes());
+        }
         self.revoke_pairing(session.pair_id, false);
-        let _ = operation;
         finish_close(session, SessionEnd::Violation);
     }
 
@@ -1097,29 +1040,20 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         operation_id: OperationId,
         state: OperationState,
     ) -> OperationOutcome {
-        if state.is_terminal() {
-            return match state {
-                OperationState::Denied => OperationOutcome::Denied,
-                OperationState::Rejected => OperationOutcome::Rejected(None),
-                OperationState::CredentialRejected => OperationOutcome::CredentialRejected,
-                OperationState::Ambiguous => OperationOutcome::Ambiguous,
-                _ => OperationOutcome::Cancelled,
-            };
-        }
-        // Section 14.7: closure before commit produces cancelled; closure
-        // with a committed operation produces ambiguous on the requester.
-        let event = if state == OperationState::Committed {
-            OperationEvent::SessionClosedPostCommit
-        } else {
-            OperationEvent::SessionClosedPreCommit
-        };
-        let classified = advance_operation(state, event).unwrap_or(OperationState::Ambiguous);
-        let retry_prohibited = classified == OperationState::Ambiguous;
-        self.journal_state(operation_id, classified, retry_prohibited);
-        if classified == OperationState::Ambiguous {
-            OperationOutcome::Ambiguous
-        } else {
-            OperationOutcome::Cancelled
+        match state {
+            OperationState::Denied => OperationOutcome::Denied,
+            OperationState::Rejected => OperationOutcome::Rejected(None),
+            OperationState::CredentialRejected => OperationOutcome::CredentialRejected,
+            OperationState::Completed | OperationState::Ambiguous => OperationOutcome::Ambiguous,
+            OperationState::Cancelled => OperationOutcome::Cancelled,
+            OperationState::Committed => {
+                self.journal_state(operation_id, OperationState::Ambiguous, true);
+                OperationOutcome::Ambiguous
+            }
+            _ => {
+                self.journal_state(operation_id, OperationState::Cancelled, false);
+                OperationOutcome::Cancelled
+            }
         }
     }
 
@@ -1128,12 +1062,22 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         &mut self,
         session: &mut Session<Transport>,
     ) {
-        let end = match session.channel.receive() {
-            Inbound::Message(Body::SessionClose { reason, .. }) => {
-                self.apply_peer_close_reason(session.pair_id, reason);
-                SessionEnd::PeerClose(reason)
+        let Ok(frame_bytes) = session.transport.receive_frame() else {
+            finish_close(session, SessionEnd::TransportLoss);
+            return;
+        };
+        let Ok(frame) = BinaryFrame::reconstruct(frame_bytes) else {
+            finish_close(session, SessionEnd::IntegrityFailure);
+            return;
+        };
+        let now_ms = current_time_ms();
+        let mut store_adapter = CorePairStoreAdapter::new(&mut self.store);
+        let end = match session.endpoint.receive(&mut store_adapter, &frame, now_ms) {
+            Ok(ReceiveOutcome::Message(TypedMessage::SessionClose(msg))) => {
+                self.apply_peer_close_reason(session.pair_id, msg.reason);
+                SessionEnd::PeerClose(msg.reason)
             }
-            Inbound::Integrity => SessionEnd::IntegrityFailure,
+            Ok(ReceiveOutcome::SessionClosed(_)) => SessionEnd::IntegrityFailure,
             _ => SessionEnd::TransportLoss,
         };
         finish_close(session, end);
@@ -1152,30 +1096,20 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
     }
 }
 
-/// Walks the session machine into `closed` and records the end.
+/// Walks the session into closed and records the end.
 fn finish_close<Transport: FrameTransport>(session: &mut Session<Transport>, end: SessionEnd) {
-    let event = match end {
-        SessionEnd::LocalClose => SessionEvent::UserDisconnect,
-        SessionEnd::PeerClose(_) => SessionEvent::PeerCloseReceived,
-        SessionEnd::TransportLoss => SessionEvent::TransportFailed,
-        SessionEnd::IntegrityFailure => SessionEvent::SessionIntegrityFailed,
-        SessionEnd::Violation => SessionEvent::AuthenticatedProtocolViolation,
-    };
-    if let Some(closing) = advance_session(session.state, event) {
-        session.state = closing;
-    }
-    if let Some(closed) = advance_session(session.state, SessionEvent::CloseCompleteOrDeadline) {
-        session.state = closed;
-    }
+    session.endpoint.close_session();
+    session.state = SessionState::Closed;
     session.end = Some(end);
 }
 
-/// Advances one operation state through the requester projection.
-fn advance_operation(from: OperationState, event: OperationEvent) -> Option<OperationState> {
-    requester_transition(OPERATION_TRANSITIONS, from, event).map(|transition| transition.to)
-}
-
-/// Advances one session state through the requester projection.
-fn advance_session(from: SessionState, event: SessionEvent) -> Option<SessionState> {
-    requester_transition(SESSION_TRANSITIONS, from, event).map(|transition| transition.to)
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "milliseconds since Unix epoch fits safely in u64"
+)]
+fn current_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }

@@ -376,7 +376,7 @@ mod tests {
     fn record(pair_id: PairId) -> PairingRecord {
         PairingRecord {
             pair_id,
-            rendezvous_token: RendezvousToken([9; 16]),
+            rendezvous_token: RendezvousToken::from_array([9; 16]),
             local_private: Zeroizing::new(vec![1; 32]),
             local_public: vec![2; 32],
             peer_public: vec![3; 32],
@@ -391,6 +391,8 @@ mod tests {
             signature_cert: None,
             root_ca: None,
             intermediate_ca: None,
+            candidate_id: None,
+            transport_profile: None,
         }
     }
 
@@ -407,7 +409,7 @@ mod tests {
         delete_pairing_set().expect("clear before test");
         let _cleanup = Cleanup;
 
-        let pair_id = PairId([7; 16]);
+        let pair_id = PairId::from_array([7; 16]);
         let mut store = CredentialPairingStore::load().expect("load empty store");
         assert!(store.is_empty());
         store.insert(record(pair_id)).expect("insert");

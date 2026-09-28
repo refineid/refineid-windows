@@ -17,7 +17,9 @@ name = "refineid_rapp_ffi"
 
 [dependencies]
 refineid-rapp-core.workspace = true
+refineid-rapp.workspace = true
 refineid-windows-credential-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 hex.workspace = true
+getrandom.workspace = true

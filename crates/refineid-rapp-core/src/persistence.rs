@@ -24,7 +24,8 @@ const PAIRING_BLOB_MAGIC: &[u8] = b"RAPP-pair-record";
 /// Supported encoding revisions.
 const PAIRING_BLOB_VERSION_1: u8 = 1;
 const PAIRING_BLOB_VERSION_2: u8 = 2;
-const PAIRING_BLOB_VERSION: u8 = 3;
+const PAIRING_BLOB_VERSION_3: u8 = 3;
+const PAIRING_BLOB_VERSION: u8 = 4;
 
 /// Format tag identifying a whole stored pairing set.
 const PAIRING_SET_MAGIC: &[u8] = b"RAPP-pair-set";
@@ -94,8 +95,8 @@ pub fn encode_pairing_record(record: &PairingRecord) -> Zeroizing<Vec<u8>> {
     let mut out = Zeroizing::new(Vec::new());
     out.extend_from_slice(PAIRING_BLOB_MAGIC);
     out.push(PAIRING_BLOB_VERSION);
-    out.extend_from_slice(&record.pair_id.0);
-    out.extend_from_slice(&record.rendezvous_token.0);
+    out.extend_from_slice(record.pair_id.as_bytes());
+    out.extend_from_slice(record.rendezvous_token.as_bytes());
     out.extend_from_slice(&record.grants_hash);
     out.push(disposition_tag(record.disposition));
     out.push(if record.peer_initiated_termination {
@@ -117,6 +118,11 @@ pub fn encode_pairing_record(record: &PairingRecord) -> Zeroizing<Vec<u8>> {
     put_optional_bytes(&mut out, record.signature_cert.as_deref());
     put_optional_bytes(&mut out, record.root_ca.as_deref());
     put_optional_bytes(&mut out, record.intermediate_ca.as_deref());
+    put_optional_bytes(&mut out, record.candidate_id.as_deref().map(str::as_bytes));
+    put_optional_bytes(
+        &mut out,
+        record.transport_profile.as_deref().map(str::as_bytes),
+    );
     out
 }
 
@@ -134,13 +140,14 @@ pub fn decode_pairing_record(blob: &[u8]) -> Result<PairingRecord, PairingCodecE
     let version = reader.take_u8()?;
     if version != PAIRING_BLOB_VERSION_1
         && version != PAIRING_BLOB_VERSION_2
+        && version != PAIRING_BLOB_VERSION_3
         && version != PAIRING_BLOB_VERSION
     {
         return Err(PairingCodecError::UnsupportedVersion { found: version });
     }
 
-    let pair_id = PairId(reader.take_array()?);
-    let rendezvous_token = RendezvousToken(reader.take_array()?);
+    let pair_id = PairId::from_array(reader.take_array()?);
+    let rendezvous_token = RendezvousToken::from_array(reader.take_array()?);
     let grants_hash = reader.take_array()?;
     let disposition = disposition_from_tag(reader.take_u8()?)?;
     let peer_initiated_termination = boolean_from_tag(reader.take_u8()?)?;
@@ -172,6 +179,27 @@ pub fn decode_pairing_record(blob: &[u8]) -> Result<PairingRecord, PairingCodecE
     } else {
         (None, None)
     };
+    let (candidate_id, transport_profile) = if version >= 4 {
+        let cid = match reader.take_optional_bytes()? {
+            Some(bytes) => Some(
+                core::str::from_utf8(bytes)
+                    .map_err(|_| PairingCodecError::InvalidText)?
+                    .to_owned(),
+            ),
+            None => None,
+        };
+        let tprof = match reader.take_optional_bytes()? {
+            Some(bytes) => Some(
+                core::str::from_utf8(bytes)
+                    .map_err(|_| PairingCodecError::InvalidText)?
+                    .to_owned(),
+            ),
+            None => None,
+        };
+        (cid, tprof)
+    } else {
+        (None, None)
+    };
 
     reader.finish()?;
 
@@ -192,6 +220,8 @@ pub fn decode_pairing_record(blob: &[u8]) -> Result<PairingRecord, PairingCodecE
         signature_cert,
         root_ca,
         intermediate_ca,
+        candidate_id,
+        transport_profile,
     })
 }
 
@@ -386,8 +416,8 @@ mod tests {
 
     fn sample() -> PairingRecord {
         PairingRecord {
-            pair_id: PairId([7; 16]),
-            rendezvous_token: RendezvousToken([9; 16]),
+            pair_id: PairId::from_array([7; 16]),
+            rendezvous_token: RendezvousToken::from_array([9; 16]),
             local_private: Zeroizing::new(vec![1; 32]),
             local_public: vec![2; 32],
             peer_public: vec![3; 32],
@@ -405,6 +435,8 @@ mod tests {
             signature_cert: Some(vec![0x30, 0x82, 0x02, 0x00]),
             root_ca: Some(vec![0x30, 0x82, 0x03, 0x00]),
             intermediate_ca: Some(vec![0x30, 0x82, 0x04, 0x00]),
+            candidate_id: Some("stream-1".into()),
+            transport_profile: Some("stream.v1".into()),
         }
     }
 
@@ -431,6 +463,8 @@ mod tests {
         assert_eq!(left.signature_cert, right.signature_cert);
         assert_eq!(left.root_ca, right.root_ca);
         assert_eq!(left.intermediate_ca, right.intermediate_ca);
+        assert_eq!(left.candidate_id, right.candidate_id);
+        assert_eq!(left.transport_profile, right.transport_profile);
     }
 
     #[test]
@@ -455,7 +489,7 @@ mod tests {
     #[test]
     fn round_trips_a_multi_record_set() {
         let mut second = sample();
-        second.pair_id = PairId([8; 16]);
+        second.pair_id = PairId::from_array([8; 16]);
         second.peer_display_name = "Holder's Tablet".into();
         let records = vec![sample(), second];
         let decoded = decode_pairing_records(&encode_pairing_records(&records)).unwrap();
@@ -525,8 +559,8 @@ mod tests {
         v1_blob.extend_from_slice(PAIRING_BLOB_MAGIC);
         v1_blob.push(1); // Version 1
         let rec = sample();
-        v1_blob.extend_from_slice(&rec.pair_id.0);
-        v1_blob.extend_from_slice(&rec.rendezvous_token.0);
+        v1_blob.extend_from_slice(rec.pair_id.as_bytes());
+        v1_blob.extend_from_slice(rec.rendezvous_token.as_bytes());
         v1_blob.extend_from_slice(&rec.grants_hash);
         v1_blob.push(0); // Paired
         v1_blob.push(0); // peer_initiated = false
@@ -556,8 +590,8 @@ mod tests {
         v2_blob.extend_from_slice(PAIRING_BLOB_MAGIC);
         v2_blob.push(2); // Version 2
         let rec = sample();
-        v2_blob.extend_from_slice(&rec.pair_id.0);
-        v2_blob.extend_from_slice(&rec.rendezvous_token.0);
+        v2_blob.extend_from_slice(rec.pair_id.as_bytes());
+        v2_blob.extend_from_slice(rec.rendezvous_token.as_bytes());
         v2_blob.extend_from_slice(&rec.grants_hash);
         v2_blob.push(0); // Paired
         v2_blob.push(0); // peer_initiated = false
