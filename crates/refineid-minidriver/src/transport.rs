@@ -288,7 +288,7 @@ impl RemoteCardTransport {
 
         // 4. Fallback listener check for reverse-dial mock test harnesses (short timeout).
         let listen_timeout = Duration::from_secs(2);
-        let listen_endpoint = "0.0.0.0:47110";
+        let listen_endpoint = "127.0.0.1:47110";
         if let Ok(listener) = StreamListener::bind(listen_endpoint, candidate_id, listen_timeout)
             && let Ok(Some(StreamAccept::Session {
                 rendezvous_token,
