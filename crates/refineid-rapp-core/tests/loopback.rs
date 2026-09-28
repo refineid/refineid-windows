@@ -41,6 +41,12 @@ use refineid_rapp_core::transport::{FrameTransport, MEMORY_PROFILE, MemoryTransp
 const DEADLINE: Duration = Duration::from_secs(2);
 /// The candidate identifier used by every loopback test.
 const CANDIDATE: &str = "loopback-1";
+/// Test offer TTL in milliseconds.
+const TEST_OFFER_TTL_MS: u64 = 120_000;
+/// Test monotonic timestamp in milliseconds.
+const TEST_MONOTONIC_TIMESTAMP_MS: u64 = 1_000_000;
+/// Static 32-byte offer identifier byte array for loopback tests.
+const TEST_OFFER_ID_BYTES: [u8; 32] = [0x51; 32];
 
 /// The requester engine type under test.
 type TestRequester = Requester<MemoryPairingStore, MemoryJournal>;
@@ -58,7 +64,7 @@ fn test_requester() -> TestRequester {
 
 fn test_offer(secret_bytes: [u8; 32]) -> PairingOffer {
     PairingOffer::reconstruct(
-        OfferId::from_array([0x51; 32]),
+        OfferId::from_array(TEST_OFFER_ID_BYTES),
         PairingSecret::from_random_bytes(secret_bytes),
         vec![refineid_rapp::MANDATORY_PAIRING_SUITE.into()],
         vec![
@@ -70,7 +76,7 @@ fn test_offer(secret_bytes: [u8; 32]) -> PairingOffer {
             candidate_id: CANDIDATE.into(),
             parameters: std::collections::BTreeMap::new(),
         }],
-        120_000,
+        TEST_OFFER_TTL_MS,
     )
     .unwrap()
 }
@@ -110,7 +116,7 @@ fn proxy_pair(
     offer: PairingOffer,
     _granted: &[String],
 ) -> PairRecord {
-    let now_ms = 1_000_000;
+    let now_ms = TEST_MONOTONIC_TIMESTAMP_MS;
     let local_keys = generate_pair_key_material().unwrap();
     let mut handshake =
         PairingHandshake::begin(EndpointRole::Proxy, offer, CANDIDATE, local_keys).unwrap();
@@ -176,7 +182,7 @@ impl ProxySession {
         let mut store = MockProxyStore;
         let outcome = self
             .endpoint
-            .receive(&mut store, &frame, 1_000_000)
+            .receive(&mut store, &frame, TEST_MONOTONIC_TIMESTAMP_MS)
             .unwrap();
         match outcome {
             ReceiveOutcome::Message(m) => m,
@@ -187,7 +193,7 @@ impl ProxySession {
 
 /// Accepts one session as the proxy and completes the ready exchange.
 fn proxy_accept_session(pair_record: &PairRecord, mut transport: MemoryTransport) -> ProxySession {
-    let now_ms = 1_000_000;
+    let now_ms = TEST_MONOTONIC_TIMESTAMP_MS;
     let mut handshake = SessionHandshake::begin_proxy(pair_record).unwrap();
 
     // Message 1 (Requester -> Proxy)

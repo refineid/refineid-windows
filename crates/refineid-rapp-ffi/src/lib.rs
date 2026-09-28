@@ -44,11 +44,12 @@ use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use refineid_rapp_core::engine::{OperationOutcome, PeerIntroduction, Requester, RequesterConfig};
-use refineid_rapp_core::ids::{OfferId, PairId, PairingSecret, RendezvousToken};
+use refineid_rapp_core::ids::{PairId, PairingSecret, RendezvousToken};
 use refineid_rapp_core::limits::OFFER_TTL_MAX_MS;
 use refineid_rapp_core::message::CloseReason;
 use refineid_rapp_core::offer::{
     PairingOffer, TransportCandidate, format_pairing_code, generate_pairing_code,
+    offer_id_from_code,
 };
 use refineid_rapp_core::operations::{CardOperation, CardOperationResult};
 use refineid_rapp_core::profiles::{
@@ -59,6 +60,7 @@ use refineid_rapp_core::stream::{StreamAccept, StreamListener, stream_candidate_
 use refineid_rapp_core::transport::STREAM_PROFILE;
 use refineid_windows_credential_store::{CredentialPairingStore, delete_pairing_set};
 use serde::Serialize;
+use zeroize::Zeroize;
 
 /// The one stream candidate this requester advertises.
 const CANDIDATE_ID: &str = "stream-1";
@@ -459,10 +461,9 @@ fn begin_pairing(
     getrandom::fill(&mut secret_bytes)
         .map_err(|error| ApiFailure::new("csprng_failed", format!("{error:?}")))?;
     let secret = PairingSecret::from_random_bytes(secret_bytes);
-    let mut offer_id_bytes = [0u8; 32];
-    getrandom::fill(&mut offer_id_bytes)
-        .map_err(|error| ApiFailure::new("csprng_failed", format!("{error:?}")))?;
-    let offer_id = OfferId::from_array(offer_id_bytes);
+    secret_bytes.zeroize();
+    let offer_id = offer_id_from_code(&raw_code)
+        .map_err(|error| ApiFailure::new("offer_id_failed", format!("{error:?}")))?;
 
     let offer = PairingOffer::reconstruct(
         offer_id,

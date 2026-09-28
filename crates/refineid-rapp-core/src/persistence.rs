@@ -179,7 +179,7 @@ pub fn decode_pairing_record(blob: &[u8]) -> Result<PairingRecord, PairingCodecE
     } else {
         (None, None)
     };
-    let (candidate_id, transport_profile) = if version >= 4 {
+    let (candidate_id, transport_profile) = if version >= PAIRING_BLOB_VERSION {
         let cid = match reader.take_optional_bytes()? {
             Some(bytes) => Some(
                 core::str::from_utf8(bytes)

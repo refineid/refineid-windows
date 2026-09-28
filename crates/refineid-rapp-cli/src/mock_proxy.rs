@@ -20,6 +20,7 @@
 
 use std::time::{Duration, Instant};
 
+use refineid_rapp::cpace::CpaceState;
 use refineid_rapp::{
     BinaryFrame, CardInspection, CardOperation, CardOperationResult, EndpointRole,
     EstablishedEndpoint, LivenessMessage, OperationReference, OperationRequest,
@@ -29,12 +30,21 @@ use refineid_rapp::{
 };
 use refineid_rapp_core::stream::{StreamRendezvous, dial};
 use refineid_rapp_core::transport::FrameTransport;
+use zeroize::Zeroize;
 
 /// Default socket receive deadline.
 const DEADLINE: Duration = Duration::from_secs(10);
 
 /// Default candidate identifier.
 const DEFAULT_CANDIDATE_ID: &str = "stream-1";
+
+/// Mock signature lengths in bytes.
+const MOCK_ECDSA_P224_SIG_BYTES: usize = 56;
+const MOCK_ECDSA_P256_SIG_BYTES: usize = 64;
+const MOCK_ECDSA_P384_SIG_BYTES: usize = 96;
+const MOCK_ECDSA_P521_SIG_BYTES: usize = 132;
+const MOCK_RSA_2048_SIG_BYTES: usize = 256;
+const MOCK_FALLBACK_SIGNATURE_BYTE: u8 = 0xAB;
 
 /// Default mock certificate DER payload.
 pub const DEFAULT_MOCK_CERT_DER: &[u8] = include_bytes!("mock_cert.der");
@@ -246,7 +256,7 @@ fn resolve_offer(options: &MockProxyOptions) -> Result<(PairingOffer, String), S
 }
 
 fn run_pairing(options: &MockProxyOptions) -> Result<ProxyPairing, String> {
-    let (offer, endpoint) = resolve_offer(options)?;
+    let (mut offer, endpoint) = resolve_offer(options)?;
     println!("dialing pairing connection to {endpoint}...");
     let mut transport = dial(
         &[endpoint.clone()],
@@ -255,6 +265,39 @@ fn run_pairing(options: &MockProxyOptions) -> Result<ProxyPairing, String> {
         &StreamRendezvous::Pairing,
     )
     .map_err(|e| format!("cannot connect to requester at {endpoint}: {e:?}"))?;
+
+    if let Some(code) = &options.code {
+        let mut entropy = [0u8; 64];
+        getrandom::fill(&mut entropy).map_err(|e| format!("rng failed: {e}"))?;
+        let cpace = CpaceState::new(
+            refineid_rapp::HandshakeRole::Responder,
+            code,
+            &offer.offer_id,
+            &entropy,
+        )
+        .map_err(|e| format!("cpace init failed: {e:?}"))?;
+        entropy.zeroize();
+
+        // Send Responder's CPace frame
+        let my_frame = cpace
+            .write_message()
+            .map_err(|e| format!("cpace write frame failed: {e:?}"))?;
+        transport
+            .send_frame(my_frame.as_bytes())
+            .map_err(|e| format!("send cpace frame failed: {e:?}"))?;
+
+        // Receive Initiator's CPace frame
+        let peer_frame_bytes = transport
+            .receive_frame()
+            .map_err(|e| format!("receive cpace frame failed: {e:?}"))?;
+        let peer_frame = BinaryFrame::reconstruct(peer_frame_bytes)
+            .map_err(|e| format!("decode cpace frame failed: {e:?}"))?;
+        let secret = cpace
+            .read_message(&peer_frame)
+            .map_err(|e| format!("cpace derive secret failed: {e:?}"))?;
+
+        offer.set_pairing_secret(secret);
+    }
 
     let keys = generate_pair_key_material().map_err(|e| format!("key generation failed: {e:?}"))?;
     let mut handshake =
@@ -762,14 +805,14 @@ fn sign_digest(digest: &[u8], algorithm: refineid_rapp::SignatureAlgorithm) -> V
         }
     }
     let sig_len = match algorithm {
-        refineid_rapp::SignatureAlgorithm::EcdsaSha224 => 56,
-        refineid_rapp::SignatureAlgorithm::EcdsaSha256 => 64,
-        refineid_rapp::SignatureAlgorithm::EcdsaSha384 => 96,
-        refineid_rapp::SignatureAlgorithm::EcdsaSha512 => 132,
+        refineid_rapp::SignatureAlgorithm::EcdsaSha224 => MOCK_ECDSA_P224_SIG_BYTES,
+        refineid_rapp::SignatureAlgorithm::EcdsaSha256 => MOCK_ECDSA_P256_SIG_BYTES,
+        refineid_rapp::SignatureAlgorithm::EcdsaSha384 => MOCK_ECDSA_P384_SIG_BYTES,
+        refineid_rapp::SignatureAlgorithm::EcdsaSha512 => MOCK_ECDSA_P521_SIG_BYTES,
         refineid_rapp::SignatureAlgorithm::RsaPkcs1Sha256
         | refineid_rapp::SignatureAlgorithm::RsaPkcs1Sha384
         | refineid_rapp::SignatureAlgorithm::RsaPkcs1Sha512
-        | refineid_rapp::SignatureAlgorithm::RsaPssSha256 => 256,
+        | refineid_rapp::SignatureAlgorithm::RsaPssSha256 => MOCK_RSA_2048_SIG_BYTES,
     };
-    vec![0xAB; sig_len]
+    vec![MOCK_FALLBACK_SIGNATURE_BYTE; sig_len]
 }

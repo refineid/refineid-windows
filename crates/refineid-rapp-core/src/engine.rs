@@ -75,7 +75,20 @@ pub enum PairingError {
 
 impl core::fmt::Display for PairingError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::Offer(e) => write!(f, "pairing offer error: {e}"),
+            Self::KeyGeneration => f.write_str("key generation failed"),
+            Self::HandshakeFailed => f.write_str("handshake failed"),
+            Self::Transport(e) => write!(f, "transport error: {e:?}"),
+            Self::ParameterMismatch => f.write_str("parameter mismatch"),
+            Self::ProtocolViolation => f.write_str("protocol violation"),
+            Self::DeniedLocally => f.write_str("pairing denied locally"),
+            Self::AbortedByPeer => f.write_str("pairing aborted by peer"),
+            Self::GrantsMismatch => f.write_str("grants mismatch"),
+            Self::GrantsNotSubset => f.write_str("grants not a valid subset"),
+            Self::Store(e) => write!(f, "store error: {e:?}"),
+            Self::Channel => f.write_str("channel error"),
+        }
     }
 }
 
@@ -111,7 +124,23 @@ pub enum SessionError {
 
 impl core::fmt::Display for SessionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::UnknownPairing => f.write_str("unknown pairing"),
+            Self::NotPaired(d) => write!(f, "pairing not usable ({d:?})"),
+            Self::HandshakeFailed { suggest_repairing } => {
+                if *suggest_repairing {
+                    f.write_str("handshake failed (repairing recommended)")
+                } else {
+                    f.write_str("handshake failed")
+                }
+            }
+            Self::Transport(e) => write!(f, "transport error: {e:?}"),
+            Self::Busy => f.write_str("peer busy"),
+            Self::ParameterMismatch => f.write_str("session parameter mismatch"),
+            Self::ClosedByPeer(reason) => write!(f, "session closed by peer: {reason:?}"),
+            Self::Store(e) => write!(f, "store error: {e:?}"),
+            Self::EngineFault => f.write_str("engine fault"),
+        }
     }
 }
 
@@ -138,7 +167,15 @@ pub enum AdmissionError {
 
 impl core::fmt::Display for AdmissionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::SessionNotHealthy => f.write_str("session is not healthy"),
+            Self::ProfileNotGranted => f.write_str("profile is not in granted set"),
+            Self::OperationActive => f.write_str("an operation is already active"),
+            Self::Store(e) => write!(f, "journal error: {e:?}"),
+            Self::RandomUnavailable => f.write_str("cryptographic random is unavailable"),
+            Self::Encoding => f.write_str("operation encoding limit exceeded"),
+            Self::Operation(e) => write!(f, "operation error: {e:?}"),
+        }
     }
 }
 
@@ -239,6 +276,57 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         &self.journal
     }
 
+    /// Runs the requester half of a manual-code pairing exchange: executes the `CPace`
+    /// PAKE exchange over the transport using the 6-digit pairing code to derive
+    /// the mutual 256-bit pairing secret, then completes the pairing handshake.
+    ///
+    /// # Errors
+    /// Returns [`PairingError`] on `CPace` PAKE failure, handshake failure,
+    /// parameter mismatch, transport loss, or invalid grant.
+    pub fn pair_with_code<Transport: FrameTransport>(
+        &mut self,
+        offer_slot: &mut Option<PairingOffer>,
+        code: &str,
+        requested_profiles: &[String],
+        mut transport: Transport,
+        confirm: impl FnOnce(&PeerIntroduction, &[String]) -> Option<Vec<String>>,
+    ) -> Result<PairId, PairingError> {
+        let Some(mut offer) = offer_slot.take() else {
+            return Err(PairingError::HandshakeFailed);
+        };
+        let mut entropy = [0u8; 64];
+        getrandom::fill(&mut entropy).map_err(|_| PairingError::KeyGeneration)?;
+        let cpace = refineid_rapp::cpace::CpaceState::new(
+            refineid_rapp::HandshakeRole::Initiator,
+            code,
+            &offer.offer_id,
+            &entropy,
+        )
+        .map_err(|_| PairingError::HandshakeFailed)?;
+        zeroize::Zeroize::zeroize(&mut entropy);
+
+        // 1. Send Initiator's CPace frame
+        let my_msg = cpace
+            .write_message()
+            .map_err(|_| PairingError::HandshakeFailed)?;
+        transport
+            .send_frame(my_msg.as_bytes())
+            .map_err(PairingError::Transport)?;
+
+        // 2. Receive Responder's CPace frame
+        let peer_frame_bytes = transport.receive_frame().map_err(PairingError::Transport)?;
+        let peer_frame = BinaryFrame::reconstruct(peer_frame_bytes)
+            .map_err(|_| PairingError::HandshakeFailed)?;
+        let derived_secret = cpace
+            .read_message(&peer_frame)
+            .map_err(|_| PairingError::HandshakeFailed)?;
+
+        // 3. Set derived secret on the offer and proceed with standard Noise XXpsk3 pairing
+        offer.set_pairing_secret(derived_secret);
+        *offer_slot = Some(offer);
+        self.pair(offer_slot, requested_profiles, transport, confirm)
+    }
+
     /// Runs the requester half of the pairing exchange over an accepted
     /// candidate transport.
     ///
@@ -259,6 +347,7 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         let Some(offer) = offer_slot.take() else {
             return Err(PairingError::HandshakeFailed);
         };
+        let offer_profiles = offer.profiles.clone();
         let local_keys = generate_pair_key_material().map_err(|_| PairingError::KeyGeneration)?;
         let mut handshake = match PairingHandshake::begin(
             EndpointRole::Requester,
@@ -351,6 +440,9 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
                 return Err(PairingError::GrantsNotSubset);
             };
             if !requested_profiles.iter().any(|r| r == name) {
+                return Err(PairingError::GrantsNotSubset);
+            }
+            if !offer_profiles.iter().any(|o| o == name) {
                 return Err(PairingError::GrantsNotSubset);
             }
             granted_profiles.push(p);
@@ -865,6 +957,9 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
                     }
                     TypedMessage::OperationProgress(_)
                     | TypedMessage::Error(ProtocolErrorMessage::UnknownOperation(_)) => {}
+                    TypedMessage::Error(ProtocolErrorMessage::Busy) => {
+                        return Ok(OperationOutcome::Rejected(Some("peer_busy".to_owned())));
+                    }
                     _ => {
                         self.handle_violation(session);
                         return Ok(self.classify_after_close(operation_id, state));

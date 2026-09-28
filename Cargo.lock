@@ -1026,6 +1026,7 @@ dependencies = [
  "refineid-windows-credential-store",
  "serde",
  "serde_json",
+ "zeroize",
 ]
 
 [[package]]

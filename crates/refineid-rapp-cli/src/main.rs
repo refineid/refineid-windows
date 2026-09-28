@@ -259,7 +259,7 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
 
     let raw_code = options.code.clone().unwrap_or_else(generate_pairing_code);
     let pairing_code = format_pairing_code(&raw_code);
-    let offer_id = offer_id_from_code(&raw_code);
+    let offer_id = offer_id_from_code(&raw_code).map_err(|e| format!("invalid code: {e:?}"))?;
     let mut secret_bytes = [0u8; 32];
     getrandom::fill(&mut secret_bytes).map_err(|e| format!("rng failed: {e}"))?;
     let secret = PairingSecret::from_random_bytes(secret_bytes);
@@ -834,7 +834,7 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
     };
 
     let test_code = "654321";
-    let offer_id = offer_id_from_code(test_code);
+    let offer_id = offer_id_from_code(test_code).map_err(|e| format!("invalid code: {e:?}"))?;
     let secret = PairingSecret::from_random_bytes([0u8; 32]);
 
     let requested_profiles = vec![
@@ -908,8 +908,9 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
 
     let mut offer_slot = Some(offer);
     let pair_id = requester
-        .pair(
+        .pair_with_code(
             &mut offer_slot,
+            test_code,
             &requested_profiles,
             transport,
             |_peer, requested| Some(requested.to_vec()),

@@ -36,7 +36,7 @@ fn test_mock_proxy_pairing_and_card_operations() {
     let endpoint = format!("127.0.0.1:{port}");
 
     let test_code = "654321";
-    let offer_id = offer_id_from_code(test_code);
+    let offer_id = offer_id_from_code(test_code).expect("valid code");
     let secret = PairingSecret::from_random_bytes([0u8; 32]);
 
     let requested_profiles = vec![
@@ -94,8 +94,9 @@ fn test_mock_proxy_pairing_and_card_operations() {
 
     let mut offer_slot = Some(offer);
     let pair_id = requester
-        .pair(
+        .pair_with_code(
             &mut offer_slot,
+            test_code,
             &requested_profiles,
             transport,
             |peer, requested| {

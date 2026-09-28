@@ -79,6 +79,13 @@ impl core::fmt::Debug for PairingRecord {
     }
 }
 
+/// Default display name when peer display name is unspecified.
+pub const DEFAULT_PEER_DISPLAY_NAME: &str = "Peer";
+/// Default platform when peer platform is unspecified.
+pub const DEFAULT_PEER_PLATFORM: &str = "Unknown";
+/// Default candidate identifier for single-channel stream transport.
+pub const DEFAULT_STREAM_CANDIDATE_ID: &str = "stream-1";
+
 impl PairingRecord {
     /// Convert to canonical core [`refineid_rapp::PairRecord`].
     ///
@@ -102,13 +109,14 @@ impl PairingRecord {
             .as_slice()
             .try_into()
             .map_err(|_| refineid_rapp::PairRecordError::InvalidStaticKey)?;
-        let mut profiles: Vec<refineid_rapp::ProfileName> = self
-            .granted_profiles
-            .iter()
-            .filter_map(|p| refineid_rapp::ProfileName::parse(p))
-            .collect();
+        let mut profiles: Vec<refineid_rapp::ProfileName> = Vec::new();
+        for p in &self.granted_profiles {
+            let parsed = refineid_rapp::ProfileName::parse(p)
+                .ok_or(refineid_rapp::PairRecordError::NoNegotiatedProfiles)?;
+            profiles.push(parsed);
+        }
         if profiles.is_empty() {
-            profiles.push(refineid_rapp::ProfileName::CardStatus);
+            return Err(refineid_rapp::PairRecordError::NoNegotiatedProfiles);
         }
         let grants_hash = refineid_rapp::GrantsHash::from_array(self.grants_hash);
         refineid_rapp::PairRecord::new(
@@ -128,7 +136,7 @@ impl PairingRecord {
                 candidate_id: self
                     .candidate_id
                     .clone()
-                    .unwrap_or_else(|| "stream-1".to_owned()),
+                    .unwrap_or_else(|| DEFAULT_STREAM_CANDIDATE_ID.to_owned()),
                 parameters: std::collections::BTreeMap::new(),
             },
             0,
@@ -206,8 +214,16 @@ impl<S: PairingStore> refineid_rapp::PairStore for CorePairStoreAdapter<'_, S> {
         &mut self,
         record: refineid_rapp::PairRecord,
     ) -> Result<(), refineid_rapp::PairStoreError<Self::Error>> {
-        let pairing_record =
-            PairingRecord::from_core_pair_record(&record, "Peer".to_owned(), "Unknown".to_owned());
+        let (display_name, platform) = self.inner.get(record.pair_id()).map_or_else(
+            |_| {
+                (
+                    DEFAULT_PEER_DISPLAY_NAME.to_owned(),
+                    DEFAULT_PEER_PLATFORM.to_owned(),
+                )
+            },
+            |r| (r.peer_display_name.clone(), r.peer_platform.clone()),
+        );
+        let pairing_record = PairingRecord::from_core_pair_record(&record, display_name, platform);
         self.inner
             .insert(pairing_record)
             .map_err(refineid_rapp::PairStoreError::Backend)

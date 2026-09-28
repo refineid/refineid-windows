@@ -2365,7 +2365,8 @@ fn stop_pairing() {
 /// and the phone would wait on a different channel.
 fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<String, String> {
     use std::time::Instant;
-    let offer_id = offer_id_from_code(code);
+    let offer_id =
+        offer_id_from_code(code).map_err(|error| format!("Invalid pairing code: {error:?}"))?;
     let requested_profiles = vec![
         PROFILE_CARD_STATUS.to_owned(),
         PROFILE_AUTHENTICATION.to_owned(),
@@ -2429,6 +2430,7 @@ fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<S
             ) && let Some(outcome) = attempt_pair(
                 &mut requester,
                 &mut offer_slot,
+                code,
                 &requested_profiles,
                 transport,
                 main_raw,
@@ -2446,11 +2448,12 @@ fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<S
 fn attempt_pair(
     requester: &mut Requester<CredentialPairingStore, MemoryJournal>,
     offer_slot: &mut Option<PairingOffer>,
+    code: &str,
     profiles: &[String],
     transport: impl FrameTransport,
     main_raw: usize,
 ) -> Option<Result<String, String>> {
-    match requester.pair(offer_slot, profiles, transport, |peer, requested| {
+    match requester.pair_with_code(offer_slot, code, profiles, transport, |peer, requested| {
         confirm_pairing_dialog(main_raw, &peer.display_name, &peer.platform, requested)
     }) {
         Ok(pair_id) => Some(paired_summary(requester, pair_id)),
