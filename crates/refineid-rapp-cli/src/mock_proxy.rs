@@ -643,10 +643,7 @@ fn handle_operation_request<T: FrameTransport>(
                 refineid_rapp::CertificateKind::Authentication
                 | refineid_rapp::CertificateKind::Signature => &options.cert_der,
             };
-            println!(
-                "serving read_certificate ({kind:?}) ({} bytes DER)",
-                der.len()
-            );
+            println!("serving read_certificate");
             let result = CardOperationResult::Certificate(der.clone());
             let msg =
                 TypedMessage::OperationResult(OperationResultMessage::completed(op_ref, result));

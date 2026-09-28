@@ -174,7 +174,7 @@ fn test_mock_proxy_pairing_and_card_operations() {
         )
         .expect("execute read_certificate (auth)");
     let OperationOutcome::Completed(CardOperationResult::Certificate(der)) = outcome else {
-        panic!("unexpected outcome for ReadCertificate: {outcome:?}");
+        panic!("unexpected outcome for ReadCertificate");
     };
     assert!(!der.is_empty());
 
@@ -190,7 +190,7 @@ fn test_mock_proxy_pairing_and_card_operations() {
         .expect("execute read_certificate (sig)");
     let OperationOutcome::Completed(CardOperationResult::Certificate(sig_der)) = outcome_sig_cert
     else {
-        panic!("unexpected outcome for ReadCertificate (Signature): {outcome_sig_cert:?}");
+        panic!("unexpected outcome for ReadCertificate (Signature)");
     };
     assert!(!sig_der.is_empty());
 
