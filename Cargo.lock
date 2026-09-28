@@ -303,6 +303,7 @@ dependencies = [
  "fiat-crypto 0.2.9",
  "rustc_version",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -541,6 +542,7 @@ version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27f864f10dfb56725ce5ce5472bc52252c8f93a4ab86327122cebf62c5f59a17"
 dependencies = [
+ "ctutils",
  "subtle",
  "typenum",
  "zeroize",
@@ -582,6 +584,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "keccak"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8f198d1db720e4940b5a493201d199d9f24f568f8f746bd13706243a2f71598"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.1",
+]
+
+[[package]]
+name = "kem"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01737161ba802849cfd486b5bd209d38ba4943494c249a8126005170c7621edd"
+dependencies = [
+ "crypto-common 0.2.2",
+ "rand_core 0.10.1",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -606,6 +628,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
 dependencies = [
  "adler2",
+]
+
+[[package]]
+name = "ml-kem"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e15f3e5b957493873e396a66914e83e616b6afe335cdef7efe5c6e1216aba66"
+dependencies = [
+ "hybrid-array",
+ "kem",
+ "module-lattice",
+ "pkcs8",
+ "rand_core 0.10.1",
+ "sha3",
+]
+
+[[package]]
+name = "module-lattice"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c61b87c9683ab7cb1c6871d261ad5479b6b10ceb52c4352aaca3b5d35a8febe"
+dependencies = [
+ "ctutils",
+ "hybrid-array",
+ "num-traits",
 ]
 
 [[package]]
@@ -660,6 +707,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e14ef017e15d2e5592a9e39a346c1dbaea5120bab7ed7106b210ef58ebd97003"
 dependencies = [
  "pkg-config",
+]
+
+[[package]]
+name = "pkcs8"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "451913da69c775a56034ea8d9003d27ee8948e12443eae7c038ba100a4f21cb7"
+dependencies = [
+ "der",
+ "spki",
 ]
 
 [[package]]
@@ -841,8 +898,8 @@ dependencies = [
 
 [[package]]
 name = "refineid-digest"
-version = "26.9.27"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#1b4c787f91f496d8dcb4a475177f56d88d4dddb4"
+version = "26.9.28"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#c61ddaf6656f86ca49a38764de65c67ba7ccd3cc"
 dependencies = [
  "sha1",
  "sha2 0.11.0",
@@ -939,9 +996,14 @@ dependencies = [
 
 [[package]]
 name = "refineid-rapp"
-version = "26.9.27"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#1b4c787f91f496d8dcb4a475177f56d88d4dddb4"
+version = "26.9.28"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#c61ddaf6656f86ca49a38764de65c67ba7ccd3cc"
 dependencies = [
+ "chacha20poly1305",
+ "curve25519-dalek",
+ "getrandom 0.4.3",
+ "hmac",
+ "ml-kem",
  "sha2 0.11.0",
  "snow",
  "zeroize",
@@ -988,8 +1050,8 @@ dependencies = [
 
 [[package]]
 name = "refineid-remote"
-version = "26.9.27"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#1b4c787f91f496d8dcb4a475177f56d88d4dddb4"
+version = "26.9.28"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#c61ddaf6656f86ca49a38764de65c67ba7ccd3cc"
 dependencies = [
  "refineid-digest",
 ]
@@ -1189,6 +1251,16 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.3.1",
  "digest 0.11.3",
+]
+
+[[package]]
+name = "sha3"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be176f1a57ce4e3d31c1a166222d9768de5954f811601fb7ca06fc8203905ce1"
+dependencies = [
+ "digest 0.11.3",
+ "keccak",
 ]
 
 [[package]]
