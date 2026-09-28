@@ -110,8 +110,6 @@ pub enum SessionError {
     },
     /// The transport failed.
     Transport(TransportError),
-    /// The peer reported `busy`: an existing session survives, this one closed.
-    Busy,
     /// The peer's `session.ready` parameters did not match the local view.
     ParameterMismatch,
     /// The peer closed during establishment.
@@ -135,7 +133,6 @@ impl core::fmt::Display for SessionError {
                 }
             }
             Self::Transport(e) => write!(f, "transport error: {e:?}"),
-            Self::Busy => f.write_str("peer busy"),
             Self::ParameterMismatch => f.write_str("session parameter mismatch"),
             Self::ClosedByPeer(reason) => write!(f, "session closed by peer: {reason:?}"),
             Self::Store(e) => write!(f, "store error: {e:?}"),

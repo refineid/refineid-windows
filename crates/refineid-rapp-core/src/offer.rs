@@ -12,6 +12,11 @@ pub type OfferError = PairingOfferError;
 
 /// Standard character length of a numeric pairing code.
 pub const PAIRING_CODE_LENGTH: usize = 6;
+/// Canonical placeholder secret used during initial manual-offer reconstruction before `CPace` derives the mutual 256-bit key material.
+///
+/// This placeholder matches canonical `refineid-core` (`crates/rapp/src/bindings.rs`) and never reaches the wire;
+/// it is overwritten by [`crate::engine::Requester::pair_with_code`] via `CPace` PAKE exchange before the Noise handshake begins.
+pub const PRE_CPACE_DUMMY_SECRET: [u8; 32] = [0u8; 32];
 /// Number of digits in one formatted group.
 pub const PAIRING_CODE_GROUP_SIZE: usize = 3;
 /// Maximum byte value accepted when rejection sampling digits (25 * 10 = 250) to prevent modulo bias.

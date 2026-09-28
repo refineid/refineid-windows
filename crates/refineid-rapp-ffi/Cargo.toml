@@ -23,4 +23,3 @@ serde.workspace = true
 serde_json.workspace = true
 hex.workspace = true
 getrandom.workspace = true
-zeroize.workspace = true

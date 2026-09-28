@@ -44,13 +44,10 @@ use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use refineid_rapp_core::engine::{OperationOutcome, PeerIntroduction, Requester, RequesterConfig};
-use refineid_rapp_core::ids::{PairId, PairingSecret, RendezvousToken};
+use refineid_rapp_core::ids::{OfferId, PairId, PairingSecret, RandomIdExt as _, RendezvousToken};
 use refineid_rapp_core::limits::OFFER_TTL_MAX_MS;
 use refineid_rapp_core::message::CloseReason;
-use refineid_rapp_core::offer::{
-    PairingOffer, TransportCandidate, format_pairing_code, generate_pairing_code,
-    offer_id_from_code,
-};
+use refineid_rapp_core::offer::{PairingOffer, TransportCandidate};
 use refineid_rapp_core::operations::{CardOperation, CardOperationResult};
 use refineid_rapp_core::profiles::{
     PROFILE_AUTHENTICATION, PROFILE_CARD_STATUS, PROFILE_DOCUMENT_SIGNING,
@@ -60,7 +57,6 @@ use refineid_rapp_core::stream::{StreamAccept, StreamListener, stream_candidate_
 use refineid_rapp_core::transport::STREAM_PROFILE;
 use refineid_windows_credential_store::{CredentialPairingStore, delete_pairing_set};
 use serde::Serialize;
-use zeroize::Zeroize;
 
 /// The one stream candidate this requester advertises.
 const CANDIDATE_ID: &str = "stream-1";
@@ -455,15 +451,10 @@ fn begin_pairing(
     ];
     let parameters = stream_candidate_parameters(advertise)
         .map_err(|error| ApiFailure::new("invalid_endpoints", format!("{error:?}")))?;
-    let raw_code = generate_pairing_code();
-    let pairing_code = format_pairing_code(&raw_code);
-    let mut secret_bytes = [0u8; 32];
-    getrandom::fill(&mut secret_bytes)
+    let offer_id = OfferId::random()
         .map_err(|error| ApiFailure::new("csprng_failed", format!("{error:?}")))?;
-    let secret = PairingSecret::from_random_bytes(secret_bytes);
-    secret_bytes.zeroize();
-    let offer_id = offer_id_from_code(&raw_code)
-        .map_err(|error| ApiFailure::new("offer_id_failed", format!("{error:?}")))?;
+    let secret = PairingSecret::random()
+        .map_err(|error| ApiFailure::new("csprng_failed", format!("{error:?}")))?;
 
     let offer = PairingOffer::reconstruct(
         offer_id,
@@ -515,7 +506,7 @@ fn begin_pairing(
     Ok(BeginPairingDto {
         handle: handle_id,
         offer_uri,
-        pairing_code,
+        pairing_code: String::new(),
     })
 }
 

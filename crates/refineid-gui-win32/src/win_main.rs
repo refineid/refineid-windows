@@ -62,8 +62,8 @@ use refineid_rapp_core::engine::{Requester, RequesterConfig};
 use refineid_rapp_core::ids::{PairId, PairingSecret};
 use refineid_rapp_core::limits::OFFER_TTL_MAX_MS;
 use refineid_rapp_core::offer::{
-    PairingOffer, TransportCandidate, format_pairing_code, generate_pairing_code,
-    offer_id_from_code,
+    PRE_CPACE_DUMMY_SECRET, PairingOffer, TransportCandidate, format_pairing_code,
+    generate_pairing_code, offer_id_from_code,
 };
 use refineid_rapp_core::profiles::{
     PROFILE_AUTHENTICATION, PROFILE_CARD_STATUS, PROFILE_DOCUMENT_SIGNING,
@@ -2375,7 +2375,8 @@ fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<S
     let build_offer = || {
         PairingOffer::reconstruct(
             offer_id,
-            PairingSecret::from_random_bytes([0u8; 32]),
+            // Pre-CPace placeholder secret; overwritten by CPace PAKE exchange in pair_with_code.
+            PairingSecret::from_random_bytes(PRE_CPACE_DUMMY_SECRET),
             vec![PAIRING_SUITE.into()],
             requested_profiles.clone(),
             vec![TransportCandidate {
