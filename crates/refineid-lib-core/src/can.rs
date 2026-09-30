@@ -53,19 +53,9 @@ pub enum CanError {
     /// Input was empty.
     Empty,
     /// Input was the wrong length. CAN is exactly 6 digits.
-    WrongLength {
-        /// Length of the rejected input in bytes. Tier 0
-        /// `usize`; arithmetic count.
-        got: usize,
-    },
-    /// A non-digit byte appeared. `at` is the zero-based byte
-    /// offset; `byte` is the offending value.
-    NonDigit {
-        /// Byte index of the offending value.
-        at: usize,
-        /// The offending byte (anything outside `0..=9`).
-        byte: u8,
-    },
+    WrongLength,
+    /// A non-digit byte appeared.
+    NonDigit,
     /// The CAN was all zeros (`000000`). Syntactically a 6-digit
     /// CAN, but never a real issued value on a production card --
     /// an all-zero CAN means the input was lost / uninitialised /
@@ -81,13 +71,10 @@ impl fmt::Display for CanError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => write!(f, "CAN cannot be empty"),
-            Self::WrongLength { got } => {
-                write!(f, "CAN must be exactly {CAN_DIGITS} digits, got {got}")
+            Self::WrongLength => {
+                write!(f, "CAN must be exactly {CAN_DIGITS} digits")
             }
-            Self::NonDigit { at, byte } => write!(
-                f,
-                "CAN must be ASCII digits only; non-digit at offset {at}: byte {byte:#04x}"
-            ),
+            Self::NonDigit => write!(f, "CAN must be ASCII digits only"),
             Self::AllZeros => write!(
                 f,
                 "CAN was all zeros (000000); never a valid production CAN -- input was likely lost or zeroed upstream"
@@ -111,12 +98,10 @@ impl Can {
             return Err(CanError::Empty);
         }
         if bytes.len() != CAN_DIGITS {
-            return Err(CanError::WrongLength { got: bytes.len() });
+            return Err(CanError::WrongLength);
         }
-        for (i, &b) in bytes.iter().enumerate() {
-            if !b.is_ascii_digit() {
-                return Err(CanError::NonDigit { at: i, byte: b });
-            }
+        if bytes.iter().any(|b| !b.is_ascii_digit()) {
+            return Err(CanError::NonDigit);
         }
         // All-zero CAN: well-formed shape, but never a real issued
         // value -- treat it as a lost-data sentinel, not a CAN.
@@ -180,34 +165,35 @@ mod tests {
 
     #[test]
     fn rejects_too_short() {
-        assert!(matches!(
-            Can::new("12345"),
-            Err(CanError::WrongLength { got: 5 })
-        ));
+        assert_eq!(Can::new("12345"), Err(CanError::WrongLength));
     }
 
     #[test]
     fn rejects_too_long() {
-        assert!(matches!(
-            Can::new("1234567"),
-            Err(CanError::WrongLength { got: 7 })
-        ));
+        assert_eq!(Can::new("1234567"), Err(CanError::WrongLength));
     }
 
     #[test]
     fn rejects_letter() {
-        assert!(matches!(
-            Can::new("12a456"),
-            Err(CanError::NonDigit { at: 2, byte: b'a' })
-        ));
+        assert_eq!(Can::new("12a456"), Err(CanError::NonDigit));
     }
 
     #[test]
     fn rejects_dash() {
-        assert!(matches!(
-            Can::new("12-456"),
-            Err(CanError::NonDigit { at: 2, .. })
-        ));
+        assert_eq!(Can::new("12-456"), Err(CanError::NonDigit));
+    }
+
+    #[test]
+    fn display_omits_candidate_metadata() {
+        assert_eq!(
+            CanError::WrongLength.to_string(),
+            "CAN must be exactly 6 digits"
+        );
+        assert_eq!(
+            CanError::NonDigit.to_string(),
+            "CAN must be ASCII digits only"
+        );
+        assert_eq!(CanError::Empty.to_string(), "CAN cannot be empty");
     }
 
     #[test]
