@@ -21,9 +21,10 @@ check reports.
 
 ## Commit and push gates
 
-`.github/workflows/ci.yml` is the authoritative quality gate: it runs formatting,
-lint, tests, and the requester build on a Windows runner, and `main` is
-protected so nothing merges until it passes.
+The mandatory local hooks are the quality gate for formatting, lint, core
+tests, and dependency freshness. `.github/workflows/ci.yml` runs manually or
+weekly on Windows to check the native bridge and WinUI app builds; it does not
+run on pull requests or act as a merge gate.
 
 Enable the local hooks once per clone so defects and stale dependencies are
 caught before leaving the machine:
@@ -42,8 +43,7 @@ The hooks enforce standards locally:
   (such as `refineid-core`) are synchronized with the latest upstream revisions
   before pushing. Run `cargo update -p refineid-remote` when stale.
 - **Commit message (`.githooks/commit-msg`)**: enforces that commit messages do not
-  contain forbidden trailers (such as AI attribution). CI then validates the full
-  suite on Windows runners before merging.
+  contain forbidden trailers (such as AI attribution).
 
 Rules:
 

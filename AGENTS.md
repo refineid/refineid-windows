@@ -20,8 +20,10 @@
 - One task, one worktree (`~/src/wt/refineid-windows-<topic>`) on one
   `agent/<topic>` branch, one pull request per branch. Run
   `scripts/agent-housekeeping.sh` when starting and keep the house clean. Merge
-  the pull request once CI is green, then remove the worktree and branch and
-  fast-forward `main`. Full workflow: `docs/process/agent-worktrees.md`.
+  the pull request after mandatory local gates pass and review is complete, then
+  remove the worktree and branch and fast-forward `main`. The scheduled/manual
+  Windows portability workflow does not gate pull requests. Full workflow:
+  `docs/process/agent-worktrees.md`.
 - Never put a git worktree under `/tmp` or directly in `~/src/`; all worktrees
   must live under `~/src/wt/`.
 - Do not publish unsigned or test-signed binaries as production releases.
@@ -49,8 +51,9 @@
 - Commits are cheap backups. Make small, focused commits often, without
   asking for permission, once the required commit checks pass.
 - Complete the integration without waiting for another instruction: push
-  the task branch, open a pull request, and merge it into `main` once the
-  required checks pass. Sync local `main` with the merged remote.
+  the task branch, open a pull request, and merge it into `main` once mandatory
+  local checks pass and review is complete. Sync local `main` with the merged
+  remote.
   Use squash merges to keep the `main` history linear; do not use merge commits.
 
 ## Record deferred findings

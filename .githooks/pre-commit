@@ -1,7 +1,7 @@
 #!/bin/sh
 # RefineID Windows commit gate.
 #
-# Rejects a commit that would fail the CI quality gate in .github/workflows/ci.yml.
+# Enforces the local format, lint, and unit-test quality gate before committing.
 # Enable it once per clone with:
 #
 #     git config core.hooksPath .githooks
