@@ -172,8 +172,8 @@ pub fn parse_can(mut buffer: Vec<u8>) -> Result<Can, String> {
 fn can_error(error: CanError) -> String {
     match error {
         CanError::Empty => String::from("CAN is empty (6 digits)."),
-        CanError::WrongLength { .. } => String::from("CAN must be exactly 6 digits."),
-        CanError::NonDigit { .. } => String::from("CAN must contain digits only."),
+        CanError::WrongLength => String::from("CAN must be exactly 6 digits."),
+        CanError::NonDigit => String::from("CAN must contain digits only."),
         CanError::AllZeros => String::from("CAN was all zeros; check the input."),
     }
 }
