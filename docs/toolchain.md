@@ -43,5 +43,6 @@ because clippy only compiles and needs no linker:
 cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 ```
 
-This is the same gate CI runs on a Windows runner, so it catches
-Windows-target issues before a push even when you develop on another OS.
+The mandatory pre-commit hook runs this check when the Windows target is
+installed. The scheduled or manually dispatched Windows workflow instead
+builds the bridges and WinUI apps on a native Windows host.

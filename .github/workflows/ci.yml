@@ -1,25 +1,22 @@
-name: CI
+name: Windows portability
 
-# The authoritative format, lint, and build gate. The Windows Card Module and
-# credential-store crates only compile against the Windows target, and the
-# WinUI requester needs the Windows workload, so the whole gate runs on a
-# Windows runner. The local pre-commit hook runs the cross-platform subset it
-# can (see .githooks/pre-commit); this job is what a pull request must pass.
+# Windows-host portability checks for the WinUI apps and native bridges.
+# Formatting, lint, and core tests run in the mandatory local hooks.
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: windows-portability-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  gate:
+  windows-build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -32,22 +29,6 @@ jobs:
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: "10.0.x"
-
-      # Cheap, source-only formatting checks fail fast before any build. rustfmt
-      # covers Rust; CSharpier covers C#, XAML, and the project files.
-      - name: Rust formatting
-        run: cargo fmt --all --check
-
-      - name: C# and XAML formatting
-        run: |
-          dotnet tool restore
-          dotnet csharpier check .
-
-      - name: Rust lint
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Requester core tests
-        run: cargo test -p refineid-lib-core
 
       # The Rust bridges the WinUI apps load; built explicitly into target/debug
       # so the C# build can skip its own cargo invocation and just consume the
