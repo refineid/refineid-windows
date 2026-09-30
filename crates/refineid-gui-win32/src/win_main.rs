@@ -2481,10 +2481,7 @@ fn confirm_pairing_dialog(
     if !unsafe { IsWindow(Some(owner)) }.as_bool() {
         return None;
     }
-    let body = HSTRING::from(format!(
-        "Pair with {peer_name} ({platform})?\n\nGrants: {}",
-        requested.join(", ")
-    ));
+    let body = HSTRING::from(format!("Pair with {peer_name} ({platform})?"));
     let caption = HSTRING::from("Confirm pairing");
     let answer = unsafe { MessageBoxW(Some(owner), &body, &caption, MB_YESNO | MB_ICONQUESTION) };
     if answer == IDYES {
@@ -2504,10 +2501,8 @@ fn paired_summary(
         .get(pair_id)
         .map_err(|error| format!("Stored pairing unreadable: {error:?}"))?;
     Ok(format!(
-        "Paired with {} ({}). Granted: {}.",
-        record.peer_display_name,
-        record.peer_platform,
-        record.granted_profiles.join(", ")
+        "Paired with {} ({}).",
+        record.peer_display_name, record.peer_platform
     ))
 }
 
