@@ -42,8 +42,16 @@ use refineid_lib_core::pin::{
 };
 use refineid_lib_core::pkcs15::CardGeneration;
 use refineid_windows_credential_store::save_can;
+use refineid_windows_driver_probe::{self, LocalCardSupport};
 use serde::Serialize;
 use zeroize::Zeroize;
+
+/// JSON-view of the probe result exposed to the `WinUI` apps.
+#[derive(Serialize)]
+struct LocalCardSupportReport {
+    state: &'static str,
+    reader_count: Option<usize>,
+}
 
 const MAX_READER_NAME_BYTES: usize = 1_024;
 const MAX_SERIAL_BYTES: usize = 256;
@@ -250,6 +258,33 @@ pub extern "C" fn refineid_settings_present_readers() -> *mut c_char {
             .map(|readers| ReaderList { readers })
             .map_err(|error| ApiFailure::new("reader_enumeration_failed", error.to_string()))
     })
+}
+
+/// Probe whether this machine has a usable local FINEID card stack.
+///
+/// `ready` means the minidriver is registered and a reader is present;
+/// `driver_not_installed` means the machine has no FINEID minidriver;
+/// `no_reader` means the minidriver exists but no reader is enumerated.
+#[unsafe(no_mangle)]
+pub extern "C" fn refineid_settings_detect_local_card_support() -> *mut c_char {
+    reply_json(|| Ok(detect_local_card_support()))
+}
+
+fn detect_local_card_support() -> LocalCardSupportReport {
+    match refineid_windows_driver_probe::detect() {
+        LocalCardSupport::Ready { reader_count } => LocalCardSupportReport {
+            state: "ready",
+            reader_count: Some(reader_count),
+        },
+        LocalCardSupport::NoReader => LocalCardSupportReport {
+            state: "no_reader",
+            reader_count: Some(0),
+        },
+        LocalCardSupport::DriverNotInstalled => LocalCardSupportReport {
+            state: "driver_not_installed",
+            reader_count: None,
+        },
+    }
 }
 
 /// Inspect one selected contact-interface card without presenting a secret.

@@ -72,6 +72,7 @@ internal sealed partial class MainPage : Page
         this.Loaded -= this.OnLoaded;
         this.CheckLocalCard();
         this.cardPollTimer.Start();
+        this.ShowDriverLaneHintIfNeeded();
 #if DEBUG
         if (
             Array.Exists(Environment.GetCommandLineArgs(), argument => argument == AutoPairArgument)
@@ -251,6 +252,28 @@ internal sealed partial class MainPage : Page
         }
 
         this.CheckLocalCard();
+    }
+
+    private async void ShowDriverLaneHintIfNeeded()
+    {
+        LocalCardSupport support = await Task.Run(LocalCardService.DetectLocalCardSupport)
+            .ConfigureAwait(true);
+
+        switch (support.State)
+        {
+            case "driver_not_installed":
+                this.ShowStatus(
+                    InfoBarSeverity.Informational,
+                    "Local-card functions need the FINEID drivers. Phone-powered signing via Remote Reader still works."
+                );
+                break;
+            case "no_reader":
+                this.ShowStatus(
+                    InfoBarSeverity.Informational,
+                    "The FINEID drivers are registered but no card reader is present."
+                );
+                break;
+        }
     }
 
     private async void CheckLocalCard()

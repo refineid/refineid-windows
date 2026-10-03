@@ -32,6 +32,9 @@ internal static partial class LocalCardService
     [LibraryImport(Library, EntryPoint = "refineid_settings_present_readers")]
     private static partial nint PresentReadersNative();
 
+    [LibraryImport(Library, EntryPoint = "refineid_settings_detect_local_card_support")]
+    private static partial nint DetectLocalCardSupportNative();
+
     [LibraryImport(Library, EntryPoint = "refineid_settings_inspect")]
     private static partial nint InspectNative([In] byte[] reader, nuint readerLength);
 
@@ -56,6 +59,27 @@ internal static partial class LocalCardService
         {
             Debug.WriteLine($"PresentReaders JSON parse error: {ex.Message}");
             return [];
+        }
+    }
+
+    internal static LocalCardSupport DetectLocalCardSupport()
+    {
+        try
+        {
+            return Invoke(
+                DetectLocalCardSupportNative,
+                LocalCardJsonContext.Default.NativeEnvelopeLocalCardSupport
+            );
+        }
+        catch (NativeRappException ex)
+        {
+            Debug.WriteLine($"DetectLocalCardSupport native error: {ex.Message}");
+            return new LocalCardSupport { State = "unknown" };
+        }
+        catch (JsonException ex)
+        {
+            Debug.WriteLine($"DetectLocalCardSupport JSON parse error: {ex.Message}");
+            return new LocalCardSupport { State = "unknown" };
         }
     }
 
