@@ -48,7 +48,7 @@ is remote.
    *Transport & Discovery Model*: Governed normatively by
    [remote-transport-and-discovery-architecture.md](remote-transport-and-discovery-architecture.md).
    Windows operates strictly as an outbound client connecting to the phone's
-   ephemeral listener discovered via mDNS/DNS-SD (`DnssdServiceWatcher`),
+   ephemeral listener discovered via mDNS/DNS-SD (`Windows.Devices.Enumeration` / Win32 `DnsServiceBrowse`),
    eliminating inbound listening ports, Windows Firewall modifications, and UAC elevation.
 2. **Durable pairing** — next. A `PairingStore` implementation over the
    Windows credential store (pair keys device-only, never roaming, the

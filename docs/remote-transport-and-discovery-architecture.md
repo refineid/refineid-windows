@@ -29,8 +29,8 @@ This document specifies the architecture for remote card operations on Windows, 
    - An explicit UI toggle in `RefineID-winui` (**"Enable Remote Phone Reader"**, default: `false`) is required before Windows activates background discovery.
 4. **Normative 3-Tier Discovery & Transport Hierarchy**:
    - **Tier 1: Apple Native (Direct P2P)**: Exclusively Apple-to-Apple; not applicable on Windows.
-   - **Tier 2: Bluetooth / BLE Proximity Transport (`fi.refineid.rapp.ble.v1`)**: Supported on Windows 10/11 with Bluetooth 4.0+ hardware. On legacy hardware lacking BLE (e.g. ThinkPad R61 Broadcom BCM2045B Bluetooth 2.0+EDR), unauthenticated Classic RFCOMM is supported as a proximity fallback.
-   - **Tier 3: Local IP Stream via mDNS / DNS-SD Fallback (`fi.refineid.stream.v1`)**: Discovered via native WinRT `Windows.Networking.ServiceDiscovery.Dnssd.DnssdServiceWatcher`, connecting outbound to the phone.
+   - **Tier 2: Bluetooth / BLE Proximity Transport (`fi.refineid.rapp.ble.v1`)**: Implemented via Windows WinRT `Windows.Devices.Bluetooth.GenericAttributeProfile` for GATT-based RAPP communication. The Requester enforces an advisory discovery gate ($\ge -55\text{ dBm}$ RSSI); RSSI is strictly an advisory filter and does not guarantee physical proximity or defeat RF relays. (Note: Windows user-space does not expose public APIs for BLE L2CAP Connection-Oriented Channels). On legacy hardware lacking BLE (e.g. ThinkPad R61 Broadcom BCM2045B Bluetooth 2.0+EDR), unauthenticated Classic RFCOMM is supported as a proximity fallback.
+   - **Tier 3: Local IP Stream via mDNS / DNS-SD Fallback (`fi.refineid.stream.v1`)**: Discovered using supported `Windows.Devices.Enumeration` or Win32 `DnsServiceBrowse` APIs, establishing an outbound TCP connection to the phone.
 
 ---
 
@@ -45,7 +45,7 @@ This document specifies the architecture for remote card operations on Windows, 
 │  │                                                                   │  │
 │  │   • Default: Local Card Reader (winscard / PC/SC)                 │  │
 │  │   • Opt-in Setting: [x] Enable Remote Phone Reader                │  │
-│  │   • Discovery: WinRT DnssdServiceWatcher (Browses mDNS)           │  │
+│  │   • Discovery: Windows.Devices.Enumeration / Win32 DNS-SD         │  │
 │  │   • Pairing Ceremony: Prompts for 6-char Crockford Base32 code    │  │
 │  │   • Zero inbound ports, zero firewall rules, zero UAC prompts     │  │
 │  └───────────────────────────────────┬───────────────────────────────┘  │
@@ -67,10 +67,10 @@ This document specifies the architecture for remote card operations on Windows, 
 │                         │  • Outbound TcpStream    │                    │
 │                         └────────────┬─────────────┘                    │
 └──────────────────────────────────────┼──────────────────────────────────┘
-                                       │ Outbound Connection
-                                       │ (Zero listening ports on Windows)
-                                       │ (Zero Windows Firewall holes)
-                                       ▼
+                                        │ Outbound Connection
+                                        │ (Zero listening ports on Windows)
+                                        │ (Zero Windows Firewall holes)
+                                        ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                    SOVEREIGN CUSTODIAN (PHONE)                          │
 │                         (iOS / Android)                                 │
@@ -93,14 +93,36 @@ In the legacy codebase:
 - The user was interrupted with UAC elevation dialogs.
 
 ### 3.2 Target Outbound Implementation
-1. **Discovery using Native WinRT DNS-SD**:
-   - Use `Windows.Networking.ServiceDiscovery.Dnssd.DnssdServiceWatcher`:
-     ```csharp
-     var watcher = new DnssdServiceWatcher("_refineid-stream._tcp.local");
-     watcher.Added += OnServiceAdded;
-     watcher.Start();
-     ```
-   - Resolve the phone's advertised IP address and dynamic port from the DNS-SD SRV record.
+1. **Discovery using Supported Windows DNS-SD APIs**:
+   - Note: Microsoft explicitly marks `DnssdServiceWatcher` unsupported on modern Windows releases. Windows implementations MUST use one of the two supported discovery mechanisms:
+     - **Option A: WinRT `Windows.Devices.Enumeration`** (C# / WinUI):
+       ```csharp
+       string aqs = "System.Devices.AqsFilterByAepServiceType:=\"_refineid-stream._tcp\"";
+       string[] requestedProperties = {
+           "System.Devices.IpAddress",
+           "System.Devices.PortNumber",
+           "System.Devices.Dnssd.TextAttributes"
+       };
+       var watcher = DeviceInformation.CreateWatcher(
+           aqs,
+           requestedProperties,
+           DeviceInformationKind.AssociationEndpointService
+       );
+       watcher.Added += OnServiceAdded;
+       watcher.Updated += OnServiceUpdated;
+       watcher.Removed += OnServiceRemoved;
+       watcher.Start();
+       ```
+     - **Option B: Win32 DNS-SD Native API** (`windns.h` / `dnsapi.dll`):
+       ```c
+       DNS_SERVICE_BROWSE_REQUEST request = { 0 };
+       request.Version = DNS_QUERY_REQUEST_VERSION1;
+       request.QueryName = L"_refineid-stream._tcp.local";
+       request.pBrowseCallback = OnDnsServiceBrowseCallback;
+       DnsServiceBrowse(&request, &cancel);
+       ```
+   - Resolves the phone's advertised IP address and dynamic port without requiring administrative privileges.
+   - When the user toggles "Enable Remote Phone Reader" off, `watcher.Stop()` is invoked immediately, stopping discovery and releasing all resources.
 2. **Outbound Stream Connection**:
    - Establish outbound connection using standard `System.Net.Sockets.TcpClient`:
      ```csharp
@@ -127,7 +149,7 @@ In the legacy codebase:
          Allow discovering and using your phone as a wireless card reader.
      ```
    - When unchecked, the application generates zero network traffic and listens on zero sockets.
-   - When checked, `DnssdServiceWatcher` and BLE scanning activate to discover announced mobile readers.
+   - When checked, DNS-SD service browsing and BLE scanning activate to discover announced mobile readers.
 3. **One-Time Pairing UI**:
    - When pairing a new phone, the desktop prompts for the 6-character Crockford Base32 code displayed on the phone (per RAPP v26.10.1 §3).
    - Once paired, the trust record is stored in Windows Credential Store (`refineid-windows-credential-store`).
