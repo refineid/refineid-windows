@@ -37,6 +37,15 @@ internal sealed class ReaderList
     public string[] Readers { get; init; } = [];
 }
 
+internal sealed class LocalCardSupport
+{
+    [JsonPropertyName("state")]
+    public string State { get; init; } = "unknown";
+
+    [JsonPropertyName("reader_count")]
+    public int? ReaderCount { get; init; }
+}
+
 internal sealed class CredentialStatus
 {
     [JsonPropertyName("state")]
@@ -137,6 +146,11 @@ internal static class NativeCardService
     internal static string[] PresentReaders()
     {
         return Invoke<ReaderList>(NativeMethods.PresentReaders).Readers;
+    }
+
+    internal static LocalCardSupport DetectLocalCardSupport()
+    {
+        return Invoke<LocalCardSupport>(NativeMethods.DetectLocalCardSupport);
     }
 
     internal static CardSnapshot Inspect(string reader)
@@ -386,6 +400,9 @@ internal static class NativeCardService
 
         [DllImport(Library, EntryPoint = "refineid_settings_present_readers")]
         internal static extern nint PresentReaders();
+
+        [DllImport(Library, EntryPoint = "refineid_settings_detect_local_card_support")]
+        internal static extern nint DetectLocalCardSupport();
 
         [DllImport(Library, EntryPoint = "refineid_settings_inspect")]
         internal static extern nint Inspect([In] byte[] reader, nuint readerLength);

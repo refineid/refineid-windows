@@ -77,4 +77,15 @@ internal sealed class LocalCardSnapshot
 [JsonSourceGenerationOptions(PropertyNameCaseInsensitive = false)]
 [JsonSerializable(typeof(NativeEnvelope<ReaderList>))]
 [JsonSerializable(typeof(NativeEnvelope<LocalCardSnapshot>))]
+[JsonSerializable(typeof(NativeEnvelope<LocalCardSupport>))]
 internal sealed partial class LocalCardJsonContext : JsonSerializerContext;
+
+/// Mirror of the settings-ffi JSON for the local-card lane probe.
+internal sealed class LocalCardSupport
+{
+    [JsonPropertyName("state")]
+    public string State { get; init; } = "unknown";
+
+    [JsonPropertyName("reader_count")]
+    public int? ReaderCount { get; init; }
+}

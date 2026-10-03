@@ -176,6 +176,16 @@ public sealed partial class MainPage : Page
             if (readers.Length == 0)
             {
                 ClearCard();
+                LocalCardSupport support = await Task.Run(NativeCardService.DetectLocalCardSupport);
+                if (support.State == "driver_not_installed")
+                {
+                    ShowNotice(
+                        "FINEID drivers not detected",
+                        "The local FINEID card stack is not installed. Visit https://pkg.refineid.fi/drivers to get it. Phone-powered Remote Reader remains available."
+                    );
+                    return;
+                }
+
                 ShowNotice(
                     "No card found",
                     "Insert a FINEID card or place it on an NFC reader, then refresh."

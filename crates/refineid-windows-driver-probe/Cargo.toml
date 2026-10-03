@@ -1,0 +1,21 @@
+[package]
+name = "refineid-windows-driver-probe"
+description = "Detect whether a local RefineID smart-card stack is usable on this Windows machine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+pcsc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Registry",
+] }
