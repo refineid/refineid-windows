@@ -20,6 +20,7 @@ refineid-card-manager-core.workspace = true
 refineid-lib-core.workspace = true
 refineid-windows-credential-store.workspace = true
 refineid-windows-driver-probe.workspace = true
+refineid-doc-sign.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 zeroize.workspace = true

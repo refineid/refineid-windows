@@ -151,7 +151,7 @@ impl core::error::Error for VerifyErrorKind {}
     dead_code,
     reason = "exercised by the verify tests today; the GUI Verify tab becomes the production caller"
 )]
-pub(crate) fn verify_offline(options: &VerifyOptions) -> Result<VerifyReport, VerifyErrorKind> {
+pub fn verify_offline(options: &VerifyOptions) -> Result<VerifyReport, VerifyErrorKind> {
     let cert_bytes = std::fs::read(&options.cert).map_err(|source| VerifyErrorKind::CertRead {
         path: options.cert.clone(),
         source,

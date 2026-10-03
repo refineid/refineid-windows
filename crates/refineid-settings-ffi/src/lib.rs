@@ -28,11 +28,13 @@
 use core::ffi::c_char;
 use std::ffi::CString;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::PathBuf;
 
 use refineid_card_manager_core::card_pin::{
     ActivateOptions, ActivatePreflightOutcome, ChangePinOptions, PinManageSlot, UnblockPinOptions,
 };
 use refineid_card_manager_core::service::{self, CardSnapshot, ContactlessSnapshot};
+use refineid_doc_sign::verify::VerifyOptions;
 use refineid_lib_core::apdu::status_word::PinRetries;
 use refineid_lib_core::auth::{ChangePinOutcome, PinStatus, PukStatus, UnblockOutcome};
 use refineid_lib_core::can::{CAN_DIGITS, Can};
@@ -285,6 +287,73 @@ fn detect_local_card_support() -> LocalCardSupportReport {
             reader_count: None,
         },
     }
+}
+
+/// Verify a document signature offline (no card needed).
+///
+/// `cert`, `message`, and `signature` are UTF-8 file paths. The function
+/// loads the certificate (PEM or DER), the original message bytes, and the
+/// raw RSA-PKCS1v15-SHA256 signature, then verifies the signature against
+/// the certificate's public key. Returns a JSON report with the result.
+///
+/// # Safety
+///
+/// Each pointer must point to `*_length` readable bytes of valid UTF-8.
+/// The buffers must not exceed the documented maximums.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn refineid_settings_verify_document(
+    cert: *const u8,
+    cert_length: usize,
+    message: *const u8,
+    message_length: usize,
+    signature: *const u8,
+    signature_length: usize,
+) -> *mut c_char {
+    reply_json(|| {
+        let cert_path = unsafe { copy_utf8(cert, cert_length, MAX_READER_NAME_BYTES, "cert")? };
+        let message_path =
+            unsafe { copy_utf8(message, message_length, MAX_READER_NAME_BYTES, "message")? };
+        let signature_path = unsafe {
+            copy_utf8(
+                signature,
+                signature_length,
+                MAX_READER_NAME_BYTES,
+                "signature",
+            )?
+        };
+
+        let options = VerifyOptions {
+            cert: cert_path.into(),
+            message: message_path.into(),
+            signature: signature_path.into(),
+        };
+
+        match refineid_doc_sign::verify::verify_offline(&options) {
+            Ok(report) => Ok(VerifyReportJson {
+                cert_path: report.cert_path,
+                cert_subject_cn: report.cert_subject_cn.map(|cn| cn.to_string()),
+                message_path: report.message_path,
+                message_len: report.message_len,
+                signature_path: report.signature_path,
+                signature_len: report.signature_len,
+                ok: report.ok,
+                failure_reason: report.failure_reason.map(|e| e.to_string()),
+            }),
+            Err(e) => Err(ApiFailure::new("verify_failed", e.to_string())),
+        }
+    })
+}
+
+#[derive(Serialize)]
+struct VerifyReportJson {
+    cert_path: PathBuf,
+    cert_subject_cn: Option<String>,
+    message_path: PathBuf,
+    message_len: u64,
+    signature_path: PathBuf,
+    signature_len: usize,
+    ok: bool,
+    failure_reason: Option<String>,
 }
 
 /// Inspect one selected contact-interface card without presenting a secret.

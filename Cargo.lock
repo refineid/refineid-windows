@@ -1042,6 +1042,7 @@ name = "refineid-settings-ffi"
 version = "26.9.24"
 dependencies = [
  "refineid-card-manager-core",
+ "refineid-doc-sign",
  "refineid-lib-core",
  "refineid-windows-credential-store",
  "refineid-windows-driver-probe",
