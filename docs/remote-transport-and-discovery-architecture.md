@@ -97,10 +97,13 @@ In the legacy codebase:
    - Note: Microsoft explicitly marks `DnssdServiceWatcher` unsupported on modern Windows releases. Windows implementations MUST use one of the two supported discovery mechanisms:
      - **Option A: WinRT `Windows.Devices.Enumeration`** (C# / WinUI):
        ```csharp
-       string aqs = "System.Devices.AqsFilterByAepServiceType:=\"_refineid-stream._tcp\"";
+       string aqs = "System.Devices.AepService.ProtocolId:=\"{4526e8c1-8aac-4153-9b16-55e86ada0e54}\" AND System.Devices.Dnssd.ServiceName:=\"_refineid-stream._tcp\"";
        string[] requestedProperties = {
            "System.Devices.IpAddress",
-           "System.Devices.PortNumber",
+           "System.Devices.Dnssd.PortNumber",
+           "System.Devices.Dnssd.HostName",
+           "System.Devices.Dnssd.InstanceName",
+           "System.Devices.Dnssd.ServiceName",
            "System.Devices.Dnssd.TextAttributes"
        };
        var watcher = DeviceInformation.CreateWatcher(
