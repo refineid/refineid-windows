@@ -20,7 +20,7 @@ pub mod stream;
 pub mod transport;
 
 /// The wire version of RAPP from canonical core.
-pub const WIRE_VERSION: (u16, u16, u16) = refineid_rapp::VISIBLE_WIRE_VERSION;
+pub const WIRE_VERSION: (u16, u16, u16) = refineid_rapp::WIRE_VERSION_V26_10_1;
 
 /// The mandatory pairing handshake construction.
 pub const PAIRING_SUITE: &str = refineid_rapp::MANDATORY_PAIRING_SUITE;

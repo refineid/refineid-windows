@@ -5,7 +5,6 @@ use std::time::Duration;
 use p384::ecdsa::signature::hazmat::PrehashVerifier as _;
 use refineid_rapp_cli::mock_proxy::{MockProxyOptions, run_mock_proxy};
 use refineid_rapp_core::engine::{OperationOutcome, Requester, RequesterConfig};
-use refineid_rapp_core::ids::PairingSecret;
 use refineid_rapp_core::limits::OFFER_TTL_MAX_MS;
 use refineid_rapp_core::message::CloseReason;
 use refineid_rapp_core::offer::{PairingOffer, TransportCandidate, offer_id_from_code};
@@ -37,7 +36,6 @@ fn test_mock_proxy_pairing_and_card_operations() {
 
     let test_code = "654321";
     let offer_id = offer_id_from_code(test_code).expect("valid code");
-    let secret = PairingSecret::from_random_bytes([0u8; 32]);
 
     let requested_profiles = vec![
         PROFILE_CARD_STATUS.to_owned(),
@@ -49,7 +47,6 @@ fn test_mock_proxy_pairing_and_card_operations() {
         stream_candidate_parameters(std::slice::from_ref(&endpoint)).expect("parameters");
     let offer = PairingOffer::reconstruct(
         offer_id,
-        secret,
         vec![refineid_rapp::MANDATORY_PAIRING_SUITE.into()],
         requested_profiles.clone(),
         vec![TransportCandidate {

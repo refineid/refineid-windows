@@ -25,8 +25,8 @@ use refineid_rapp_core::ids::{
 use refineid_rapp_core::limits::OFFER_TTL_MAX_MS;
 use refineid_rapp_core::message::CloseReason;
 use refineid_rapp_core::offer::{
-    PRE_CPACE_DUMMY_SECRET, PairingOffer, TransportCandidate, format_pairing_code,
-    is_valid_pairing_code, normalize_pairing_code, offer_id_from_code,
+    PairingOffer, TransportCandidate, format_pairing_code, is_valid_pairing_code,
+    normalize_pairing_code, offer_id_from_code,
 };
 use refineid_rapp_core::operations::{
     CardOperation, CardOperationExt, CardOperationResult, CertificateKind, KeyProfile,
@@ -257,16 +257,14 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
         PROFILE_DOCUMENT_SIGNING.to_owned(),
     ];
 
-    let (offer, pairing_service, manual_code) = if let Some(code) = &options.code {
+    let (offer, pairing_service, manual_code, qr_secret) = if let Some(code) = &options.code {
         let raw_code = normalize_pairing_code(code);
         let pairing_code = format_pairing_code(&raw_code);
         let offer_id = offer_id_from_code(&raw_code).map_err(|e| format!("invalid code: {e:?}"))?;
-        let secret = PairingSecret::from_random_bytes(PRE_CPACE_DUMMY_SECRET);
         let candidate_params = stream_candidate_parameters(&options.advertise)
             .map_err(|error| format!("invalid advertised endpoints: {error:?}"))?;
         let offer = PairingOffer::reconstruct(
             offer_id,
-            secret,
             vec![refineid_rapp::MANDATORY_PAIRING_SUITE.into()],
             requested_profiles.clone(),
             vec![TransportCandidate {
@@ -286,7 +284,7 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
         );
         println!("pairing code: {pairing_code}");
         flush_now();
-        (offer, service, Some(raw_code))
+        (offer, service, Some(raw_code), None)
     } else {
         let offer_id =
             OfferId::random().map_err(|_| "csprng failed: random offer_id".to_owned())?;
@@ -296,7 +294,6 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
             .map_err(|error| format!("invalid advertised endpoints: {error:?}"))?;
         let offer = PairingOffer::reconstruct(
             offer_id,
-            secret,
             vec![refineid_rapp::MANDATORY_PAIRING_SUITE.into()],
             requested_profiles.clone(),
             vec![TransportCandidate {
@@ -322,7 +319,7 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
         println!("{}", uri.expose());
         flush_now();
         let service = refineid_rapp_core::stream::stream_rendezvous_name(uri.expose().as_bytes());
-        (offer, service, None)
+        (offer, service, None, Some(secret))
     };
     println!("pairing service instance: {pairing_service}");
     flush_now();
@@ -374,9 +371,10 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
                             }
                         },
                     )
-                } else {
-                    requester.pair(
+                } else if let Some(secret) = &qr_secret {
+                    requester.pair_with_secret(
                         &mut offer_slot,
+                        secret,
                         &requested_profiles,
                         transport,
                         |peer, requested| {
@@ -393,6 +391,8 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
                             }
                         },
                     )
+                } else {
+                    return Err("no pairing secret or code available".into());
                 };
                 match outcome {
                     Ok(pair_id) => break pair_id,
@@ -908,7 +908,6 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
 
     let test_code = "654321";
     let offer_id = offer_id_from_code(test_code).map_err(|e| format!("invalid code: {e:?}"))?;
-    let secret = PairingSecret::from_random_bytes(PRE_CPACE_DUMMY_SECRET);
 
     let requested_profiles = vec![
         PROFILE_CARD_STATUS.to_owned(),
@@ -927,7 +926,6 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
         .map_err(|e| format!("parameters: {e:?}"))?;
     let offer = PairingOffer::reconstruct(
         offer_id,
-        secret,
         vec![refineid_rapp::MANDATORY_PAIRING_SUITE.into()],
         requested_profiles.clone(),
         vec![TransportCandidate {

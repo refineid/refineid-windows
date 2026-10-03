@@ -458,7 +458,6 @@ fn begin_pairing(
 
     let offer = PairingOffer::reconstruct(
         offer_id,
-        secret,
         vec![refineid_rapp::MANDATORY_PAIRING_SUITE.to_owned()],
         requested_profiles.clone(),
         vec![TransportCandidate {
@@ -496,7 +495,14 @@ fn begin_pairing(
     // The thread reaches the shared state through the registry by handle id,
     // owning the pieces it moves and locking only briefly each time.
     let thread = std::thread::spawn(move || {
-        pairing_thread(handle_id, requester, listener, offer, requested_profiles);
+        pairing_thread(
+            handle_id,
+            requester,
+            listener,
+            offer,
+            secret,
+            requested_profiles,
+        );
     });
     if let Ok(mut registry) = lock_registry()
         && let Some(entry) = registry.get_mut(&handle_id)
@@ -519,6 +525,7 @@ fn pairing_thread(
     mut requester: StreamRequester,
     listener: StreamListener,
     offer: PairingOffer,
+    secret: PairingSecret,
     requested_profiles: Vec<String>,
 ) {
     let mut offer_slot = Some(offer);
@@ -553,7 +560,13 @@ fn pairing_thread(
                 Ok(None) | Err(_) => None,
             }
         };
-        let outcome = requester.pair(&mut offer_slot, &attempt_profiles, transport, confirm);
+        let outcome = requester.pair_with_secret(
+            &mut offer_slot,
+            &secret,
+            &attempt_profiles,
+            transport,
+            confirm,
+        );
         match outcome {
             Ok(pair_id) => {
                 finish_pairing(handle_id, requester, listener, pair_id);

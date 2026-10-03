@@ -288,7 +288,7 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         mut transport: Transport,
         confirm: impl FnOnce(&PeerIntroduction, &[String]) -> Option<Vec<String>>,
     ) -> Result<PairId, PairingError> {
-        let Some(mut offer) = offer_slot.take() else {
+        let Some(offer) = offer_slot.take() else {
             return Err(PairingError::HandshakeFailed);
         };
         let mut entropy = [0u8; 64];
@@ -318,14 +318,36 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
             .read_message(&peer_frame)
             .map_err(|_| PairingError::HandshakeFailed)?;
 
-        // 3. Set derived secret on the offer and proceed with standard Noise XXpsk3 pairing
-        offer.set_pairing_secret(derived_secret);
+        // 3. Proceed with standard Noise XXpsk3 pairing using derived secret
         *offer_slot = Some(offer);
-        self.pair(offer_slot, requested_profiles, transport, confirm)
+        self.pair_with_secret(
+            offer_slot,
+            &derived_secret,
+            requested_profiles,
+            transport,
+            confirm,
+        )
     }
 
     /// Runs the requester half of the pairing exchange over an accepted
-    /// candidate transport.
+    /// candidate transport using an ephemeral default secret.
+    ///
+    /// # Errors
+    /// Returns [`PairingError`] on handshake failure, parameter mismatch,
+    /// transport loss, or invalid grant.
+    pub fn pair<Transport: FrameTransport>(
+        &mut self,
+        offer_slot: &mut Option<PairingOffer>,
+        requested_profiles: &[String],
+        transport: Transport,
+        confirm: impl FnOnce(&PeerIntroduction, &[String]) -> Option<Vec<String>>,
+    ) -> Result<PairId, PairingError> {
+        let secret = refineid_rapp::PairingSecret::from_random_bytes([0u8; 32]);
+        self.pair_with_secret(offer_slot, &secret, requested_profiles, transport, confirm)
+    }
+
+    /// Runs the requester half of the pairing exchange over an accepted
+    /// candidate transport with a verified pairing secret.
     ///
     /// # Errors
     /// Returns [`PairingError`] on handshake failure, parameter mismatch,
@@ -334,9 +356,10 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         clippy::too_many_lines,
         reason = "pairing handshake walks 7 sequential wire messages"
     )]
-    pub fn pair<Transport: FrameTransport>(
+    pub fn pair_with_secret<Transport: FrameTransport>(
         &mut self,
         offer_slot: &mut Option<PairingOffer>,
+        pairing_secret: &refineid_rapp::PairingSecret,
         requested_profiles: &[String],
         mut transport: Transport,
         confirm: impl FnOnce(&PeerIntroduction, &[String]) -> Option<Vec<String>>,
@@ -351,6 +374,7 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
             offer,
             transport.candidate_id(),
             local_keys,
+            pairing_secret,
         ) {
             Ok(h) => h,
             Err(fail) => {
