@@ -3021,8 +3021,8 @@ impl CredentialIdentity {
         self.printed_serial.as_deref()
     }
 
-    /// "Person" portion of the identity -- surname, given names,
-    /// PEUIN -- space-separated, `None` fields elided. Empty
+    /// "Person" portion of the identity -- surname and given names,
+    /// space-separated, `None` fields elided. Empty
     /// string when none of those are known.
     ///
     /// Given-name slots concatenate in canonical order: first,
@@ -3049,11 +3049,6 @@ impl CredentialIdentity {
             if !given.is_empty() {
                 parts.push(given);
             }
-        }
-        if let Some(s) = self.peuin.as_deref()
-            && !s.is_empty()
-        {
-            parts.push(s);
         }
         parts.join(" ")
     }
