@@ -101,6 +101,8 @@ Requirements:
   with C++* workload, including the MSVC build tools for the host architecture.
 
 See [docs/toolchain.md](docs/toolchain.md) for the architecture-specific tool
+and [docs/store-and-driver-distribution.md](docs/store-and-driver-distribution.md)
+for how the Store MSIX and the pkg.refineid.fi driver installer split up.
 requirements and for cross-building the Windows target from macOS or Linux.
 
 Build both supported architectures:
