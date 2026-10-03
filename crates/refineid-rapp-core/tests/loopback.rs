@@ -62,10 +62,9 @@ fn test_requester() -> TestRequester {
     )
 }
 
-fn test_offer(secret_bytes: [u8; 32]) -> PairingOffer {
+fn test_offer() -> PairingOffer {
     PairingOffer::reconstruct(
         OfferId::from_array(TEST_OFFER_ID_BYTES),
-        PairingSecret::from_random_bytes(secret_bytes),
         vec![refineid_rapp::MANDATORY_PAIRING_SUITE.into()],
         vec![
             PROFILE_CARD_STATUS.to_owned(),
@@ -114,12 +113,13 @@ impl PairStore for MockProxyStore {
 fn proxy_pair(
     mut transport: MemoryTransport,
     offer: PairingOffer,
+    secret: &PairingSecret,
     _granted: &[String],
 ) -> PairRecord {
     let now_ms = TEST_MONOTONIC_TIMESTAMP_MS;
     let local_keys = generate_pair_key_material().unwrap();
     let mut handshake =
-        PairingHandshake::begin(EndpointRole::Proxy, offer, CANDIDATE, local_keys).unwrap();
+        PairingHandshake::begin(EndpointRole::Proxy, offer, CANDIDATE, local_keys, secret).unwrap();
 
     // Message 1 (Requester -> Proxy)
     let m1_bytes = transport.receive_frame().unwrap();
@@ -227,18 +227,26 @@ fn proxy_accept_session(pair_record: &PairRecord, mut transport: MemoryTransport
 
 /// Pairs a fresh requester with a proxy thread and returns both halves.
 fn paired(requester: &mut TestRequester, granted: &[String]) -> (PairId, PairRecord) {
-    let secret_bytes = [0x77u8; 32];
-    let offer = test_offer(secret_bytes);
-    let proxy_offer = test_offer(secret_bytes);
+    let secret = PairingSecret::from_random_bytes([0x77u8; 32]);
+    let offer = test_offer();
+    let proxy_offer = test_offer();
     let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
     let granted_for_proxy = granted.to_vec();
-    let proxy =
-        std::thread::spawn(move || proxy_pair(proxy_transport, proxy_offer, &granted_for_proxy));
+    let secret_for_proxy = PairingSecret::from_random_bytes([0x77u8; 32]);
+    let proxy = std::thread::spawn(move || {
+        proxy_pair(
+            proxy_transport,
+            proxy_offer,
+            &secret_for_proxy,
+            &granted_for_proxy,
+        )
+    });
     let profile_request: Vec<String> = granted.to_vec();
     let mut offer_slot = Some(offer);
     let pair_id = requester
-        .pair(
+        .pair_with_secret(
             &mut offer_slot,
+            &secret,
             &profile_request,
             requester_transport,
             |peer, _requested| {
@@ -271,14 +279,21 @@ fn pairing_stores_matching_records_on_both_sides() {
 #[test]
 fn wrong_secret_fails_pairing_without_storing() {
     let mut requester = test_requester();
-    let offer = test_offer([0x02; 32]);
-    let proxy_offer = test_offer([0x01; 32]);
+    let offer = test_offer();
+    let proxy_offer = test_offer();
+    let req_secret = PairingSecret::from_random_bytes([0x02; 32]);
+    let proxy_secret = PairingSecret::from_random_bytes([0x01; 32]);
     let (requester_transport, mut proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
     let proxy = std::thread::spawn(move || {
         let local_keys = generate_pair_key_material().unwrap();
-        let mut handshake =
-            PairingHandshake::begin(EndpointRole::Proxy, proxy_offer, CANDIDATE, local_keys)
-                .unwrap();
+        let mut handshake = PairingHandshake::begin(
+            EndpointRole::Proxy,
+            proxy_offer,
+            CANDIDATE,
+            local_keys,
+            &proxy_secret,
+        )
+        .unwrap();
         let m1 = proxy_transport.receive_frame().unwrap();
         let m1_frame = BinaryFrame::reconstruct(m1).unwrap();
         if handshake.read_message(&m1_frame).is_ok()
@@ -288,8 +303,9 @@ fn wrong_secret_fails_pairing_without_storing() {
         }
     });
     let mut offer_slot = Some(offer);
-    let outcome = requester.pair(
+    let outcome = requester.pair_with_secret(
         &mut offer_slot,
+        &req_secret,
         &[PROFILE_CARD_STATUS.to_owned()],
         requester_transport,
         |_, _| panic!("an unauthenticated attempt must never reach confirmation"),

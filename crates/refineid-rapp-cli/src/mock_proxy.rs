@@ -221,13 +221,11 @@ fn resolve_offer(options: &MockProxyOptions) -> Result<(PairingOffer, String), S
         let normalized = refineid_rapp_core::offer::normalize_pairing_code(code);
         let offer_id = refineid_rapp::cpace::derive_manual_offer_id(&normalized)
             .map_err(|e| format!("invalid code: {e:?}"))?;
-        let secret = PairingSecret::from_random_bytes([0u8; 32]);
         let candidate_params =
             refineid_rapp::StreamCandidateParameters::new(vec![endpoint.clone()])
                 .map_err(|e| format!("candidate parameters failed: {e:?}"))?;
         let offer = PairingOffer::reconstruct(
             offer_id,
-            secret,
             vec![refineid_rapp::MANDATORY_PAIRING_SUITE.to_owned()],
             vec![
                 refineid_rapp::ProfileName::CardStatus.as_str().to_owned(),
@@ -256,7 +254,7 @@ fn resolve_offer(options: &MockProxyOptions) -> Result<(PairingOffer, String), S
 }
 
 fn run_pairing(options: &MockProxyOptions) -> Result<ProxyPairing, String> {
-    let (mut offer, endpoint) = resolve_offer(options)?;
+    let (offer, endpoint) = resolve_offer(options)?;
     println!("dialing pairing connection to {endpoint}...");
     let mut transport = dial(
         &[endpoint.clone()],
@@ -266,7 +264,7 @@ fn run_pairing(options: &MockProxyOptions) -> Result<ProxyPairing, String> {
     )
     .map_err(|e| format!("cannot connect to requester at {endpoint}: {e:?}"))?;
 
-    if let Some(code) = &options.code {
+    let pairing_secret = if let Some(code) = &options.code {
         let mut entropy = [0u8; 64];
         getrandom::fill(&mut entropy).map_err(|e| format!("rng failed: {e}"))?;
         let cpace = CpaceState::new(
@@ -292,17 +290,22 @@ fn run_pairing(options: &MockProxyOptions) -> Result<ProxyPairing, String> {
             .map_err(|e| format!("receive cpace frame failed: {e:?}"))?;
         let peer_frame = BinaryFrame::reconstruct(peer_frame_bytes)
             .map_err(|e| format!("decode cpace frame failed: {e:?}"))?;
-        let secret = cpace
+        cpace
             .read_message(&peer_frame)
-            .map_err(|e| format!("cpace derive secret failed: {e:?}"))?;
-
-        offer.set_pairing_secret(secret);
-    }
+            .map_err(|e| format!("cpace derive secret failed: {e:?}"))?
+    } else {
+        PairingSecret::from_random_bytes([0u8; 32])
+    };
 
     let keys = generate_pair_key_material().map_err(|e| format!("key generation failed: {e:?}"))?;
-    let mut handshake =
-        PairingHandshake::begin(EndpointRole::Proxy, offer, &options.candidate_id, keys)
-            .map_err(|fail| format!("pairing handshake failed: {:?}", fail.error()))?;
+    let mut handshake = PairingHandshake::begin(
+        EndpointRole::Proxy,
+        offer,
+        &options.candidate_id,
+        keys,
+        &pairing_secret,
+    )
+    .map_err(|fail| format!("pairing handshake failed: {:?}", fail.error()))?;
 
     // Message 1 (Requester -> Proxy)
     let m1_bytes = transport
