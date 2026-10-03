@@ -45,6 +45,11 @@ is remote.
    role against vendored draft 26.8.17.233 with the conformance corpus
    replayed; `refineid-rapp pair-demo` proves pairing, sessions, and
    typed operations against a real phone from a terminal.
+   *Transport & Discovery Model*: Governed normatively by
+   [remote-transport-and-discovery-architecture.md](remote-transport-and-discovery-architecture.md).
+   Windows operates strictly as an outbound client connecting to the phone's
+   ephemeral listener discovered via mDNS/DNS-SD (`DnssdServiceWatcher`),
+   eliminating inbound listening ports, Windows Firewall modifications, and UAC elevation.
 2. **Durable pairing** — next. A `PairingStore` implementation over the
    Windows credential store (pair keys device-only, never roaming, the
    revoked record kept as the tombstone), and the pairing ceremony in

@@ -206,5 +206,5 @@ Packaging is implemented natively in Rust via `crates/refineid-msi`:
 The Windows desktop application (`apps/RefineID`) is built with modern WinUI 3 and
 Windows App SDK:
 - Fluent Design with Mica backdrop and system styling.
-- Card verification, pairing management, and local firewall service registration.
+- Local smart card verification (PC/SC) by default, pairing management, and outbound phone reader discovery (deprecating inbound firewall rules and UAC elevation per [remote-transport-and-discovery-architecture.md](remote-transport-and-discovery-architecture.md)).
 - Native builds for `win-arm64` and `win-x64` targeting .NET 10.
