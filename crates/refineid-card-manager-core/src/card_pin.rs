@@ -120,7 +120,7 @@ pub struct ChangePinReport {
     /// connected.
     pub card_serial: String,
     /// `CredentialIdentity::person_string()` rendering --
-    /// "SURNAME GIVENS PEUIN" form (still uppercase per
+    /// "SURNAME GIVENS" form (still uppercase per
     /// DVV-emitted cert subject; the typed [`NativeName`]
     /// rendering is a separate concern).
     ///
