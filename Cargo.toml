@@ -95,9 +95,11 @@ redundant_explicit_links = "deny"
 
 [workspace.lints.clippy]
 allow_attributes_without_reason = "deny"
+assert_is_empty = { level = "allow", priority = 1 }
 enum_glob_use = "deny"
 nursery = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+suboptimal_flops = { level = "allow", priority = 1 }
 unwrap_used = "deny"
 
 [profile.release]
