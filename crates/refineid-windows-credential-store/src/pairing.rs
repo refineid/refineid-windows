@@ -255,7 +255,9 @@ fn write_pairing_set(blob: &[u8]) -> Result<(), CredentialStoreError> {
 fn read_pairing_set() -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, CredentialStoreError> {
     use core::ptr;
 
-    use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, GetLastError};
+    use windows_sys::Win32::Foundation::{
+        ERROR_NO_SUCH_LOGON_SESSION, ERROR_NOT_FOUND, GetLastError,
+    };
     use windows_sys::Win32::Security::Credentials::{CRED_TYPE_GENERIC, CREDENTIALW, CredReadW};
     use zeroize::Zeroize as _;
 
@@ -287,7 +289,7 @@ fn read_pairing_set() -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, CredentialS
                 return Ok(Some(zeroize::Zeroizing::new(bytes)));
             }
         }
-        return if error_code == ERROR_NOT_FOUND {
+        return if error_code == ERROR_NOT_FOUND || error_code == ERROR_NO_SUCH_LOGON_SESSION {
             Ok(None)
         } else {
             Err(CredentialStoreError::Windows { code: error_code })
@@ -322,7 +324,9 @@ fn read_pairing_set() -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, CredentialS
 /// build is not running on Windows.
 #[cfg(windows)]
 pub fn delete_pairing_set() -> Result<(), CredentialStoreError> {
-    use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, GetLastError};
+    use windows_sys::Win32::Foundation::{
+        ERROR_NO_SUCH_LOGON_SESSION, ERROR_NOT_FOUND, GetLastError,
+    };
     use windows_sys::Win32::Security::Credentials::{CRED_TYPE_GENERIC, CredDeleteW};
     use zeroize::Zeroize as _;
 
@@ -339,7 +343,7 @@ pub fn delete_pairing_set() -> Result<(), CredentialStoreError> {
         let _ = std::fs::remove_file(path);
     }
     target.zeroize();
-    if deleted != 0 || error_code == ERROR_NOT_FOUND {
+    if deleted != 0 || error_code == ERROR_NOT_FOUND || error_code == ERROR_NO_SUCH_LOGON_SESSION {
         Ok(())
     } else {
         Err(CredentialStoreError::Windows { code: error_code })

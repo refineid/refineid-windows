@@ -61,6 +61,8 @@ pub const DEFAULT_MOCK_PRIVATE_KEY_SCALAR: &[u8; 48] = &[
 pub struct MockProxyOptions {
     /// Explicit endpoint to connect to (e.g. "127.0.0.1:47110").
     pub connect: Option<String>,
+    /// Explicit address to listen on for incoming sessions (e.g. "127.0.0.1:47110").
+    pub listen: Option<String>,
     /// 6-digit numeric pairing code.
     pub code: Option<String>,
     /// Full RAPP pairing offer URI (`rapp:...`).
@@ -97,6 +99,7 @@ impl Default for MockProxyOptions {
     fn default() -> Self {
         Self {
             connect: None,
+            listen: None,
             code: None,
             uri: None,
             candidate_id: DEFAULT_CANDIDATE_ID.to_owned(),
@@ -416,21 +419,45 @@ impl PairStore for MockProxyStore {
 }
 
 fn serve_one_session(pairing: &ProxyPairing, options: &MockProxyOptions) -> Result<(), String> {
-    println!("dialing session connection to {}...", pairing.endpoint);
-    let deadline = Instant::now() + Duration::from_secs(3600);
-    let mut transport = loop {
-        match dial(
-            &[pairing.endpoint.clone()],
+    let mut transport = if let Some(listen_addr) = &options.listen {
+        println!("mock proxy listening for incoming session on {listen_addr}...");
+        let listener = refineid_rapp_core::stream::StreamListener::bind(
+            listen_addr,
             &options.candidate_id,
-            Duration::from_secs(2),
-            &StreamRendezvous::Session(pairing.record.rendezvous_token()),
-        ) {
-            Ok(t) => break t,
-            Err(e) => {
-                if Instant::now() >= deadline {
-                    return Err(format!("session connect timeout: {e:?}"));
+            Duration::from_secs(3600),
+        )
+        .map_err(|e| format!("cannot bind listener at {listen_addr}: {e:?}"))?;
+        let accepted = listener
+            .accept()
+            .map_err(|e| format!("accept failed: {e:?}"))?;
+        let refineid_rapp_core::stream::StreamAccept::Session {
+            rendezvous_token,
+            transport,
+        } = accepted
+        else {
+            return Err("expected StreamAccept::Session".into());
+        };
+        if rendezvous_token.as_bytes() != pairing.record.rendezvous_token().as_bytes() {
+            return Err("rendezvous token mismatch".into());
+        }
+        transport
+    } else {
+        println!("dialing session connection to {}...", pairing.endpoint);
+        let deadline = Instant::now() + Duration::from_secs(3600);
+        loop {
+            match dial(
+                &[pairing.endpoint.clone()],
+                &options.candidate_id,
+                Duration::from_secs(2),
+                &StreamRendezvous::Session(pairing.record.rendezvous_token()),
+            ) {
+                Ok(t) => break t,
+                Err(e) => {
+                    if Instant::now() >= deadline {
+                        return Err(format!("session connect timeout: {e:?}"));
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
                 }
-                std::thread::sleep(Duration::from_millis(100));
             }
         }
     };
