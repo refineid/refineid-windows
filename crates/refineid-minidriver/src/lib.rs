@@ -1818,13 +1818,8 @@ unsafe extern "system" fn CardSignData(
             let origin = std::env::var("REFINEID_RP_ORIGIN")
                 .ok()
                 .or_else(|| std::env::var("REFINEID_ORIGIN").ok())
-                .filter(|s| !s.trim().is_empty() && s.len() <= 512);
-            let Some(origin) = origin else {
-                Log::dbg(
-                    "CardSignData: missing required caller RP origin (set REFINEID_RP_ORIGIN)",
-                );
-                return SCARD_E_INVALID_PARAMETER;
-            };
+                .filter(|s| !s.trim().is_empty() && s.len() <= 512)
+                .unwrap_or_else(|| "https://card.refineid.fi".to_owned());
             CardOperation::BrowserAuthenticate {
                 origin,
                 key_profile,

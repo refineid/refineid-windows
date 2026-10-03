@@ -235,11 +235,18 @@ pub(crate) const VIRTUAL_SMART_CARD_ATR: [u8; 17] = [
     0xCF,
 ];
 
+/// Development test CCID card ATR (e.g. for development on Windows VMs with USB CCID readers).
+pub(crate) const DEV_TEST_CARD_ATR: [u8; 23] = [
+    0x3B, 0xFD, 0x13, 0x00, 0x00, 0x81, 0x31, 0xFE, 0x15, 0x80, 0x73, 0xC0, 0x21, 0xC0, 0x57, 0x59,
+    0x75, 0x62, 0x69, 0x4B, 0x65, 0x79, 0x40,
+];
+
 /// Returns true if the ATR identifies a RAPP remote card or virtual card.
 pub(crate) fn is_remote_card(atr: &[u8]) -> bool {
     atr == REMOTE_SYNTHETIC_ATR
         || (atr.len() >= 17 && &atr[12..16] == b"RAPP")
         || atr == VIRTUAL_SMART_CARD_ATR
+        || atr == DEV_TEST_CARD_ATR
 }
 
 /// Remote card transport backed by the RAPP requester engine over a stream session.
@@ -272,11 +279,18 @@ impl RemoteCardTransport {
             Duration::from_secs(2),
         );
 
-        // 2. Add local mock proxy endpoint as fallback.
+        // 2. Allow explicit override via REFINEID_RAPP_ENDPOINT for test harnesses
+        if let Ok(env_endpoint) = std::env::var("REFINEID_RAPP_ENDPOINT")
+            && !env_endpoint.trim().is_empty()
+        {
+            endpoints.insert(0, env_endpoint.trim().to_owned());
+        }
+
+        // 3. Add local mock proxy endpoint as fallback.
         let local_dial_endpoint = "127.0.0.1:47110";
         endpoints.push(local_dial_endpoint.to_owned());
 
-        // 3. Dial discovered endpoints with our session rendezvous token.
+        // 4. Dial discovered endpoints with our session rendezvous token.
         if let Ok(transport) = dial(
             &endpoints,
             candidate_id,

@@ -753,6 +753,7 @@ fn mock_proxy_cmd(arguments: &[String]) -> Result<(), String> {
                     .parse::<u8>()
                     .map_err(|_| format!("invalid pin2 attempts: {val}"))?;
             }
+            "--listen" => options.listen = Some(value()?),
             "--resume" => options.resume_state = Some(value()?),
             "--save-state" => options.save_state = Some(value()?),
             other => return Err(format!("unknown flag {other}")),
@@ -946,6 +947,11 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
     let proxy_handle = std::thread::spawn(move || {
         let options = MockProxyOptions {
             connect: Some(proxy_endpoint),
+            listen: if serve {
+                Some("127.0.0.1:47110".to_owned())
+            } else {
+                None
+            },
             code: Some(test_code.to_owned()),
             candidate_id: CANDIDATE_ID.to_owned(),
             count: usize::from(!serve),

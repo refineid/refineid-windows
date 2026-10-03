@@ -88,6 +88,9 @@ def run_test(
 
     # Configure auto-selection of client certificates matching target
     auto_select_rule = json.dumps({"pattern": url, "filter": {}})
+    options.add_argument(f"--auto-select-certificate-for-urls=[{auto_select_rule}]")
+    options.add_argument("--enable-logging")
+    options.add_argument("--v=1")
     options.add_experimental_option(
         "prefs",
         {
@@ -97,19 +100,47 @@ def run_test(
         },
     )
 
+    options.page_load_strategy = "none"
+
     service = Service(executable_path=driver_path)
     driver = webdriver.Edge(service=service, options=options)
 
     try:
-        driver.set_page_load_timeout(timeout)
         start_time = time.time()
         print(f"Navigating to {url}...")
         driver.get(url)
-        elapsed = time.time() - start_time
 
-        title = driver.title
-        current_url = driver.current_url
-        page_text = driver.find_element("tag name", "body").text
+        title = ""
+        current_url = url
+        page_text = ""
+        success_markers = [
+            "Card holder",
+            "Client Certificate",
+            "Autentikoitu",
+            "Authenticated",
+            "Varmenne",
+        ]
+        unauth_markers = [
+            "Card login did not complete",
+            "Client certificate missing",
+            "403 Forbidden",
+        ]
+
+        for i in range(timeout):
+            time.sleep(1)
+            try:
+                title = driver.title
+                current_url = driver.current_url
+                body = driver.find_element("tag name", "body")
+                if body:
+                    page_text = body.text
+                    if any(m.lower() in page_text.lower() for m in success_markers + unauth_markers):
+                        print(f"Page response detected after {i+1}s")
+                        break
+            except Exception:
+                pass
+
+        elapsed = time.time() - start_time
 
         # Ensure directory exists for screenshot
         screenshot_dir = os.path.dirname(screenshot_path)
@@ -119,21 +150,6 @@ def run_test(
         print(f"Screenshot saved to: {screenshot_path}")
 
         # Check for card authentication status
-        # Success markers:
-        success_markers = [
-            "Card holder",
-            "Client Certificate",
-            "Autentikoitu",
-            "Authenticated",
-            "Varmenne",
-        ]
-        # Unauthenticated / 403 markers:
-        unauth_markers = [
-            "Card login did not complete",
-            "Client certificate missing",
-            "403 Forbidden",
-        ]
-
         auth_success = any(m.lower() in page_text.lower() for m in success_markers)
         auth_incomplete = any(m.lower() in page_text.lower() for m in unauth_markers)
 
@@ -193,6 +209,7 @@ def main():
     )
 
     args = parser.parse_args()
+    log_file = r"C:\Users\pk\edge_test.log"
     try:
         result = run_test(
             url=args.url,
@@ -201,9 +218,21 @@ def main():
             screenshot_path=args.screenshot,
             timeout=args.timeout,
         )
-        sys.exit(0)
+        try:
+            with open(log_file, "w", encoding="utf-8") as f:
+                f.write(json.dumps(result, indent=2))
+        except Exception:
+            pass
+        sys.exit(0 if result.get("authenticated") else 2)
     except Exception as e:
-        print(f"Error running Edge browser test: {e}", file=sys.stderr)
+        import traceback
+        err_msg = f"Error running Edge browser test: {e}\n{traceback.format_exc()}"
+        print(err_msg, file=sys.stderr)
+        try:
+            with open(log_file, "w", encoding="utf-8") as f:
+                f.write(err_msg)
+        except Exception:
+            pass
         sys.exit(1)
 
 
