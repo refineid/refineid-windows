@@ -38,6 +38,10 @@ const DEADLINE: Duration = Duration::from_secs(10);
 /// Default candidate identifier.
 const DEFAULT_CANDIDATE_ID: &str = "stream-1";
 
+/// Validity dates the mock identity answer reports (section 9.1 form).
+const MOCK_ISSUANCE_DATE: &str = "2026-01-01";
+const MOCK_EXPIRATION_DATE: &str = "2031-01-01";
+
 /// Mock signature lengths in bytes.
 const MOCK_ECDSA_P224_SIG_BYTES: usize = 56;
 const MOCK_ECDSA_P256_SIG_BYTES: usize = 64;
@@ -601,6 +605,7 @@ fn handle_operation_request<T: FrameTransport>(
         CardOperation::InspectCard => {
             println!("serving inspect_card operation");
             let result = CardOperationResult::Inspection(CardInspection {
+                answer_to_reset: Vec::new(),
                 pin1_factory: false,
                 pin2_factory: false,
                 pin1_attempts: Some(options.pin1_attempts),
@@ -608,7 +613,7 @@ fn handle_operation_request<T: FrameTransport>(
                 puk_attempts: None,
             });
             let msg =
-                TypedMessage::OperationResult(OperationResultMessage::completed(op_ref, result));
+                TypedMessage::OperationResult(OperationResultMessage::completed(op_ref, &result));
             let frame = endpoint
                 .send(&msg)
                 .map_err(|e| format!("send result failed: {e:?}"))?;
@@ -638,12 +643,19 @@ fn handle_operation_request<T: FrameTransport>(
                 "serving read_identity: {} ({})",
                 options.identity_name, options.person_id
             );
-            let result = CardOperationResult::Identity {
-                display_name: options.identity_name.clone(),
-                person_id: options.person_id.clone(),
-            };
+            let result = CardOperationResult::Identity(
+                refineid_rapp::CardIdentity::reconstruct(
+                    options.identity_name.clone(),
+                    options.person_id.clone(),
+                    MOCK_ISSUANCE_DATE.to_owned(),
+                    MOCK_EXPIRATION_DATE.to_owned(),
+                    vec![options.cert_der.clone()],
+                    None,
+                )
+                .map_err(|e| format!("identity out of bounds: {e:?}"))?,
+            );
             let msg =
-                TypedMessage::OperationResult(OperationResultMessage::completed(op_ref, result));
+                TypedMessage::OperationResult(OperationResultMessage::completed(op_ref, &result));
             let frame = endpoint
                 .send(&msg)
                 .map_err(|e| format!("send result failed: {e:?}"))?;
@@ -676,7 +688,7 @@ fn handle_operation_request<T: FrameTransport>(
             println!("serving read_certificate");
             let result = CardOperationResult::Certificate(der.clone());
             let msg =
-                TypedMessage::OperationResult(OperationResultMessage::completed(op_ref, result));
+                TypedMessage::OperationResult(OperationResultMessage::completed(op_ref, &result));
             let frame = endpoint
                 .send(&msg)
                 .map_err(|e| format!("send result failed: {e:?}"))?;
@@ -707,38 +719,15 @@ fn handle_operation_request<T: FrameTransport>(
             digest,
             ..
         } => {
-            println!("serving browser_authenticate: origin='{origin}' sending OperationPrepared");
-            let prep_msg = TypedMessage::OperationPrepared(op_ref);
-            let frame = endpoint
-                .send(&prep_msg)
-                .map_err(|e| format!("send prep failed: {e:?}"))?;
-            transport
-                .send_frame(frame.as_bytes())
-                .map_err(|e| format!("send prep frame failed: {e:?}"))?;
-
-            // Await Commit
-            let commit_bytes = transport
-                .receive_frame()
-                .map_err(|e| format!("receive commit failed: {e:?}"))?;
-            let commit_frame = BinaryFrame::reconstruct(commit_bytes)
-                .map_err(|e| format!("commit frame failed: {e:?}"))?;
+            println!("serving browser_authenticate: origin='{origin}'");
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as u64);
-            let outcome = endpoint
-                .receive(store, &commit_frame, now_ms)
-                .map_err(|e| format!("commit receive failed: {e:?}"))?;
-            let ReceiveOutcome::Message(TypedMessage::OperationCommit(comm_ref)) = outcome else {
-                return Err("expected OperationCommit".into());
-            };
-            if comm_ref != op_ref {
-                return Err("commit mismatch".into());
-            }
 
             let sig_bytes = sign_digest(&digest, algorithm);
             let result = CardOperationResult::Signature(sig_bytes);
             let res_msg =
-                TypedMessage::OperationResult(OperationResultMessage::completed(op_ref, result));
+                TypedMessage::OperationResult(OperationResultMessage::completed(op_ref, &result));
             let res_frame = endpoint
                 .send(&res_msg)
                 .map_err(|e| format!("send res failed: {e:?}"))?;
@@ -766,38 +755,15 @@ fn handle_operation_request<T: FrameTransport>(
             digest,
             ..
         } => {
-            println!("serving sign_document: document='{document_name}' sending OperationPrepared");
-            let prep_msg = TypedMessage::OperationPrepared(op_ref);
-            let frame = endpoint
-                .send(&prep_msg)
-                .map_err(|e| format!("send prep failed: {e:?}"))?;
-            transport
-                .send_frame(frame.as_bytes())
-                .map_err(|e| format!("send prep frame failed: {e:?}"))?;
-
-            // Await Commit
-            let commit_bytes = transport
-                .receive_frame()
-                .map_err(|e| format!("receive commit failed: {e:?}"))?;
-            let commit_frame = BinaryFrame::reconstruct(commit_bytes)
-                .map_err(|e| format!("commit frame failed: {e:?}"))?;
+            println!("serving sign_document: document='{document_name}'");
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as u64);
-            let outcome = endpoint
-                .receive(store, &commit_frame, now_ms)
-                .map_err(|e| format!("commit receive failed: {e:?}"))?;
-            let ReceiveOutcome::Message(TypedMessage::OperationCommit(comm_ref)) = outcome else {
-                return Err("expected OperationCommit".into());
-            };
-            if comm_ref != op_ref {
-                return Err("commit mismatch".into());
-            }
 
             let sig_bytes = sign_digest(&digest, algorithm);
             let result = CardOperationResult::Signature(sig_bytes);
             let res_msg =
-                TypedMessage::OperationResult(OperationResultMessage::completed(op_ref, result));
+                TypedMessage::OperationResult(OperationResultMessage::completed(op_ref, &result));
             let res_frame = endpoint
                 .send(&res_msg)
                 .map_err(|e| format!("send res failed: {e:?}"))?;

@@ -23,7 +23,7 @@ use refineid_rapp::{
     BinaryFrame, CardInspection, CardKeyProfile as KeyProfile, CardOperation, CardOperationResult,
     CloseReason, EndpointRole, EstablishedEndpoint, OfferId, OperationReference,
     OperationResultMessage, PairId, PairRecord, PairStore, PairStoreError, PairTombstone,
-    PairingHandshake, PairingOffer, PairingSecret, ReceiveOutcome, ResultError, ResultStatus,
+    PairingHandshake, PairingOffer, PairingSecret, ProxyFailure, ReceiveOutcome,
     SessionCloseMessage, SessionHandshake, SignatureAlgorithm, TransportCandidate, TypedMessage,
     generate_pair_key_material,
 };
@@ -336,7 +336,8 @@ fn card_status_completes_without_commit() {
         session.send(&TypedMessage::OperationResult(
             OperationResultMessage::completed(
                 reference,
-                CardOperationResult::Inspection(CardInspection {
+                &CardOperationResult::Inspection(CardInspection {
+                    answer_to_reset: Vec::new(),
                     pin1_factory: false,
                     pin2_factory: false,
                     pin1_attempts: Some(5),
@@ -361,6 +362,7 @@ fn card_status_completes_without_commit() {
     assert_eq!(
         result,
         CardOperationResult::Inspection(CardInspection {
+            answer_to_reset: Vec::new(),
             pin1_factory: false,
             pin2_factory: false,
             pin1_attempts: Some(5),
@@ -371,7 +373,7 @@ fn card_status_completes_without_commit() {
 }
 
 #[test]
-fn authentication_walks_prepare_commit_result() {
+fn authentication_executes_directly_to_its_result() {
     let mut requester = test_requester();
     let granted = vec![PROFILE_AUTHENTICATION.to_owned()];
     let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
@@ -385,15 +387,10 @@ fn authentication_walks_prepare_commit_result() {
             operation_id: request.operation_id,
             request_hash: request.request_hash().unwrap(),
         };
-        session.send(&TypedMessage::OperationPrepared(reference));
-        let TypedMessage::OperationCommit(echoed) = session.receive() else {
-            panic!("expected a commit after prepared");
-        };
-        assert_eq!(echoed, reference);
         session.send(&TypedMessage::OperationResult(
             OperationResultMessage::completed(
                 reference,
-                CardOperationResult::Signature(vec![0xAB; 96]),
+                &CardOperationResult::Signature(vec![0xAB; 96]),
             ),
         ));
         let TypedMessage::OperationResultAck(ack_ref) = session.receive() else {
@@ -428,12 +425,7 @@ fn denial_leaves_the_session_healthy() {
                 operation_id: request.operation_id,
                 request_hash: request.request_hash().unwrap(),
             };
-            let failure_msg = OperationResultMessage::failure(
-                reference,
-                ResultStatus::Denied,
-                ResultError::UserDenied,
-            )
-            .unwrap();
+            let failure_msg = OperationResultMessage::failure(reference, ProxyFailure::UserDenied);
             session.send(&TypedMessage::OperationResult(failure_msg));
         }
     });
@@ -462,12 +454,8 @@ fn credential_rejection_revokes_the_pairing() {
             operation_id: request.operation_id,
             request_hash: request.request_hash().unwrap(),
         };
-        let failure_msg = OperationResultMessage::failure(
-            reference,
-            ResultStatus::CredentialRejected,
-            ResultError::CredentialRejected,
-        )
-        .unwrap();
+        let failure_msg =
+            OperationResultMessage::failure(reference, ProxyFailure::CredentialRejected);
         session.send(&TypedMessage::OperationResult(failure_msg));
         session.send(&TypedMessage::SessionClose(SessionCloseMessage {
             reason: CloseReason::CredentialRejected,
@@ -497,7 +485,7 @@ fn credential_rejection_revokes_the_pairing() {
 }
 
 #[test]
-fn committed_close_classifies_as_ambiguous() {
+fn unanswered_consequential_close_classifies_as_ambiguous() {
     let mut requester = test_requester();
     let granted = vec![PROFILE_AUTHENTICATION.to_owned()];
     let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
@@ -507,15 +495,8 @@ fn committed_close_classifies_as_ambiguous() {
         let TypedMessage::OperationRequest(request) = session.receive() else {
             panic!("expected an operation request");
         };
-        let reference = OperationReference {
-            operation_id: request.operation_id,
-            request_hash: request.request_hash().unwrap(),
-        };
-        session.send(&TypedMessage::OperationPrepared(reference));
-        let TypedMessage::OperationCommit(_) = session.receive() else {
-            panic!("expected a commit");
-        };
-        // The transport dies with the operation committed.
+        assert!(request.operation.is_consequential());
+        // The transport dies with the request delivered and unanswered.
         drop(session);
     });
     let mut session = requester.connect(pair_id, requester_transport).unwrap();
@@ -547,7 +528,8 @@ fn first_sequence_violation_revokes_the_pairing() {
         };
         let result_msg = TypedMessage::OperationResult(OperationResultMessage::completed(
             bad_reference,
-            CardOperationResult::Inspection(CardInspection {
+            &CardOperationResult::Inspection(CardInspection {
+                answer_to_reset: Vec::new(),
                 pin1_factory: false,
                 pin2_factory: false,
                 pin1_attempts: Some(5),

@@ -815,11 +815,12 @@ fn report(operation: &CardOperation, outcome: &OperationOutcome) {
                     )
                 );
             }
-            CardOperationResult::Identity {
-                display_name,
-                person_id,
-            } => {
-                println!("ok: {display_name} ({})", masked(person_id));
+            CardOperationResult::Identity(identity) => {
+                println!(
+                    "ok: {} ({})",
+                    identity.holder_name,
+                    masked(&identity.card_id)
+                );
             }
             CardOperationResult::Certificate(der) => {
                 println!("ok: certificate, {} bytes DER", der.len());

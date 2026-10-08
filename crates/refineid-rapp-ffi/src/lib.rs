@@ -639,12 +639,9 @@ fn read_paired_card(paired: &mut Paired) -> Result<CardReadDto, ApiFailure> {
     // operation and the phone reads the card once. Card status and the
     // certificate bytes are separate operations added when a screen needs them.
     let identity = match run_operation(paired, &mut session, &CardOperation::ReadIdentity)? {
-        CardOperationResult::Identity {
-            display_name,
-            person_id,
-        } => IdentityDto {
-            display_name,
-            person_id,
+        CardOperationResult::Identity(identity) => IdentityDto {
+            display_name: identity.holder_name,
+            person_id: identity.card_id,
         },
         _ => return Err(unexpected_result("read_identity")),
     };
