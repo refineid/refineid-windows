@@ -199,7 +199,7 @@ EOF
 *Started: $(date -u +%Y-%m-%dT%H:%M:%SZ)*
 
 ## Turn 1 ($CONTRIBUTOR_NAME -> Muse)
-${INTENT:-"Submitted PR #$PR_NUM and diff for rigorous review against ReFineID project rules."}
+${INTENT:-"Submitted PR #$PR_NUM and diff for rigorous review against RefineID project rules."}
 
 ## Turn 1 (Muse Reviewer)
 $(cat "$TMP_DIR/cleaned_reply.txt")
