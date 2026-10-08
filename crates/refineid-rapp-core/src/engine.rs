@@ -19,9 +19,9 @@ use crate::store::{
 };
 use crate::transport::{BinaryFrame, FrameTransport, TransportError};
 use refineid_rapp::{
-    CancelMessage, EndpointRole, EstablishedEndpoint, ExplicitUserIntent, LivenessMessage,
-    OperationReference, OperationRequest, OperationState, PairingHandshake, PingChallenge,
-    ProfileName, ProtocolErrorMessage, ReceiveOutcome, SessionCloseMessage, SessionHandshake,
+    EndpointRole, EstablishedEndpoint, ExplicitUserIntent, LivenessMessage, OperationReference,
+    OperationRequest, OperationState, PairingHandshake, PingChallenge, ProfileName,
+    ProtocolErrorMessage, ReceiveOutcome, ResultError, SessionCloseMessage, SessionHandshake,
     SessionState, TypedMessage, generate_pair_key_material,
 };
 
@@ -719,7 +719,7 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
     /// or session fault.
     #[allow(
         clippy::too_many_lines,
-        reason = "operation execution manages prepare, commit, progress, liveness, and result state transitions"
+        reason = "operation execution manages request, progress, liveness, and result state transitions"
     )]
     pub fn execute<Transport: FrameTransport>(
         &mut self,
@@ -792,21 +792,19 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
             return Ok(outcome);
         }
 
-        let mut state = OperationState::Requested;
+        // RAPP v26.10.1 section 8.2 executes directly: once a consequential
+        // request is sent the custodian may act on it after consent, so an
+        // unanswered one is in flight and ends ambiguous, never cancelled.
+        let mut state = if consequential {
+            OperationState::Committed
+        } else {
+            OperationState::Requested
+        };
+        self.journal_state(operation_id, state, false);
         loop {
             let frame_bytes = match session.transport.receive_frame() {
                 Ok(bytes) => bytes,
-                Err(TransportError::TimedOut) if !matches!(state, OperationState::Committed) => {
-                    let cancel_msg = TypedMessage::OperationCancel(CancelMessage {
-                        reference: OperationReference {
-                            operation_id,
-                            request_hash: req_hash,
-                        },
-                        reason: Some("expired".into()),
-                    });
-                    if let Ok(cancel_frame) = session.endpoint.send(&cancel_msg) {
-                        let _ = session.transport.send_frame(cancel_frame.as_bytes());
-                    }
+                Err(TransportError::TimedOut) if !consequential => {
                     state = OperationState::Cancelled;
                     self.journal_state(operation_id, state, false);
                     return Ok(OperationOutcome::Cancelled);
@@ -855,50 +853,6 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
                             let _ = session.transport.send_frame(pong_frame.as_bytes());
                         }
                     }
-                    TypedMessage::OperationPrepared(prepared_ref) => {
-                        if prepared_ref.operation_id != operation_id {
-                            let err_msg =
-                                TypedMessage::Error(ProtocolErrorMessage::UnknownOperation(Some(
-                                    prepared_ref.operation_id,
-                                )));
-                            if let Ok(err_frame) = session.endpoint.send(&err_msg) {
-                                let _ = session.transport.send_frame(err_frame.as_bytes());
-                            }
-                            continue;
-                        }
-                        if prepared_ref.request_hash != req_hash
-                            || !consequential
-                            || state != OperationState::Requested
-                        {
-                            self.handle_violation(session);
-                            return Ok(self.classify_after_close(operation_id, state));
-                        }
-                        state = OperationState::Committed;
-                        self.journal_state(operation_id, state, false);
-                        let commit_msg = TypedMessage::OperationCommit(prepared_ref);
-                        let Ok(commit_frame) = session.endpoint.send(&commit_msg) else {
-                            let outcome = self.close_with_operation(
-                                session,
-                                operation_id,
-                                state,
-                                SessionEnd::TransportLoss,
-                            );
-                            return Ok(outcome);
-                        };
-                        if session
-                            .transport
-                            .send_frame(commit_frame.as_bytes())
-                            .is_err()
-                        {
-                            let outcome = self.close_with_operation(
-                                session,
-                                operation_id,
-                                state,
-                                SessionEnd::TransportLoss,
-                            );
-                            return Ok(outcome);
-                        }
-                    }
                     TypedMessage::OperationResult(result_msg) => {
                         if result_msg.operation_id != operation_id {
                             let err_msg =
@@ -910,20 +864,36 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
                             }
                             continue;
                         }
-                        if result_msg.request_hash != req_hash {
-                            self.handle_violation(session);
-                            return Ok(self.classify_after_close(operation_id, state));
-                        }
-                        if result_msg.status == ResultStatus::Completed
-                            && state == OperationState::Requested
-                            && consequential
+                        if result_msg.request_hash != req_hash
+                            || result_msg
+                                .validate_for(
+                                    OperationReference {
+                                        operation_id,
+                                        request_hash: req_hash,
+                                    },
+                                    operation,
+                                )
+                                .is_err()
                         {
                             self.handle_violation(session);
                             return Ok(self.classify_after_close(operation_id, state));
                         }
                         match result_msg.status {
+                            ResultStatus::Completed if result_msg.retired => {
+                                // A retired result's response was pruned; there
+                                // is nothing left to deliver.
+                                state = OperationState::Completed;
+                                self.journal_state(operation_id, state, false);
+                                return Ok(OperationOutcome::Rejected(
+                                    result_msg.error.map(|e| e.as_str().to_owned()),
+                                ));
+                            }
                             ResultStatus::Completed => {
-                                let Some(result) = result_msg.result else {
+                                let Some(Ok(result)) = result_msg
+                                    .response
+                                    .as_ref()
+                                    .map(|response| response.typed_for(operation))
+                                else {
                                     self.handle_violation(session);
                                     return Ok(self.classify_after_close(operation_id, state));
                                 };
@@ -939,7 +909,12 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
                                 }
                                 return Ok(OperationOutcome::Completed(result));
                             }
-                            ResultStatus::Denied => {
+                            ResultStatus::Rejected
+                                if matches!(
+                                    result_msg.error,
+                                    Some(ResultError::UserCancelled | ResultError::UserDeclined)
+                                ) =>
+                            {
                                 state = OperationState::Denied;
                                 self.journal_state(operation_id, state, false);
                                 return Ok(OperationOutcome::Denied);
@@ -976,11 +951,21 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
                         let outcome = self.close_with_operation(session, operation_id, state, end);
                         return Ok(outcome);
                     }
-                    TypedMessage::OperationProgress(_)
-                    | TypedMessage::Error(ProtocolErrorMessage::UnknownOperation(_)) => {}
-                    TypedMessage::Error(ProtocolErrorMessage::Busy) => {
+                    TypedMessage::Error(ProtocolErrorMessage::OperationFailed(_)) => {
                         return Ok(OperationOutcome::Rejected(Some("peer_busy".to_owned())));
                     }
+                    TypedMessage::Error(ProtocolErrorMessage::DuplicateOperation(id))
+                        if id == operation_id =>
+                    {
+                        return Ok(OperationOutcome::Rejected(Some(
+                            "duplicate_operation".to_owned(),
+                        )));
+                    }
+                    TypedMessage::OperationProgress(_)
+                    | TypedMessage::Error(
+                        ProtocolErrorMessage::UnknownOperation(_)
+                        | ProtocolErrorMessage::DuplicateOperation(_),
+                    ) => {}
                     _ => {
                         self.handle_violation(session);
                         return Ok(self.classify_after_close(operation_id, state));
@@ -1132,7 +1117,11 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
             | CloseReason::CredentialRejected => {
                 self.revoke_pairing(pair_id, true);
             }
-            CloseReason::UserDisconnect | CloseReason::Policy | CloseReason::Shutdown => {}
+            CloseReason::Normal
+            | CloseReason::Complete
+            | CloseReason::UserDisconnect
+            | CloseReason::Policy
+            | CloseReason::Shutdown => {}
         }
     }
 

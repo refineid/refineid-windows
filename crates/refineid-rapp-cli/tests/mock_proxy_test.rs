@@ -150,15 +150,11 @@ fn test_mock_proxy_pairing_and_card_operations() {
             OPERATION_EXPIRY_MS,
         )
         .expect("execute read_identity");
-    let OperationOutcome::Completed(CardOperationResult::Identity {
-        display_name,
-        person_id,
-    }) = outcome
-    else {
+    let OperationOutcome::Completed(CardOperationResult::Identity(identity)) = outcome else {
         panic!("unexpected outcome for ReadIdentity: {outcome:?}");
     };
-    assert_eq!(display_name, "MATTI MEIKÄLÄINEN");
-    assert_eq!(person_id, "010180-999X");
+    assert_eq!(identity.holder_name, "MATTI MEIKÄLÄINEN");
+    assert_eq!(identity.card_id, "010180-999X");
 
     // 3. ReadCertificate (Authentication)
     let outcome = requester
