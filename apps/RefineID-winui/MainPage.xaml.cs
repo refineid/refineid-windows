@@ -43,6 +43,9 @@ internal sealed partial class MainPage : Page
     private readonly DispatcherQueue dispatcher;
     private readonly DispatcherTimer cardPollTimer;
     private string? remoteHolder;
+
+    /// <summary>Whether the device holds a pairing, read or not.</summary>
+    private bool hasPairing;
     private string? selectedReader;
     private bool started;
 
@@ -80,15 +83,14 @@ internal sealed partial class MainPage : Page
         // the phone, when that needs no administrator rights.
         _ = Task.Run(FirewallService.DisableLegacyRule);
         this.ShowDriverLaneHintIfNeeded();
-        await this.RunRemoteCardAsync(quiet: true).ConfigureAwait(true);
+        bool quiet = true;
 #if DEBUG
-        if (
-            Array.Exists(Environment.GetCommandLineArgs(), argument => argument == AutoPairArgument)
-        )
-        {
-            await this.RunRemoteCardAsync(quiet: false).ConfigureAwait(true);
-        }
+        quiet = !Array.Exists(
+            Environment.GetCommandLineArgs(),
+            argument => argument == AutoPairArgument
+        );
 #endif
+        await this.RunRemoteCardAsync(quiet).ConfigureAwait(true);
     }
 
     /// <summary>The settings page polls the readers itself while it is shown.</summary>
@@ -144,6 +146,7 @@ internal sealed partial class MainPage : Page
 
         // The pairing exists, so forgetting it is an action even before a
         // read has succeeded.
+        this.hasPairing = true;
         this.IdentityMenuButton.Visibility = Visibility.Visible;
         await this.ReadPairedCardAsync(handle, quiet).ConfigureAwait(true);
     }
@@ -158,6 +161,7 @@ internal sealed partial class MainPage : Page
 
         if (dialog.PairedHandle is ulong pairedHandle)
         {
+            this.hasPairing = true;
             this.IdentityMenuButton.Visibility = Visibility.Visible;
             await this.ReadPairedCardAsync(pairedHandle, quiet: false).ConfigureAwait(true);
         }
@@ -169,7 +173,12 @@ internal sealed partial class MainPage : Page
 
     private async Task ReadPairedCardAsync(ulong handle, bool quiet)
     {
-        this.SetBusy(true);
+        // A quiet read runs behind the screen; only a requested read blocks it.
+        if (!quiet)
+        {
+            this.SetBusy(true);
+        }
+
         try
         {
             CardReading reading = await Task.Run(() => NativeRappService.ReadCard(handle))
@@ -223,6 +232,7 @@ internal sealed partial class MainPage : Page
     private void ForgetIdentity()
     {
         this.remoteHolder = null;
+        this.hasPairing = false;
         this.HolderText.Text = string.Empty;
         this.HolderText.Visibility = Visibility.Collapsed;
         this.IdentityMenuButton.Visibility = Visibility.Collapsed;
@@ -326,7 +336,7 @@ internal sealed partial class MainPage : Page
             this.HolderText.Text = string.Empty;
             this.HolderText.Visibility = Visibility.Collapsed;
             this.ConnectRemoteReaderButton.Visibility = Visibility.Visible;
-            this.IdentityMenuButton.Visibility = Visibility.Collapsed;
+            this.IdentityMenuButton.Visibility = this.PairingMenuVisibility();
         }
     }
 
@@ -337,7 +347,7 @@ internal sealed partial class MainPage : Page
             this.HolderText.Text = string.Empty;
             this.HolderText.Visibility = Visibility.Collapsed;
             this.ConnectRemoteReaderButton.Visibility = Visibility.Visible;
-            this.IdentityMenuButton.Visibility = Visibility.Collapsed;
+            this.IdentityMenuButton.Visibility = this.PairingMenuVisibility();
             this.SignCard.IsEnabled = false;
         }
         else
@@ -349,6 +359,10 @@ internal sealed partial class MainPage : Page
             this.SignCard.IsEnabled = true;
         }
     }
+
+    /// <summary>The menu stays while a pairing exists, read or not.</summary>
+    private Visibility PairingMenuVisibility() =>
+        this.hasPairing ? Visibility.Visible : Visibility.Collapsed;
 
     private void SetBusy(bool busy)
     {
