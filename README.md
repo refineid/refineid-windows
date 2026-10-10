@@ -207,7 +207,7 @@ PIN, or private key ever reaches the requester. The crate carries the
 deterministic CBOR wire form, both handshakes, the full message schema,
 the transcribed state-machine tables the engine is checked against, and
 a loopback conformance suite. The crate also implements
-the `fi.refineid.stream.v1` transport profile: the listener, the rendezvous
+the `fi.refineid.stream.v1` transport profile: the listener, the routing
 preamble, and the offer candidate parameters, replayed against the vendored
 conformance corpus. `refineid-rapp-cli` is the development requester that
 proves the live path against a phone proxy. The phone-side proxies live in

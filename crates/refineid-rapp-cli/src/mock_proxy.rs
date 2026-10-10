@@ -1,9 +1,9 @@
 //! Mock RAPP custodian for automated verification and testing.
 //!
-//! Listens like a phone does (RAPP v26.10.9 section 2.2.2), shows a pairing
+//! Listens like a phone does (RAPP v26.10.10 section 2.2.2), shows a pairing
 //! code, serves a random offer after the pairing preamble, answers `CPace`
 //! KC2 as responder and `Noise_XXpsk3` with the hello and confirmation
-//! exchange, then accepts sessions routed by their rendezvous token and
+//! exchange, then accepts sessions routed by their routing tag and
 //! serves typed card operations (inspection, identity, certificate, and
 //! signatures). It publishes no DNS-SD record: requesters dial it by
 //! address.
@@ -25,9 +25,9 @@ use refineid_rapp::{
     BinaryFrame, CardInspection, CardOperation, CardOperationResult, CpaceKc2Responder,
     EndpointRole, EstablishedEndpoint, LivenessMessage, MAXIMUM_CPACE_ATTEMPTS, OfferId,
     OperationReference, OperationRequest, OperationResultMessage, PairRecord, PairStore,
-    PairStoreError, PairTombstone, PairingHandshake, PairingOffer, ReceiveOutcome,
+    PairStoreError, PairTombstone, PairingHandshake, PairingOffer, ReceiveOutcome, RoutingKey,
     SessionHandshake, TransportProfile, TypedMessage, decode_pair_record, encode_pair_record,
-    generate_pair_key_material, standard_pairing_context_v2,
+    generate_pair_key_material, route_session, standard_pairing_context_v2,
 };
 use refineid_rapp_core::offer::{format_pairing_code, generate_pairing_code};
 use refineid_rapp_core::stream::{STREAM_CANDIDATE_ID, StreamAccept, StreamListener};
@@ -385,10 +385,18 @@ fn accept_session(
             .accept()
             .map_err(|e| format!("accept failed: {e:?}"))?
         {
-            StreamAccept::Session {
-                rendezvous_token,
-                transport,
-            } if rendezvous_token == pairing.record.rendezvous_token() => return Ok(transport),
+            StreamAccept::Session { routing, transport }
+                if RoutingKey::derive(&pairing.record).is_ok_and(|key| {
+                    route_session(
+                        core::slice::from_ref(&key),
+                        TransportProfile::Stream,
+                        &routing,
+                    )
+                    .is_some()
+                }) =>
+            {
+                return Ok(transport);
+            }
             StreamAccept::Session { .. } => println!("closed a session for an unknown pairing"),
             StreamAccept::Pairing(_) => println!("closed a pairing connection; no offer is open"),
         }

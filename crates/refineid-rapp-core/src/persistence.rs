@@ -16,18 +16,18 @@
 
 use zeroize::Zeroizing;
 
-use crate::ids::{PairId, RendezvousToken};
+use crate::ids::PairId;
 use crate::store::{PairingDisposition, PairingRecord};
 
 /// Format tag identifying a `RefineID` pairing-record blob.
 const PAIRING_BLOB_MAGIC: &[u8] = b"RAPP-pair-record";
 
 /// The pairing-record encoding revision.
-const PAIRING_BLOB_VERSION: u8 = 5;
+const PAIRING_BLOB_VERSION: u8 = 6;
 
 /// The highest revision written for an earlier RAPP protocol version. Those
-/// pairings cannot open RAPP v26.10.9 sessions, so they are not loaded.
-const LAST_EARLIER_PROTOCOL_BLOB_VERSION: u8 = 4;
+/// pairings cannot open RAPP v26.10.10 sessions, so they are not loaded.
+const LAST_EARLIER_PROTOCOL_BLOB_VERSION: u8 = 5;
 
 /// Format tag identifying a whole stored pairing set.
 const PAIRING_SET_MAGIC: &[u8] = b"RAPP-pair-set";
@@ -110,7 +110,6 @@ pub fn encode_pairing_record(record: &PairingRecord) -> Zeroizing<Vec<u8>> {
     out.extend_from_slice(PAIRING_BLOB_MAGIC);
     out.push(PAIRING_BLOB_VERSION);
     out.extend_from_slice(record.pair_id.as_bytes());
-    out.extend_from_slice(record.rendezvous_token.as_bytes());
     out.extend_from_slice(&record.grants_hash);
     out.push(disposition_tag(record.disposition));
     out.push(if record.peer_initiated_termination {
@@ -155,7 +154,6 @@ pub fn decode_pairing_record(blob: &[u8]) -> Result<PairingRecord, PairingCodecE
     }
 
     let pair_id = PairId::from_array(reader.take_array()?);
-    let rendezvous_token = RendezvousToken::from_array(reader.take_array()?);
     let grants_hash = reader.take_array()?;
     let disposition = disposition_from_tag(reader.take_u8()?)?;
     let peer_initiated_termination = boolean_from_tag(reader.take_u8()?)?;
@@ -180,7 +178,6 @@ pub fn decode_pairing_record(blob: &[u8]) -> Result<PairingRecord, PairingCodecE
 
     Ok(PairingRecord {
         pair_id,
-        rendezvous_token,
         local_private,
         local_public,
         peer_public,
@@ -390,13 +387,12 @@ mod tests {
         PAIRING_BLOB_MAGIC, PAIRING_BLOB_VERSION, PairingCodecError, decode_pairing_record,
         decode_pairing_records, encode_pairing_record, encode_pairing_records,
     };
-    use crate::ids::{PairId, RendezvousToken};
+    use crate::ids::PairId;
     use crate::store::{PairingDisposition, PairingRecord};
 
     fn sample() -> PairingRecord {
         PairingRecord {
             pair_id: PairId::from_array([7; 16]),
-            rendezvous_token: RendezvousToken::from_array([9; 16]),
             local_private: Zeroizing::new(vec![1; 32]),
             local_public: vec![2; 32],
             peer_public: vec![3; 32],
@@ -419,7 +415,6 @@ mod tests {
 
     fn assert_same(left: &PairingRecord, right: &PairingRecord) {
         assert_eq!(left.pair_id, right.pair_id);
-        assert_eq!(left.rendezvous_token, right.rendezvous_token);
         assert_eq!(
             left.local_private.as_slice(),
             right.local_private.as_slice()

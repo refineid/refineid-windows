@@ -22,7 +22,7 @@ use refineid_rapp_cli::mock_proxy::{DEFAULT_LISTEN, MockProxyOptions, run_mock_p
 use refineid_rapp_core::engine::{
     OperationOutcome, PairingError, PeerIntroduction, Requester, RequesterConfig,
 };
-use refineid_rapp_core::ids::{Challenge, PairId, RendezvousToken};
+use refineid_rapp_core::ids::{Challenge, PairId};
 use refineid_rapp_core::message::CloseReason;
 use refineid_rapp_core::offer::normalize_pairing_code;
 use refineid_rapp_core::operations::{
@@ -32,7 +32,7 @@ use refineid_rapp_core::operations::{
 use refineid_rapp_core::persistence::{decode_pairing_records, encode_pairing_records};
 use refineid_rapp_core::store::{MemoryJournal, MemoryPairingStore, PairingStore};
 use refineid_rapp_core::stream::{
-    DiscoveryMode, STREAM_CANDIDATE_ID, StreamRendezvous, browse, dial, dial_session,
+    DialPurpose, DiscoveryMode, STREAM_CANDIDATE_ID, browse, dial, dial_session,
 };
 use refineid_windows_credential_store::CredentialPairingStore;
 
@@ -221,7 +221,7 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
                 &endpoints,
                 STREAM_CANDIDATE_ID,
                 RECEIVE_DEADLINE,
-                &StreamRendezvous::Pairing,
+                DialPurpose::Pairing,
             ) else {
                 continue;
             };
@@ -241,7 +241,7 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
         }
     };
 
-    let expected_token = {
+    let pairing = {
         let record = requester
             .store()
             .get(pair_id)
@@ -252,7 +252,9 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
             record.peer_platform,
             record.granted_profiles.join(", ")
         );
-        record.rendezvous_token
+        record
+            .to_core_pair_record()
+            .map_err(|error| format!("stored pairing unusable: {error:?}"))?
     };
     flush_now();
 
@@ -260,7 +262,7 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
         &mut requester,
         options.connect.as_deref(),
         pair_id,
-        expected_token,
+        &pairing,
         options.sign_profile,
         options.count,
     )
@@ -288,7 +290,7 @@ fn reconnect(arguments: &[String]) -> Result<(), String> {
         MemoryJournal::new(),
     );
 
-    let (pair_id, expected_token) = {
+    let (pair_id, pairing) = {
         let record = requester
             .store()
             .usable_pairing()
@@ -299,7 +301,10 @@ fn reconnect(arguments: &[String]) -> Result<(), String> {
             record.peer_platform,
             record.granted_profiles.join(", ")
         );
-        (record.pair_id, record.rendezvous_token)
+        let pairing = record
+            .to_core_pair_record()
+            .map_err(|error| format!("stored pairing unusable: {error:?}"))?;
+        (record.pair_id, pairing)
     };
     flush_now();
 
@@ -307,7 +312,7 @@ fn reconnect(arguments: &[String]) -> Result<(), String> {
         &mut requester,
         options.connect.as_deref(),
         pair_id,
-        expected_token,
+        &pairing,
         options.sign_profile,
         options.count,
     )
@@ -349,20 +354,15 @@ fn serve_sessions<S: PairingStore>(
     requester: &mut Requester<S, MemoryJournal>,
     connect: Option<&str>,
     pair_id: PairId,
-    expected_token: RendezvousToken,
+    pairing: &refineid_rapp::PairRecord,
     sign_profile: Option<(KeyProfile, SignatureAlgorithm)>,
     count: Option<usize>,
 ) -> Result<(), String> {
     let preferred: Vec<String> = connect.map(str::to_owned).into_iter().collect();
     let mut served = 0;
     loop {
-        let Ok(transport) = dial_session(
-            expected_token,
-            &preferred,
-            &[],
-            BROWSE_WINDOW,
-            RECEIVE_DEADLINE,
-        ) else {
+        let Ok(transport) = dial_session(pairing, &preferred, &[], BROWSE_WINDOW, RECEIVE_DEADLINE)
+        else {
             std::thread::sleep(SESSION_RETRY);
             continue;
         };
@@ -663,7 +663,7 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
             &endpoints,
             STREAM_CANDIDATE_ID,
             Duration::from_secs(10),
-            &StreamRendezvous::Pairing,
+            DialPurpose::Pairing,
         ) {
             Ok(transport) => break transport,
             Err(_) if Instant::now() < deadline && !proxy_handle.is_finished() => {
@@ -755,10 +755,6 @@ fn list_pairing() -> Result<(), String> {
         println!(
             "      Peer: {} ({})",
             record.peer_display_name, record.peer_platform
-        );
-        println!(
-            "      Rendezvous Token: {}",
-            hex::encode(record.rendezvous_token.as_bytes())
         );
         println!("      Profiles: {}", record.granted_profiles.join(", "));
         println!("      Has Auth Cert: {}", record.auth_cert.is_some());
