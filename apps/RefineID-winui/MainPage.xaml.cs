@@ -190,20 +190,12 @@ internal sealed partial class MainPage : Page
         LocalCardSupport support = await Task.Run(LocalCardService.DetectLocalCardSupport)
             .ConfigureAwait(true);
 
-        switch (support.State)
+        if (support.State == "driver_not_installed")
         {
-            case "driver_not_installed":
-                this.ShowStatus(
-                    InfoBarSeverity.Informational,
-                    "Local-card functions need the FINEID drivers. Phone-powered signing via Remote Reader still works."
-                );
-                break;
-            case "no_reader":
-                this.ShowStatus(
-                    InfoBarSeverity.Informational,
-                    "The FINEID drivers are registered but no card reader is present."
-                );
-                break;
+            this.ShowStatus(
+                InfoBarSeverity.Informational,
+                "Local-card functions need the FINEID drivers. Phone-powered signing via Remote Reader still works."
+            );
         }
     }
 
