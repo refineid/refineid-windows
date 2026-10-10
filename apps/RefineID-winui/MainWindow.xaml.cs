@@ -17,6 +17,8 @@ namespace RefineID;
 using System;
 using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Navigation;
 using Windows.Graphics;
 using WinRT.Interop;
 
@@ -101,7 +103,23 @@ internal sealed partial class MainWindow : Window
             SetWindowSubclass(hWnd, this.subclassProc, SubclassId, UIntPtr.Zero);
         }
 
+        this.RootFrame.Navigated += this.OnNavigated;
         this.RootFrame.Navigate(typeof(MainPage));
+    }
+
+    /// <summary>The title bar shows Back exactly when there is a page to go back to.</summary>
+    private void OnNavigated(object sender, NavigationEventArgs args)
+    {
+        this.AppTitleBar.IsBackButtonVisible = this.RootFrame.CanGoBack;
+        this.AppTitleBar.IsBackButtonEnabled = this.RootFrame.CanGoBack;
+    }
+
+    private void AppTitleBar_BackRequested(TitleBar sender, object args)
+    {
+        if (this.RootFrame.CanGoBack)
+        {
+            this.RootFrame.GoBack();
+        }
     }
 
     private bool placementApplied;

@@ -34,7 +34,12 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <TitleBar x:Name="AppTitleBar" Title="RefineID">
+        <TitleBar
+            x:Name="AppTitleBar"
+            Title="RefineID"
+            BackRequested="AppTitleBar_BackRequested"
+            IsBackButtonVisible="False"
+        >
             <TitleBar.IconSource>
                 <ImageIconSource ImageSource="Assets/AppIcon.ico" />
             </TitleBar.IconSource>

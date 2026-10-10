@@ -15,23 +15,22 @@
   limitations under the License.
 -->
 <Page
-    x:Class="RefineID_Settings.MainPage"
+    x:Class="RefineID.CardPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-    Loaded="Page_Loaded"
     mc:Ignorable="d"
 >
     <Grid>
-        <ScrollViewer>
-            <!-- The content column grows up to its maximum width and stays at the
-                 left edge of wider windows. -->
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <!--  The content column grows up to its maximum width and stays at
+                  the left edge of wider windows.  -->
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" MaxWidth="920" />
                 </Grid.ColumnDefinitions>
-                <StackPanel x:Name="ActionRoot" Padding="32,24,32,48" Spacing="20">
+                <StackPanel x:Name="ActionRoot" Padding="32,20,32,40" Spacing="20">
                     <InfoBar
                         x:Name="StatusInfoBar"
                         AutomationProperties.AutomationId="StatusInfoBar"
@@ -41,10 +40,10 @@
 
                     <ComboBox
                         x:Name="ReaderComboBox"
+                        HorizontalAlignment="Stretch"
                         AutomationProperties.AutomationId="ReaderComboBox"
                         AutomationProperties.Name="Card reader"
                         Header="Card reader"
-                        HorizontalAlignment="Stretch"
                         PlaceholderText="No reader"
                         SelectionChanged="ReaderComboBox_SelectionChanged"
                     />
@@ -81,6 +80,7 @@
                                 Grid.Column="1"
                                 AutomationProperties.AutomationId="PersonText"
                                 AutomationProperties.Name="Card holder"
+                                IsTextSelectionEnabled="True"
                                 TextWrapping="Wrap"
                             />
                             <TextBlock Grid.Row="1" FontWeight="SemiBold" Text="Card model" />
@@ -99,6 +99,7 @@
                                 Grid.Column="1"
                                 AutomationProperties.AutomationId="SerialText"
                                 AutomationProperties.Name="Card serial"
+                                IsTextSelectionEnabled="True"
                                 TextWrapping="Wrap"
                             />
                             <TextBlock Grid.Row="3" FontWeight="SemiBold" Text="PIN1" />
@@ -138,6 +139,8 @@
 
                     <Expander
                         x:Name="NfcExpander"
+                        HorizontalAlignment="Stretch"
+                        HorizontalContentAlignment="Stretch"
                         AutomationProperties.AutomationId="NfcExpander"
                         AutomationProperties.Name="Contactless NFC"
                         Header="Contactless NFC"
@@ -193,19 +196,23 @@
                         Spacing="12"
                     >
                         <TextBlock
+                            Margin="4,0,0,0"
                             AutomationProperties.HeadingLevel="Level2"
-                            Style="{ThemeResource SubtitleTextBlockStyle}"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            Style="{StaticResource BodyStrongTextBlockStyle}"
                             Text="Card management"
                         />
                         <InfoBar
-                            IsOpen="True"
                             IsClosable="False"
-                            Severity="Informational"
+                            IsOpen="True"
                             Message="PIN1: login. PIN2: signing."
+                            Severity="Informational"
                         />
 
                         <Expander
                             x:Name="ChangePinExpander"
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Stretch"
                             AutomationProperties.AutomationId="ChangePinExpander"
                             AutomationProperties.Name="Change PIN"
                             Header="Change PIN"
@@ -258,6 +265,8 @@
 
                         <Expander
                             x:Name="UnblockPinExpander"
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Stretch"
                             AutomationProperties.AutomationId="UnblockPinExpander"
                             AutomationProperties.Name="Reset PIN (PUK)"
                             Header="Reset PIN (PUK)"
@@ -314,6 +323,8 @@
 
                         <Expander
                             x:Name="ActivationExpander"
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Stretch"
                             AutomationProperties.AutomationId="ActivationExpander"
                             AutomationProperties.Name="Activate a new card"
                             Header="Activate a new card"
@@ -379,17 +390,19 @@
             </Grid>
         </ScrollViewer>
 
-        <Border x:Name="BusyOverlay" Background="#66000000" Visibility="Collapsed">
-            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="12">
-                <ProgressRing
-                    Width="48"
-                    Height="48"
-                    AutomationProperties.AutomationId="BusyRing"
-                    AutomationProperties.Name="Working with the card"
-                    IsActive="True"
-                />
-                <TextBlock Foreground="White" Text="Working with the card..." />
-            </StackPanel>
+        <Border
+            x:Name="BusyOverlay"
+            Background="#66000000"
+            IsHitTestVisible="True"
+            Visibility="Collapsed"
+        >
+            <ProgressRing
+                Width="48"
+                Height="48"
+                AutomationProperties.AutomationId="BusyRing"
+                AutomationProperties.Name="Working with the card"
+                IsActive="True"
+            />
         </Border>
     </Grid>
 </Page>

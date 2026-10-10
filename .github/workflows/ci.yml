@@ -43,9 +43,3 @@ jobs:
           dotnet build apps/RefineID-winui/RefineID.csproj
           -c Debug -p:Platform=x64 -p:SkipRustBuild=true
           -p:WindowsPackageType=None -p:EnableMsixTooling=false
-
-      - name: Build settings app
-        run: >-
-          dotnet build apps/RefineID.Settings/RefineID.Settings.csproj
-          -c Debug -p:Platform=x64 -p:SkipRustBuild=true
-          -p:WindowsPackageType=None -p:EnableMsixTooling=false

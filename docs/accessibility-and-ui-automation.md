@@ -46,19 +46,14 @@ Windows UI Automation (`IUIAutomation` in Win32, `System.Windows.Automation` in 
 
 ## 3. WinUI 3 Accessibility Implementation
 
-All user-facing XAML views in RefineID (`apps/RefineID` and `apps/RefineID.Settings`) implement comprehensive UIA attributes:
+All user-facing XAML views in RefineID (`apps/RefineID-winui`) implement comprehensive UIA attributes:
 
 ### A. Semantic Heading Structure
 Headings guide screen reader users and AI agents through logical document hierarchy:
 ```xml
 <TextBlock
-    Text="Citizen certificate card"
-    Style="{ThemeResource TitleTextBlockStyle}"
-    AutomationProperties.HeadingLevel="Level1" />
-
-<TextBlock
     Text="Card management"
-    Style="{ThemeResource SubtitleTextBlockStyle}"
+    Style="{StaticResource BodyStrongTextBlockStyle}"
     AutomationProperties.HeadingLevel="Level2" />
 ```
 

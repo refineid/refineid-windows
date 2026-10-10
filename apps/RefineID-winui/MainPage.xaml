@@ -21,6 +21,7 @@
     xmlns:controls="using:CommunityToolkit.WinUI.Controls"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    NavigationCacheMode="Required"
     mc:Ignorable="d"
 >
     <Grid>
@@ -136,6 +137,21 @@
                         </StackPanel>
                     </controls:SettingsCard>
                 </StackPanel>
+
+                <!--  Card settings: PIN, recovery, activation, contactless.  -->
+                <controls:SettingsCard
+                    x:Name="SettingsCard"
+                    AutomationProperties.AutomationId="SettingsCard"
+                    AutomationProperties.HelpText="PIN, recovery code, activation and NFC access of the card"
+                    AutomationProperties.Name="Card settings"
+                    Click="Settings_Click"
+                    Header="Settings"
+                    IsClickEnabled="True"
+                >
+                    <controls:SettingsCard.HeaderIcon>
+                        <FontIcon Glyph="&#xE713;" />
+                    </controls:SettingsCard.HeaderIcon>
+                </controls:SettingsCard>
 
                 <TextBlock
                     x:Name="DiagnosticsText"

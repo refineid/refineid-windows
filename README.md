@@ -44,7 +44,7 @@ S4-1 v3.1 RSA card and an ACR39U reader:
 
 - `certutil -scinfo -silent` selected the RefineID Card Module without an
   unknown-card error;
-- the settings app restored PIN2 with the recovery code and the card reported
+- the card settings page restored PIN2 with the recovery code and the card reported
   five attempts plus the changed-from-factory flag afterwards; and
 - Microsoft KSP calls completed and locally verified RSA-3072 PKCS #1 v1.5 and
   RSA-PSS signatures with both PIN1 and PIN2.
@@ -58,7 +58,7 @@ The browser and Windows KSP acceptance tests above currently use the contact
 interface. The repository now contains an experimental end-to-end contactless
 path:
 
-- RefineID Settings proves the printed six-digit CAN with the Apple-reference
+- the card settings page proves the printed six-digit CAN with the Apple-reference
   `SELECT MF`, PACE, and protected PKCS #15 sequence before saving it;
 - only the CAN is stored in the current Windows user's Credential Manager,
   keyed by the complete PC/SC contactless ATR; no PIN or PUK is stored;
@@ -73,10 +73,10 @@ an ACS ACR1581 PICC reader. The new Windows Credential Manager-to-minidriver
 handoff still needs real-reader acceptance before contactless browser use can be
 called supported. Contact mode remains the supported path meanwhile.
 
-### RefineID Settings
+### Card settings
 
-`apps/RefineID.Settings` is a native WinUI 3 desktop settings application with
-a narrow C# UI and a Rust card-service DLL. It can:
+The Settings entry of `apps/RefineID-winui` opens the card settings page, a
+narrow C# UI over the Rust card-service DLL (`refineid_settings_ffi`). It can:
 
 - inspect a card and show counter-safe PIN1, PIN2, and recovery status;
 - change PIN1 or PIN2;
@@ -140,10 +140,10 @@ cargo sweep -t 14
 find target -type d -name "incremental" -prune -exec rm -rf {} +
 ```
 
-Build the unpackaged x64 settings app:
+Build the unpackaged x64 app:
 
 ```powershell
-dotnet build apps/RefineID.Settings/RefineID.Settings.csproj `
+dotnet build apps/RefineID-winui/ReFineID.csproj `
   -c Release `
   -p:Platform=x64 `
   -p:WindowsPackageType=None `
@@ -177,7 +177,7 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -AllowUnsigned
 ```
 
-Then use RefineID Settings once to prove and save the card's printed CAN. The
+Then open Settings in RefineID once to prove and save the card's printed CAN. The
 CAN argument is deliberately not accepted by the installer or command line.
 
 Validate with a reader and card:
@@ -216,7 +216,7 @@ RAPP-backed remote card is future work here.
 
 ## Accessibility and UI Automation (UIA)
 
-RefineID applications (`RefineID` and `RefineID.Settings`) implement first-class
+The RefineID application (`apps/RefineID-winui`) implements first-class
 Windows Accessibility support through Microsoft UI Automation (UIA) and WinUI 3
 `AutomationProperties` (`HeadingLevel`, `AutomationId`, `Name`, `HelpText`). This
 provides accessible semantics for screen readers (such as Windows Narrator) and
