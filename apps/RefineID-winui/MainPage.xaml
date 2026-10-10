@@ -31,13 +31,6 @@
                 HorizontalAlignment="Stretch"
                 Spacing="24"
             >
-                <TextBlock
-                    Margin="4,8,0,0"
-                    AutomationProperties.HeadingLevel="Level1"
-                    Style="{StaticResource TitleTextBlockStyle}"
-                    Text="RefineID"
-                />
-
                 <InfoBar
                     x:Name="StatusInfoBar"
                     AutomationProperties.AutomationId="StatusInfoBar"

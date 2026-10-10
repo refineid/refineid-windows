@@ -22,20 +22,55 @@ public sealed partial class MainPage : Page
     private CardSnapshot? _snapshot;
     private bool _busy;
     private bool _refreshingReaders;
+    private bool _polling;
+
+    // Card-present readers are listed on this cadence so inserted, removed and
+    // tapped cards appear without user action.
+    private static readonly TimeSpan ReaderPollInterval = TimeSpan.FromSeconds(2);
+
+    private readonly DispatcherTimer _readerPollTimer = new() { Interval = ReaderPollInterval };
 
     public MainPage()
     {
         InitializeComponent();
+        _readerPollTimer.Tick += ReaderPollTimer_Tick;
+        Unloaded += (_, _) => _readerPollTimer.Stop();
     }
 
     private async void Page_Loaded(object sender, RoutedEventArgs e)
     {
         await RefreshReadersAsync();
+        _readerPollTimer.Start();
     }
 
-    private async void RefreshButton_Click(object sender, RoutedEventArgs e)
+    // A tick lists readers only; the card is inspected again only when the set
+    // of card-present readers changes.
+    private async void ReaderPollTimer_Tick(object? sender, object e)
     {
-        await RefreshReadersAsync();
+        if (_busy || _polling)
+        {
+            return;
+        }
+
+        _polling = true;
+        try
+        {
+            string[] readers = await Task.Run(NativeCardService.PresentReaders);
+            string[] shown = ReaderComboBox.ItemsSource as string[] ?? [];
+            if (!_busy && !readers.SequenceEqual(shown, StringComparer.Ordinal))
+            {
+                await RefreshReadersAsync();
+            }
+        }
+        // codeql[cs/catch-of-all-exceptions]
+        catch (Exception)
+        {
+            // The next tick retries. Errors are shown only by a full refresh.
+        }
+        finally
+        {
+            _polling = false;
+        }
     }
 
     private async void ReaderComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -186,10 +221,7 @@ public sealed partial class MainPage : Page
                     return;
                 }
 
-                ShowNotice(
-                    "No card found",
-                    "Insert a FINEID card or place it on an NFC reader, then refresh."
-                );
+                StatusInfoBar.IsOpen = false;
                 return;
             }
 
@@ -237,10 +269,8 @@ public sealed partial class MainPage : Page
             _ => "Unknown",
         };
         ActivationHintText.Text = snapshot.ActivationCodeLength is int length
-            ? $"This card expects a {length}-digit activation code. "
-                + "Activation is refused when the card already looks active."
-            : "The activation-code length could not be classified. "
-                + "Activation will be refused.";
+            ? $"{length}-digit activation code."
+            : "Unknown activation code. Activation refused.";
         CardPanel.Visibility = Visibility.Visible;
         ManagementPanel.IsHitTestVisible = true;
         ManagementPanel.Opacity = 1;
@@ -284,9 +314,9 @@ public sealed partial class MainPage : Page
             ShowError(error.Message);
         }
         // codeql[cs/catch-of-all-exceptions]
-        catch (Exception error)
+        catch (Exception)
         {
-            ShowError($"Unexpected application error: {error.Message}");
+            ShowError(string.Empty);
         }
         finally
         {
