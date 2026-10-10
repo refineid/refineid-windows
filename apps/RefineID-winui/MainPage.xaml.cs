@@ -132,15 +132,15 @@ internal sealed partial class MainPage : Page
         {
             CardReading reading = await Task.Run(() => NativeRappService.ReadCard(handle))
                 .ConfigureAwait(true);
-            string holder = string.IsNullOrWhiteSpace(reading.Identity.PersonId)
-                ? reading.Identity.DisplayName
-                : $"{reading.Identity.DisplayName} {reading.Identity.PersonId}";
+            // The holder name as the card carries it; the person identifier
+            // stays off the screen.
+            string holder = reading.Identity.DisplayName;
             this.remoteHolder = holder;
             this.HolderText.Text = holder;
             this.HolderText.Visibility = Visibility.Visible;
             this.ForgetIdentityButton.Visibility = Visibility.Visible;
             this.ConnectRemoteReaderButton.Visibility = Visibility.Collapsed;
-            this.ShowSuccess($"Read the remote card of {holder}.");
+            this.StatusInfoBar.IsOpen = false;
         }
         catch (NativeRappException error)
         {
@@ -165,9 +165,7 @@ internal sealed partial class MainPage : Page
         {
             XamlRoot = this.XamlRoot,
             Title = "Forget identity?",
-            Content = string.IsNullOrWhiteSpace(this.HolderText.Text)
-                ? "The remote card will be removed from this device."
-                : $"The remote card of {this.HolderText.Text} will be removed from this device.",
+            Content = "The pairing with the phone is removed from this device.",
             PrimaryButtonText = "Forget",
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Close,
@@ -314,8 +312,6 @@ internal sealed partial class MainPage : Page
         this.BusyOverlay.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
         this.BusyOverlay.IsHitTestVisible = busy;
     }
-
-    private void ShowSuccess(string message) => this.ShowStatus(InfoBarSeverity.Success, message);
 
     private void ShowError(string message) => this.ShowStatus(InfoBarSeverity.Error, message);
 
