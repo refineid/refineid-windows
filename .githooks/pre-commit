@@ -16,6 +16,24 @@ if git ls-files | grep -i -E '(^|/)WHATSUP\.md$' >/dev/null; then
     exit 1
 fi
 
+# Stamp the workspace version to the UTC day when the day changed. The
+# manifest carries CalVer YY.M.D; the apps and packages add the time bucket
+# at build.
+root=$(git rev-parse --show-toplevel)
+manifest="$root/Cargo.toml"
+yy=$(date -u +%y); yy=${yy#0}
+mo=$(date -u +%m); mo=${mo#0}
+dd=$(date -u +%d); dd=${dd#0}
+today="$yy.$mo.$dd"
+current=$(awk -F'"' '/^version = / { print $2; exit }' "$manifest")
+if [ "$current" != "$today" ]; then
+    sed -i.bak "s|^version = \"$current\"|version = \"$today\"|" "$manifest"
+    rm -f "$manifest.bak"
+    cargo check --workspace --quiet
+    git add "$manifest" "$root/Cargo.lock"
+    echo "pre-commit: workspace version $current -> $today (UTC day change)"
+fi
+
 echo "pre-commit: cargo fmt --all --check"
 cargo fmt --all --check
 

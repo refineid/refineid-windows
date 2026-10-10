@@ -35,10 +35,11 @@ git config core.hooksPath .githooks
 
 The hooks enforce standards locally:
 
-- **Pre-commit (`.githooks/pre-commit`)**: runs on every host to catch defects before
-  committing: `cargo fmt`, `dotnet csharpier check`, `cargo clippy` (both native
-  host and `x86_64-pc-windows-msvc` for Windows-specific crates), and core
-  unit tests (`cargo test -p refineid-lib-core`).
+- **Pre-commit (`.githooks/pre-commit`)**: stamps the workspace version in
+  `Cargo.toml` to the UTC day when the day changed, then runs on every host to
+  catch defects before committing: `cargo fmt`, `dotnet csharpier check`,
+  `cargo clippy` (both native host and `x86_64-pc-windows-msvc` for
+  Windows-specific crates), and core unit tests (`cargo test -p refineid-lib-core`).
 - **Pre-push (`.githooks/pre-push`)**: verifies that Git dependencies in `Cargo.lock`
   (such as `refineid-core`) are synchronized with the latest upstream revisions
   before pushing. Run `cargo update -p refineid-remote` when stale.
