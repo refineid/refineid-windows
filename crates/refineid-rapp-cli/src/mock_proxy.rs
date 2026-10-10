@@ -1,16 +1,17 @@
-//! Mock authorization proxy for RAPP automated verification and testing.
+//! Mock RAPP custodian for automated verification and testing.
 //!
-//! Connects to a RAPP requester (such as `refineid-rapp pair-demo` or the
-//! `RefineID` Windows Settings app), performs `Noise_XXpsk3` pairing with a
-//! 6-digit numeric pairing code or pairing offer URI, and serves typed card
-//! operations (inspection, identity, certificate, and authentication).
+//! Listens like a phone does (RAPP v26.10.9 section 2.2.2), shows a pairing
+//! code, serves a random offer after the pairing preamble, answers `CPace`
+//! KC2 as responder and `Noise_XXpsk3` with the hello and confirmation
+//! exchange, then accepts sessions routed by their rendezvous token and
+//! serves typed card operations (inspection, identity, certificate, and
+//! signatures). It publishes no DNS-SD record: requesters dial it by
+//! address.
 
 #![expect(
     clippy::too_many_lines,
     clippy::missing_errors_doc,
     clippy::needless_pass_by_value,
-    clippy::assigning_clones,
-    clippy::cloned_ref_to_slice_refs,
     clippy::collapsible_if,
     clippy::cast_possible_truncation,
     clippy::similar_names,
@@ -18,25 +19,27 @@
     reason = "Mock proxy test harness with mock state serialization and session handling"
 )]
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use refineid_rapp::cpace::CpaceState;
 use refineid_rapp::{
-    BinaryFrame, CardInspection, CardOperation, CardOperationResult, EndpointRole,
-    EstablishedEndpoint, LivenessMessage, OperationReference, OperationRequest,
-    OperationResultMessage, PairRecord, PairStore, PairStoreError, PairTombstone, PairingHandshake,
-    PairingOffer, PairingOfferUri, PairingSecret, ReceiveOutcome, SessionHandshake, TypedMessage,
-    decode_pair_record, encode_pair_record, generate_pair_key_material,
+    BinaryFrame, CardInspection, CardOperation, CardOperationResult, CpaceKc2Responder,
+    EndpointRole, EstablishedEndpoint, LivenessMessage, MAXIMUM_CPACE_ATTEMPTS, OfferId,
+    OperationReference, OperationRequest, OperationResultMessage, PairRecord, PairStore,
+    PairStoreError, PairTombstone, PairingHandshake, PairingOffer, ReceiveOutcome,
+    SessionHandshake, TransportProfile, TypedMessage, decode_pair_record, encode_pair_record,
+    generate_pair_key_material, standard_pairing_context_v2,
 };
-use refineid_rapp_core::stream::{StreamRendezvous, dial};
-use refineid_rapp_core::transport::FrameTransport;
-use zeroize::Zeroize;
+use refineid_rapp_core::offer::{format_pairing_code, generate_pairing_code};
+use refineid_rapp_core::stream::{STREAM_CANDIDATE_ID, StreamAccept, StreamListener};
+use refineid_rapp_core::transport::{FrameTransport, STREAM_PROFILE, TcpFrameTransport};
+use zeroize::Zeroizing;
 
-/// Default socket receive deadline.
+/// Socket receive deadline on an accepted connection.
 const DEADLINE: Duration = Duration::from_secs(10);
 
-/// Default candidate identifier.
-const DEFAULT_CANDIDATE_ID: &str = "stream-1";
+/// Default listen address: the local mock custodian endpoint requesters
+/// fall back to.
+pub const DEFAULT_LISTEN: &str = "127.0.0.1:47110";
 
 /// Validity dates the mock identity answer reports (section 9.1 form).
 const MOCK_ISSUANCE_DATE: &str = "2026-01-01";
@@ -63,16 +66,10 @@ pub const DEFAULT_MOCK_PRIVATE_KEY_SCALAR: &[u8; 48] = &[
 /// Options configuring the mock proxy.
 #[derive(Clone, Debug)]
 pub struct MockProxyOptions {
-    /// Explicit endpoint to connect to (e.g. "127.0.0.1:47110").
-    pub connect: Option<String>,
-    /// Explicit address to listen on for incoming sessions (e.g. "127.0.0.1:47110").
-    pub listen: Option<String>,
-    /// 6-digit numeric pairing code.
+    /// Address to listen on for pairing and session connections.
+    pub listen: String,
+    /// The pairing code to show; a fresh random one when absent.
     pub code: Option<String>,
-    /// Full RAPP pairing offer URI (`rapp:...`).
-    pub uri: Option<String>,
-    /// Candidate ID (default: "stream-1").
-    pub candidate_id: String,
     /// Display name sent to requester.
     pub name: String,
     /// Platform string sent to requester.
@@ -102,11 +99,8 @@ pub struct MockProxyOptions {
 impl Default for MockProxyOptions {
     fn default() -> Self {
         Self {
-            connect: None,
-            listen: None,
+            listen: DEFAULT_LISTEN.to_owned(),
             code: None,
-            uri: None,
-            candidate_id: DEFAULT_CANDIDATE_ID.to_owned(),
             name: "RefineID Mock Phone".to_owned(),
             platform: "iOS".to_owned(),
             count: 1,
@@ -128,8 +122,6 @@ impl Default for MockProxyOptions {
 pub struct ProxyPairing {
     /// Canonical core pair record.
     pub record: PairRecord,
-    /// Connected remote endpoint address.
-    pub endpoint: String,
 }
 
 impl ProxyPairing {
@@ -137,37 +129,40 @@ impl ProxyPairing {
     pub fn save_to_file(&self, path: &str) -> Result<(), String> {
         let cbor = encode_pair_record(&self.record)
             .map_err(|e| format!("cannot serialize pair record: {e:?}"))?;
-        let content = format!("{}\n{}\n", hex::encode(cbor), self.endpoint);
-        std::fs::write(path, content).map_err(|e| format!("cannot save state to {path}: {e}"))
+        std::fs::write(path, format!("{}\n", hex::encode(cbor)))
+            .map_err(|e| format!("cannot save state to {path}: {e}"))
     }
 
     /// Loads the proxy pairing state from a simple hex-encoded text file.
     pub fn load_from_file(path: &str) -> Result<Self, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
-        let lines: Vec<&str> = text.lines().collect();
-        if lines.len() < 2 {
-            return Err("state file is truncated".into());
-        }
-        let cbor = hex::decode(lines[0].trim()).map_err(|e| format!("invalid hex: {e}"))?;
+        let line = text.lines().next().ok_or("state file is empty")?;
+        let cbor = hex::decode(line.trim()).map_err(|e| format!("invalid hex: {e}"))?;
         let record =
             decode_pair_record(&cbor).map_err(|e| format!("invalid pair record: {e:?}"))?;
-        let endpoint = lines[1].trim().to_owned();
-        Ok(Self { record, endpoint })
+        Ok(Self { record })
     }
 }
 
 /// Runs the mock proxy workflow according to the provided options.
 pub fn run_mock_proxy(options: MockProxyOptions) -> Result<(), String> {
-    println!("starting RAPP mock proxy...");
+    println!("starting RAPP mock custodian on {}...", options.listen);
+    let listener = StreamListener::bind(&options.listen, STREAM_CANDIDATE_ID, DEADLINE)
+        .map_err(|e| format!("cannot listen on {}: {e:?}", options.listen))?;
+    serve_mock_proxy(&listener, options)
+}
+
+/// Runs the mock proxy workflow on a listener the caller bound; `listen` in
+/// the options is ignored.
+pub fn serve_mock_proxy(
+    listener: &StreamListener,
+    options: MockProxyOptions,
+) -> Result<(), String> {
     let pairing = if let Some(state_path) = &options.resume_state {
         println!("resuming from state file: {state_path}");
-        let mut p = ProxyPairing::load_from_file(state_path)?;
-        if let Some(connect) = &options.connect {
-            p.endpoint = connect.clone();
-        }
-        p
+        ProxyPairing::load_from_file(state_path)?
     } else {
-        let p = run_pairing(&options)?;
+        let p = run_pairing(listener, &options)?;
         if let Some(save_path) = &options.save_state {
             p.save_to_file(save_path)?;
             println!("saved proxy state to: {save_path}");
@@ -176,172 +171,155 @@ pub fn run_mock_proxy(options: MockProxyOptions) -> Result<(), String> {
     };
 
     println!(
-        "pairing active (pair_id: {}, rendezvous_token: {})",
-        hex::encode(pairing.record.pair_id().as_bytes()),
-        hex::encode(pairing.record.rendezvous_token().as_bytes())
+        "pairing active (pair_id: {})",
+        hex::encode(pairing.record.pair_id().as_bytes())
     );
 
     let mut sessions_served = 0;
     while options.count == 0 || sessions_served < options.count {
+        let transport = accept_session(listener, &pairing)?;
         sessions_served += 1;
-        println!(
-            "connecting session {sessions_served}{}...",
-            if options.count > 0 {
-                format!("/{}", options.count)
-            } else {
-                String::new()
-            }
-        );
-        serve_one_session(&pairing, &options)?;
+        println!("serving session {sessions_served}...");
+        serve_one_session(transport, &pairing, &options)?;
     }
     println!("mock proxy finished successfully (served {sessions_served} sessions)");
     Ok(())
 }
 
-fn resolve_offer(options: &MockProxyOptions) -> Result<(PairingOffer, String), String> {
-    if let Some(uri_str) = &options.uri {
-        let offer = PairingOffer::from_uri(PairingOfferUri::from_scanned_text(uri_str.clone()))
-            .map_err(|e| format!("invalid offer URI: {e:?}"))?;
-        let endpoint = if let Some(explicit) = &options.connect {
-            explicit.clone()
-        } else {
-            let candidate = offer
-                .transports
-                .iter()
-                .find(|t| t.profile == refineid_rapp_core::transport::STREAM_PROFILE)
-                .ok_or("offer contains no stream candidate")?;
-            let params =
-                refineid_rapp::StreamCandidateParameters::from_parameters(&candidate.parameters)
-                    .map_err(|e| format!("invalid candidate parameters: {e:?}"))?;
-            params
-                .endpoints()
-                .first()
-                .cloned()
-                .ok_or("offer has empty endpoint list")?
-        };
-        Ok((offer, endpoint))
-    } else if let Some(code) = &options.code {
-        let endpoint = options
-            .connect
-            .clone()
-            .ok_or("--connect <host:port> is required when pairing with --code")?;
-        let normalized = refineid_rapp_core::offer::normalize_pairing_code(code);
-        let offer_id = refineid_rapp::cpace::derive_manual_offer_id(&normalized)
-            .map_err(|e| format!("invalid code: {e:?}"))?;
-        let candidate_params =
-            refineid_rapp::StreamCandidateParameters::new(vec![endpoint.clone()])
-                .map_err(|e| format!("candidate parameters failed: {e:?}"))?;
-        let offer = PairingOffer::reconstruct(
-            offer_id,
-            vec![refineid_rapp::MANDATORY_PAIRING_SUITE.to_owned()],
-            vec![
-                refineid_rapp::ProfileName::CardStatus.as_str().to_owned(),
-                refineid_rapp::ProfileName::Authentication
-                    .as_str()
-                    .to_owned(),
-                refineid_rapp::ProfileName::DocumentSigning
-                    .as_str()
-                    .to_owned(),
-            ],
-            vec![refineid_rapp::TransportCandidate {
-                profile: refineid_rapp_core::transport::STREAM_PROFILE.to_owned(),
-                candidate_id: options.candidate_id.clone(),
-                parameters: candidate_params.to_parameters(),
-            }],
-            refineid_rapp_core::limits::OFFER_TTL_MAX_MS,
-        )
-        .map_err(|e| format!("offer reconstruct failed: {e:?}"))?;
-        Ok((offer, endpoint))
-    } else {
-        Err(
-            "either --uri <rapp:...> or (--connect <host:port> and --code <code>) must be specified"
-                .into(),
-        )
-    }
+/// The mock custodian's random offer for the stream transport.
+fn custodian_offer() -> Result<PairingOffer, String> {
+    let mut offer_id = [0_u8; refineid_rapp::OFFER_ID_SIZE];
+    getrandom::fill(&mut offer_id).map_err(|e| format!("rng failed: {e}"))?;
+    PairingOffer::create(
+        OfferId::from_array(offer_id),
+        vec![
+            refineid_rapp::ProfileName::CardStatus.as_str().to_owned(),
+            refineid_rapp::ProfileName::Authentication
+                .as_str()
+                .to_owned(),
+            refineid_rapp::ProfileName::DocumentSigning
+                .as_str()
+                .to_owned(),
+        ],
+        &[TransportProfile::Stream],
+    )
+    .map_err(|e| format!("offer creation failed: {e:?}"))
 }
 
-fn run_pairing(options: &MockProxyOptions) -> Result<ProxyPairing, String> {
-    let (offer, endpoint) = resolve_offer(options)?;
-    println!("dialing pairing connection to {endpoint}...");
-    let mut transport = dial(
-        &[endpoint.clone()],
-        &options.candidate_id,
-        DEADLINE,
-        &StreamRendezvous::Pairing,
-    )
-    .map_err(|e| format!("cannot connect to requester at {endpoint}: {e:?}"))?;
-
-    let pairing_secret = if let Some(code) = &options.code {
-        let mut entropy = [0u8; 64];
-        getrandom::fill(&mut entropy).map_err(|e| format!("rng failed: {e}"))?;
-        let cpace = CpaceState::new(
-            refineid_rapp::HandshakeRole::Responder,
-            code,
-            &offer.offer_id,
-            &entropy,
-        )
-        .map_err(|e| format!("cpace init failed: {e:?}"))?;
-        entropy.zeroize();
-
-        // Send Responder's CPace frame
-        let my_frame = cpace
-            .write_message()
-            .map_err(|e| format!("cpace write frame failed: {e:?}"))?;
-        transport
-            .send_frame(my_frame.as_bytes())
-            .map_err(|e| format!("send cpace frame failed: {e:?}"))?;
-
-        // Receive Initiator's CPace frame
-        let peer_frame_bytes = transport
-            .receive_frame()
-            .map_err(|e| format!("receive cpace frame failed: {e:?}"))?;
-        let peer_frame = BinaryFrame::reconstruct(peer_frame_bytes)
-            .map_err(|e| format!("decode cpace frame failed: {e:?}"))?;
-        cpace
-            .read_message(&peer_frame)
-            .map_err(|e| format!("cpace derive secret failed: {e:?}"))?
-    } else {
-        PairingSecret::from_random_bytes([0u8; 32])
+/// Shows the code and accepts pairing connections until one pairs or the
+/// custodian's three `CPace` attempts are spent (section 3.3).
+fn run_pairing(
+    listener: &StreamListener,
+    options: &MockProxyOptions,
+) -> Result<ProxyPairing, String> {
+    let code = match &options.code {
+        Some(code) => code.clone(),
+        None => generate_pairing_code().map_err(|e| format!("rng failed: {e}"))?,
     };
+    let offer = custodian_offer()?;
+    println!("pairing code: {}", format_pairing_code(&code));
+    let mut attempts = 0_u8;
+    while attempts < MAXIMUM_CPACE_ATTEMPTS {
+        let accepted = listener
+            .accept()
+            .map_err(|e| format!("accept failed: {e:?}"))?;
+        let StreamAccept::Pairing(transport) = accepted else {
+            println!("ignored a session connection while pairing");
+            continue;
+        };
+        attempts += 1;
+        match pair_once(transport, &offer, &code, options) {
+            Ok(record) => return Ok(ProxyPairing { record }),
+            Err(error) => println!("pairing attempt {attempts} failed: {error}"),
+        }
+    }
+    Err("pairing attempts exhausted".into())
+}
+
+/// One pairing connection: the offer bootstrap, `CPace` KC2 as responder,
+/// `Noise_XXpsk3`, then the hello and confirmation exchange.
+fn pair_once(
+    mut transport: TcpFrameTransport,
+    offer: &PairingOffer,
+    code: &str,
+    options: &MockProxyOptions,
+) -> Result<PairRecord, String> {
+    let bootstrap = offer
+        .to_cbor()
+        .map_err(|e| format!("offer encoding failed: {e:?}"))?;
+    transport
+        .send_frame(&bootstrap)
+        .map_err(|e| format!("send offer failed: {e:?}"))?;
+    let offer_hash = offer
+        .offer_hash()
+        .map_err(|e| format!("offer hash failed: {e:?}"))?;
+    let context = standard_pairing_context_v2(&offer_hash, STREAM_PROFILE, STREAM_CANDIDATE_ID)
+        .map_err(|e| format!("context failed: {e:?}"))?;
+
+    let step_one = BinaryFrame::reconstruct(
+        transport
+            .receive_frame()
+            .map_err(|e| format!("receive Y_A failed: {e:?}"))?,
+    )
+    .map_err(|e| format!("Y_A frame invalid: {e:?}"))?;
+    let mut entropy = Zeroizing::new([0_u8; 64]);
+    getrandom::fill(entropy.as_mut()).map_err(|e| format!("rng failed: {e}"))?;
+    let (step_two, waiting) = CpaceKc2Responder::process_step1_frame(
+        code,
+        &context,
+        &offer.offer_id,
+        &step_one,
+        &entropy,
+    )
+    .map_err(|e| format!("Y_A refused: {e:?}"))?;
+    drop(entropy);
+    transport
+        .send_frame(step_two.as_bytes())
+        .map_err(|e| format!("send Y_B failed: {e:?}"))?;
+    let step_three = BinaryFrame::reconstruct(
+        transport
+            .receive_frame()
+            .map_err(|e| format!("receive T_A failed (mistyped code?): {e:?}"))?,
+    )
+    .map_err(|e| format!("T_A frame invalid: {e:?}"))?;
+    let pairing_secret = waiting
+        .process_step3_frame(&step_three)
+        .map_err(|e| format!("T_A refused: {e:?}"))?;
 
     let keys = generate_pair_key_material().map_err(|e| format!("key generation failed: {e:?}"))?;
     let mut handshake = PairingHandshake::begin(
         EndpointRole::Proxy,
-        offer,
-        &options.candidate_id,
+        offer.clone(),
+        STREAM_CANDIDATE_ID,
         keys,
         &pairing_secret,
     )
     .map_err(|fail| format!("pairing handshake failed: {:?}", fail.error()))?;
 
-    // Message 1 (Requester -> Proxy)
-    let m1_bytes = transport
-        .receive_frame()
-        .map_err(|e| format!("receive frame 1 failed: {e:?}"))?;
-    let m1 =
-        BinaryFrame::reconstruct(m1_bytes).map_err(|e| format!("frame 1 decode failed: {e:?}"))?;
+    let m1 = BinaryFrame::reconstruct(
+        transport
+            .receive_frame()
+            .map_err(|e| format!("receive frame 1 failed: {e:?}"))?,
+    )
+    .map_err(|e| format!("frame 1 decode failed: {e:?}"))?;
     handshake
         .read_message(&m1)
         .map_err(|e| format!("handshake read 1 failed: {e:?}"))?;
-
-    // Message 2 (Proxy -> Requester)
     let m2 = handshake
         .write_message()
         .map_err(|e| format!("handshake write 2 failed: {e:?}"))?;
     transport
         .send_frame(m2.as_bytes())
         .map_err(|e| format!("send frame 2 failed: {e:?}"))?;
-
-    // Message 3 (Requester -> Proxy)
-    let m3_bytes = transport
-        .receive_frame()
-        .map_err(|e| format!("receive frame 3 failed: {e:?}"))?;
-    let m3 =
-        BinaryFrame::reconstruct(m3_bytes).map_err(|e| format!("frame 3 decode failed: {e:?}"))?;
+    let m3 = BinaryFrame::reconstruct(
+        transport
+            .receive_frame()
+            .map_err(|e| format!("receive frame 3 failed: {e:?}"))?,
+    )
+    .map_err(|e| format!("frame 3 decode failed: {e:?}"))?;
     handshake
         .read_message(&m3)
         .map_err(|e| format!("handshake read 3 failed: {e:?}"))?;
-
     if !handshake.is_complete() {
         return Err("handshake incomplete".into());
     }
@@ -349,17 +327,16 @@ fn run_pairing(options: &MockProxyOptions) -> Result<ProxyPairing, String> {
     let mut confirmation = handshake
         .into_confirmation()
         .map_err(|e| format!("confirmation failed: {e:?}"))?;
-
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64);
 
-    // Receive Requester Hello
-    let req_hello_bytes = transport
-        .receive_frame()
-        .map_err(|e| format!("receive hello failed: {e:?}"))?;
-    let req_hello_frame = BinaryFrame::reconstruct(req_hello_bytes)
-        .map_err(|e| format!("hello frame decode failed: {e:?}"))?;
+    let req_hello_frame = BinaryFrame::reconstruct(
+        transport
+            .receive_frame()
+            .map_err(|e| format!("receive hello failed: {e:?}"))?,
+    )
+    .map_err(|e| format!("hello frame decode failed: {e:?}"))?;
     let req_hello = confirmation
         .receive_hello(&req_hello_frame, now_ms)
         .map_err(|e| format!("verify hello failed: {e:?}"))?;
@@ -367,8 +344,6 @@ fn run_pairing(options: &MockProxyOptions) -> Result<ProxyPairing, String> {
         "requester hello from: {} ({})",
         req_hello.display_name, req_hello.platform
     );
-
-    // Send Proxy Hello
     let proxy_hello = confirmation
         .send_hello(options.name.clone(), options.platform.clone())
         .map_err(|e| format!("send hello failed: {e:?}"))?;
@@ -376,19 +351,17 @@ fn run_pairing(options: &MockProxyOptions) -> Result<ProxyPairing, String> {
         .send_frame(proxy_hello.as_bytes())
         .map_err(|e| format!("send hello frame failed: {e:?}"))?;
 
-    // Receive Requester Confirmation
-    let req_conf_bytes = transport
-        .receive_frame()
-        .map_err(|e| format!("receive confirm failed: {e:?}"))?;
-    let req_conf_frame = BinaryFrame::reconstruct(req_conf_bytes)
-        .map_err(|e| format!("confirm frame decode failed: {e:?}"))?;
-    let req_conf = confirmation
+    let req_conf_frame = BinaryFrame::reconstruct(
+        transport
+            .receive_frame()
+            .map_err(|e| format!("receive confirm failed: {e:?}"))?,
+    )
+    .map_err(|e| format!("confirm frame decode failed: {e:?}"))?;
+    let granted_profiles = confirmation
         .receive_confirmation(&req_conf_frame, now_ms)
-        .map_err(|e| format!("verify confirm failed: {e:?}"))?;
-    let granted_profiles = req_conf.to_vec();
+        .map_err(|e| format!("verify confirm failed: {e:?}"))?
+        .to_vec();
     println!("requester granted profiles: {:?}", granted_profiles);
-
-    // Send Proxy Confirmation
     let proxy_conf = confirmation
         .send_confirmation(granted_profiles)
         .map_err(|e| format!("send confirm failed: {e:?}"))?;
@@ -396,11 +369,30 @@ fn run_pairing(options: &MockProxyOptions) -> Result<ProxyPairing, String> {
         .send_frame(proxy_conf.as_bytes())
         .map_err(|e| format!("send confirm frame failed: {e:?}"))?;
 
-    let record = confirmation
+    confirmation
         .into_pair_record(now_ms)
-        .map_err(|e| format!("into_pair_record failed: {e:?}"))?;
+        .map_err(|e| format!("into_pair_record failed: {e:?}"))
+}
 
-    Ok(ProxyPairing { record, endpoint })
+/// Accepts connections until one opens a session for this pairing; others
+/// are closed without changing state.
+fn accept_session(
+    listener: &StreamListener,
+    pairing: &ProxyPairing,
+) -> Result<TcpFrameTransport, String> {
+    loop {
+        match listener
+            .accept()
+            .map_err(|e| format!("accept failed: {e:?}"))?
+        {
+            StreamAccept::Session {
+                rendezvous_token,
+                transport,
+            } if rendezvous_token == pairing.record.rendezvous_token() => return Ok(transport),
+            StreamAccept::Session { .. } => println!("closed a session for an unknown pairing"),
+            StreamAccept::Pairing(_) => println!("closed a pairing connection; no offer is open"),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -422,52 +414,13 @@ impl PairStore for MockProxyStore {
     }
 }
 
-fn serve_one_session(pairing: &ProxyPairing, options: &MockProxyOptions) -> Result<(), String> {
-    let mut transport = if let Some(listen_addr) = &options.listen {
-        println!("mock proxy listening for incoming session on {listen_addr}...");
-        let listener = refineid_rapp_core::stream::StreamListener::bind(
-            listen_addr,
-            &options.candidate_id,
-            Duration::from_secs(3600),
-        )
-        .map_err(|e| format!("cannot bind listener at {listen_addr}: {e:?}"))?;
-        let accepted = listener
-            .accept()
-            .map_err(|e| format!("accept failed: {e:?}"))?;
-        let refineid_rapp_core::stream::StreamAccept::Session {
-            rendezvous_token,
-            transport,
-        } = accepted
-        else {
-            return Err("expected StreamAccept::Session".into());
-        };
-        if rendezvous_token.as_bytes() != pairing.record.rendezvous_token().as_bytes() {
-            return Err("rendezvous token mismatch".into());
-        }
-        transport
-    } else {
-        println!("dialing session connection to {}...", pairing.endpoint);
-        let deadline = Instant::now() + Duration::from_secs(3600);
-        loop {
-            match dial(
-                &[pairing.endpoint.clone()],
-                &options.candidate_id,
-                Duration::from_secs(2),
-                &StreamRendezvous::Session(pairing.record.rendezvous_token()),
-            ) {
-                Ok(t) => break t,
-                Err(e) => {
-                    if Instant::now() >= deadline {
-                        return Err(format!("session connect timeout: {e:?}"));
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-            }
-        }
-    };
-
+fn serve_one_session(
+    mut transport: TcpFrameTransport,
+    pairing: &ProxyPairing,
+    options: &MockProxyOptions,
+) -> Result<(), String> {
     println!("running Noise_KK session handshake...");
-    let mut handshake = SessionHandshake::begin_proxy(&pairing.record)
+    let mut handshake = SessionHandshake::begin_proxy(&pairing.record, TransportProfile::Stream)
         .map_err(|e| format!("session handshake failed: {e:?}"))?;
 
     // Message 1 (Requester -> Proxy)

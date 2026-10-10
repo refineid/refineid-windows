@@ -85,7 +85,6 @@
       Include="CommunityToolkit.WinUI.Controls.SettingsControls"
       Version="8.2.250402"
     />
-    <PackageReference Include="QRCoder" Version="1.6.0" />
   </ItemGroup>
 
   <PropertyGroup Condition="'$(DisableHasPackageAndPublishMenuAddedByProject)'!='true' and '$(EnableMsixTooling)'=='true'">

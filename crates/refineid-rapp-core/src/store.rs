@@ -1,10 +1,11 @@
 //! Durable pairing records and the operation journal.
 //!
-//! A pairing record is the atomic store of Section 9.3 step 8: pair keys,
-//! `pair_id`, the rendezvous token, granted profiles, `grants_hash`, labels,
-//! and the fail-stop marker. The journal is the durable operation record of
-//! Sections 12.2 and 12.6: the requester writes its commit intent before
-//! sending commit, and terminal states are permanent.
+//! A pairing record is the atomic result of pairing: pair keys, `pair_id`,
+//! the rendezvous token, granted profiles, `grants_hash`, labels, and the
+//! fail-stop marker. The journal records each operation from the moment its
+//! request is written (RAPP v26.10.9 section 8): an unanswered consequential
+//! request is in flight and ends ambiguous, and terminal states are
+//! permanent.
 //!
 //! Both stores are traits so the Windows build can put pair keys behind the
 //! platform credential store and the journal on disk, while tests use the
@@ -63,10 +64,6 @@ pub struct PairingRecord {
     pub root_ca: Option<Vec<u8>>,
     /// Cached DER bytes of the intermediate CA certificate, if populated.
     pub intermediate_ca: Option<Vec<u8>>,
-    /// Candidate identifier used by this pairing.
-    pub candidate_id: Option<String>,
-    /// Transport profile used by this pairing.
-    pub transport_profile: Option<String>,
 }
 
 impl core::fmt::Debug for PairingRecord {
@@ -83,8 +80,6 @@ impl core::fmt::Debug for PairingRecord {
 pub const DEFAULT_PEER_DISPLAY_NAME: &str = "Peer";
 /// Default platform when peer platform is unspecified.
 pub const DEFAULT_PEER_PLATFORM: &str = "Unknown";
-/// Default candidate identifier for single-channel stream transport.
-pub const DEFAULT_STREAM_CANDIDATE_ID: &str = "stream-1";
 
 impl PairingRecord {
     /// Convert to canonical core [`refineid_rapp::PairRecord`].
@@ -128,17 +123,6 @@ impl PairingRecord {
             peer_public,
             grants_hash,
             profiles,
-            refineid_rapp::PairTransportBinding {
-                profile: self
-                    .transport_profile
-                    .clone()
-                    .unwrap_or_else(|| refineid_rapp::STREAM_PROFILE.to_owned()),
-                candidate_id: self
-                    .candidate_id
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_STREAM_CANDIDATE_ID.to_owned()),
-                parameters: std::collections::BTreeMap::new(),
-            },
             0,
         )
     }
@@ -171,8 +155,6 @@ impl PairingRecord {
             signature_cert: None,
             root_ca: None,
             intermediate_ca: None,
-            candidate_id: Some(core.transport().candidate_id.clone()),
-            transport_profile: Some(core.transport().profile.clone()),
         }
     }
 }
@@ -293,6 +275,9 @@ pub trait PairingStore {
     ///
     /// Fails when no record exists.
     fn remove(&mut self, pair_id: PairId) -> Result<(), StoreError>;
+
+    /// Every stored pairing, newest first.
+    fn pair_ids(&self) -> Vec<PairId>;
 }
 
 /// An in-memory pairing store for tests and composition.
@@ -345,6 +330,14 @@ impl PairingStore for MemoryPairingStore {
         }
         Ok(())
     }
+
+    fn pair_ids(&self) -> Vec<PairId> {
+        self.records
+            .iter()
+            .rev()
+            .map(|entry| entry.pair_id)
+            .collect()
+    }
 }
 
 /// One journaled operation on the requester.
@@ -364,7 +357,7 @@ pub struct JournalEntry {
     pub state: OperationState,
     /// Whether automatic retry is permanently forbidden (`INV-06`).
     pub retry_prohibited: bool,
-    /// The proxy's journaled state from a Section 12.6 status answer,
+    /// The custodian's state from a section 8.3 status answer,
     /// stored as an annotation that transitions nothing.
     pub reconciled_proxy_state: Option<String>,
 }
@@ -373,8 +366,8 @@ pub struct JournalEntry {
 pub trait OperationJournal {
     /// Creates or replaces the entry for one operation.
     ///
-    /// The write must be durable before the call returns: the commit intent
-    /// is journaled before `operation.commit` is sent.
+    /// The write must be durable before the call returns: the request is
+    /// journaled before `operation.request` is sent.
     ///
     /// # Errors
     ///
@@ -388,7 +381,7 @@ pub trait OperationJournal {
     /// Fails when no entry exists.
     fn get(&self, operation_id: OperationId) -> Result<&JournalEntry, StoreError>;
 
-    /// The non-terminal entries needing Section 12.6 reconciliation.
+    /// The non-terminal entries needing section 8.3 reconciliation.
     fn open_entries(&self) -> Vec<&JournalEntry>;
 }
 
@@ -460,8 +453,6 @@ mod tests {
             signature_cert: None,
             root_ca: None,
             intermediate_ca: None,
-            candidate_id: None,
-            transport_profile: None,
         }
     }
 

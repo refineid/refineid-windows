@@ -39,17 +39,11 @@ internal sealed class NativeError
     public string Message { get; init; } = string.Empty;
 }
 
-/// <summary>A live offer's handle, the QR text encoding it, and the 6-digit numeric pairing code.</summary>
+/// <summary>The handle of a pairing attempt in progress.</summary>
 internal sealed class BeginPairingResult
 {
     [JsonPropertyName("handle")]
     public ulong Handle { get; init; }
-
-    [JsonPropertyName("offer_uri")]
-    public string OfferUri { get; init; } = string.Empty;
-
-    [JsonPropertyName("pairing_code")]
-    public string PairingCode { get; init; } = string.Empty;
 }
 
 /// <summary>The current pairing state, plus the peer once it connects.</summary>

@@ -16,11 +16,7 @@ namespace RefineID;
 
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
-using System.Globalization;
 using System.Linq;
-using System.Net;
-using System.Net.NetworkInformation;
-using System.Net.Sockets;
 using System.Text.Json;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
@@ -38,9 +34,6 @@ using Microsoft.UI.Xaml.Controls;
 )]
 internal sealed partial class MainPage : Page
 {
-    /// <summary>The TCP port the requester listens on for the phone's dial.</summary>
-    private const int ListenPort = 47110;
-
     /// <summary>Requester label the phone shows during pairing.</summary>
     private const string RequesterName = "RefineID Windows";
 
@@ -63,13 +56,16 @@ internal sealed partial class MainPage : Page
     }
 
 #if DEBUG
-    /// <summary>Debug-only launch flag that opens the pairing QR on launch.</summary>
+    /// <summary>Debug-only launch flag that opens pairing on launch.</summary>
     private const string AutoPairArgument = "--pair";
 #endif
 
     private async void OnLoaded(object sender, RoutedEventArgs args)
     {
         this.Loaded -= this.OnLoaded;
+        // Once per run: disable the inbound rule earlier releases opened for
+        // the phone, when that needs no administrator rights.
+        _ = Task.Run(FirewallService.DisableLegacyRule);
         this.CheckLocalCard();
         this.cardPollTimer.Start();
         this.ShowDriverLaneHintIfNeeded();
@@ -96,72 +92,7 @@ internal sealed partial class MainPage : Page
 
     private async Task RunRemoteCardAsync()
     {
-        bool firewallConfigured = await Task.Run(FirewallService.IsRuleConfigured)
-            .ConfigureAwait(true);
-        if (!firewallConfigured)
-        {
-            var firewallDialog = new ContentDialog
-            {
-                XamlRoot = this.XamlRoot,
-                Title = "Firewall Configuration",
-                Content =
-                    "Windows Firewall needs to allow inbound connections so your phone can connect to this computer. Would you like to configure this now?",
-                PrimaryButtonText = "Configure",
-                SecondaryButtonText = "Continue anyway",
-                CloseButtonText = "Cancel",
-                DefaultButton = ContentDialogButton.Primary,
-            };
-
-            ContentDialogResult result = await firewallDialog.ShowAsync();
-            if (result == ContentDialogResult.Primary)
-            {
-                bool ok = await Task.Run(FirewallService.OpenRule).ConfigureAwait(true);
-                if (!ok)
-                {
-                    this.ShowError(
-                        "Could not configure firewall rule. Administrator permission is required."
-                    );
-                    return;
-                }
-            }
-            else if (result == ContentDialogResult.None)
-            {
-                return;
-            }
-        }
-
-        string? advertise = LocalAdvertiseEndpoint();
-        if (advertise is null)
-        {
-            this.ShowError("No local network address was found to advertise to the phone.");
-            return;
-        }
-
-        BeginPairingResult begun;
-        try
-        {
-            begun = await Task.Run(() =>
-                    NativeRappService.BeginPairing(
-                        $"0.0.0.0:{ListenPort}",
-                        advertise,
-                        RequesterName
-                    )
-                )
-                .ConfigureAwait(true);
-        }
-        catch (NativeRappException error)
-        {
-            this.ShowError(error.Message);
-            return;
-        }
-
-        var dialog = new PairingDialog(
-            begun.Handle,
-            begun.OfferUri,
-            begun.PairingCode,
-            this.dispatcher,
-            PollInterval
-        )
+        var dialog = new PairingDialog(RequesterName, this.dispatcher, PollInterval)
         {
             XamlRoot = this.XamlRoot,
         };
@@ -334,12 +265,6 @@ internal sealed partial class MainPage : Page
 
     private void UpdateLocalCardUi(LocalCardSnapshot snapshot)
     {
-        // If local card is in use, RAPP firewall must be closed.
-        if (FirewallService.IsRuleConfigured())
-        {
-            _ = Task.Run(FirewallService.CloseRule);
-        }
-
         this.SignCard.IsEnabled = true;
 
         if (!string.IsNullOrWhiteSpace(snapshot.Person))
@@ -376,38 +301,6 @@ internal sealed partial class MainPage : Page
             this.ForgetIdentityButton.Visibility = Visibility.Visible;
             this.SignCard.IsEnabled = true;
         }
-    }
-
-    private static string? LocalAdvertiseEndpoint()
-    {
-        foreach (NetworkInterface adapter in NetworkInterface.GetAllNetworkInterfaces())
-        {
-            if (
-                adapter.OperationalStatus != OperationalStatus.Up
-                || adapter.NetworkInterfaceType == NetworkInterfaceType.Loopback
-            )
-            {
-                continue;
-            }
-
-            foreach (
-                UnicastIPAddressInformation address in adapter.GetIPProperties().UnicastAddresses
-            )
-            {
-                if (
-                    address.Address.AddressFamily == AddressFamily.InterNetwork
-                    && !IPAddress.IsLoopback(address.Address)
-                )
-                {
-                    return string.Create(
-                        CultureInfo.InvariantCulture,
-                        $"{address.Address}:{ListenPort}"
-                    );
-                }
-            }
-        }
-
-        return null;
     }
 
     private void SetBusy(bool busy)

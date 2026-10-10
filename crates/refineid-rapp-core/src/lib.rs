@@ -20,7 +20,7 @@ pub mod stream;
 pub mod transport;
 
 /// The wire version of RAPP from canonical core.
-pub const WIRE_VERSION: (u16, u16, u16) = refineid_rapp::WIRE_VERSION_V26_10_1;
+pub const WIRE_VERSION: (u16, u16, u16) = refineid_rapp::WIRE_VERSION_V26_10_9;
 
 /// The mandatory pairing handshake construction.
 pub const PAIRING_SUITE: &str = refineid_rapp::MANDATORY_PAIRING_SUITE;
@@ -42,17 +42,14 @@ pub mod limits {
     /// Maximum UTF-8 bytes in one text string (`MAX_TEXT_SIZE`).
     pub const MAX_TEXT_SIZE: usize = 4_096;
 
-    /// Maximum encoded pairing-offer bytes before QR encoding (`MAX_OFFER_SIZE`).
-    pub const MAX_OFFER_SIZE: usize = 1_024;
-
-    /// Maximum transport candidates in one offer (`MAX_TRANSPORT_CANDIDATES`).
-    pub const MAX_TRANSPORT_CANDIDATES: usize = refineid_rapp::MAX_TRANSPORT_CANDIDATES;
+    /// Maximum encoded pairing-offer bytes (`MAX_OFFER_SIZE`).
+    pub const MAX_OFFER_SIZE: usize = refineid_rapp::MAX_OFFER_SIZE;
 
     /// Maximum concurrently active operations per proxy (`MAX_ACTIVE_OPERATIONS`).
     pub const MAX_ACTIVE_OPERATIONS: usize = refineid_rapp::MAX_ACTIVE_OPERATIONS;
 
-    /// Maximum pairing-offer lifetime in milliseconds (`OFFER_TTL_MAX`).
-    pub const OFFER_TTL_MAX_MS: u64 = refineid_rapp::OFFER_TTL_MAX_MS;
+    /// Pairing-offer lifetime in milliseconds (section 3.3).
+    pub const OFFER_TTL_MS: u64 = refineid_rapp::OFFER_TTL_MS;
 
     /// Consecutive failed session-candidate authentications after which
     /// re-pairing is suggested, stored keys untouched.

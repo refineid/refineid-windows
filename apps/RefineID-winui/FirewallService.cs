@@ -19,12 +19,12 @@ using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 
 /// <summary>
-/// Verifies and configures the Windows Firewall rule for RefineID RAPP remote card sessions.
+/// Finds and disables, without elevation, the inbound Windows Firewall rule earlier
+/// releases opened for RAPP.
 /// </summary>
 internal static class FirewallService
 {
     private const string RuleName = "RefineID RAPP";
-    private const string PortRange = "40000-60000";
 
     /// <summary>
     /// Checks whether the inbound firewall rule for RefineID RAPP is configured and enabled.
@@ -78,11 +78,17 @@ internal static class FirewallService
     }
 
     /// <summary>
-    /// Closes the RAPP firewall rule by disabling inbound connections.
-    /// Used when a local smart card is in use or RAPP is not needed.
+    /// Disables the rule when it is enabled, without elevation. Returns true when
+    /// no enabled rule remains. A rule only an administrator can change is left
+    /// as it is.
     /// </summary>
-    public static bool CloseRule()
+    public static bool DisableLegacyRule()
     {
+        if (!IsRuleConfigured())
+        {
+            return true;
+        }
+
         try
         {
             using var process = new Process
@@ -100,112 +106,7 @@ internal static class FirewallService
 
             process.Start();
             process.WaitForExit(3000);
-            if (process.ExitCode == 0)
-            {
-                return true;
-            }
-
-            using var elevated = new Process
-            {
-                StartInfo = new ProcessStartInfo
-                {
-                    FileName = "netsh",
-                    Arguments = $"advfirewall firewall set rule name=\"{RuleName}\" new enable=no",
-                    UseShellExecute = true,
-                    Verb = "runas",
-                },
-            };
-
-            elevated.Start();
-            elevated.WaitForExit(5000);
-            return elevated.ExitCode == 0;
-        }
-        catch (Win32Exception)
-        {
-            return false;
-        }
-        catch (InvalidOperationException)
-        {
-            return false;
-        }
-        catch (IOException)
-        {
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// Opens the RAPP firewall rule when remote phone card reader is needed.
-    /// Re-enables the rule if already present, or creates it if missing.
-    /// </summary>
-    public static bool OpenRule()
-    {
-        if (IsRuleConfigured())
-        {
-            return true;
-        }
-
-        try
-        {
-            using var enableProcess = new Process
-            {
-                StartInfo = new ProcessStartInfo
-                {
-                    FileName = "netsh",
-                    Arguments = $"advfirewall firewall set rule name=\"{RuleName}\" new enable=yes",
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                },
-            };
-
-            enableProcess.Start();
-            enableProcess.WaitForExit(3000);
-            if (enableProcess.ExitCode == 0 && IsRuleConfigured())
-            {
-                return true;
-            }
-        }
-        catch (Win32Exception ex)
-        {
-            Debug.WriteLine($"Failed to enable firewall rule via netsh: {ex.Message}");
-        }
-        catch (InvalidOperationException ex)
-        {
-            Debug.WriteLine($"Failed to enable firewall rule via netsh: {ex.Message}");
-        }
-        catch (IOException ex)
-        {
-            Debug.WriteLine($"Failed to enable firewall rule via netsh: {ex.Message}");
-        }
-
-        return ConfigureRule();
-    }
-
-    /// <summary>
-    /// Requests Windows UAC elevation to add the inbound firewall rule.
-    /// Returns true if the command executed with exit code 0.
-    /// </summary>
-    public static bool ConfigureRule()
-    {
-        try
-        {
-            using var process = new Process
-            {
-                StartInfo = new ProcessStartInfo
-                {
-                    FileName = "netsh",
-                    Arguments =
-                        $"advfirewall firewall add rule name=\"{RuleName}\" dir=in action=allow protocol=TCP localport={PortRange}",
-                    UseShellExecute = true,
-                    Verb = "runas",
-                },
-            };
-
-            process.Start();
-            process.WaitForExit(10000);
-            return process.ExitCode == 0;
+            return process.HasExited && process.ExitCode == 0;
         }
         catch (Win32Exception)
         {

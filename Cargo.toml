@@ -48,7 +48,6 @@ getrandom = "0.4"
 hex = "0.4"
 # Terminal QR rendering for the RAPP pairing offer in the requester CLI.
 # Pure Rust; the image and SVG render features stay off.
-qrcode = { version = "0.14", default-features = false }
 hmac = "0.13"
 miniz_oxide = "0.9"
 pcsc = "2.9"

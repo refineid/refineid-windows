@@ -1076,25 +1076,48 @@ pub(super) fn card_sign(
     input: &[u8],
     origin: Option<&str>,
 ) -> Result<Vec<u8>, CkRv> {
+    card_sign_with_origin_source(reader_name, pin_cache, mechanism, input, origin, &|name| {
+        std::env::var(name).ok()
+    })
+}
+
+/// Environment variables that supply the relying-party origin of a remote
+/// signature when the caller passes none, in lookup order.
+const ORIGIN_VARIABLES: [&str; 2] = ["REFINEID_RP_ORIGIN", "REFINEID_ORIGIN"];
+
+/// Longest relying-party origin accepted for a remote signature.
+const MAX_ORIGIN_LENGTH: usize = 512;
+
+/// The relying-party origin for a remote signature: the caller's, else the
+/// first usable value `variable` yields for [`ORIGIN_VARIABLES`].
+fn remote_origin(
+    origin: Option<&str>,
+    variable: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let usable = |o: &str| !o.trim().is_empty() && o.len() <= MAX_ORIGIN_LENGTH;
+    origin.filter(|o| usable(o)).map(str::to_owned).or_else(|| {
+        ORIGIN_VARIABLES
+            .iter()
+            .find_map(|name| variable(name))
+            .filter(|o| usable(o))
+    })
+}
+
+/// [`card_sign`] with the origin fallback read through `variable`.
+fn card_sign_with_origin_source(
+    reader_name: &str,
+    pin_cache: &Arc<Mutex<PinSafetyCache>>,
+    mechanism: Mechanism,
+    input: &[u8],
+    origin: Option<&str>,
+    variable: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<u8>, CkRv> {
     if let Some(hex_id) = reader_name.strip_prefix("rapp:") {
-        let env_origin;
-        let effective_origin = if let Some(o) =
-            origin.filter(|o| !o.trim().is_empty() && o.len() <= 512)
-        {
-            o
-        } else {
-            env_origin = std::env::var("REFINEID_RP_ORIGIN")
-                .ok()
-                .or_else(|| std::env::var("REFINEID_ORIGIN").ok())
-                .filter(|o| !o.trim().is_empty() && o.len() <= 512);
-            if let Some(o) = &env_origin {
-                o.as_str()
-            } else {
-                crate::diag::diag!("card_sign: remote card sign missing required caller RP origin");
-                return Err(CKR_ARGUMENTS_BAD);
-            }
+        let Some(effective_origin) = remote_origin(origin, variable) else {
+            crate::diag::diag!("card_sign: remote card sign missing required caller RP origin");
+            return Err(CKR_ARGUMENTS_BAD);
         };
-        return remote_card_sign(hex_id, effective_origin, mechanism, input);
+        return remote_card_sign(hex_id, &effective_origin, mechanism, input);
     }
     let backend = PcscBackend;
     let reader = ReaderId::new(reader_name.to_owned());
@@ -1277,60 +1300,26 @@ impl RemoteCardTransport {
         }
     }
 
+    /// Establishes a session transport to the paired custodian found by its
+    /// session-mode discovery record, falling back to the local mock
+    /// custodian. This computer only dials; it never listens.
     fn connect_session_transport(
         &self,
     ) -> Result<refineid_rapp_core::transport::TcpFrameTransport, String> {
         use core::time::Duration;
-        use refineid_rapp_core::stream::{
-            StreamAccept, StreamListener, StreamRendezvous, dial, discover_stream_endpoints,
-            stream_rendezvous_name,
-        };
 
-        let dial_timeout = Duration::from_secs(5);
-        let candidate_id = "stream-1";
-        let service_name = stream_rendezvous_name(self.pairing_record.rendezvous_token.as_bytes());
-
-        crate::diag::diag!("connect_session_transport: discovering proxy for {service_name}...");
-        // 1. Discover phone proxy endpoint via mDNS matching our pairing rendezvous token.
-        let mut endpoints = discover_stream_endpoints(Some(&service_name), Duration::from_secs(2));
-        crate::diag::diag!("connect_session_transport: discovered endpoints: {endpoints:?}");
-
-        // 2. Add local mock proxy endpoint as fallback.
-        let local_dial_endpoint = "127.0.0.1:47110";
-        endpoints.push(local_dial_endpoint.to_owned());
-
-        // 3. Dial discovered endpoints with our session rendezvous token.
-        crate::diag::diag!("connect_session_transport: dialing endpoints {endpoints:?}...");
-        match dial(
-            &endpoints,
-            candidate_id,
-            dial_timeout,
-            &StreamRendezvous::Session(self.pairing_record.rendezvous_token),
-        ) {
-            Ok(transport) => {
-                crate::diag::diag!("connect_session_transport: dial succeeded!");
-                return Ok(transport);
-            }
-            Err(err) => {
-                crate::diag::diag!("connect_session_transport: dial failed: {err:?}");
-            }
-        }
-
-        // 4. Fallback listener check for reverse-dial mock test harnesses (short timeout).
-        let listen_timeout = Duration::from_millis(150);
-        let listen_endpoint = "127.0.0.1:47110";
-        if let Ok(listener) = StreamListener::bind(listen_endpoint, candidate_id, listen_timeout)
-            && let Ok(Some(StreamAccept::Session {
-                rendezvous_token,
-                transport,
-            })) = listener.accept_timeout(listen_timeout)
-            && rendezvous_token == self.pairing_record.rendezvous_token
-        {
-            crate::diag::diag!("connect_session_transport: reverse dial accepted!");
-            return Ok(transport);
-        }
-
-        Err("unable to reach paired proxy via mDNS dial or local fallback".into())
+        crate::diag::diag!("connect_session_transport: discovering the paired phone");
+        refineid_rapp_core::stream::dial_session(
+            self.pairing_record.rendezvous_token,
+            &[],
+            &["127.0.0.1:47110".to_owned()],
+            Duration::from_secs(2),
+            Duration::from_secs(5),
+        )
+        .map_err(|error| {
+            crate::diag::diag!("connect_session_transport: dial failed: {error:?}");
+            "unable to reach the paired phone".to_owned()
+        })
     }
 
     pub(crate) fn execute_operation(
@@ -1888,16 +1877,42 @@ mod tests {
     }
 
     #[test]
+    fn the_remote_origin_prefers_the_caller_then_the_variables_in_order() {
+        let variables = |name: &str| match name {
+            "REFINEID_RP_ORIGIN" => Some("https://rp.example".to_owned()),
+            "REFINEID_ORIGIN" => Some("https://other.example".to_owned()),
+            _ => None,
+        };
+        assert_eq!(
+            super::remote_origin(Some("https://caller.example"), &variables).as_deref(),
+            Some("https://caller.example")
+        );
+        assert_eq!(
+            super::remote_origin(Some("  "), &variables).as_deref(),
+            Some("https://rp.example")
+        );
+        let only_second =
+            |name: &str| (name == "REFINEID_ORIGIN").then(|| "https://other.example".to_owned());
+        assert_eq!(
+            super::remote_origin(None, &only_second).as_deref(),
+            Some("https://other.example")
+        );
+        let too_long = |_: &str| Some("x".repeat(super::MAX_ORIGIN_LENGTH + 1));
+        assert_eq!(super::remote_origin(None, &too_long), None);
+    }
+
+    #[test]
     fn remote_card_sign_missing_origin_fails_closed() {
         let pin_cache = std::sync::Arc::new(std::sync::Mutex::new(
             super::PinSafetyCache::new().expect("pin safety cache"),
         ));
-        let res = super::card_sign(
+        let res = super::card_sign_with_origin_source(
             "rapp:0123456789abcdef",
             &pin_cache,
             crate::sign::Mechanism::Ecdsa,
             &[0u8; 32],
             None,
+            &|_| None,
         );
         assert_eq!(res, Err(crate::ck::CKR_ARGUMENTS_BAD));
     }
@@ -1907,12 +1922,13 @@ mod tests {
         let pin_cache = std::sync::Arc::new(std::sync::Mutex::new(
             super::PinSafetyCache::new().expect("pin safety cache"),
         ));
-        let res = super::card_sign(
+        let res = super::card_sign_with_origin_source(
             "rapp:0123456789abcdef",
             &pin_cache,
             crate::sign::Mechanism::Ecdsa,
             &[0u8; 32],
             Some("   "),
+            &|_| None,
         );
         assert_eq!(res, Err(crate::ck::CKR_ARGUMENTS_BAD));
     }

@@ -14,18 +14,21 @@
 
 //! Narrow C ABI for the `RefineID` Windows remote-card UI.
 //!
-//! Raw pointers end in this crate. Listen addresses, advertised endpoints,
-//! and display names are copied into owned Rust strings before use. The
+//! Raw pointers end in this crate. The typed pairing code and the display
+//! name are copied into owned Rust strings before use. The
 //! requester never holds a CAN, PIN, or PUK, so none can cross this boundary;
 //! the phone-side proxy owns every credential. Public identity fields (the
 //! cardholder name and personal identifier) do cross in the JSON reply
 //! because the UI displays them, but they never enter a log.
 //!
 //! The requester is long-lived, so this ABI is handle-based: a caller begins
-//! a pairing, polls its state, confirms it, then reads the paired card. Each
-//! handle owns one background pairing thread and, after pairing, the live
-//! `Requester` whose device-only credential store persists the pairing so the
-//! minidriver can later load and use it behind this same ABI.
+//! a pairing with the code the phone shows, polls its state, confirms it,
+//! then reads the paired card. Each handle owns one background pairing
+//! thread that finds the phone by its DNS-SD `mode=pairing` record and dials
+//! it (RAPP v26.10.9 section 2.2), and, after pairing, the live `Requester`
+//! whose device-only credential store persists the pairing so the minidriver
+//! can later load and use it behind this same ABI. This computer only ever
+//! dials out; it listens on no port.
 
 #![expect(
     unsafe_code,
@@ -36,43 +39,41 @@
 use core::ffi::c_char;
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::net::TcpStream;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
-use refineid_rapp_core::engine::{OperationOutcome, PeerIntroduction, Requester, RequesterConfig};
-use refineid_rapp_core::ids::{OfferId, PairId, PairingSecret, RandomIdExt as _, RendezvousToken};
-use refineid_rapp_core::limits::OFFER_TTL_MAX_MS;
-use refineid_rapp_core::message::CloseReason;
-use refineid_rapp_core::offer::{PairingOffer, TransportCandidate};
-use refineid_rapp_core::operations::{CardOperation, CardOperationResult};
-use refineid_rapp_core::profiles::{
-    PROFILE_AUTHENTICATION, PROFILE_CARD_STATUS, PROFILE_DOCUMENT_SIGNING,
+use refineid_rapp_core::engine::{
+    OperationOutcome, PairingError, PeerIntroduction, Requester, RequesterConfig,
 };
+use refineid_rapp_core::ids::{PairId, RendezvousToken};
+use refineid_rapp_core::message::CloseReason;
+use refineid_rapp_core::offer::normalize_pairing_code;
+use refineid_rapp_core::operations::{CardOperation, CardOperationResult};
 use refineid_rapp_core::store::{MemoryJournal, PairingStore};
-use refineid_rapp_core::stream::{StreamAccept, StreamListener, stream_candidate_parameters};
-use refineid_rapp_core::transport::STREAM_PROFILE;
+use refineid_rapp_core::stream::{
+    DiscoveryMode, STREAM_CANDIDATE_ID, StreamRendezvous, browse, dial, session_candidates,
+};
 use refineid_windows_credential_store::{CredentialPairingStore, delete_pairing_set};
 use serde::Serialize;
 
-/// The one stream candidate this requester advertises.
-const CANDIDATE_ID: &str = "stream-1";
+/// Frame receive deadline on a dialed stream connection.
+const RECEIVE_DEADLINE_MS: u64 = 60_000;
 
-/// Frame receive deadline used by the stream listener.
-const RECEIVE_DEADLINE_MS: u64 = 180_000;
+/// How long one DNS-SD browse listens for custodian records.
+const BROWSE_WINDOW_MS: u64 = 3_000;
+
+/// Browse rounds a pairing makes before reporting that no phone is in
+/// pairing mode; together they span the 60 s offer lifetime.
+const MAX_PAIRING_BROWSE_ROUNDS: u32 = 20;
 
 /// Operation expiry sent on the wire; the holder approves within this.
 const OPERATION_EXPIRY_MS: u64 = 120_000;
 
-/// Maximum inbound connections a single read will sift for the paired
-/// session before giving up, so a stray dial cannot loop forever.
-const MAX_SESSION_ATTEMPTS: u32 = 16;
-
-/// Longest listen address or advertised endpoint accepted, in bytes.
-const MAX_ADDRESS_BYTES: usize = 1_024;
+/// Longest typed pairing code accepted, in bytes, before normalization.
+const MAX_CODE_BYTES: usize = 64;
 
 /// Longest requester display name accepted, in bytes.
 const MAX_NAME_BYTES: usize = 256;
@@ -115,8 +116,6 @@ struct ApiEnvelope<'a, T> {
 #[derive(Serialize)]
 struct BeginPairingDto {
     handle: u64,
-    offer_uri: String,
-    pairing_code: String,
 }
 
 #[derive(Serialize)]
@@ -167,11 +166,10 @@ enum Phase {
     Failed(String),
 }
 
-/// The live requester and its listener, parked here once pairing succeeds so
-/// a later read can drive the card on the caller's thread.
+/// The live requester, parked here once pairing succeeds so a later read can
+/// drive the card on the caller's thread.
 struct Paired {
     requester: StreamRequester,
-    listener: StreamListener,
     pair_id: PairId,
     rendezvous: RendezvousToken,
 }
@@ -184,12 +182,10 @@ struct Shared {
     paired: Option<Paired>,
 }
 
-/// One pairing handle: its shared state, the background pairing thread, and
-/// the listen port used to wake a thread still blocked on `accept`.
+/// One pairing handle: its shared state and the background pairing thread.
 struct Handle {
     shared: Mutex<Shared>,
     thread: Option<JoinHandle<()>>,
-    port: u16,
 }
 
 static REGISTRY: LazyLock<Mutex<HashMap<u64, Handle>>> =
@@ -232,50 +228,38 @@ pub extern "C" fn refineid_rapp_forget_pairings() -> *mut c_char {
     })
 }
 
-/// Begin a pairing: bind a listener, publish an offer, and start accepting.
+/// Begin a pairing with the code the phone shows.
 ///
-/// Returns `{ handle, offer_uri }` immediately. The URI is the exact text a
-/// QR must encode. The background thread accepts the phone's connection and
+/// Returns `{ handle }` immediately, or `invalid_code` when the input is not
+/// a six-character pairing code (RAPP v26.10.9 section 3.1). The background
+/// thread finds the phone in pairing mode, dials it, reads its offer, and
 /// runs the pairing handshake; the caller drives confirmation through
 /// [`refineid_rapp_poll_pairing`] and [`refineid_rapp_confirm_pairing`].
 ///
 /// # Safety
 ///
 /// Each pointer must address the accompanying number of readable bytes for
-/// the duration of the call. `listen` and each byte of `advertise`/`name`
-/// must be UTF-8. `advertise` is a newline-separated list of `host:port`
-/// endpoints reachable by the phone.
+/// the duration of the call, and both inputs must be UTF-8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn refineid_rapp_begin_pairing(
-    listen: *const u8,
-    listen_length: usize,
-    advertise: *const u8,
-    advertise_length: usize,
+    code: *const u8,
+    code_length: usize,
     name: *const u8,
     name_length: usize,
 ) -> *mut c_char {
     reply_json(|| {
         // SAFETY: Each input is pointer- and bound-checked before the slice
         // is formed, then copied into owned Rust before use.
-        let listen = unsafe { copy_utf8(listen, listen_length, MAX_ADDRESS_BYTES, "listen") }?;
-        // SAFETY: As above.
-        let advertise_raw =
-            unsafe { copy_utf8(advertise, advertise_length, MAX_ADDRESS_BYTES, "advertise") }?;
+        let code = unsafe { copy_utf8(code, code_length, MAX_CODE_BYTES, "code") }?;
         // SAFETY: As above.
         let name = unsafe { copy_utf8(name, name_length, MAX_NAME_BYTES, "name") }?;
-        let advertise: Vec<String> = advertise_raw
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(ToOwned::to_owned)
-            .collect();
-        if advertise.is_empty() {
+        if normalize_pairing_code(&code).is_none() {
             return Err(ApiFailure::new(
-                "no_advertised_endpoint",
-                "At least one advertised host:port endpoint is required.",
+                "invalid_code",
+                "Type the six characters the phone shows.",
             ));
         }
-        begin_pairing(&listen, &advertise, name)
+        begin_pairing(code, name)
     })
 }
 
@@ -396,43 +380,21 @@ pub extern "C" fn refineid_rapp_end_pairing(handle: u64) -> *mut c_char {
         let Some(mut entry) = removed else {
             return Ok(AckDto { ok: true });
         };
-        // Wake the background thread if it is still blocked on accept, then
-        // let its own drop release the listener and requester.
+        // Release a thread waiting for a decision. A thread blocked on the
+        // network finishes on its receive deadline, sees the handle gone,
+        // and drops the requester it owns; it is not joined here.
         if let Ok(mut shared) = entry.shared.lock() {
             shared.end_requested = true;
             if let Some(decision_tx) = shared.decision_tx.take() {
                 let _ = decision_tx.send(None);
             }
         }
-        let _ = TcpStream::connect(("127.0.0.1", entry.port));
-        if let Some(thread) = entry.thread.take() {
-            let _ = thread.join();
-        }
+        drop(entry.thread.take());
         Ok(AckDto { ok: true })
     })
 }
 
-fn begin_pairing(
-    listen: &str,
-    advertise: &[String],
-    name: String,
-) -> Result<BeginPairingDto, ApiFailure> {
-    let listener =
-        StreamListener::bind(listen, CANDIDATE_ID, receive_deadline()).map_err(|_error| {
-            ApiFailure::new(
-                "listen_failed",
-                "Could not open the network port to wait for the phone. \
-                 Another RefineID window may already be waiting for a connection; \
-                 close it and try again.",
-            )
-        })?;
-    let port = listener.local_port().map_err(|_error| {
-        ApiFailure::new(
-            "port_unavailable",
-            "The network port opened but its number could not be read.",
-        )
-    })?;
-
+fn begin_pairing(code: String, name: String) -> Result<BeginPairingDto, ApiFailure> {
     let pairing_store = CredentialPairingStore::load()
         .map_err(|error| ApiFailure::new("pairing_store_unavailable", format!("{error}")))?;
     let requester = Requester::new(
@@ -443,36 +405,6 @@ fn begin_pairing(
         pairing_store,
         MemoryJournal::new(),
     );
-
-    let requested_profiles = vec![
-        PROFILE_CARD_STATUS.to_owned(),
-        PROFILE_AUTHENTICATION.to_owned(),
-        PROFILE_DOCUMENT_SIGNING.to_owned(),
-    ];
-    let parameters = stream_candidate_parameters(advertise)
-        .map_err(|error| ApiFailure::new("invalid_endpoints", format!("{error:?}")))?;
-    let offer_id = OfferId::random()
-        .map_err(|error| ApiFailure::new("csprng_failed", format!("{error:?}")))?;
-    let secret = PairingSecret::random()
-        .map_err(|error| ApiFailure::new("csprng_failed", format!("{error:?}")))?;
-
-    let offer = PairingOffer::reconstruct(
-        offer_id,
-        vec![refineid_rapp::MANDATORY_PAIRING_SUITE.to_owned()],
-        requested_profiles.clone(),
-        vec![TransportCandidate {
-            profile: STREAM_PROFILE.to_owned(),
-            candidate_id: CANDIDATE_ID.to_owned(),
-            parameters,
-        }],
-        OFFER_TTL_MAX_MS,
-    )
-    .map_err(|error| ApiFailure::new("offer_reconstruct_failed", format!("{error:?}")))?;
-    let offer_uri = offer
-        .to_uri()
-        .map_err(|error| ApiFailure::new("offer_encoding_failed", format!("{error:?}")))?
-        .expose()
-        .to_owned();
 
     let handle_id = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
     let shared = Mutex::new(Shared {
@@ -488,105 +420,77 @@ fn begin_pairing(
             Handle {
                 shared,
                 thread: None,
-                port,
             },
         );
     }
     // The thread reaches the shared state through the registry by handle id,
     // owning the pieces it moves and locking only briefly each time.
     let thread = std::thread::spawn(move || {
-        pairing_thread(
-            handle_id,
-            requester,
-            listener,
-            offer,
-            secret,
-            requested_profiles,
-        );
+        pairing_thread(handle_id, requester, &code);
     });
     if let Ok(mut registry) = lock_registry()
         && let Some(entry) = registry.get_mut(&handle_id)
     {
         entry.thread = Some(thread);
     }
-    Ok(BeginPairingDto {
-        handle: handle_id,
-        offer_uri,
-        pairing_code: String::new(),
-    })
+    Ok(BeginPairingDto { handle: handle_id })
 }
 
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "the offer and profiles are moved into this spawned thread and owned for its life"
-)]
-fn pairing_thread(
-    handle_id: u64,
-    mut requester: StreamRequester,
-    listener: StreamListener,
-    offer: PairingOffer,
-    secret: PairingSecret,
-    requested_profiles: Vec<String>,
-) {
-    let mut offer_slot = Some(offer);
-    loop {
-        if ended(handle_id) || offer_slot.is_none() {
-            return;
-        }
-        let Ok(accepted) = listener.accept() else {
-            continue;
-        };
+/// Finds a phone in pairing mode, dials it with the pairing preamble, and
+/// pairs with the typed code. A phone that cannot be reached is skipped;
+/// a mistyped code or a refused pairing ends the attempt.
+fn pairing_thread(handle_id: u64, mut requester: StreamRequester, code: &str) {
+    for _ in 0..MAX_PAIRING_BROWSE_ROUNDS {
         if ended(handle_id) {
             return;
         }
-        let StreamAccept::Pairing(transport) = accepted else {
-            // A session dial before any pairing exists: ignore it.
-            continue;
-        };
-
-        let (decision_tx, decision_rx) = channel::<Option<Vec<String>>>();
-        if !publish_decision_sender(handle_id, decision_tx) {
-            return;
-        }
-        let attempt_profiles = requested_profiles.clone();
-        let confirm = |peer: &PeerIntroduction, offered: &[String]| -> Option<Vec<String>> {
-            set_awaiting(handle_id, peer, offered);
-            match decision_rx.recv() {
-                Ok(Some(granted)) => Some(if granted.is_empty() {
-                    offered.to_vec()
-                } else {
-                    granted
-                }),
-                Ok(None) | Err(_) => None,
-            }
-        };
-        let outcome = requester.pair_with_secret(
-            &mut offer_slot,
-            &secret,
-            &attempt_profiles,
-            transport,
-            confirm,
-        );
-        match outcome {
-            Ok(pair_id) => {
-                finish_pairing(handle_id, requester, listener, pair_id);
+        for service in browse(DiscoveryMode::Pairing, browse_window()) {
+            if ended(handle_id) {
                 return;
             }
-            Err(error) => {
-                if reset_after_failure(handle_id, error) {
+            let Ok(transport) = dial(
+                &service.endpoints,
+                STREAM_CANDIDATE_ID,
+                receive_deadline(),
+                &StreamRendezvous::Pairing,
+            ) else {
+                continue;
+            };
+            let (decision_tx, decision_rx) = channel::<Option<Vec<String>>>();
+            if !publish_decision_sender(handle_id, decision_tx) {
+                return;
+            }
+            let confirm = |peer: &PeerIntroduction, offered: &[String]| -> Option<Vec<String>> {
+                set_awaiting(handle_id, peer, offered);
+                match decision_rx.recv() {
+                    Ok(Some(granted)) => Some(if granted.is_empty() {
+                        offered.to_vec()
+                    } else {
+                        granted
+                    }),
+                    Ok(None) | Err(_) => None,
+                }
+            };
+            match requester.pair_with_code(code, transport, confirm) {
+                Ok(pair_id) => {
+                    finish_pairing(handle_id, requester, pair_id);
                     return;
+                }
+                Err(error) => {
+                    if fail_attempt(handle_id, error) {
+                        return;
+                    }
                 }
             }
         }
     }
+    set_phase(
+        handle_id,
+        Phase::Failed("No phone in pairing mode was found on this network.".to_owned()),
+    );
 }
 
-fn finish_pairing(
-    handle_id: u64,
-    requester: StreamRequester,
-    listener: StreamListener,
-    pair_id: PairId,
-) {
+fn finish_pairing(handle_id: u64, requester: StreamRequester, pair_id: PairId) {
     let Ok(record) = requester.store().get(pair_id) else {
         set_phase(
             handle_id,
@@ -597,13 +501,12 @@ fn finish_pairing(
     let rendezvous = record.rendezvous_token;
     let pair_id_hex = hex::encode(pair_id.as_bytes());
     // If the handle is gone, the closure is never run and the moved
-    // requester and listener are dropped here instead.
+    // requester is dropped here instead.
     let _stored = registry_entry_apply(handle_id, move |shared| {
         shared.decision_tx = None;
         shared.phase = Phase::Paired { pair_id_hex };
         shared.paired = Some(Paired {
             requester,
-            listener,
             pair_id,
             rendezvous,
         });
@@ -611,24 +514,28 @@ fn finish_pairing(
 }
 
 fn read_paired_card(paired: &mut Paired) -> Result<CardReadDto, ApiFailure> {
-    let mut attempts = 0_u32;
-    let session_transport = loop {
-        if attempts >= MAX_SESSION_ATTEMPTS {
-            return Err(ApiFailure::new(
+    let services = session_candidates(
+        browse(DiscoveryMode::Session, browse_window()),
+        &paired.rendezvous,
+        unix_seconds(),
+    );
+    let session_transport = services
+        .iter()
+        .find_map(|service| {
+            dial(
+                &service.endpoints,
+                STREAM_CANDIDATE_ID,
+                receive_deadline(),
+                &StreamRendezvous::Session(paired.rendezvous),
+            )
+            .ok()
+        })
+        .ok_or_else(|| {
+            ApiFailure::new(
                 "no_session",
-                "The phone did not open a session for this pairing.",
-            ));
-        }
-        attempts += 1;
-        if let Ok(StreamAccept::Session {
-            rendezvous_token,
-            transport,
-        }) = paired.listener.accept()
-            && rendezvous_token == paired.rendezvous
-        {
-            break transport;
-        }
-    };
+                "The paired phone was not found on this network.",
+            )
+        })?;
 
     let mut session = paired
         .requester
@@ -797,26 +704,27 @@ fn publish_decision_sender(handle_id: u64, decision_tx: Sender<Option<Vec<String
     .is_some()
 }
 
-fn reset_after_failure(handle_id: u64, error: refineid_rapp_core::engine::PairingError) -> bool {
-    // A denial or an authenticated failure ends the attempt; anything else
-    // leaves the offer live for another candidate.
-    let denied = matches!(
-        error,
-        refineid_rapp_core::engine::PairingError::DeniedLocally
-            | refineid_rapp_core::engine::PairingError::AbortedByPeer
-    );
+/// Records a failed pairing attempt. Returns whether the attempt ends the
+/// pairing: a refusal, a mistyped code, or an ended handle; a phone that
+/// could not complete the exchange leaves the next one to be tried.
+fn fail_attempt(handle_id: u64, error: PairingError) -> bool {
+    let (ends, phase) = match error {
+        PairingError::DeniedLocally | PairingError::AbortedByPeer => (true, Phase::Denied),
+        PairingError::CodeMismatch => (
+            true,
+            Phase::Failed("The code does not match the one the phone shows.".to_owned()),
+        ),
+        _ => (false, Phase::Offer),
+    };
     registry_entry_apply(handle_id, |shared| {
         shared.decision_tx = None;
-        if shared.end_requested {
-            shared.phase = Phase::Cancelled;
-        } else if denied {
-            shared.phase = Phase::Denied;
+        shared.phase = if shared.end_requested {
+            Phase::Cancelled
         } else {
-            shared.phase = Phase::Offer;
-        }
+            phase
+        };
     });
-    // Stop the thread on a denial, a cancel, or a lost handle.
-    denied || ended(handle_id)
+    ends || ended(handle_id)
 }
 
 /// Applies `update` to a handle's shared state, returning `Some(())` when the
@@ -852,6 +760,16 @@ fn ended(handle_id: u64) -> bool {
 
 const fn receive_deadline() -> std::time::Duration {
     std::time::Duration::from_millis(RECEIVE_DEADLINE_MS)
+}
+
+const fn browse_window() -> std::time::Duration {
+    std::time::Duration::from_millis(BROWSE_WINDOW_MS)
+}
+
+fn unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 fn lock_registry() -> Result<MutexGuard<'static, HashMap<u64, Handle>>, ApiFailure> {

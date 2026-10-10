@@ -3,25 +3,67 @@
 use std::time::Duration;
 
 use p384::ecdsa::signature::hazmat::PrehashVerifier as _;
-use refineid_rapp_cli::mock_proxy::{MockProxyOptions, run_mock_proxy};
-use refineid_rapp_core::engine::{OperationOutcome, Requester, RequesterConfig};
-use refineid_rapp_core::limits::OFFER_TTL_MAX_MS;
+use refineid_rapp_cli::mock_proxy::{MockProxyOptions, serve_mock_proxy};
+use refineid_rapp_core::engine::{OperationOutcome, PairingError, Requester, RequesterConfig};
 use refineid_rapp_core::message::CloseReason;
-use refineid_rapp_core::offer::{PairingOffer, TransportCandidate, offer_id_from_code};
 use refineid_rapp_core::operations::{
     CardOperation, CardOperationResult, CertificateKind, KeyProfile, SignatureAlgorithm,
     SignatureAlgorithmExt as _,
 };
-use refineid_rapp_core::profiles::{
-    PROFILE_AUTHENTICATION, PROFILE_CARD_STATUS, PROFILE_DOCUMENT_SIGNING,
-};
 use refineid_rapp_core::store::{MemoryJournal, MemoryPairingStore, PairingStore};
-use refineid_rapp_core::stream::{StreamAccept, StreamListener, stream_candidate_parameters};
-use refineid_rapp_core::transport::STREAM_PROFILE;
+use refineid_rapp_core::stream::{
+    STREAM_CANDIDATE_ID, StreamListener, StreamRendezvous, dial, dial_session,
+};
 
-const CANDIDATE_ID: &str = "stream-test";
 const DEADLINE: Duration = Duration::from_secs(5);
 const OPERATION_EXPIRY_MS: u64 = 30_000;
+const TEST_CODE: &str = "654321";
+
+/// Binds the mock custodian on a free loopback port and returns its endpoint.
+fn start_custodian(
+    options: MockProxyOptions,
+) -> (String, std::thread::JoinHandle<Result<(), String>>) {
+    let listener = StreamListener::bind("127.0.0.1:0", STREAM_CANDIDATE_ID, DEADLINE)
+        .expect("listener bind failed");
+    let port = listener.local_port().expect("listener port failed");
+    let handle = std::thread::spawn(move || serve_mock_proxy(&listener, options));
+    (format!("127.0.0.1:{port}"), handle)
+}
+
+fn requester() -> Requester<MemoryPairingStore, MemoryJournal> {
+    Requester::new(
+        RequesterConfig {
+            display_name: "Test Requester".into(),
+            platform: "Windows".into(),
+        },
+        MemoryPairingStore::new(),
+        MemoryJournal::new(),
+    )
+}
+
+#[test]
+fn a_mistyped_code_is_refused_by_the_custodian() {
+    let (endpoint, _proxy) = start_custodian(MockProxyOptions {
+        code: Some(TEST_CODE.to_owned()),
+        ..MockProxyOptions::default()
+    });
+    let transport = dial(
+        &[endpoint],
+        STREAM_CANDIDATE_ID,
+        DEADLINE,
+        &StreamRendezvous::Pairing,
+    )
+    .expect("dial pairing");
+    let outcome =
+        requester().pair_with_code("654322", transport, |_, requested| Some(requested.to_vec()));
+    assert!(
+        matches!(
+            outcome,
+            Err(PairingError::CodeMismatch | PairingError::Transport(_))
+        ),
+        "unexpected outcome: {outcome:?}"
+    );
+}
 
 #[test]
 #[expect(
@@ -29,97 +71,46 @@ const OPERATION_EXPIRY_MS: u64 = 30_000;
     reason = "Comprehensive end-to-end integration test for pairing and operations"
 )]
 fn test_mock_proxy_pairing_and_card_operations() {
-    let listener =
-        StreamListener::bind("127.0.0.1:0", CANDIDATE_ID, DEADLINE).expect("listener bind failed");
-    let port = listener.local_port().expect("listener port failed");
-    let endpoint = format!("127.0.0.1:{port}");
-
-    let test_code = "654321";
-    let offer_id = offer_id_from_code(test_code).expect("valid code");
-
-    let requested_profiles = vec![
-        PROFILE_CARD_STATUS.to_owned(),
-        PROFILE_AUTHENTICATION.to_owned(),
-        PROFILE_DOCUMENT_SIGNING.to_owned(),
-    ];
-
-    let stream_params =
-        stream_candidate_parameters(std::slice::from_ref(&endpoint)).expect("parameters");
-    let offer = PairingOffer::reconstruct(
-        offer_id,
-        vec![refineid_rapp::MANDATORY_PAIRING_SUITE.into()],
-        requested_profiles.clone(),
-        vec![TransportCandidate {
-            profile: STREAM_PROFILE.into(),
-            candidate_id: CANDIDATE_ID.into(),
-            parameters: stream_params,
-        }],
-        OFFER_TTL_MAX_MS,
-    )
-    .expect("offer reconstruct");
-
-    let proxy_endpoint = endpoint;
-    let proxy_handle = std::thread::spawn(move || {
-        let options = MockProxyOptions {
-            connect: Some(proxy_endpoint),
-            code: Some(test_code.to_owned()),
-            candidate_id: CANDIDATE_ID.to_owned(),
-            count: 1,
-            identity_name: "MATTI MEIKÄLÄINEN".to_owned(),
-            person_id: "010180-999X".to_owned(),
-            pin1_attempts: 3,
-            pin2_attempts: 4,
-            ..MockProxyOptions::default()
-        };
-        run_mock_proxy(options).expect("mock proxy failed");
+    let (endpoint, proxy_handle) = start_custodian(MockProxyOptions {
+        code: Some(TEST_CODE.to_owned()),
+        count: 1,
+        identity_name: "MATTI MEIKÄLÄINEN".to_owned(),
+        person_id: "010180-999X".to_owned(),
+        pin1_attempts: 3,
+        pin2_attempts: 4,
+        ..MockProxyOptions::default()
     });
 
-    let mut requester = Requester::new(
-        RequesterConfig {
-            display_name: "Test Requester".into(),
-            platform: "Windows".into(),
-        },
-        MemoryPairingStore::new(),
-        MemoryJournal::new(),
-    );
+    let mut requester = requester();
 
-    // Accept pairing connection from mock proxy
-    let accepted = listener.accept().expect("accept pairing");
-    let StreamAccept::Pairing(transport) = accepted else {
-        panic!("expected StreamAccept::Pairing");
-    };
-
-    let mut offer_slot = Some(offer);
+    let transport = dial(
+        std::slice::from_ref(&endpoint),
+        STREAM_CANDIDATE_ID,
+        DEADLINE,
+        &StreamRendezvous::Pairing,
+    )
+    .expect("dial pairing");
     let pair_id = requester
-        .pair_with_code(
-            &mut offer_slot,
-            test_code,
-            &requested_profiles,
-            transport,
-            |peer, requested| {
-                assert_eq!(peer.display_name, "RefineID Mock Phone");
-                assert_eq!(peer.platform, "iOS");
-                Some(requested.to_vec())
-            },
-        )
+        .pair_with_code(TEST_CODE, transport, |peer, requested| {
+            assert_eq!(peer.display_name, "RefineID Mock Phone");
+            assert_eq!(peer.platform, "iOS");
+            Some(requested.to_vec())
+        })
         .expect("requester pairing failed");
 
-    let expected_token = requester
+    let token = requester
         .store()
         .get(pair_id)
         .expect("stored record")
         .rendezvous_token;
-
-    // Accept session connection from mock proxy
-    let accepted = listener.accept().expect("accept session");
-    let StreamAccept::Session {
-        rendezvous_token,
-        transport,
-    } = accepted
-    else {
-        panic!("expected StreamAccept::Session");
-    };
-    assert_eq!(rendezvous_token, expected_token);
+    let transport = dial_session(
+        token,
+        std::slice::from_ref(&endpoint),
+        &[],
+        Duration::ZERO,
+        DEADLINE,
+    )
+    .expect("dial session");
 
     let mut session = requester
         .connect(pair_id, transport)
@@ -225,5 +216,8 @@ fn test_mock_proxy_pairing_and_card_operations() {
     // Close session gracefully
     requester.disconnect(&mut session, CloseReason::UserDisconnect);
 
-    proxy_handle.join().expect("proxy thread finished");
+    proxy_handle
+        .join()
+        .expect("proxy thread finished")
+        .expect("mock proxy failed");
 }

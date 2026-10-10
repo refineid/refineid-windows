@@ -22,47 +22,33 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     Title="Remote Card"
     CloseButtonText="Cancel"
+    DefaultButton="Primary"
+    PrimaryButtonText="Pair"
     mc:Ignorable="d"
 >
     <StackPanel MinWidth="320" Spacing="16">
+        <TextBox
+            x:Name="CodeBox"
+            HorizontalAlignment="Center"
+            AutomationProperties.AutomationId="CodeBox"
+            AutomationProperties.Name="Pairing code"
+            CharacterCasing="Upper"
+            FontSize="24"
+            IsSpellCheckEnabled="False"
+            IsTextPredictionEnabled="False"
+            MaxLength="8"
+            MinWidth="180"
+            PlaceholderText="Code"
+            TextAlignment="Center"
+        />
+
         <TextBlock
             x:Name="StatusText"
             HorizontalAlignment="Center"
             AutomationProperties.AutomationId="StatusText"
-            AutomationProperties.HeadingLevel="Level2"
-            Text="Scan QR or enter pairing code on the phone"
             TextAlignment="Center"
             TextWrapping="Wrap"
-        />
-
-        <Border
-            x:Name="QrFrame"
-            Width="248"
-            Height="248"
-            HorizontalAlignment="Center"
-            Background="White"
-            CornerRadius="8"
-        >
-            <Image
-                x:Name="QrImage"
-                Width="232"
-                Height="232"
-                HorizontalAlignment="Center"
-                VerticalAlignment="Center"
-                AutomationProperties.AutomationId="QrImage"
-                AutomationProperties.Name="Pairing QR code"
-            />
-        </Border>
-
-        <TextBlock
-            x:Name="PairingCodeText"
-            HorizontalAlignment="Center"
-            AutomationProperties.AutomationId="PairingCodeText"
-            AutomationProperties.Name="Pairing code"
-            FontSize="24"
-            FontWeight="SemiBold"
-            CharacterSpacing="120"
-            TextAlignment="Center"
+            Visibility="Collapsed"
         />
 
         <ProgressRing
@@ -71,8 +57,9 @@
             Height="28"
             HorizontalAlignment="Center"
             AutomationProperties.AutomationId="WaitRing"
-            AutomationProperties.Name="Waiting for remote reader pairing"
-            IsActive="True"
+            AutomationProperties.Name="Pairing"
+            IsActive="False"
+            Visibility="Collapsed"
         />
     </StackPanel>
 </ContentDialog>

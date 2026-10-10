@@ -14,24 +14,20 @@
 
 namespace RefineID;
 
-using System.Runtime.InteropServices.WindowsRuntime;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Media.Imaging;
-using QRCoder;
-using Windows.Storage.Streams;
 
 /// <summary>
-/// Presents one pairing offer as a QR code, polls its progress, hosts the
-/// on-screen confirmation, and reports the paired handle or the failure.
+/// Takes the code the phone shows, starts the pairing, polls its progress,
+/// hosts the on-screen confirmation, and reports the paired handle or the
+/// failure.
 /// </summary>
 internal sealed partial class PairingDialog : ContentDialog
 {
-    private const int QrPixelsPerModule = 8;
-
-    private readonly ulong handle;
+    private readonly string requesterName;
     private readonly DispatcherQueueTimer timer;
+    private ulong? handle;
     private bool confirmed;
     private bool settled;
 
@@ -41,70 +37,69 @@ internal sealed partial class PairingDialog : ContentDialog
     /// <summary>A human-readable failure, set when pairing did not complete.</summary>
     public string? Failure { get; private set; }
 
-    private readonly string offerUri;
-    private readonly string pairingCode;
-
-    public PairingDialog(
-        ulong handle,
-        string offerUri,
-        string pairingCode,
-        DispatcherQueue dispatcher,
-        TimeSpan pollInterval
-    )
+    public PairingDialog(string requesterName, DispatcherQueue dispatcher, TimeSpan pollInterval)
     {
         this.InitializeComponent();
-        this.handle = handle;
-        this.offerUri = offerUri;
-        this.pairingCode = pairingCode;
-        if (!string.IsNullOrWhiteSpace(pairingCode))
-        {
-            this.PairingCodeText.Text = pairingCode;
-        }
-        else
-        {
-            this.PairingCodeText.Visibility = Visibility.Collapsed;
-        }
+        this.requesterName = requesterName;
 
         this.timer = dispatcher.CreateTimer();
         this.timer.Interval = pollInterval;
         this.timer.Tick += this.OnPoll;
-        this.timer.Start();
 
-        this.Loaded += this.OnLoaded;
+        this.PrimaryButtonClick += this.OnPair;
         this.Closing += this.OnClosing;
     }
 
-    private async void OnLoaded(object sender, RoutedEventArgs args)
+    private async void OnPair(ContentDialog sender, ContentDialogButtonClickEventArgs args)
     {
-        this.Loaded -= this.OnLoaded;
-        this.QrImage.Source = await RenderQrAsync(this.offerUri).ConfigureAwait(true);
+        // The dialog stays open while the pairing runs.
+        args.Cancel = true;
+        if (this.handle is not null)
+        {
+            return;
+        }
+
+        string code = this.CodeBox.Text;
+        this.IsPrimaryButtonEnabled = false;
+        this.CodeBox.IsEnabled = false;
+        BeginPairingResult begun;
+        try
+        {
+            begun = await Task.Run(() => NativeRappService.BeginPairing(code, this.requesterName))
+                .ConfigureAwait(true);
+        }
+        catch (NativeRappException error)
+        {
+            this.ShowStatus(error.Message);
+            this.IsPrimaryButtonEnabled = true;
+            this.CodeBox.IsEnabled = true;
+            return;
+        }
+
+        this.handle = begun.Handle;
+        this.StatusText.Visibility = Visibility.Collapsed;
+        this.WaitRing.IsActive = true;
+        this.WaitRing.Visibility = Visibility.Visible;
+        this.timer.Start();
     }
 
-    private static async Task<BitmapImage> RenderQrAsync(string text)
+    private void ShowStatus(string message)
     {
-        byte[] bytes = BuildQrPng(text);
-        var image = new BitmapImage();
-        using var stream = new InMemoryRandomAccessStream();
-        await stream.WriteAsync(bytes.AsBuffer());
-        stream.Seek(0);
-        await image.SetSourceAsync(stream);
-        return image;
-    }
-
-    private static byte[] BuildQrPng(string text)
-    {
-        using var generator = new QRCodeGenerator();
-        using QRCodeData data = generator.CreateQrCode(text, QRCodeGenerator.ECCLevel.M);
-        using var png = new PngByteQRCode(data);
-        return png.GetGraphic(QrPixelsPerModule);
+        this.StatusText.Text = message;
+        this.StatusText.Visibility = Visibility.Visible;
     }
 
     private void OnPoll(DispatcherQueueTimer sender, object args)
     {
+        if (this.handle is not ulong current)
+        {
+            return;
+        }
+
         PairingState state;
         try
         {
-            state = NativeRappService.PollPairing(this.handle);
+            state = NativeRappService.PollPairing(current);
         }
         catch (NativeRappException error)
         {
@@ -115,10 +110,10 @@ internal sealed partial class PairingDialog : ContentDialog
         switch (state.State)
         {
             case "awaiting_confirmation":
-                this.AutoConfirm(state.Peer);
+                this.AutoConfirm(current, state.Peer);
                 break;
             case "paired":
-                this.PairedHandle = this.handle;
+                this.PairedHandle = current;
                 this.Settle(failure: null);
                 break;
             case "denied":
@@ -136,7 +131,7 @@ internal sealed partial class PairingDialog : ContentDialog
         }
     }
 
-    private void AutoConfirm(PairingPeer? peer)
+    private void AutoConfirm(ulong current, PairingPeer? peer)
     {
         if (this.confirmed)
         {
@@ -145,12 +140,13 @@ internal sealed partial class PairingDialog : ContentDialog
 
         this.confirmed = true;
 
-        // The scan is the human's consent; the 256-bit offer secret
-        // authenticates the peer. Grant exactly what the peer requested and
-        // let the protocol finish without a second manual confirmation.
+        // Typing the code the phone shows is the human's consent, and CPace
+        // over that code authenticates the peer. Grant exactly what the peer
+        // requested and let the protocol finish without a second manual
+        // confirmation.
         try
         {
-            NativeRappService.ConfirmPairing(this.handle, []);
+            NativeRappService.ConfirmPairing(current, []);
         }
         catch (NativeRappException error)
         {
@@ -158,9 +154,10 @@ internal sealed partial class PairingDialog : ContentDialog
             return;
         }
 
-        this.StatusText.Text = peer is null ? "Pairing…" : $"Pairing with {peer.DisplayName}…";
-        this.QrFrame.Visibility = Visibility.Collapsed;
-        this.PairingCodeText.Visibility = Visibility.Collapsed;
+        if (peer is not null)
+        {
+            this.ShowStatus(peer.DisplayName);
+        }
     }
 
     private void Settle(string? failure)
@@ -178,13 +175,18 @@ internal sealed partial class PairingDialog : ContentDialog
 
     private void OnClosing(ContentDialog sender, ContentDialogClosingEventArgs args)
     {
-        this.timer.Stop();
-        if (this.PairedHandle is null)
+        if (args.Result == ContentDialogResult.Primary && !this.settled)
         {
-            // Cancel button or dismissal without a completed pairing: drop the offer.
+            return;
+        }
+
+        this.timer.Stop();
+        if (this.PairedHandle is null && this.handle is ulong current)
+        {
+            // Cancel button or dismissal without a completed pairing: stop the attempt.
             try
             {
-                NativeRappService.CancelPairing(this.handle);
+                NativeRappService.CancelPairing(current);
             }
             catch (NativeRappException ex)
             {
@@ -193,7 +195,7 @@ internal sealed partial class PairingDialog : ContentDialog
                 );
             }
 
-            NativeRappService.EndPairing(this.handle);
+            NativeRappService.EndPairing(current);
         }
     }
 }

@@ -50,10 +50,8 @@ internal static partial class NativeRappService
 
     [LibraryImport(Library, EntryPoint = "refineid_rapp_begin_pairing")]
     private static partial nint BeginPairingNative(
-        [In] byte[] listen,
-        nuint listenLength,
-        [In] byte[] advertise,
-        nuint advertiseLength,
+        [In] byte[] code,
+        nuint codeLength,
         [In] byte[] name,
         nuint nameLength
     );
@@ -83,19 +81,16 @@ internal static partial class NativeRappService
     [LibraryImport(Library, EntryPoint = "refineid_rapp_string_free")]
     private static partial void StringFree(nint value);
 
-    /// <summary>Starts a pairing offer and returns its handle and QR text.</summary>
-    internal static BeginPairingResult BeginPairing(string listen, string advertise, string name)
+    /// <summary>Starts pairing with the code the phone shows and returns its handle.</summary>
+    internal static BeginPairingResult BeginPairing(string code, string name)
     {
-        byte[] listenBytes = Encoding.UTF8.GetBytes(listen);
-        byte[] advertiseBytes = Encoding.UTF8.GetBytes(advertise);
+        byte[] codeBytes = Encoding.UTF8.GetBytes(code);
         byte[] nameBytes = Encoding.UTF8.GetBytes(name);
         return Invoke(
             () =>
                 BeginPairingNative(
-                    listenBytes,
-                    (nuint)listenBytes.Length,
-                    advertiseBytes,
-                    (nuint)advertiseBytes.Length,
+                    codeBytes,
+                    (nuint)codeBytes.Length,
                     nameBytes,
                     (nuint)nameBytes.Length
                 ),
