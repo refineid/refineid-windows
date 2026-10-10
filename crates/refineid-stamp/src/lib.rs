@@ -17,8 +17,9 @@
 //!
 //! The build environment passes the stamp in `REFINEID_VERSION` so every
 //! artifact of one build carries the same instant; without it the stamp is
-//! the UTC clock when the build script runs. Build scripts call
-//! [`Stamp::from_build_environment`].
+//! the UTC clock when the build script runs, which Cargo reruns only when an
+//! input changes, so a plain incremental build keeps its first stamp. Build
+//! scripts call [`Stamp::from_build_environment`].
 
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
