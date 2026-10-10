@@ -127,6 +127,9 @@ $productVersion = '{0}.{1}.{2}.{3}' -f ($now.Year - 2000), $now.Month, $now.Day,
     ($now.Hour * 10 + [math]::Floor($now.Minute / 10))
 $env:REFINEID_VERSION = $productVersion
 
+# Cargo builds the tree this script belongs to, whatever the current directory.
+$manifest = Join-Path $repositoryRoot 'Cargo.toml'
+
 $rustTargets = @{
     'x64'   = 'x86_64-pc-windows-msvc'
     'arm64' = 'aarch64-pc-windows-msvc'
@@ -137,7 +140,7 @@ New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 foreach ($arch in $Architecture) {
     $rustTarget = $rustTargets[$arch]
     Write-Host "Building refineid_minidriver.dll for $rustTarget"
-    & cargo build --release --package refineid-minidriver --target $rustTarget
+    & cargo build --manifest-path $manifest --release --package refineid-minidriver --target $rustTarget
     if ($LASTEXITCODE -ne 0) {
         throw "cargo build failed for $rustTarget."
     }
@@ -155,7 +158,7 @@ foreach ($arch in $Architecture) {
 
     $msi = Join-Path $OutputDirectory "RefineID.CardDriver-$productVersion-$arch.msi"
     Write-Host "Packaging $msi"
-    & cargo run --quiet --package refineid-msi -- `
+    & cargo run --manifest-path $manifest --quiet --package refineid-msi -- `
         --architecture $arch `
         --minidriver $dll `
         --output $msi `
