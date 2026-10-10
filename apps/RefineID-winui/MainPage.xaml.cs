@@ -63,6 +63,9 @@ internal sealed partial class MainPage : Page
     private async void OnLoaded(object sender, RoutedEventArgs args)
     {
         this.Loaded -= this.OnLoaded;
+        // Once per run: disable the inbound rule earlier releases opened for
+        // the phone, when that needs no administrator rights.
+        _ = Task.Run(FirewallService.DisableLegacyRule);
         this.CheckLocalCard();
         this.cardPollTimer.Start();
         this.ShowDriverLaneHintIfNeeded();
@@ -262,12 +265,6 @@ internal sealed partial class MainPage : Page
 
     private void UpdateLocalCardUi(LocalCardSnapshot snapshot)
     {
-        // Remove the inbound rule earlier releases opened for the phone.
-        if (FirewallService.IsRuleConfigured())
-        {
-            _ = Task.Run(FirewallService.CloseRule);
-        }
-
         this.SignCard.IsEnabled = true;
 
         if (!string.IsNullOrWhiteSpace(snapshot.Person))
