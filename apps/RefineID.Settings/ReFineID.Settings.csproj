@@ -9,6 +9,10 @@
     <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' and '$(Platform)' == 'arm64'"
       >win-arm64</RuntimeIdentifier>
     <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
+    <!-- The MSIX carries the .NET runtime itself: the Store installs framework
+         packages such as the Windows App SDK, but has none for .NET, and a
+         packaged app may not download one at run time. -->
+    <SelfContained>true</SelfContained>
     <PublishProfile Condition="Exists('Properties\PublishProfiles\win-$(Platform).pubxml')"
       >win-$(Platform).pubxml</PublishProfile>
     <UseWinUI>true</UseWinUI>
