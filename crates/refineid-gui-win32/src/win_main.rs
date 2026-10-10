@@ -57,22 +57,14 @@ use refineid_doc_sign::service::{
 use refineid_lib_core::identity::CommonName;
 use refineid_lib_core::pin::PinBytes;
 use refineid_lib_pcsc::PcscBackend;
-use refineid_rapp_core::PAIRING_SUITE;
-use refineid_rapp_core::engine::{Requester, RequesterConfig};
+use refineid_rapp_core::engine::{PairingError, Requester, RequesterConfig};
 use refineid_rapp_core::ids::PairId;
-use refineid_rapp_core::limits::OFFER_TTL_MAX_MS;
-use refineid_rapp_core::offer::{
-    PairingOffer, TransportCandidate, format_pairing_code, generate_pairing_code,
-    offer_id_from_code,
-};
-use refineid_rapp_core::profiles::{
-    PROFILE_AUTHENTICATION, PROFILE_CARD_STATUS, PROFILE_DOCUMENT_SIGNING,
-};
+use refineid_rapp_core::limits::OFFER_TTL_MS;
+use refineid_rapp_core::offer::normalize_pairing_code;
 use refineid_rapp_core::store::{MemoryJournal, PairingStore as _};
 use refineid_rapp_core::stream::StreamRendezvous;
-use refineid_rapp_core::transport::{FrameTransport, STREAM_PROFILE};
+use refineid_rapp_core::transport::FrameTransport;
 use refineid_windows_credential_store::CredentialPairingStore;
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1238,9 +1230,9 @@ fn on_create(main: HWND) -> windows::core::Result<()> {
         &mut tints,
     )?;
     let remote_code = child(
-        w!("STATIC"),
-        "··· ···",
-        WS_CHILD | WS_VISIBLE,
+        w!("EDIT"),
+        "",
+        WS_CHILD | WS_VISIBLE | WS_BORDER,
         110,
         62,
         180,
@@ -1253,7 +1245,7 @@ fn on_create(main: HWND) -> windows::core::Result<()> {
     tints.push((remote_code, INK));
     let pair_gen = child(
         w!("BUTTON"),
-        "Generate code",
+        "Pair",
         WS_CHILD | WS_VISIBLE | WINDOW_STYLE(BS_PUSHBUTTON as u32),
         300,
         62,
@@ -2296,15 +2288,11 @@ fn start_doc_verify() {
     });
 }
 
-/// The one stream candidate this UI advertises, mirroring the CLI.
-const PAIR_CANDIDATE_ID: &str = "stream-1";
-
-/// Generate a pairing code and wait for the phone on a worker
-/// thread; the refresh timer picks progress and the outcome up from
-/// `INBOX`. The phone reconstructs the same offer from the code
-/// and advertises it over mDNS; this side browses and dials, like
-/// the Android offer flow. No offer text leaves this machine: the
-/// 6-digit code is the only thing the user transfers.
+/// Pair with the code the phone shows, on a worker thread; the
+/// refresh timer picks progress and the outcome up from `INBOX`. The
+/// phone advertises a pairing-mode record over DNS-SD and serves its
+/// offer on the connection (RAPP v26.10.9 section 4.2); this side
+/// browses, dials, and types the code into `CPace`.
 fn start_pairing() {
     let snapshot = STATE.with(|cell| {
         cell.borrow()
@@ -2323,8 +2311,15 @@ fn start_pairing() {
             state.pair_cancel = Some(cancel.clone());
         }
     });
-    let code = generate_pairing_code();
-    set_text(code_edit, &format_pairing_code(&code));
+    let Some(code) = normalize_pairing_code(&get_text(code_edit)) else {
+        set_remote_status("Type the six characters the phone shows.");
+        STATE.with(|cell| {
+            if let Some(state) = cell.borrow_mut().as_mut() {
+                state.pair_cancel = None;
+            }
+        });
+        return;
+    };
     set_remote_status("Starting…");
     set_card_busy(true);
     // `HWND` is a raw pointer and not `Send`; the worker only needs
@@ -2354,46 +2349,13 @@ fn stop_pairing() {
     });
 }
 
-/// Blocking browse-and-dial loop: discover the phone's mDNS
-/// advertisement until it pairs, the code expires, or `cancel`
-/// trips. Runs on the pairing worker, never on the UI thread.
-///
-/// The offer carries empty transport parameters, exactly like the
-/// phone's reconstruction from the code: endpoints come from mDNS
-/// discovery, never from the offer. Any extra field would change
-/// the offer URI, the rendezvous name, and the handshake prologue,
-/// and the phone would wait on a different channel.
+/// Blocking browse-and-dial loop: find a phone in pairing mode and
+/// pair with the typed code, until it pairs, the offer lifetime
+/// passes, or `cancel` trips. Runs on the pairing worker, never on
+/// the UI thread.
 fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<String, String> {
     use std::time::Instant;
-    let offer_id =
-        offer_id_from_code(code).map_err(|error| format!("Invalid pairing code: {error:?}"))?;
-    let requested_profiles = vec![
-        PROFILE_CARD_STATUS.to_owned(),
-        PROFILE_AUTHENTICATION.to_owned(),
-        PROFILE_DOCUMENT_SIGNING.to_owned(),
-    ];
-    let build_offer = || {
-        PairingOffer::reconstruct(
-            offer_id,
-            vec![PAIRING_SUITE.into()],
-            requested_profiles.clone(),
-            vec![TransportCandidate {
-                profile: STREAM_PROFILE.into(),
-                candidate_id: PAIR_CANDIDATE_ID.into(),
-                parameters: BTreeMap::new(),
-            }],
-            OFFER_TTL_MAX_MS,
-        )
-    };
-    let offer = build_offer().map_err(|error| format!("Offer construct failed: {error:?}"))?;
-    let uri = offer
-        .to_uri()
-        .map_err(|error| format!("Offer encoding failed: {error:?}"))?;
-    let pairing_service =
-        refineid_rapp_core::stream::stream_rendezvous_name(uri.expose().as_bytes());
-    post_pair_status(
-        "Waiting for the phone — enter the code in the phone app. The code expires in 3 minutes.",
-    );
+    post_pair_status("Looking for the phone…");
     let mut requester = Requester::new(
         RequesterConfig {
             display_name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows PC".to_owned()),
@@ -2403,62 +2365,57 @@ fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<S
             .map_err(|error| format!("Cannot open pairing store: {error}"))?,
         MemoryJournal::new(),
     );
-    let mut offer_slot = Some(offer);
-    let deadline = Instant::now() + Duration::from_millis(OFFER_TTL_MAX_MS);
+    let deadline = Instant::now() + Duration::from_millis(OFFER_TTL_MS);
     loop {
         if cancel.load(Ordering::SeqCst) {
             return Err("Pairing stopped.".to_owned());
         }
         if Instant::now() >= deadline {
-            return Err("The pairing code expired.".to_owned());
+            return Err("No phone in pairing mode was found.".to_owned());
         }
-        let discovered = refineid_rapp_core::stream::discover_stream_endpoints(
-            Some(&pairing_service),
+        for service in refineid_rapp_core::stream::browse(
+            refineid_rapp_core::stream::DiscoveryMode::Pairing,
             Duration::from_millis(600),
-        );
-        if !discovered.is_empty() {
-            post_pair_status("Phone found — pairing…");
-            if offer_slot.is_none() {
-                offer_slot = build_offer().ok();
+        ) {
+            if cancel.load(Ordering::SeqCst) {
+                return Err("Pairing stopped.".to_owned());
             }
+            post_pair_status("Phone found — pairing…");
             if let Ok(transport) = refineid_rapp_core::stream::dial(
-                &discovered,
-                PAIR_CANDIDATE_ID,
-                Duration::from_secs(5),
+                &service.endpoints,
+                refineid_rapp_core::stream::STREAM_CANDIDATE_ID,
+                Duration::from_secs(10),
                 &StreamRendezvous::Pairing,
-            ) && let Some(outcome) = attempt_pair(
-                &mut requester,
-                &mut offer_slot,
-                code,
-                &requested_profiles,
-                transport,
-                main_raw,
-            ) {
+            ) && let Some(outcome) = attempt_pair(&mut requester, code, transport, main_raw)
+            {
                 return outcome;
             }
         }
     }
 }
 
-/// One pairing attempt over an established transport. `Some`
-/// is terminal (success summary, or a store-read failure after a
-/// successful pair); `None` reposts the failure and the code stays
-/// live for the next attempt.
+/// One pairing attempt over an established transport. `Some` is
+/// terminal: success, a mistyped code, or a refusal; `None` reposts
+/// a failure that leaves the next phone to be tried.
 fn attempt_pair(
     requester: &mut Requester<CredentialPairingStore, MemoryJournal>,
-    offer_slot: &mut Option<PairingOffer>,
     code: &str,
-    profiles: &[String],
     transport: impl FrameTransport,
     main_raw: usize,
 ) -> Option<Result<String, String>> {
-    match requester.pair_with_code(offer_slot, code, profiles, transport, |peer, requested| {
+    match requester.pair_with_code(code, transport, |peer, requested| {
         confirm_pairing_dialog(main_raw, &peer.display_name, &peer.platform, requested)
     }) {
         Ok(pair_id) => Some(paired_summary(requester, pair_id)),
+        Err(PairingError::CodeMismatch) => Some(Err(
+            "The code does not match the one the phone shows.".to_owned(),
+        )),
+        Err(PairingError::DeniedLocally | PairingError::AbortedByPeer) => {
+            Some(Err("The pairing was declined.".to_owned()))
+        }
         Err(error) => {
             post_pair_status(&format!(
-                "Pairing attempt failed ({error:?}) — still waiting for the phone."
+                "Pairing attempt failed ({error:?}) — still looking for the phone."
             ));
             None
         }

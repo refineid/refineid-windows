@@ -38,7 +38,6 @@ use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::message::CloseReason;
 use refineid_rapp_core::operations::{CardOperation, CardOperationResult};
 use refineid_rapp_core::store::{MemoryJournal, MemoryPairingStore, PairingRecord, PairingStore};
-use refineid_rapp_core::stream::{StreamAccept, StreamListener, StreamRendezvous, dial};
 use refineid_rapp_core::transport::TcpFrameTransport;
 
 use crate::ffi::SCARDHANDLE;
@@ -249,6 +248,9 @@ pub(crate) fn is_remote_card(atr: &[u8]) -> bool {
         || atr == DEV_TEST_CARD_ATR
 }
 
+/// The endpoint the development mock custodian listens on.
+const LOCAL_MOCK_CUSTODIAN: &str = "127.0.0.1:47110";
+
 /// Remote card transport backed by the RAPP requester engine over a stream session.
 pub(crate) struct RemoteCardTransport {
     pub(crate) atr: Vec<u8>,
@@ -265,55 +267,25 @@ impl RemoteCardTransport {
         }
     }
 
-    /// Establishes a session transport to the paired proxy.
+    /// Establishes a session transport to the paired custodian: an explicit
+    /// `REFINEID_RAPP_ENDPOINT` for test harnesses first, then the phone found
+    /// by its session-mode discovery record, then the local mock custodian.
+    /// This computer only dials; it never listens.
     fn connect_session_transport(&self) -> Result<TcpFrameTransport, String> {
-        let dial_timeout = Duration::from_secs(5);
-        let candidate_id = "stream-1";
-        let service_name = refineid_rapp_core::stream::stream_rendezvous_name(
-            self.pairing_record.rendezvous_token.as_bytes(),
-        );
-
-        // 1. Discover phone proxy endpoint via mDNS matching our pairing rendezvous token.
-        let mut endpoints = refineid_rapp_core::stream::discover_stream_endpoints(
-            Some(&service_name),
+        let preferred: Vec<String> = std::env::var("REFINEID_RAPP_ENDPOINT")
+            .ok()
+            .map(|endpoint| endpoint.trim().to_owned())
+            .filter(|endpoint| !endpoint.is_empty())
+            .into_iter()
+            .collect();
+        refineid_rapp_core::stream::dial_session(
+            self.pairing_record.rendezvous_token,
+            &preferred,
+            &[LOCAL_MOCK_CUSTODIAN.to_owned()],
             Duration::from_secs(2),
-        );
-
-        // 2. Allow explicit override via REFINEID_RAPP_ENDPOINT for test harnesses
-        if let Ok(env_endpoint) = std::env::var("REFINEID_RAPP_ENDPOINT")
-            && !env_endpoint.trim().is_empty()
-        {
-            endpoints.insert(0, env_endpoint.trim().to_owned());
-        }
-
-        // 3. Add local mock proxy endpoint as fallback.
-        let local_dial_endpoint = "127.0.0.1:47110";
-        endpoints.push(local_dial_endpoint.to_owned());
-
-        // 4. Dial discovered endpoints with our session rendezvous token.
-        if let Ok(transport) = dial(
-            &endpoints,
-            candidate_id,
-            dial_timeout,
-            &StreamRendezvous::Session(self.pairing_record.rendezvous_token),
-        ) {
-            return Ok(transport);
-        }
-
-        // 4. Fallback listener check for reverse-dial mock test harnesses (short timeout).
-        let listen_timeout = Duration::from_secs(2);
-        let listen_endpoint = "127.0.0.1:47110";
-        if let Ok(listener) = StreamListener::bind(listen_endpoint, candidate_id, listen_timeout)
-            && let Ok(Some(StreamAccept::Session {
-                rendezvous_token,
-                transport,
-            })) = listener.accept_timeout(listen_timeout)
-            && rendezvous_token == self.pairing_record.rendezvous_token
-        {
-            return Ok(transport);
-        }
-
-        Err("unable to reach paired proxy via mDNS dial or local fallback".into())
+            Duration::from_secs(5),
+        )
+        .map_err(|_| "unable to reach the paired phone".to_owned())
     }
 
     /// Executes a typed card operation via RAPP.

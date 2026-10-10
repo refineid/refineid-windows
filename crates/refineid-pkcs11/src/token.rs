@@ -1277,60 +1277,26 @@ impl RemoteCardTransport {
         }
     }
 
+    /// Establishes a session transport to the paired custodian found by its
+    /// session-mode discovery record, falling back to the local mock
+    /// custodian. This computer only dials; it never listens.
     fn connect_session_transport(
         &self,
     ) -> Result<refineid_rapp_core::transport::TcpFrameTransport, String> {
         use core::time::Duration;
-        use refineid_rapp_core::stream::{
-            StreamAccept, StreamListener, StreamRendezvous, dial, discover_stream_endpoints,
-            stream_rendezvous_name,
-        };
 
-        let dial_timeout = Duration::from_secs(5);
-        let candidate_id = "stream-1";
-        let service_name = stream_rendezvous_name(self.pairing_record.rendezvous_token.as_bytes());
-
-        crate::diag::diag!("connect_session_transport: discovering proxy for {service_name}...");
-        // 1. Discover phone proxy endpoint via mDNS matching our pairing rendezvous token.
-        let mut endpoints = discover_stream_endpoints(Some(&service_name), Duration::from_secs(2));
-        crate::diag::diag!("connect_session_transport: discovered endpoints: {endpoints:?}");
-
-        // 2. Add local mock proxy endpoint as fallback.
-        let local_dial_endpoint = "127.0.0.1:47110";
-        endpoints.push(local_dial_endpoint.to_owned());
-
-        // 3. Dial discovered endpoints with our session rendezvous token.
-        crate::diag::diag!("connect_session_transport: dialing endpoints {endpoints:?}...");
-        match dial(
-            &endpoints,
-            candidate_id,
-            dial_timeout,
-            &StreamRendezvous::Session(self.pairing_record.rendezvous_token),
-        ) {
-            Ok(transport) => {
-                crate::diag::diag!("connect_session_transport: dial succeeded!");
-                return Ok(transport);
-            }
-            Err(err) => {
-                crate::diag::diag!("connect_session_transport: dial failed: {err:?}");
-            }
-        }
-
-        // 4. Fallback listener check for reverse-dial mock test harnesses (short timeout).
-        let listen_timeout = Duration::from_millis(150);
-        let listen_endpoint = "127.0.0.1:47110";
-        if let Ok(listener) = StreamListener::bind(listen_endpoint, candidate_id, listen_timeout)
-            && let Ok(Some(StreamAccept::Session {
-                rendezvous_token,
-                transport,
-            })) = listener.accept_timeout(listen_timeout)
-            && rendezvous_token == self.pairing_record.rendezvous_token
-        {
-            crate::diag::diag!("connect_session_transport: reverse dial accepted!");
-            return Ok(transport);
-        }
-
-        Err("unable to reach paired proxy via mDNS dial or local fallback".into())
+        crate::diag::diag!("connect_session_transport: discovering the paired phone");
+        refineid_rapp_core::stream::dial_session(
+            self.pairing_record.rendezvous_token,
+            &[],
+            &["127.0.0.1:47110".to_owned()],
+            Duration::from_secs(2),
+            Duration::from_secs(5),
+        )
+        .map_err(|error| {
+            crate::diag::diag!("connect_session_transport: dial failed: {error:?}");
+            "unable to reach the paired phone".to_owned()
+        })
     }
 
     pub(crate) fn execute_operation(

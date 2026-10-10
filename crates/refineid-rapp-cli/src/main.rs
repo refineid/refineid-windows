@@ -1,15 +1,16 @@
 //! Development requester CLI for the RAPP remote-card path.
 //!
 //! `refineid-rapp pair-demo` proves the full stream-profile path against a
-//! real phone proxy in one process: it displays the pairing QR, accepts the
-//! phone's connection, confirms grants on both devices, then serves inbound
-//! sessions and runs typed card operations that the holder approves on the
-//! phone. Its pair keys live only for the process lifetime.
+//! real phone custodian in one process: it takes the code the phone shows,
+//! finds the phone advertising pairing, dials it, confirms grants on both
+//! devices, then dials sessions and runs typed card operations that the
+//! holder approves on the phone. Its pair keys live only for the process
+//! lifetime unless `--durable` stores them.
 //!
 //! `refineid-rapp reconnect` proves the durable path the minidriver will use:
 //! it loads a pairing the settings app already stored in the Windows
-//! credential vault and serves sessions against it, with no fresh pairing
-//! ceremony. Both share one session-serving loop.
+//! credential vault and dials sessions against it, with no fresh pairing
+//! ceremony. Both share one session loop.
 //!
 //! This is a development tool. It prints operation results to the terminal
 //! and must not be distributed to end users.
@@ -17,41 +18,45 @@
 use std::io::Write as _;
 use std::time::{Duration, Instant};
 
-use refineid_rapp_cli::mock_proxy::{MockProxyOptions, run_mock_proxy};
-use refineid_rapp_core::engine::{OperationOutcome, PeerIntroduction, Requester, RequesterConfig};
-use refineid_rapp_core::ids::{
-    Challenge, OfferId, PairId, PairingSecret, RandomIdExt as _, RendezvousToken,
+use refineid_rapp_cli::mock_proxy::{DEFAULT_LISTEN, MockProxyOptions, run_mock_proxy};
+use refineid_rapp_core::engine::{
+    OperationOutcome, PairingError, PeerIntroduction, Requester, RequesterConfig,
 };
-use refineid_rapp_core::limits::OFFER_TTL_MAX_MS;
+use refineid_rapp_core::ids::{Challenge, PairId, RendezvousToken};
 use refineid_rapp_core::message::CloseReason;
-use refineid_rapp_core::offer::{
-    PairingOffer, TransportCandidate, format_pairing_code, is_valid_pairing_code,
-    normalize_pairing_code, offer_id_from_code,
-};
+use refineid_rapp_core::offer::normalize_pairing_code;
 use refineid_rapp_core::operations::{
     CardOperation, CardOperationExt, CardOperationResult, CertificateKind, KeyProfile,
     SignatureAlgorithm, SignatureAlgorithmExt,
 };
 use refineid_rapp_core::persistence::{decode_pairing_records, encode_pairing_records};
-use refineid_rapp_core::profiles::{
-    PROFILE_AUTHENTICATION, PROFILE_CARD_STATUS, PROFILE_DOCUMENT_SIGNING,
-};
 use refineid_rapp_core::store::{MemoryJournal, MemoryPairingStore, PairingStore};
-use refineid_rapp_core::stream::{StreamAccept, StreamListener, stream_candidate_parameters};
-use refineid_rapp_core::transport::STREAM_PROFILE;
+use refineid_rapp_core::stream::{
+    DiscoveryMode, STREAM_CANDIDATE_ID, StreamRendezvous, browse, dial, dial_session,
+};
 use refineid_windows_credential_store::CredentialPairingStore;
 
-/// The one stream candidate this CLI advertises.
-const CANDIDATE_ID: &str = "stream-1";
-
-/// Frame receive deadline; also the accept-loop poll bound.
+/// Frame receive deadline on a dialed connection.
 const RECEIVE_DEADLINE: Duration = Duration::from_mins(3);
+
+/// How long the requester keeps looking for the custodian showing the code;
+/// the custodian's offer lives this long (section 3.3).
+const PAIRING_WINDOW: Duration = Duration::from_millis(refineid_rapp::OFFER_TTL_MS);
+
+/// One DNS-SD browse round.
+const BROWSE_WINDOW: Duration = Duration::from_secs(3);
+
+/// Pause between session dial rounds that found no custodian.
+const SESSION_RETRY: Duration = Duration::from_secs(2);
 
 /// Operation expiry sent on the wire; the holder approves within this.
 const OPERATION_EXPIRY_MS: u64 = 120_000;
 
 /// Visible prefix of a personal identifier in development output.
 const PERSON_ID_VISIBLE_CHARS: usize = 6;
+
+/// The pairing code `setup-mock-pairing` gives its mock custodian.
+const MOCK_PAIRING_CODE: &str = "654321";
 
 fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
@@ -66,27 +71,17 @@ fn main() {
         Some("export-cert") => export_cert(&arguments[1..]),
         Some("export-pairing") => export_pairing(&arguments[1..]),
         Some("import-pairing") => import_pairing(&arguments[1..]),
-        Some("firewall-check") => {
-            firewall_check_cmd(&arguments[1..]);
-            Ok(())
-        }
         _ => {
             eprintln!("usage:");
-            eprintln!("  refineid-rapp pair-demo --listen <bind-address> \\");
-            eprintln!("      --advertise <host:port> [--advertise <host:port> ...] \\");
-            eprintln!("      [--name <label>] [--code <code>] [--auto-confirm] [--count <n>] \\");
-            eprintln!("      [--sign-profile rsa3072|ecdsa384] [--durable] \\");
-            eprintln!("      [--root-ca <path>] [--intermediate-ca <path>]");
-            eprintln!("  refineid-rapp reconnect --listen <bind-address> \\");
+            eprintln!("  refineid-rapp pair-demo --code <code> [--connect <host:port>] \\");
+            eprintln!("      [--name <label>] [--auto-confirm] [--count <n>] \\");
+            eprintln!("      [--sign-profile rsa3072|ecdsa384] [--durable]");
+            eprintln!("  refineid-rapp reconnect [--connect <host:port>] \\");
             eprintln!("      [--sign-profile rsa3072|ecdsa384] [--count <n>]");
-            eprintln!("  refineid-rapp firewall-check [<port>]");
-            eprintln!(
-                "  refineid-rapp mock-proxy (--connect <host:port> --code <code> | --uri <rapp-uri> | --resume <state>) \\"
-            );
+            eprintln!("  refineid-rapp mock-proxy [--listen <bind-address>] [--code <code>] \\");
+            eprintln!("      [--resume <state>] [--save-state <path>] \\");
             eprintln!("      [--cert <path>] [--root-ca <path>] [--intermediate-ca <path>] \\");
-            eprintln!(
-                "      [--save-state <path>] [--count <n>] [--identity-name <name>] [--person-id <id>]"
-            );
+            eprintln!("      [--count <n>] [--identity-name <name>] [--person-id <id>]");
             eprintln!(
                 "  refineid-rapp setup-mock-pairing [--cert <path>] [--root-ca <path>] [--intermediate-ca <path>] [--state <path>] [--serve]"
             );
@@ -105,8 +100,7 @@ fn main() {
 }
 
 struct DemoOptions {
-    listen: String,
-    advertise: Vec<String>,
+    connect: Option<String>,
     name: String,
     code: Option<String>,
     auto_confirm: bool,
@@ -116,8 +110,7 @@ struct DemoOptions {
 }
 
 fn parse_options(arguments: &[String]) -> Result<DemoOptions, String> {
-    let mut listen = None;
-    let mut advertise = Vec::new();
+    let mut connect = None;
     let mut name = "RefineID Windows".to_owned();
     let mut code = None;
     let mut auto_confirm = false;
@@ -133,21 +126,16 @@ fn parse_options(arguments: &[String]) -> Result<DemoOptions, String> {
                 .ok_or_else(|| format!("{flag} requires a value"))
         };
         match flag.as_str() {
-            "--listen" => listen = Some(value()?),
-            "--advertise" => advertise.push(value()?),
+            "--connect" => connect = Some(value()?),
             "--name" => name = value()?,
             "--code" => {
-                let val = value()?;
-                if !is_valid_pairing_code(&val) {
-                    return Err(format!("invalid 6-digit pairing code: {val}"));
-                }
-                code = Some(normalize_pairing_code(&val));
+                code = Some(
+                    normalize_pairing_code(&value()?)
+                        .ok_or("the pairing code is six characters from the phone")?,
+                );
             }
             "--auto-confirm" | "--yes" | "-y" => auto_confirm = true,
             "--durable" | "--save" => durable = true,
-            "--root-ca" | "--intermediate-ca" => {
-                let _ = value()?;
-            }
             "--count" => {
                 let val = value()?;
                 count = Some(
@@ -166,8 +154,7 @@ fn parse_options(arguments: &[String]) -> Result<DemoOptions, String> {
         }
     }
     Ok(DemoOptions {
-        listen: listen.ok_or("--listen is required")?,
-        advertise,
+        connect,
         name,
         code,
         auto_confirm,
@@ -175,44 +162,6 @@ fn parse_options(arguments: &[String]) -> Result<DemoOptions, String> {
         sign_profile,
         durable,
     })
-}
-
-#[cfg(windows)]
-fn check_firewall(port: u16) {
-    let output = std::process::Command::new("netsh")
-        .args([
-            "advfirewall",
-            "firewall",
-            "show",
-            "rule",
-            "name=RefineID RAPP",
-        ])
-        .output();
-    match output {
-        Ok(out) if out.status.success() => {
-            println!("[firewall] Inbound firewall rule 'RefineID RAPP' is configured.");
-        }
-        _ => {
-            println!(
-                "[firewall] Warning: Inbound firewall rule for port {port} may not be configured."
-            );
-            println!("[firewall] To allow the phone to connect, run as Administrator:");
-            println!(
-                "           netsh advfirewall firewall add rule name=\"RefineID RAPP\" dir=in action=allow protocol=TCP localport=40000-60000"
-            );
-        }
-    }
-}
-
-#[cfg(not(windows))]
-const fn check_firewall(_port: u16) {}
-
-fn firewall_check_cmd(arguments: &[String]) {
-    let port = arguments
-        .first()
-        .and_then(|arg| arg.parse::<u16>().ok())
-        .unwrap_or(47110);
-    check_firewall(port);
 }
 
 fn pair_demo(arguments: &[String]) -> Result<(), String> {
@@ -226,22 +175,8 @@ fn pair_demo(arguments: &[String]) -> Result<(), String> {
     }
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "the demo is one linear ceremony and reads best unsplit"
-)]
 fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(), String> {
-    if options.advertise.is_empty() {
-        return Err("--advertise is required at least once".into());
-    }
-    let listener = StreamListener::bind(&options.listen, CANDIDATE_ID, RECEIVE_DEADLINE)
-        .map_err(|error| format!("cannot bind {}: {error:?}", options.listen))?;
-    let port = listener
-        .local_port()
-        .map_err(|error| format!("cannot read bound port: {error:?}"))?;
-    println!("listening on {} (port {port})", options.listen);
-    check_firewall(port);
-
+    let code = options.code.as_deref().ok_or("--code is required")?;
     let mut requester = Requester::new(
         RequesterConfig {
             display_name: options.name.clone(),
@@ -250,217 +185,59 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
         store,
         MemoryJournal::new(),
     );
-
-    let requested_profiles = vec![
-        PROFILE_CARD_STATUS.to_owned(),
-        PROFILE_AUTHENTICATION.to_owned(),
-        PROFILE_DOCUMENT_SIGNING.to_owned(),
-    ];
-
-    let (offer, pairing_service, manual_code, qr_secret) = if let Some(code) = &options.code {
-        let raw_code = normalize_pairing_code(code);
-        let pairing_code = format_pairing_code(&raw_code);
-        let offer_id = offer_id_from_code(&raw_code).map_err(|e| format!("invalid code: {e:?}"))?;
-        let candidate_params = stream_candidate_parameters(&options.advertise)
-            .map_err(|error| format!("invalid advertised endpoints: {error:?}"))?;
-        let offer = PairingOffer::reconstruct(
-            offer_id,
-            vec![refineid_rapp::MANDATORY_PAIRING_SUITE.into()],
-            requested_profiles.clone(),
-            vec![TransportCandidate {
-                profile: STREAM_PROFILE.into(),
-                candidate_id: CANDIDATE_ID.into(),
-                parameters: candidate_params,
-            }],
-            OFFER_TTL_MAX_MS,
-        )
-        .map_err(|error| format!("offer reconstruct failed: {error:?}"))?;
-        let uri = offer
-            .to_uri()
-            .map_err(|error| format!("offer encoding failed: {error:?}"))?;
-        let service = refineid_rapp_core::stream::stream_rendezvous_name(uri.expose().as_bytes());
-        println!(
-            "manual-code pairing mode: enter code in RefineID on the phone; expires in 3 minutes"
-        );
-        println!("pairing code: {pairing_code}");
-        flush_now();
-        (offer, service, Some(raw_code), None)
-    } else {
-        let offer_id =
-            OfferId::random().map_err(|_| "csprng failed: random offer_id".to_owned())?;
-        let secret = PairingSecret::random()
-            .map_err(|_| "csprng failed: random pairing_secret".to_owned())?;
-        let candidate_params = stream_candidate_parameters(&options.advertise)
-            .map_err(|error| format!("invalid advertised endpoints: {error:?}"))?;
-        let offer = PairingOffer::reconstruct(
-            offer_id,
-            vec![refineid_rapp::MANDATORY_PAIRING_SUITE.into()],
-            requested_profiles.clone(),
-            vec![TransportCandidate {
-                profile: STREAM_PROFILE.into(),
-                candidate_id: CANDIDATE_ID.into(),
-                parameters: candidate_params,
-            }],
-            OFFER_TTL_MAX_MS,
-        )
-        .map_err(|error| format!("offer reconstruct failed: {error:?}"))?;
-        let uri = offer
-            .to_uri()
-            .map_err(|error| format!("offer encoding failed: {error:?}"))?;
-        let qr = qrcode::QrCode::new(uri.expose().as_bytes())
-            .map_err(|error| format!("QR encoding failed: {error}"))?;
-        println!(
-            "{}",
-            qr.render::<qrcode::render::unicode::Dense1x2>().build()
-        );
-        println!("scan QR with RefineID on the phone; the offer expires in three minutes");
-        println!();
-        println!("offer text (the QR encodes exactly this):");
-        println!("{}", uri.expose());
-        flush_now();
-        let service = refineid_rapp_core::stream::stream_rendezvous_name(uri.expose().as_bytes());
-        (offer, service, None, Some(secret))
-    };
-    println!("pairing service instance: {pairing_service}");
-    flush_now();
-
-    let mut offer_slot = Some(offer);
-    let deadline = Instant::now() + Duration::from_millis(OFFER_TTL_MAX_MS);
-    let pair_id = loop {
-        if Instant::now() >= deadline {
-            return Err("the pairing offer expired".into());
-        }
-        if offer_slot.is_none() {
-            return Err("the pairing offer was consumed by a failed attempt".into());
-        }
-
-        // 1. Discover if the proxy is listening under the offer's derived service name
-        let discovered = refineid_rapp_core::stream::discover_stream_endpoints(
-            Some(&pairing_service),
-            Duration::from_millis(600),
-        );
-        if !discovered.is_empty() {
+    let auto_confirm = options.auto_confirm;
+    let confirm = move |peer: &PeerIntroduction, requested: &[String]| {
+        if auto_confirm {
+            println!();
             println!(
-                "discovered proxy advertising {pairing_service} at {discovered:?}, dialing..."
+                "auto-confirming pairing request from {} ({})",
+                peer.display_name, peer.platform
             );
+            println!("granted: {}", requested.join(", "));
+            Some(requested.to_vec())
+        } else {
+            confirm_grants(peer, requested)
+        }
+    };
+
+    println!("looking for the phone showing the code...");
+    flush_now();
+    let deadline = Instant::now() + PAIRING_WINDOW;
+    let pair_id = 'search: loop {
+        if Instant::now() >= deadline {
+            return Err("no phone accepted the code; show a new code and try again".into());
+        }
+        let candidates: Vec<Vec<String>> = options.connect.as_ref().map_or_else(
+            || {
+                browse(DiscoveryMode::Pairing, BROWSE_WINDOW)
+                    .into_iter()
+                    .map(|service| service.endpoints)
+                    .collect()
+            },
+            |endpoint| vec![vec![endpoint.clone()]],
+        );
+        for endpoints in candidates {
+            let Ok(transport) = dial(
+                &endpoints,
+                STREAM_CANDIDATE_ID,
+                RECEIVE_DEADLINE,
+                &StreamRendezvous::Pairing,
+            ) else {
+                continue;
+            };
+            println!("dialed {endpoints:?}");
             flush_now();
-            if let Ok(transport) = refineid_rapp_core::stream::dial(
-                &discovered,
-                CANDIDATE_ID,
-                Duration::from_secs(10),
-                &refineid_rapp_core::stream::StreamRendezvous::Pairing,
-            ) {
-                let auto_confirm = options.auto_confirm;
-                let outcome = if let Some(code) = &manual_code {
-                    requester.pair_with_code(
-                        &mut offer_slot,
-                        code,
-                        &requested_profiles,
-                        transport,
-                        |peer, requested| {
-                            if auto_confirm {
-                                println!();
-                                println!(
-                                    "auto-confirming pairing request from {} ({})",
-                                    peer.display_name, peer.platform
-                                );
-                                println!("granted: {}", requested.join(", "));
-                                Some(requested.to_vec())
-                            } else {
-                                confirm_grants(peer, requested)
-                            }
-                        },
-                    )
-                } else if let Some(secret) = &qr_secret {
-                    requester.pair_with_secret(
-                        &mut offer_slot,
-                        secret,
-                        &requested_profiles,
-                        transport,
-                        |peer, requested| {
-                            if auto_confirm {
-                                println!();
-                                println!(
-                                    "auto-confirming pairing request from {} ({})",
-                                    peer.display_name, peer.platform
-                                );
-                                println!("granted: {}", requested.join(", "));
-                                Some(requested.to_vec())
-                            } else {
-                                confirm_grants(peer, requested)
-                            }
-                        },
-                    )
-                } else {
-                    return Err("no pairing secret or code available".into());
-                };
-                match outcome {
-                    Ok(pair_id) => break pair_id,
-                    Err(error) => {
-                        println!("pairing attempt failed: {error:?}");
-                    }
+            match requester.pair_with_code(code, transport, confirm) {
+                Ok(pair_id) => break 'search pair_id,
+                Err(PairingError::CodeMismatch) => {
+                    return Err("the phone refused the code; check it and try again".into());
                 }
+                Err(PairingError::DeniedLocally) => return Err("pairing declined".into()),
+                Err(error) => println!("pairing attempt failed: {error:?}"),
             }
         }
-
-        // 2. Check on listener for reverse-dial harness
-        match listener.accept_timeout(Duration::from_millis(200)) {
-            Ok(Some(StreamAccept::Pairing(transport))) => {
-                let auto_confirm = options.auto_confirm;
-                let outcome = if let Some(code) = &manual_code {
-                    requester.pair_with_code(
-                        &mut offer_slot,
-                        code,
-                        &requested_profiles,
-                        transport,
-                        |peer, requested| {
-                            if auto_confirm {
-                                println!();
-                                println!(
-                                    "auto-confirming pairing request from {} ({})",
-                                    peer.display_name, peer.platform
-                                );
-                                println!("granted: {}", requested.join(", "));
-                                Some(requested.to_vec())
-                            } else {
-                                confirm_grants(peer, requested)
-                            }
-                        },
-                    )
-                } else {
-                    requester.pair(
-                        &mut offer_slot,
-                        &requested_profiles,
-                        transport,
-                        |peer, requested| {
-                            if auto_confirm {
-                                println!();
-                                println!(
-                                    "auto-confirming pairing request from {} ({})",
-                                    peer.display_name, peer.platform
-                                );
-                                println!("granted: {}", requested.join(", "));
-                                Some(requested.to_vec())
-                            } else {
-                                confirm_grants(peer, requested)
-                            }
-                        },
-                    )
-                };
-                match outcome {
-                    Ok(pair_id) => break pair_id,
-                    Err(error) => {
-                        println!("pairing attempt failed: {error:?}");
-                    }
-                }
-            }
-            Ok(Some(StreamAccept::Session { .. })) => {
-                println!("discarded a session attempt before any pairing exists");
-            }
-            Ok(None) => {}
-            Err(error) => {
-                println!("discarded connection: {error:?}");
-            }
+        if options.connect.is_some() {
+            std::thread::sleep(SESSION_RETRY);
         }
     };
 
@@ -481,7 +258,7 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
 
     serve_sessions(
         &mut requester,
-        &listener,
+        options.connect.as_deref(),
         pair_id,
         expected_token,
         options.sign_profile,
@@ -491,8 +268,8 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
 
 /// Reconnects to a pairing the settings app already stored in the Windows
 /// credential vault and serves sessions against it -- the durable path the
-/// minidriver will use. No pairing ceremony runs; the phone dials the same
-/// listener address it stored at pairing.
+/// minidriver will use. No pairing ceremony runs; the requester finds the
+/// phone by its session advertisement.
 fn reconnect(arguments: &[String]) -> Result<(), String> {
     let options = parse_options(arguments)?;
 
@@ -526,11 +303,9 @@ fn reconnect(arguments: &[String]) -> Result<(), String> {
     };
     flush_now();
 
-    let listener = StreamListener::bind(&options.listen, CANDIDATE_ID, RECEIVE_DEADLINE)
-        .map_err(|error| format!("cannot bind {}: {error:?}", options.listen))?;
     serve_sessions(
         &mut requester,
-        &listener,
+        options.connect.as_deref(),
         pair_id,
         expected_token,
         options.sign_profile,
@@ -567,72 +342,28 @@ fn record_certificate_outcome<S: PairingStore>(
     }
 }
 
-/// Serves inbound sessions for one pairing until interrupted: for each session
-/// the phone dials, it connects, runs the read operations and an optional
-/// signature, and disconnects. Shared by `pair-demo` and `reconnect`.
-#[allow(
-    clippy::too_many_lines,
-    reason = "serving sessions involves linear operation dispatch and loop handling"
-)]
+/// Dials sessions for one pairing until interrupted: each session runs the
+/// read operations and an optional signature, then disconnects. Shared by
+/// `pair-demo` and `reconnect`.
 fn serve_sessions<S: PairingStore>(
     requester: &mut Requester<S, MemoryJournal>,
-    listener: &StreamListener,
+    connect: Option<&str>,
     pair_id: PairId,
     expected_token: RendezvousToken,
     sign_profile: Option<(KeyProfile, SignatureAlgorithm)>,
     count: Option<usize>,
 ) -> Result<(), String> {
-    let service_name =
-        refineid_rapp_core::stream::stream_rendezvous_name(expected_token.as_bytes());
-    println!("session service instance: {service_name}");
-    flush_now();
+    let preferred: Vec<String> = connect.map(str::to_owned).into_iter().collect();
     let mut served = 0;
     loop {
-        let mut transport_opt = None;
-
-        // 1. Try dialing the proxy directly if it is advertising via mDNS
-        let discovered = refineid_rapp_core::stream::discover_stream_endpoints(
-            Some(&service_name),
-            Duration::from_millis(800),
-        );
-        if !discovered.is_empty() {
-            println!("dialing proxy for session at {discovered:?}...");
-            flush_now();
-            if let Ok(transport) = refineid_rapp_core::stream::dial(
-                &discovered,
-                CANDIDATE_ID,
-                Duration::from_secs(10),
-                &refineid_rapp_core::stream::StreamRendezvous::Session(expected_token),
-            ) {
-                transport_opt = Some(transport);
-            }
-        }
-
-        // 2. Check listener for reverse-dial harness
-        if transport_opt.is_none() {
-            match listener.accept_timeout(Duration::from_millis(500)) {
-                Ok(Some(StreamAccept::Session {
-                    rendezvous_token,
-                    transport,
-                })) => {
-                    if rendezvous_token == expected_token {
-                        transport_opt = Some(transport);
-                    } else {
-                        println!("discarded a session for an unknown rendezvous token");
-                    }
-                }
-                Ok(Some(StreamAccept::Pairing(_))) => {
-                    println!("discarded a pairing attempt; no offer is active");
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    println!("discarded connection: {error:?}");
-                }
-            }
-        }
-
-        let Some(transport) = transport_opt else {
-            std::thread::sleep(Duration::from_millis(200));
+        let Ok(transport) = dial_session(
+            expected_token,
+            &preferred,
+            &[],
+            BROWSE_WINDOW,
+            RECEIVE_DEADLINE,
+        ) else {
+            std::thread::sleep(SESSION_RETRY);
             continue;
         };
 
@@ -703,16 +434,12 @@ fn mock_proxy_cmd(arguments: &[String]) -> Result<(), String> {
                 .ok_or_else(|| format!("{flag} requires a value"))
         };
         match flag.as_str() {
-            "--connect" => options.connect = Some(value()?),
             "--code" => {
-                let val = value()?;
-                if !is_valid_pairing_code(&val) {
-                    return Err(format!("invalid 6-digit pairing code: {val}"));
-                }
-                options.code = Some(normalize_pairing_code(&val));
+                options.code = Some(
+                    normalize_pairing_code(&value()?)
+                        .ok_or("a pairing code is six Crockford base32 characters")?,
+                );
             }
-            "--uri" => options.uri = Some(value()?),
-            "--candidate-id" => options.candidate_id = value()?,
             "--name" => options.name = value()?,
             "--platform" => options.platform = value()?,
             "--count" => {
@@ -753,7 +480,7 @@ fn mock_proxy_cmd(arguments: &[String]) -> Result<(), String> {
                     .parse::<u8>()
                     .map_err(|_| format!("invalid pin2 attempts: {val}"))?;
             }
-            "--listen" => options.listen = Some(value()?),
+            "--listen" => options.listen = value()?,
             "--resume" => options.resume_state = Some(value()?),
             "--save-state" => options.save_state = Some(value()?),
             other => return Err(format!("unknown flag {other}")),
@@ -861,10 +588,12 @@ fn masked(person_id: &str) -> String {
     format!("{visible}…")
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "CLI helper orchestrating local mock pairing setup"
-)]
+/// Reads a DER file when a path was given.
+fn read_optional(path: Option<&str>, label: &str) -> Result<Option<Vec<u8>>, String> {
+    path.map(|path| std::fs::read(path).map_err(|e| format!("cannot read {label} at {path}: {e}")))
+        .transpose()
+}
+
 fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
     let mut cert_path = None;
     let mut root_ca_path = None;
@@ -889,57 +618,11 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
         }
     }
 
-    let cert_der = if let Some(path) = cert_path {
-        std::fs::read(&path).map_err(|e| format!("cannot read cert at {path}: {e}"))?
-    } else {
-        refineid_rapp_cli::mock_proxy::DEFAULT_MOCK_CERT_DER.to_vec()
-    };
-    let root_ca_der = if let Some(path) = root_ca_path {
-        Some(std::fs::read(&path).map_err(|e| format!("cannot read root CA at {path}: {e}"))?)
-    } else {
-        None
-    };
-    let intermediate_ca_der = if let Some(path) = intermediate_ca_path {
-        Some(
-            std::fs::read(&path)
-                .map_err(|e| format!("cannot read intermediate CA at {path}: {e}"))?,
-        )
-    } else {
-        None
-    };
+    let cert_der = read_optional(cert_path.as_deref(), "certificate")?
+        .unwrap_or_else(|| refineid_rapp_cli::mock_proxy::DEFAULT_MOCK_CERT_DER.to_vec());
+    let root_ca_der = read_optional(root_ca_path.as_deref(), "root CA")?;
+    let intermediate_ca_der = read_optional(intermediate_ca_path.as_deref(), "intermediate CA")?;
 
-    let test_code = "654321";
-    let offer_id = offer_id_from_code(test_code).map_err(|e| format!("invalid code: {e:?}"))?;
-
-    let requested_profiles = vec![
-        PROFILE_CARD_STATUS.to_owned(),
-        PROFILE_AUTHENTICATION.to_owned(),
-        PROFILE_DOCUMENT_SIGNING.to_owned(),
-    ];
-
-    let listener = StreamListener::bind("127.0.0.1:0", CANDIDATE_ID, Duration::from_secs(10))
-        .map_err(|e| format!("cannot bind listener: {e:?}"))?;
-    let port = listener
-        .local_port()
-        .map_err(|e| format!("cannot get port: {e:?}"))?;
-    let local_endpoint = format!("127.0.0.1:{port}");
-
-    let stream_params = stream_candidate_parameters(std::slice::from_ref(&local_endpoint))
-        .map_err(|e| format!("parameters: {e:?}"))?;
-    let offer = PairingOffer::reconstruct(
-        offer_id,
-        vec![refineid_rapp::MANDATORY_PAIRING_SUITE.into()],
-        requested_profiles.clone(),
-        vec![TransportCandidate {
-            profile: STREAM_PROFILE.into(),
-            candidate_id: CANDIDATE_ID.into(),
-            parameters: stream_params,
-        }],
-        OFFER_TTL_MAX_MS,
-    )
-    .map_err(|e| format!("offer reconstruct failed: {e:?}"))?;
-
-    let proxy_endpoint = local_endpoint;
     let proxy_cert = cert_der.clone();
     let proxy_root = root_ca_der.clone();
     let proxy_inter = intermediate_ca_der.clone();
@@ -947,14 +630,7 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
 
     let proxy_handle = std::thread::spawn(move || {
         let options = MockProxyOptions {
-            connect: Some(proxy_endpoint),
-            listen: if serve {
-                Some("127.0.0.1:47110".to_owned())
-            } else {
-                None
-            },
-            code: Some(test_code.to_owned()),
-            candidate_id: CANDIDATE_ID.to_owned(),
+            code: Some(MOCK_PAIRING_CODE.to_owned()),
             count: usize::from(!serve),
             cert_der: proxy_cert,
             root_ca_der: proxy_root,
@@ -977,22 +653,27 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
         MemoryJournal::new(),
     );
 
-    let accepted = listener
-        .accept()
-        .map_err(|e| format!("accept pairing: {e:?}"))?;
-    let StreamAccept::Pairing(transport) = accepted else {
-        return Err("expected StreamAccept::Pairing".into());
+    let endpoints = [DEFAULT_LISTEN.to_owned()];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let transport = loop {
+        match dial(
+            &endpoints,
+            STREAM_CANDIDATE_ID,
+            Duration::from_secs(10),
+            &StreamRendezvous::Pairing,
+        ) {
+            Ok(transport) => break transport,
+            Err(_) if Instant::now() < deadline && !proxy_handle.is_finished() => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => return Err(format!("cannot reach the mock custodian: {error:?}")),
+        }
     };
 
-    let mut offer_slot = Some(offer);
     let pair_id = requester
-        .pair_with_code(
-            &mut offer_slot,
-            test_code,
-            &requested_profiles,
-            transport,
-            |_peer, requested| Some(requested.to_vec()),
-        )
+        .pair_with_code(MOCK_PAIRING_CODE, transport, |_peer, requested| {
+            Some(requested.to_vec())
+        })
         .map_err(|e| format!("pairing failed: {e:?}"))?;
 
     requester
@@ -1075,10 +756,6 @@ fn list_pairing() -> Result<(), String> {
         println!(
             "      Rendezvous Token: {}",
             hex::encode(record.rendezvous_token.as_bytes())
-        );
-        println!(
-            "      Service Name: {}",
-            refineid_rapp_core::stream::stream_rendezvous_name(record.rendezvous_token.as_bytes())
         );
         println!("      Profiles: {}", record.granted_profiles.join(", "));
         println!("      Has Auth Cert: {}", record.auth_cert.is_some());

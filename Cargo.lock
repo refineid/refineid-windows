@@ -733,12 +733,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "qrcode"
-version = "0.14.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
-
-[[package]]
 name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -821,7 +815,7 @@ dependencies = [
 [[package]]
 name = "refineid-digest"
 version = "26.10.8"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#6fcd7835128348f9c22038c547bc195504eaf151"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#663916e84e1e182275f4f645fe2b6829b43f53bd"
 dependencies = [
  "sha1",
  "sha2 0.11.0",
@@ -919,7 +913,7 @@ dependencies = [
 [[package]]
 name = "refineid-rapp"
 version = "26.10.8"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#6fcd7835128348f9c22038c547bc195504eaf151"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#663916e84e1e182275f4f645fe2b6829b43f53bd"
 dependencies = [
  "chacha20poly1305",
  "curve25519-dalek",
@@ -938,7 +932,6 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "p384",
- "qrcode",
  "refineid-lib-core",
  "refineid-rapp",
  "refineid-rapp-core",
@@ -975,7 +968,7 @@ dependencies = [
 [[package]]
 name = "refineid-remote"
 version = "26.10.8"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#6fcd7835128348f9c22038c547bc195504eaf151"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#663916e84e1e182275f4f645fe2b6829b43f53bd"
 dependencies = [
  "refineid-digest",
 ]

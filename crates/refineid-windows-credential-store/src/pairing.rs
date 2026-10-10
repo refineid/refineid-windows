@@ -122,6 +122,14 @@ impl PairingStore for CredentialPairingStore {
         self.persist()
     }
 
+    fn pair_ids(&self) -> Vec<PairId> {
+        self.records
+            .iter()
+            .rev()
+            .map(|entry| entry.pair_id)
+            .collect()
+    }
+
     fn remove(&mut self, pair_id: PairId) -> Result<(), StoreError> {
         let before = self.records.len();
         self.records.retain(|entry| entry.pair_id != pair_id);
@@ -395,8 +403,6 @@ mod tests {
             signature_cert: None,
             root_ca: None,
             intermediate_ca: None,
-            candidate_id: None,
-            transport_profile: None,
         }
     }
 

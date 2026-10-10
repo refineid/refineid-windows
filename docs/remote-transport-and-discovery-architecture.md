@@ -1,7 +1,7 @@
 # RefineID Windows: Remote Transport & Discovery Architecture
 
 - **Document Version**: `26.10.3`
-- **Protocol Versions**: `26.9.28`, `26.10.1`
+- **Protocol Version**: `26.10.9`
 - **Status**: Normative Architecture & Migration Plan
 - **Applies To**: `RefineID-Windows` (`RefineID-winui`, `refineid-minidriver`, `refineid-pkcs11`, `refineid-rapp-core`)
 - **Companion Specification**: [RAPP Transport and Discovery Hierarchy Specification](../../refineid-core/docs/protocols/rapp-transport-and-discovery-hierarchy.md)
@@ -154,7 +154,7 @@ In the legacy codebase:
    - When unchecked, the application generates zero network traffic and listens on zero sockets.
    - When checked, DNS-SD service browsing and BLE scanning activate to discover announced mobile readers.
 3. **One-Time Pairing UI**:
-   - When pairing a new phone, the desktop prompts for the 6-character Crockford Base32 code displayed on the phone (per RAPP v26.10.1 §3).
+   - When pairing a new phone, the desktop prompts for the 6-character Crockford Base32 code displayed on the phone (per RAPP v26.10.9 §3).
    - Once paired, the trust record is stored in Windows Credential Store (`refineid-windows-credential-store`).
 
 ---

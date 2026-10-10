@@ -3,10 +3,12 @@
 //!
 //! The proxy here is test scaffolding, not a product: the real proxies are
 //! the holder's phones. It speaks the exact wire so the requester is
-//! exercised end to end - pairing with grant agreement, sessions with the
-//! parameter echo, the prepare/commit/result exchange, denial, credential
+//! exercised end to end - code pairing through `CPace` KC2 and
+//! `Noise_XXpsk3` with grant agreement, `Noise_KK` sessions with the
+//! parameter echo, direct operations and their results, denial, credential
 //! rejection revoking the pairing, immediate revocation on the first
-//! authenticated violation, and ambiguity on a committed close.
+//! authenticated violation, and ambiguity on an unanswered consequential
+//! request.
 
 #![allow(
     clippy::unwrap_used,
@@ -21,11 +23,11 @@ use std::time::Duration;
 
 use refineid_rapp::{
     BinaryFrame, CardInspection, CardKeyProfile as KeyProfile, CardOperation, CardOperationResult,
-    CloseReason, EndpointRole, EstablishedEndpoint, OfferId, OperationReference,
+    CloseReason, CpaceKc2Responder, EndpointRole, EstablishedEndpoint, OperationReference,
     OperationResultMessage, PairId, PairRecord, PairStore, PairStoreError, PairTombstone,
-    PairingHandshake, PairingOffer, PairingSecret, ProxyFailure, ReceiveOutcome,
-    SessionCloseMessage, SessionHandshake, SignatureAlgorithm, TransportCandidate, TypedMessage,
-    generate_pair_key_material,
+    PairingHandshake, ProxyFailure, ReceiveOutcome, SessionCloseMessage, SessionHandshake,
+    SignatureAlgorithm, TransportProfile, TypedMessage, generate_pair_key_material,
+    standard_pairing_context_v2,
 };
 use refineid_rapp_core::engine::{
     OperationOutcome, PairingError, Requester, RequesterConfig, SessionError,
@@ -35,18 +37,20 @@ use refineid_rapp_core::profiles::{PROFILE_AUTHENTICATION, PROFILE_CARD_STATUS};
 use refineid_rapp_core::store::{
     MemoryJournal, MemoryPairingStore, OperationJournal, PairingDisposition, PairingStore,
 };
-use refineid_rapp_core::transport::{FrameTransport, MEMORY_PROFILE, MemoryTransport};
+use refineid_rapp_core::stream::{STREAM_CANDIDATE_ID, STREAM_PROFILE};
+use refineid_rapp_core::transport::{FrameTransport, MemoryTransport};
 
 /// A generous deadline for scripted exchanges.
 const DEADLINE: Duration = Duration::from_secs(2);
-/// The candidate identifier used by every loopback test.
-const CANDIDATE: &str = "loopback-1";
-/// Test offer TTL in milliseconds.
-const TEST_OFFER_TTL_MS: u64 = 120_000;
+/// The candidate identifier every loopback connection reports: the
+/// in-memory transport stands in for a stream connection.
+const CANDIDATE: &str = STREAM_CANDIDATE_ID;
 /// Test monotonic timestamp in milliseconds.
 const TEST_MONOTONIC_TIMESTAMP_MS: u64 = 1_000_000;
-/// Static 32-byte offer identifier byte array for loopback tests.
-const TEST_OFFER_ID_BYTES: [u8; 32] = [0x51; 32];
+/// The code the scripted custodian shows.
+const SHOWN_CODE: &str = "7KX4M9";
+/// Fixed custodian scalar entropy for the scripted exchange.
+const CUSTODIAN_ENTROPY: [u8; 64] = [0x24; 64];
 
 /// The requester engine type under test.
 type TestRequester = Requester<MemoryPairingStore, MemoryJournal>;
@@ -55,29 +59,11 @@ fn test_requester() -> TestRequester {
     Requester::new(
         RequesterConfig {
             display_name: "Workstation".into(),
-            platform: "Windows".into(),
+            platform: "Linux".into(),
         },
         MemoryPairingStore::new(),
         MemoryJournal::new(),
     )
-}
-
-fn test_offer() -> PairingOffer {
-    PairingOffer::reconstruct(
-        OfferId::from_array(TEST_OFFER_ID_BYTES),
-        vec![refineid_rapp::MANDATORY_PAIRING_SUITE.into()],
-        vec![
-            PROFILE_CARD_STATUS.to_owned(),
-            PROFILE_AUTHENTICATION.to_owned(),
-        ],
-        vec![TransportCandidate {
-            profile: MEMORY_PROFILE.into(),
-            candidate_id: CANDIDATE.into(),
-            parameters: std::collections::BTreeMap::new(),
-        }],
-        TEST_OFFER_TTL_MS,
-    )
-    .unwrap()
 }
 
 /// A registered consequential operation for the authentication tests.
@@ -109,68 +95,93 @@ impl PairStore for MockProxyStore {
     }
 }
 
-/// Runs the proxy half of the pairing exchange and returns its stored half.
-fn proxy_pair(
-    mut transport: MemoryTransport,
-    offer: PairingOffer,
-    secret: &PairingSecret,
-    _granted: &[String],
-) -> PairRecord {
+/// The custodian's random offer for the stream transport.
+fn custodian_offer() -> refineid_rapp::PairingOffer {
+    let mut offer_id = [0_u8; refineid_rapp::OFFER_ID_SIZE];
+    getrandom::fill(&mut offer_id).unwrap();
+    refineid_rapp::PairingOffer::create(
+        refineid_rapp::OfferId::from_array(offer_id),
+        vec![
+            PROFILE_CARD_STATUS.to_owned(),
+            PROFILE_AUTHENTICATION.to_owned(),
+            "fi.refineid.document-signing.v1".to_owned(),
+        ],
+        &[TransportProfile::Stream],
+    )
+    .unwrap()
+}
+
+/// Serves the offer bootstrap (RAPP v26.10.9 section 4.2) and returns the
+/// offer and its `CPace` context.
+fn serve_offer<T: FrameTransport>(transport: &mut T) -> (refineid_rapp::PairingOffer, Vec<u8>) {
+    let offer = custodian_offer();
+    transport.send_frame(&offer.to_cbor().unwrap()).unwrap();
+    let context = standard_pairing_context_v2(
+        &offer.offer_hash().unwrap(),
+        STREAM_PROFILE,
+        STREAM_CANDIDATE_ID,
+    )
+    .unwrap();
+    (offer, context)
+}
+
+/// Runs the custodian half of pairing and returns its stored half: the
+/// offer bootstrap, `CPace` KC2 as responder, then `Noise_XXpsk3` under its
+/// key, then the hello and confirmation exchange.
+fn proxy_pair<T: FrameTransport>(mut transport: T, shown_code: &str) -> PairRecord {
     let now_ms = TEST_MONOTONIC_TIMESTAMP_MS;
+    let candidate = transport.candidate_id().to_owned();
+    let (offer, context) = serve_offer(&mut transport);
+
+    let step_one = BinaryFrame::reconstruct(transport.receive_frame().unwrap()).unwrap();
+    let (step_two, waiting) = CpaceKc2Responder::process_step1_frame(
+        shown_code,
+        &context,
+        &offer.offer_id,
+        &step_one,
+        &CUSTODIAN_ENTROPY,
+    )
+    .unwrap();
+    transport.send_frame(step_two.as_bytes()).unwrap();
+    let step_three = BinaryFrame::reconstruct(transport.receive_frame().unwrap()).unwrap();
+    let secret = waiting.process_step3_frame(&step_three).unwrap();
+
     let local_keys = generate_pair_key_material().unwrap();
     let mut handshake =
-        PairingHandshake::begin(EndpointRole::Proxy, offer, CANDIDATE, local_keys, secret).unwrap();
+        PairingHandshake::begin(EndpointRole::Proxy, offer, &candidate, local_keys, &secret)
+            .unwrap();
 
-    // Message 1 (Requester -> Proxy)
-    let m1_bytes = transport.receive_frame().unwrap();
-    let m1 = BinaryFrame::reconstruct(m1_bytes).unwrap();
+    let m1 = BinaryFrame::reconstruct(transport.receive_frame().unwrap()).unwrap();
     handshake.read_message(&m1).unwrap();
-
-    // Message 2 (Proxy -> Requester)
     let m2 = handshake.write_message().unwrap();
     transport.send_frame(m2.as_bytes()).unwrap();
-
-    // Message 3 (Requester -> Proxy)
-    let m3_bytes = transport.receive_frame().unwrap();
-    let m3 = BinaryFrame::reconstruct(m3_bytes).unwrap();
+    let m3 = BinaryFrame::reconstruct(transport.receive_frame().unwrap()).unwrap();
     handshake.read_message(&m3).unwrap();
 
     let mut confirmation = handshake.into_confirmation().unwrap();
-
-    // Message 4: Receive Requester Hello
-    let req_hello_bytes = transport.receive_frame().unwrap();
-    let req_hello_frame = BinaryFrame::reconstruct(req_hello_bytes).unwrap();
-    let _hello = confirmation
-        .receive_hello(&req_hello_frame, now_ms)
-        .unwrap();
-
-    // Message 5: Send Proxy Hello
+    let hello = BinaryFrame::reconstruct(transport.receive_frame().unwrap()).unwrap();
+    confirmation.receive_hello(&hello, now_ms).unwrap();
     let proxy_hello = confirmation
         .send_hello("Phone".into(), "iOS".into())
         .unwrap();
     transport.send_frame(proxy_hello.as_bytes()).unwrap();
-
-    // Message 6: Receive Requester Confirmation
-    let req_conf_bytes = transport.receive_frame().unwrap();
-    let req_conf_frame = BinaryFrame::reconstruct(req_conf_bytes).unwrap();
-    let req_conf = confirmation
-        .receive_confirmation(&req_conf_frame, now_ms)
-        .unwrap();
-    let granted_profiles = req_conf.to_vec();
-
-    // Message 7: Send Proxy Confirmation
-    let proxy_conf = confirmation.send_confirmation(granted_profiles).unwrap();
-    transport.send_frame(proxy_conf.as_bytes()).unwrap();
-
+    let requester_confirmation =
+        BinaryFrame::reconstruct(transport.receive_frame().unwrap()).unwrap();
+    let granted = confirmation
+        .receive_confirmation(&requester_confirmation, now_ms)
+        .unwrap()
+        .to_vec();
+    let proxy_confirmation = confirmation.send_confirmation(granted).unwrap();
+    transport.send_frame(proxy_confirmation.as_bytes()).unwrap();
     confirmation.into_pair_record(now_ms).unwrap()
 }
 
-struct ProxySession {
+struct ProxySession<T: FrameTransport> {
     endpoint: EstablishedEndpoint,
-    transport: MemoryTransport,
+    transport: T,
 }
 
-impl ProxySession {
+impl<T: FrameTransport> ProxySession<T> {
     fn send(&mut self, message: &TypedMessage) {
         let frame = self.endpoint.send(message).unwrap();
         self.transport.send_frame(frame.as_bytes()).unwrap();
@@ -192,9 +203,13 @@ impl ProxySession {
 }
 
 /// Accepts one session as the proxy and completes the ready exchange.
-fn proxy_accept_session(pair_record: &PairRecord, mut transport: MemoryTransport) -> ProxySession {
+fn proxy_accept_session<T: FrameTransport>(
+    pair_record: &PairRecord,
+    mut transport: T,
+) -> ProxySession<T> {
     let now_ms = TEST_MONOTONIC_TIMESTAMP_MS;
-    let mut handshake = SessionHandshake::begin_proxy(pair_record).unwrap();
+    let mut handshake =
+        SessionHandshake::begin_proxy(pair_record, TransportProfile::Stream).unwrap();
 
     // Message 1 (Requester -> Proxy)
     let m1_bytes = transport.receive_frame().unwrap();
@@ -225,35 +240,15 @@ fn proxy_accept_session(pair_record: &PairRecord, mut transport: MemoryTransport
     }
 }
 
-/// Pairs a fresh requester with a proxy thread and returns both halves.
+/// Pairs a fresh requester with a custodian thread and returns both halves.
 fn paired(requester: &mut TestRequester, granted: &[String]) -> (PairId, PairRecord) {
-    let secret = PairingSecret::from_random_bytes([0x77u8; 32]);
-    let offer = test_offer();
-    let proxy_offer = test_offer();
     let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
-    let granted_for_proxy = granted.to_vec();
-    let secret_for_proxy = PairingSecret::from_random_bytes([0x77u8; 32]);
-    let proxy = std::thread::spawn(move || {
-        proxy_pair(
-            proxy_transport,
-            proxy_offer,
-            &secret_for_proxy,
-            &granted_for_proxy,
-        )
-    });
-    let profile_request: Vec<String> = granted.to_vec();
-    let mut offer_slot = Some(offer);
+    let proxy = std::thread::spawn(move || proxy_pair(proxy_transport, SHOWN_CODE));
     let pair_id = requester
-        .pair_with_secret(
-            &mut offer_slot,
-            &secret,
-            &profile_request,
-            requester_transport,
-            |peer, _requested| {
-                assert_eq!(peer.display_name, "Phone");
-                Some(granted.to_vec())
-            },
-        )
+        .pair_with_code("7k x4-m9", requester_transport, |peer, _requested| {
+            assert_eq!(peer.display_name, "Phone");
+            Some(granted.to_vec())
+        })
         .unwrap();
     let proxy_record = proxy.join().unwrap();
     assert_eq!(proxy_record.pair_id(), pair_id);
@@ -277,48 +272,43 @@ fn pairing_stores_matching_records_on_both_sides() {
 }
 
 #[test]
-fn wrong_secret_fails_pairing_without_storing() {
+fn a_mistyped_code_fails_at_the_custodian_tag_and_stores_nothing() {
     let mut requester = test_requester();
-    let offer = test_offer();
-    let proxy_offer = test_offer();
-    let req_secret = PairingSecret::from_random_bytes([0x02; 32]);
-    let proxy_secret = PairingSecret::from_random_bytes([0x01; 32]);
     let (requester_transport, mut proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
     let proxy = std::thread::spawn(move || {
-        let local_keys = generate_pair_key_material().unwrap();
-        let mut handshake = PairingHandshake::begin(
-            EndpointRole::Proxy,
-            proxy_offer,
-            CANDIDATE,
-            local_keys,
-            &proxy_secret,
+        let (offer, context) = serve_offer(&mut proxy_transport);
+        let step_one = BinaryFrame::reconstruct(proxy_transport.receive_frame().unwrap()).unwrap();
+        let (step_two, _waiting) = CpaceKc2Responder::process_step1_frame(
+            SHOWN_CODE,
+            &context,
+            &offer.offer_id,
+            &step_one,
+            &CUSTODIAN_ENTROPY,
         )
         .unwrap();
-        let m1 = proxy_transport.receive_frame().unwrap();
-        let m1_frame = BinaryFrame::reconstruct(m1).unwrap();
-        if handshake.read_message(&m1_frame).is_ok()
-            && let Ok(m2) = handshake.write_message()
-        {
-            let _ = proxy_transport.send_frame(m2.as_bytes());
-        }
+        proxy_transport.send_frame(step_two.as_bytes()).unwrap();
+        // The requester refuses T_B and never answers with T_A.
+        assert!(proxy_transport.receive_frame().is_err());
     });
-    let mut offer_slot = Some(offer);
-    let outcome = requester.pair_with_secret(
-        &mut offer_slot,
-        &req_secret,
-        &[PROFILE_CARD_STATUS.to_owned()],
-        requester_transport,
-        |_, _| panic!("an unauthenticated attempt must never reach confirmation"),
-    );
+    let outcome = requester.pair_with_code("7KX4MA", requester_transport, |_, _| {
+        panic!("an unauthenticated attempt must never reach confirmation")
+    });
     proxy.join().unwrap();
-    assert!(matches!(
-        outcome,
-        Err(PairingError::HandshakeFailed | PairingError::Transport(_))
-    ));
+    assert_eq!(outcome, Err(PairingError::CodeMismatch));
+    assert!(requester.store().pair_ids().is_empty());
 }
 
 #[test]
-fn card_status_completes_without_commit() {
+fn input_that_is_not_a_code_never_touches_the_transport() {
+    let mut requester = test_requester();
+    let (requester_transport, mut proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    let outcome = requester.pair_with_code("7KX4MU", requester_transport, |_, _| None);
+    assert_eq!(outcome, Err(PairingError::InvalidCode));
+    assert!(proxy_transport.receive_frame().is_err());
+}
+
+#[test]
+fn card_status_completes_as_a_safe_read() {
     let mut requester = test_requester();
     let granted = vec![PROFILE_CARD_STATUS.to_owned()];
     let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
@@ -547,7 +537,7 @@ fn first_sequence_violation_revokes_the_pairing() {
         .execute(&mut session, &CardOperation::InspectCard, 30_000)
         .unwrap();
     proxy.join().unwrap();
-    // Pre-commit closure classifies the operation as cancelled.
+    // An unanswered safe read classifies as cancelled.
     assert_eq!(outcome, OperationOutcome::Cancelled);
     // Section 14.6: the first authenticated violation revokes immediately.
     let record = requester.store().get(pair_id).unwrap();
@@ -561,4 +551,82 @@ fn first_sequence_violation_revokes_the_pairing() {
         requester.connect(pair_id, requester_transport),
         Err(SessionError::NotPaired(PairingDisposition::Revoked))
     ));
+}
+
+#[test]
+fn stream_pairing_and_session_route_only_by_their_preambles() {
+    use refineid_rapp::StreamRendezvous;
+    use refineid_rapp_core::stream::{StreamAccept, StreamListener, dial};
+
+    let listener = StreamListener::bind("127.0.0.1:0", STREAM_CANDIDATE_ID, DEADLINE).unwrap();
+    let endpoints = vec![format!("127.0.0.1:{}", listener.local_port().unwrap())];
+    let custodian = std::thread::spawn(move || {
+        let StreamAccept::Pairing(transport) = listener.accept().unwrap() else {
+            panic!("pairing opens with the pairing preamble");
+        };
+        let record = proxy_pair(transport, SHOWN_CODE);
+        let StreamAccept::Session {
+            rendezvous_token,
+            transport,
+        } = listener.accept().unwrap()
+        else {
+            panic!("a session opens with the session preamble");
+        };
+        assert_eq!(rendezvous_token, record.rendezvous_token());
+        let mut session = proxy_accept_session(&record, transport);
+        let TypedMessage::OperationRequest(request) = session.receive() else {
+            panic!("expected an operation request");
+        };
+        let reference = OperationReference {
+            operation_id: request.operation_id,
+            request_hash: request.request_hash().unwrap(),
+        };
+        session.send(&TypedMessage::OperationResult(
+            OperationResultMessage::completed(
+                reference,
+                &CardOperationResult::Certificate(vec![0x30, 0x03, 0x02, 0x01, 0x01]),
+            ),
+        ));
+        let TypedMessage::OperationResultAck(acknowledged) = session.receive() else {
+            panic!("expected the result to be acknowledged");
+        };
+        assert_eq!(acknowledged, reference);
+    });
+
+    let mut requester = test_requester();
+    let pairing = dial(
+        &endpoints,
+        STREAM_CANDIDATE_ID,
+        DEADLINE,
+        &StreamRendezvous::Pairing,
+    )
+    .unwrap();
+    let pair_id = requester
+        .pair_with_code(SHOWN_CODE, pairing, |_, requested| Some(requested.to_vec()))
+        .unwrap();
+    let token = requester.store().get(pair_id).unwrap().rendezvous_token;
+    let transport = dial(
+        &endpoints,
+        STREAM_CANDIDATE_ID,
+        DEADLINE,
+        &StreamRendezvous::Session(token),
+    )
+    .unwrap();
+    let mut session = requester.connect(pair_id, transport).unwrap();
+    let outcome = requester
+        .execute(
+            &mut session,
+            &CardOperation::ReadCertificate {
+                kind: refineid_rapp::CertificateKind::Authentication,
+            },
+            30_000,
+        )
+        .unwrap();
+    custodian.join().unwrap();
+    assert_eq!(
+        outcome,
+        OperationOutcome::Completed(CardOperationResult::Certificate(vec![
+            0x30, 0x03, 0x02, 0x01, 0x01
+        ]))
+    );
 }

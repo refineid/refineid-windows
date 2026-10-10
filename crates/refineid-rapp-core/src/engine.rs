@@ -1,12 +1,21 @@
-//! The requester engine: the Windows side of RAPP.
+//! The requester engine: the workstation side of RAPP v26.10.9.
 //!
 //! The engine drives pairing, sessions, and operations using the canonical
 //! protocol boundaries from `refineid_rapp`.
 //!
-//! The engine is blocking and synchronous: the minidriver, PKCS#11 provider,
+//! The engine is blocking and synchronous: the PKCS#11 module, TLS client,
 //! CLI, and GUI call it from their own threads.
 
+use std::time::{Duration, Instant};
+
 use zeroize::Zeroizing;
+
+/// Noise handshake completion window after `CPace` success (section 3.3).
+const POST_PAKE_HANDSHAKE: Duration = Duration::from_millis(refineid_rapp::POST_PAKE_HANDSHAKE_MS);
+
+/// Hello, confirmation, and storage window after Noise completion (section 3.3).
+const POST_PAKE_CONFIRMATION: Duration =
+    Duration::from_millis(refineid_rapp::POST_PAKE_CONFIRMATION_MS);
 
 use crate::ids::{OperationId, PairId, RandomIdExt, SessionId};
 use crate::limits;
@@ -50,8 +59,13 @@ pub enum PairingError {
     Offer(OfferError),
     /// Key material could not be produced.
     KeyGeneration,
-    /// The handshake failed; the offer is not consumed.
+    /// The handshake failed.
     HandshakeFailed,
+    /// The input is not a six-character pairing code (section 3.1).
+    InvalidCode,
+    /// The custodian's confirmation tag did not verify: the code typed here
+    /// differs from the one the custodian shows.
+    CodeMismatch,
     /// The transport failed during pairing.
     Transport(TransportError),
     /// The peer's parameter echo did not match the local view.
@@ -71,6 +85,10 @@ pub enum PairingError {
     Store(StoreError),
     /// The channel failed after authentication.
     Channel,
+    /// The connection's transport profile is not a registered one.
+    UnregisteredTransport,
+    /// A post-PAKE phase passed its section 3.3 deadline.
+    DeadlineExpired,
 }
 
 impl core::fmt::Display for PairingError {
@@ -79,6 +97,10 @@ impl core::fmt::Display for PairingError {
             Self::Offer(e) => write!(f, "pairing offer error: {e}"),
             Self::KeyGeneration => f.write_str("key generation failed"),
             Self::HandshakeFailed => f.write_str("handshake failed"),
+            Self::UnregisteredTransport => f.write_str("unregistered transport profile"),
+            Self::DeadlineExpired => f.write_str("pairing deadline expired"),
+            Self::InvalidCode => f.write_str("not a pairing code"),
+            Self::CodeMismatch => f.write_str("pairing code does not match the phone"),
             Self::Transport(e) => write!(f, "transport error: {e:?}"),
             Self::ParameterMismatch => f.write_str("parameter mismatch"),
             Self::ProtocolViolation => f.write_str("protocol violation"),
@@ -183,7 +205,7 @@ impl core::error::Error for AdmissionError {}
 pub enum OperationOutcome {
     /// The result was delivered, schema-validated, and acknowledged.
     Completed(CardOperationResult),
-    /// The proxy user denied before commit.
+    /// The holder declined on the phone.
     Denied,
     /// Cancellation or expiry before physical transmission.
     Cancelled,
@@ -273,113 +295,119 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         &self.journal
     }
 
-    /// Runs the requester half of a manual-code pairing exchange: executes the `CPace`
-    /// PAKE exchange over the transport using the 6-digit pairing code to derive
-    /// the mutual 256-bit pairing secret, then completes the pairing handshake.
+    /// Pairs with the custodian showing `code`, as the requester (RAPP
+    /// v26.10.9 sections 3, 4.2 and 6).
+    ///
+    /// The transport is already past its `"pairing"` routing preamble. The
+    /// custodian's first frame is its offer; the requester checks it lists
+    /// the connection's transport, sends `Y_A`, verifies the custodian's
+    /// `Y_B || T_B`, answers with `T_A`, and hands the `CPace` key to
+    /// `Noise_XXpsk3` under the 10 s post-PAKE deadlines of section 3.3; the
+    /// pairing hello and confirmation follow inside that channel. `confirm`
+    /// sees the custodian's introduction and returns the profiles to grant,
+    /// or `None` to refuse.
     ///
     /// # Errors
-    /// Returns [`PairingError`] on `CPace` PAKE failure, handshake failure,
-    /// parameter mismatch, transport loss, or invalid grant.
+    /// [`PairingError::InvalidCode`] for input that is not a pairing code
+    /// (checked before any frame is read), [`PairingError::CodeMismatch`]
+    /// when the custodian's confirmation tag does not verify (a mistyped
+    /// code), and the other [`PairingError`] variants on offer, handshake,
+    /// deadline, transport, or grant failures.
     pub fn pair_with_code<Transport: FrameTransport>(
         &mut self,
-        offer_slot: &mut Option<PairingOffer>,
         code: &str,
-        requested_profiles: &[String],
         mut transport: Transport,
         confirm: impl FnOnce(&PeerIntroduction, &[String]) -> Option<Vec<String>>,
     ) -> Result<PairId, PairingError> {
-        let Some(offer) = offer_slot.take() else {
-            return Err(PairingError::HandshakeFailed);
-        };
-        let mut entropy = [0u8; 64];
-        getrandom::fill(&mut entropy).map_err(|_| PairingError::KeyGeneration)?;
-        let cpace = refineid_rapp::cpace::CpaceState::new(
-            refineid_rapp::HandshakeRole::Initiator,
-            code,
-            &offer.offer_id,
-            &entropy,
-        )
-        .map_err(|_| PairingError::HandshakeFailed)?;
-        zeroize::Zeroize::zeroize(&mut entropy);
+        let normalized = crate::offer::normalize_pairing_code(code)
+            .map(Zeroizing::new)
+            .ok_or(PairingError::InvalidCode)?;
+        let offer = crate::offer::read_bootstrap(&mut transport).map_err(|error| match error {
+            crate::offer::BootstrapError::Transport(error) => PairingError::Transport(error),
+            crate::offer::BootstrapError::UnregisteredTransport => {
+                PairingError::UnregisteredTransport
+            }
+            crate::offer::BootstrapError::Offer(error) => PairingError::Offer(error),
+        })?;
+        let profile = refineid_rapp::TransportProfile::parse(transport.profile())
+            .ok_or(PairingError::UnregisteredTransport)?;
+        let candidate_id = offer
+            .entry(profile)
+            .map(|entry| entry.candidate_id.clone())
+            .ok_or(PairingError::UnregisteredTransport)?;
+        let offer_hash = offer
+            .offer_hash()
+            .map_err(|_| PairingError::HandshakeFailed)?;
+        let context =
+            refineid_rapp::standard_pairing_context_v2(&offer_hash, profile.name(), &candidate_id)
+                .map_err(|_| PairingError::HandshakeFailed)?;
+        let mut entropy = Zeroizing::new([0u8; 64]);
+        getrandom::fill(entropy.as_mut()).map_err(|_| PairingError::KeyGeneration)?;
+        let (initiator, step_one) =
+            refineid_rapp::CpaceKc2Initiator::new(&normalized, &context, &offer.offer_id, &entropy)
+                .map_err(|_| PairingError::HandshakeFailed)?;
+        drop(entropy);
 
-        // 1. Send Initiator's CPace frame
-        let my_msg = cpace
-            .write_message()
+        let step_one_frame = refineid_rapp::encode_kc2_step1_frame(&step_one)
             .map_err(|_| PairingError::HandshakeFailed)?;
         transport
-            .send_frame(my_msg.as_bytes())
+            .send_frame(step_one_frame.as_bytes())
+            .map_err(PairingError::Transport)?;
+        let step_two = transport.receive_frame().map_err(PairingError::Transport)?;
+        let step_two =
+            BinaryFrame::reconstruct(step_two).map_err(|_| PairingError::HandshakeFailed)?;
+        let (step_three, pairing_secret) =
+            initiator
+                .process_step2_frame(&step_two)
+                .map_err(|error| match error {
+                    refineid_rapp::CpaceError::ConfirmationTagMismatch => {
+                        PairingError::CodeMismatch
+                    }
+                    _ => PairingError::HandshakeFailed,
+                })?;
+        transport
+            .send_frame(step_three.as_bytes())
             .map_err(PairingError::Transport)?;
 
-        // 2. Receive Responder's CPace frame
-        let peer_frame_bytes = transport.receive_frame().map_err(PairingError::Transport)?;
-        let peer_frame = BinaryFrame::reconstruct(peer_frame_bytes)
-            .map_err(|_| PairingError::HandshakeFailed)?;
-        let derived_secret = cpace
-            .read_message(&peer_frame)
-            .map_err(|_| PairingError::HandshakeFailed)?;
-
-        // 3. Proceed with standard Noise XXpsk3 pairing using derived secret
-        *offer_slot = Some(offer);
-        self.pair_with_secret(
-            offer_slot,
-            &derived_secret,
-            requested_profiles,
+        let requested: Vec<String> = offer.profiles.clone();
+        self.complete_pairing(
+            offer,
+            &candidate_id,
+            &pairing_secret,
+            &requested,
             transport,
             confirm,
         )
     }
 
-    /// Runs the requester half of the pairing exchange over an accepted
-    /// candidate transport using an ephemeral default secret.
-    ///
-    /// # Errors
-    /// Returns [`PairingError`] on handshake failure, parameter mismatch,
-    /// transport loss, or invalid grant.
-    pub fn pair<Transport: FrameTransport>(
-        &mut self,
-        offer_slot: &mut Option<PairingOffer>,
-        requested_profiles: &[String],
-        transport: Transport,
-        confirm: impl FnOnce(&PeerIntroduction, &[String]) -> Option<Vec<String>>,
-    ) -> Result<PairId, PairingError> {
-        let secret = refineid_rapp::PairingSecret::from_random_bytes([0u8; 32]);
-        self.pair_with_secret(offer_slot, &secret, requested_profiles, transport, confirm)
-    }
-
-    /// Runs the requester half of the pairing exchange over an accepted
-    /// candidate transport with a verified pairing secret.
-    ///
-    /// # Errors
-    /// Returns [`PairingError`] on handshake failure, parameter mismatch,
-    /// transport loss, or invalid grant.
+    /// Runs `Noise_XXpsk3` under the `CPace` key, then the pairing hello and
+    /// confirmation, and stores the resulting record.
     #[allow(
         clippy::too_many_lines,
         reason = "pairing handshake walks 7 sequential wire messages"
     )]
-    pub fn pair_with_secret<Transport: FrameTransport>(
+    fn complete_pairing<Transport: FrameTransport>(
         &mut self,
-        offer_slot: &mut Option<PairingOffer>,
+        offer: PairingOffer,
+        candidate_id: &str,
         pairing_secret: &refineid_rapp::PairingSecret,
         requested_profiles: &[String],
         mut transport: Transport,
         confirm: impl FnOnce(&PeerIntroduction, &[String]) -> Option<Vec<String>>,
     ) -> Result<PairId, PairingError> {
-        let Some(offer) = offer_slot.take() else {
-            return Err(PairingError::HandshakeFailed);
-        };
         let offer_profiles = offer.profiles.clone();
+        let handshake_deadline = Instant::now() + POST_PAKE_HANDSHAKE;
         let local_keys = generate_pair_key_material().map_err(|_| PairingError::KeyGeneration)?;
         let mut handshake = match PairingHandshake::begin(
             EndpointRole::Requester,
             offer,
-            transport.candidate_id(),
+            candidate_id,
             local_keys,
             pairing_secret,
         ) {
             Ok(h) => h,
             Err(fail) => {
-                let (err, returned_offer) = fail.into_parts();
-                *offer_slot = Some(returned_offer);
+                let (err, _offer) = fail.into_parts();
                 return Err(match err {
                     refineid_rapp::PairingError::Offer(e) => PairingError::Offer(e),
                     refineid_rapp::PairingError::CandidateNotUnique => {
@@ -417,6 +445,10 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         if !handshake.is_complete() {
             return Err(PairingError::HandshakeFailed);
         }
+        if Instant::now() > handshake_deadline {
+            return Err(PairingError::DeadlineExpired);
+        }
+        let confirmation_deadline = Instant::now() + POST_PAKE_CONFIRMATION;
 
         let mut confirmation = handshake
             .into_confirmation()
@@ -495,6 +527,10 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
                 _ => PairingError::ProtocolViolation,
             })?;
 
+        if Instant::now() > confirmation_deadline {
+            return Err(PairingError::DeadlineExpired);
+        }
+
         // Into PairRecord and store
         let pair_record = confirmation
             .into_pair_record(now_ms)
@@ -533,8 +569,10 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         let core_record = record
             .to_core_pair_record()
             .map_err(|_| SessionError::EngineFault)?;
+        let profile = refineid_rapp::TransportProfile::parse(transport.profile())
+            .ok_or(SessionError::EngineFault)?;
         let mut handshake =
-            SessionHandshake::begin_requester(&core_record, ExplicitUserIntent::record())
+            SessionHandshake::begin_requester(&core_record, profile, ExplicitUserIntent::record())
                 .map_err(|_| SessionError::EngineFault)?;
 
         // Message 1 (Requester -> Proxy)
@@ -792,7 +830,7 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
             return Ok(outcome);
         }
 
-        // RAPP v26.10.1 section 8.2 executes directly: once a consequential
+        // RAPP v26.10.9 section 8.2 executes directly: once a consequential
         // request is sent the custodian may act on it after consent, so an
         // unanswered one is in flight and ends ambiguous, never cancelled.
         let mut state = if consequential {
@@ -1121,7 +1159,8 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
             | CloseReason::Complete
             | CloseReason::UserDisconnect
             | CloseReason::Policy
-            | CloseReason::Shutdown => {}
+            | CloseReason::Shutdown
+            | CloseReason::CardUnavailable => {}
         }
     }
 
