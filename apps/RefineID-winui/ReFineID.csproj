@@ -42,14 +42,13 @@
          Assembly.GetName().Version (shown in the footer) reads
          AssemblyVersion, which otherwise falls back to the SDK default and
          renders as 0.0.0.0. The package identity carries the same day with
-         revision 0, which the Store reserves. -->
+         revision 0, which the Store reserves. The Rust build gets the same
+         stamp through REFINEID_VERSION. -->
     <RefineIdBuildTicks>$([System.DateTime]::UtcNow.Ticks)</RefineIdBuildTicks>
-    <RefineIdBuildYear
-      >$([MSBuild]::Subtract($([System.DateTime]::FromBinary($(RefineIdBuildTicks)).Year), 2000))</RefineIdBuildYear>
+    <RefineIdBuildYear>$([MSBuild]::Subtract($([System.DateTime]::FromBinary($(RefineIdBuildTicks)).Year), 2000))</RefineIdBuildYear>
     <RefineIdBuildMonth>$([System.DateTime]::FromBinary($(RefineIdBuildTicks)).Month)</RefineIdBuildMonth>
     <RefineIdBuildDay>$([System.DateTime]::FromBinary($(RefineIdBuildTicks)).Day)</RefineIdBuildDay>
-    <RefineIdBuildBucket
-      >$([MSBuild]::Add($([MSBuild]::Multiply($([System.DateTime]::FromBinary($(RefineIdBuildTicks)).Hour), 10)), $([System.DateTime]::FromBinary($(RefineIdBuildTicks)).ToString("mm").Substring(0, 1))))</RefineIdBuildBucket>
+    <RefineIdBuildBucket>$([MSBuild]::Add($([MSBuild]::Multiply($([System.DateTime]::FromBinary($(RefineIdBuildTicks)).Hour), 10)), $([System.DateTime]::FromBinary($(RefineIdBuildTicks)).ToString("mm").Substring(0, 1))))</RefineIdBuildBucket>
     <RefineIdVersion>$(RefineIdBuildYear).$(RefineIdBuildMonth).$(RefineIdBuildDay).$(RefineIdBuildBucket)</RefineIdVersion>
     <RefineIdPackageVersion>$(RefineIdBuildYear).$(RefineIdBuildMonth).$(RefineIdBuildDay).0</RefineIdPackageVersion>
     <Version>$(RefineIdVersion)</Version>
@@ -116,6 +115,7 @@
   >
     <Exec
       Command="&quot;$(RustCargo)&quot; build -p refineid-rapp-ffi -p refineid-settings-ffi $(RustReleaseArgument)"
+      EnvironmentVariables="REFINEID_VERSION=$(RefineIdVersion)"
       WorkingDirectory="$(MSBuildProjectDirectory)\..\.."
     />
   </Target>

@@ -125,6 +125,7 @@ if ($CertificateThumbprint) {
 $now = [datetime]::UtcNow
 $productVersion = '{0}.{1}.{2}.{3}' -f ($now.Year - 2000), $now.Month, $now.Day,
     ($now.Hour * 10 + [math]::Floor($now.Minute / 10))
+$env:REFINEID_VERSION = $productVersion
 
 $rustTargets = @{
     'x64'   = 'x86_64-pc-windows-msvc'

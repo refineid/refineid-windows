@@ -848,6 +848,7 @@ dependencies = [
  "refineid-lib-core",
  "refineid-lib-pcsc",
  "refineid-rapp-core",
+ "refineid-stamp",
  "refineid-windows-credential-store",
  "windows",
  "zeroize",
@@ -907,6 +908,7 @@ dependencies = [
  "refineid-lib-core",
  "refineid-lib-pcsc",
  "refineid-rapp-core",
+ "refineid-stamp",
  "refineid-windows-credential-store",
 ]
 
@@ -986,6 +988,10 @@ dependencies = [
  "serde_json",
  "zeroize",
 ]
+
+[[package]]
+name = "refineid-stamp"
+version = "26.10.10"
 
 [[package]]
 name = "refineid-windows-credential-store"

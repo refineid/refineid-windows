@@ -14,6 +14,7 @@ members = [
     "crates/refineid-rapp-core",
     "crates/refineid-rapp-ffi",
     "crates/refineid-settings-ffi",
+    "crates/refineid-stamp",
     "crates/refineid-windows-credential-store",
 ]
 
@@ -32,6 +33,7 @@ refineid-card-manager-core = { path = "crates/refineid-card-manager-core", versi
 refineid-doc-sign = { path = "crates/refineid-doc-sign", version = "26" }
 refineid-gui-win32 = { path = "crates/refineid-gui-win32", version = "26" }
 refineid-rapp-core = { path = "crates/refineid-rapp-core", version = "26" }
+refineid-stamp = { path = "crates/refineid-stamp", version = "26" }
 refineid-windows-credential-store = { path = "crates/refineid-windows-credential-store", version = "26" }
 refineid-windows-driver-probe = { path = "crates/refineid-windows-driver-probe", version = "26" }
 

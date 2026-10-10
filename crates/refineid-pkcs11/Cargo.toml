@@ -13,6 +13,9 @@ default = []
 pin-change = []
 test-pin-env = []
 
+[build-dependencies]
+refineid-stamp.workspace = true
+
 [lints]
 workspace = true
 

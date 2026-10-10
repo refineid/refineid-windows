@@ -2,30 +2,30 @@
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
-//! Generate the PKCS#11 token version from the canonical release version.
+//! Generate the PKCS#11 token firmware version from the build stamp.
 
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+use refineid_stamp::Stamp;
+
 fn main() {
-    let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest path"));
-    let version_path = manifest.join("../../VERSION");
-    println!("cargo:rerun-if-changed={}", version_path.display());
-
-    let version = fs::read_to_string(version_path).expect("read VERSION");
-    let parts: Vec<u8> = version
-        .trim()
-        .split('.')
-        .map(|part| part.parse().expect("numeric VERSION component"))
-        .collect();
-    assert_eq!(parts.len(), 4, "VERSION must be YY.M.D.B");
-
+    let stamp = Stamp::from_build_environment();
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
     let source = format!(
         "const TOKEN_FIRMWARE_VERSION: CkVersion = CkVersion {{ major: {}, minor: {} }};\n",
-        parts[2], parts[3]
+        stamp.day, stamp.bucket
     );
     fs::write(out.join("token-version.rs"), source).expect("write token version");
 }

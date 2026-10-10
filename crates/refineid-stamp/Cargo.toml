@@ -1,0 +1,12 @@
+[package]
+name = "refineid-stamp"
+description = "The build stamp of a RefineID build: calendar version YY.M.D.B from the build environment or the UTC clock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
