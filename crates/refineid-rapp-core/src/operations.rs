@@ -37,6 +37,7 @@ impl CardOperationExt for CardOperation {
             Self::ReadCertificate { .. } => "read_certificate",
             Self::BrowserAuthenticate { .. } => "browser_authenticate",
             Self::SignDocument { .. } => "sign_document",
+            Self::BatchSignDocuments { .. } => "batch_sign_documents",
         }
     }
 }

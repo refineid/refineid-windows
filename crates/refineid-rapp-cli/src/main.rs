@@ -555,6 +555,9 @@ fn report(operation: &CardOperation, outcome: &OperationOutcome) {
             CardOperationResult::Signature(bytes) => {
                 println!("ok: signature, {} bytes", bytes.len());
             }
+            CardOperationResult::Signatures(signatures) => {
+                println!("ok: {} signatures", signatures.len());
+            }
         },
         OperationOutcome::Denied => println!("denied on the phone"),
         OperationOutcome::Cancelled => println!("cancelled or expired"),
