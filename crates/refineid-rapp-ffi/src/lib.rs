@@ -547,7 +547,7 @@ fn read_paired_card(paired: &mut Paired) -> Result<CardReadDto, ApiFailure> {
     // certificate bytes are separate operations added when a screen needs them.
     let identity = match run_operation(paired, &mut session, &CardOperation::ReadIdentity)? {
         CardOperationResult::Identity(identity) => IdentityDto {
-            display_name: card_holder_name(&identity.certificates).unwrap_or(identity.holder_name),
+            display_name: identity.holder_name,
             person_id: identity.card_id,
         },
         _ => return Err(unexpected_result("read_identity")),
@@ -558,35 +558,6 @@ fn read_paired_card(paired: &mut Paired) -> Result<CardReadDto, ApiFailure> {
         .disconnect(&mut session, CloseReason::UserDisconnect);
 
     Ok(CardReadDto { identity })
-}
-
-/// The holder name as the card carries it: surname, then given names, read
-/// from the authentication certificate's subject, which is the rendering the
-/// local card lane shows too. `None` when no certificate parses or names
-/// nobody, and the phone's own rendering stands.
-fn card_holder_name(certificates: &[Vec<u8>]) -> Option<String> {
-    use refineid_lib_core::identity::CredentialIdentity;
-    use refineid_lib_core::x509::OwnedCert;
-
-    certificates.iter().find_map(|der| {
-        let owned = OwnedCert::from_der(der).ok()?;
-        let certificate = owned.view();
-        let subject = &certificate.subject;
-        let given_names = subject.given_names();
-        let mut identity = CredentialIdentity::new();
-        if let Some(value) = subject.surname() {
-            identity = identity.with_surname(value);
-        }
-        if let Some(value) = given_names.first {
-            identity = identity.with_first_name(value);
-        }
-        if let Some(value) = given_names.second {
-            identity = identity.with_second_name(value);
-        }
-        identity = identity.with_additional_names(given_names.additional);
-        let name = identity.person_string();
-        (!name.is_empty()).then_some(name)
-    })
 }
 
 fn run_operation(

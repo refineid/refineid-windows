@@ -132,8 +132,7 @@ internal sealed partial class MainPage : Page
         {
             CardReading reading = await Task.Run(() => NativeRappService.ReadCard(handle))
                 .ConfigureAwait(true);
-            // The holder name as the card carries it; the person identifier
-            // stays off the screen.
+
             string holder = reading.Identity.DisplayName;
             this.remoteHolder = holder;
             this.HolderText.Text = holder;

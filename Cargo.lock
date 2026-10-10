@@ -958,7 +958,6 @@ version = "26.10.10"
 dependencies = [
  "getrandom 0.4.3",
  "hex",
- "refineid-lib-core",
  "refineid-rapp",
  "refineid-rapp-core",
  "refineid-windows-credential-store",
