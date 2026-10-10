@@ -1076,25 +1076,48 @@ pub(super) fn card_sign(
     input: &[u8],
     origin: Option<&str>,
 ) -> Result<Vec<u8>, CkRv> {
+    card_sign_with_origin_source(reader_name, pin_cache, mechanism, input, origin, &|name| {
+        std::env::var(name).ok()
+    })
+}
+
+/// Environment variables that supply the relying-party origin of a remote
+/// signature when the caller passes none, in lookup order.
+const ORIGIN_VARIABLES: [&str; 2] = ["REFINEID_RP_ORIGIN", "REFINEID_ORIGIN"];
+
+/// Longest relying-party origin accepted for a remote signature.
+const MAX_ORIGIN_LENGTH: usize = 512;
+
+/// The relying-party origin for a remote signature: the caller's, else the
+/// first usable value `variable` yields for [`ORIGIN_VARIABLES`].
+fn remote_origin(
+    origin: Option<&str>,
+    variable: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let usable = |o: &str| !o.trim().is_empty() && o.len() <= MAX_ORIGIN_LENGTH;
+    origin.filter(|o| usable(o)).map(str::to_owned).or_else(|| {
+        ORIGIN_VARIABLES
+            .iter()
+            .find_map(|name| variable(name))
+            .filter(|o| usable(o))
+    })
+}
+
+/// [`card_sign`] with the origin fallback read through `variable`.
+fn card_sign_with_origin_source(
+    reader_name: &str,
+    pin_cache: &Arc<Mutex<PinSafetyCache>>,
+    mechanism: Mechanism,
+    input: &[u8],
+    origin: Option<&str>,
+    variable: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<u8>, CkRv> {
     if let Some(hex_id) = reader_name.strip_prefix("rapp:") {
-        let env_origin;
-        let effective_origin = if let Some(o) =
-            origin.filter(|o| !o.trim().is_empty() && o.len() <= 512)
-        {
-            o
-        } else {
-            env_origin = std::env::var("REFINEID_RP_ORIGIN")
-                .ok()
-                .or_else(|| std::env::var("REFINEID_ORIGIN").ok())
-                .filter(|o| !o.trim().is_empty() && o.len() <= 512);
-            if let Some(o) = &env_origin {
-                o.as_str()
-            } else {
-                crate::diag::diag!("card_sign: remote card sign missing required caller RP origin");
-                return Err(CKR_ARGUMENTS_BAD);
-            }
+        let Some(effective_origin) = remote_origin(origin, variable) else {
+            crate::diag::diag!("card_sign: remote card sign missing required caller RP origin");
+            return Err(CKR_ARGUMENTS_BAD);
         };
-        return remote_card_sign(hex_id, effective_origin, mechanism, input);
+        return remote_card_sign(hex_id, &effective_origin, mechanism, input);
     }
     let backend = PcscBackend;
     let reader = ReaderId::new(reader_name.to_owned());
@@ -1854,16 +1877,42 @@ mod tests {
     }
 
     #[test]
+    fn the_remote_origin_prefers_the_caller_then_the_variables_in_order() {
+        let variables = |name: &str| match name {
+            "REFINEID_RP_ORIGIN" => Some("https://rp.example".to_owned()),
+            "REFINEID_ORIGIN" => Some("https://other.example".to_owned()),
+            _ => None,
+        };
+        assert_eq!(
+            super::remote_origin(Some("https://caller.example"), &variables).as_deref(),
+            Some("https://caller.example")
+        );
+        assert_eq!(
+            super::remote_origin(Some("  "), &variables).as_deref(),
+            Some("https://rp.example")
+        );
+        let only_second =
+            |name: &str| (name == "REFINEID_ORIGIN").then(|| "https://other.example".to_owned());
+        assert_eq!(
+            super::remote_origin(None, &only_second).as_deref(),
+            Some("https://other.example")
+        );
+        let too_long = |_: &str| Some("x".repeat(super::MAX_ORIGIN_LENGTH + 1));
+        assert_eq!(super::remote_origin(None, &too_long), None);
+    }
+
+    #[test]
     fn remote_card_sign_missing_origin_fails_closed() {
         let pin_cache = std::sync::Arc::new(std::sync::Mutex::new(
             super::PinSafetyCache::new().expect("pin safety cache"),
         ));
-        let res = super::card_sign(
+        let res = super::card_sign_with_origin_source(
             "rapp:0123456789abcdef",
             &pin_cache,
             crate::sign::Mechanism::Ecdsa,
             &[0u8; 32],
             None,
+            &|_| None,
         );
         assert_eq!(res, Err(crate::ck::CKR_ARGUMENTS_BAD));
     }
@@ -1873,12 +1922,13 @@ mod tests {
         let pin_cache = std::sync::Arc::new(std::sync::Mutex::new(
             super::PinSafetyCache::new().expect("pin safety cache"),
         ));
-        let res = super::card_sign(
+        let res = super::card_sign_with_origin_source(
             "rapp:0123456789abcdef",
             &pin_cache,
             crate::sign::Mechanism::Ecdsa,
             &[0u8; 32],
             Some("   "),
+            &|_| None,
         );
         assert_eq!(res, Err(crate::ck::CKR_ARGUMENTS_BAD));
     }
