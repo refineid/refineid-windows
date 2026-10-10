@@ -738,6 +738,44 @@ fn handle_operation_request<T: FrameTransport>(
                 }
             }
         }
+        CardOperation::BatchSignDocuments {
+            document_names,
+            algorithm,
+            digests,
+            ..
+        } => {
+            println!(
+                "serving batch_sign_documents: {} documents",
+                document_names.len()
+            );
+            let signatures = digests
+                .iter()
+                .map(|digest| sign_digest(digest, algorithm))
+                .collect();
+            let result = CardOperationResult::Signatures(signatures);
+            let res_msg =
+                TypedMessage::OperationResult(OperationResultMessage::completed(op_ref, &result));
+            let res_frame = endpoint
+                .send(&res_msg)
+                .map_err(|e| format!("send res failed: {e:?}"))?;
+            transport
+                .send_frame(res_frame.as_bytes())
+                .map_err(|e| format!("send res frame failed: {e:?}"))?;
+            let ack_bytes = transport
+                .receive_frame()
+                .map_err(|e| format!("receive ack failed: {e:?}"))?;
+            let ack_frame = BinaryFrame::reconstruct(ack_bytes)
+                .map_err(|e| format!("ack frame failed: {e:?}"))?;
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
+            if let Ok(ReceiveOutcome::Message(TypedMessage::OperationResultAck(ack_ref))) =
+                endpoint.receive(store, &ack_frame, now_ms)
+                && ack_ref == op_ref
+            {
+                println!("batch_sign_documents completed and acknowledged");
+            }
+        }
     }
     Ok(())
 }
