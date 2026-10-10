@@ -113,26 +113,36 @@
                                 IsTextSelectionEnabled="True"
                                 Visibility="Collapsed"
                             />
-                            <!--  The forget action lives on the row it removes,
-                                   pinned to the trailing edge. A confirmation
-                                   dialog stands in front of it.  -->
+                            <!--  The row's actions sit behind the "More
+                                   options" button, as Windows Settings does
+                                   for a device or a known network. A
+                                   confirmation dialog stands in front of
+                                   forgetting.  -->
                             <Button
-                                x:Name="ForgetIdentityButton"
+                                x:Name="IdentityMenuButton"
                                 Padding="8"
                                 VerticalAlignment="Center"
-                                AutomationProperties.AutomationId="ForgetIdentityButton"
-                                AutomationProperties.Name="Forget identity"
+                                AutomationProperties.AutomationId="IdentityMenuButton"
+                                AutomationProperties.Name="More options"
                                 Background="Transparent"
                                 BorderThickness="0"
-                                Click="ForgetIdentity_Click"
-                                ToolTipService.ToolTip="Forget identity"
+                                ToolTipService.ToolTip="More options"
                                 Visibility="Collapsed"
                             >
-                                <FontIcon
-                                    FontSize="16"
-                                    Foreground="{ThemeResource SystemFillColorCriticalBrush}"
-                                    Glyph="&#xE738;"
-                                />
+                                <FontIcon FontSize="16" Glyph="&#xE712;" />
+                                <Button.Flyout>
+                                    <MenuFlyout Placement="BottomEdgeAlignedRight">
+                                        <MenuFlyoutItem
+                                            AutomationProperties.AutomationId="ForgetIdentityItem"
+                                            Click="ForgetIdentity_Click"
+                                            Text="Forget"
+                                        >
+                                            <MenuFlyoutItem.Icon>
+                                                <FontIcon Glyph="&#xE74D;" />
+                                            </MenuFlyoutItem.Icon>
+                                        </MenuFlyoutItem>
+                                    </MenuFlyout>
+                                </Button.Flyout>
                             </Button>
                         </StackPanel>
                     </controls:SettingsCard>

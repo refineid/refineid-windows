@@ -137,7 +137,7 @@ internal sealed partial class MainPage : Page
             this.remoteHolder = holder;
             this.HolderText.Text = holder;
             this.HolderText.Visibility = Visibility.Visible;
-            this.ForgetIdentityButton.Visibility = Visibility.Visible;
+            this.IdentityMenuButton.Visibility = Visibility.Visible;
             this.ConnectRemoteReaderButton.Visibility = Visibility.Collapsed;
             this.StatusInfoBar.IsOpen = false;
         }
@@ -181,7 +181,7 @@ internal sealed partial class MainPage : Page
         this.remoteHolder = null;
         this.HolderText.Text = string.Empty;
         this.HolderText.Visibility = Visibility.Collapsed;
-        this.ForgetIdentityButton.Visibility = Visibility.Collapsed;
+        this.IdentityMenuButton.Visibility = Visibility.Collapsed;
         this.ConnectRemoteReaderButton.Visibility = Visibility.Visible;
 
         // Clearing the row is not enough now that a pairing is durable: drop
@@ -275,14 +275,14 @@ internal sealed partial class MainPage : Page
             this.HolderText.Text = snapshot.Person;
             this.HolderText.Visibility = Visibility.Visible;
             this.ConnectRemoteReaderButton.Visibility = Visibility.Collapsed;
-            this.ForgetIdentityButton.Visibility = Visibility.Collapsed;
+            this.IdentityMenuButton.Visibility = Visibility.Collapsed;
         }
         else if (this.remoteHolder is null)
         {
             this.HolderText.Text = string.Empty;
             this.HolderText.Visibility = Visibility.Collapsed;
             this.ConnectRemoteReaderButton.Visibility = Visibility.Visible;
-            this.ForgetIdentityButton.Visibility = Visibility.Collapsed;
+            this.IdentityMenuButton.Visibility = Visibility.Collapsed;
         }
     }
 
@@ -293,7 +293,7 @@ internal sealed partial class MainPage : Page
             this.HolderText.Text = string.Empty;
             this.HolderText.Visibility = Visibility.Collapsed;
             this.ConnectRemoteReaderButton.Visibility = Visibility.Visible;
-            this.ForgetIdentityButton.Visibility = Visibility.Collapsed;
+            this.IdentityMenuButton.Visibility = Visibility.Collapsed;
             this.SignCard.IsEnabled = false;
         }
         else
@@ -301,7 +301,7 @@ internal sealed partial class MainPage : Page
             this.HolderText.Text = this.remoteHolder;
             this.HolderText.Visibility = Visibility.Visible;
             this.ConnectRemoteReaderButton.Visibility = Visibility.Collapsed;
-            this.ForgetIdentityButton.Visibility = Visibility.Visible;
+            this.IdentityMenuButton.Visibility = Visibility.Visible;
             this.SignCard.IsEnabled = true;
         }
     }
