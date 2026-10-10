@@ -120,16 +120,12 @@ if ($CertificateThumbprint) {
     Write-Host "Signing as: $($certificate.Subject)"
 }
 
-# VERSION is canonical. Cargo.toml carries only the three-component SemVer
-# projection, which would silently drop the within-day bucket.
-$versionFile = Join-Path $repositoryRoot 'VERSION'
-if (-not (Test-Path -LiteralPath $versionFile)) {
-    throw "No VERSION file. Run script\version-stamp.ps1 first."
-}
-$productVersion = (Get-Content $versionFile -Raw).Trim()
-if ($productVersion -notmatch '^\d+\.\d+\.\d+\.\d+$') {
-    throw "VERSION must be YY.M.D.B, found '$productVersion'."
-}
+# The version is the UTC build instant as CalVer YY.M.D.B, the same stamp
+# ReFineID.csproj gives the app: B is the ten-minute bucket of the day.
+$now = [datetime]::UtcNow
+$productVersion = '{0}.{1}.{2}.{3}' -f ($now.Year - 2000), $now.Month, $now.Day,
+    ($now.Hour * 10 + [math]::Floor($now.Minute / 10))
+$env:REFINEID_VERSION = $productVersion
 
 $rustTargets = @{
     'x64'   = 'x86_64-pc-windows-msvc'

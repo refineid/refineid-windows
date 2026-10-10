@@ -108,7 +108,7 @@ so a shared desktop reader stays usable.
 
 ## Versions
 
-- Library version: tracks the workspace CalVer (see the root `VERSION` file).
+- Library version: the workspace CalVer YY.M.D in `Cargo.toml`, stamped to the UTC day at commit.
 - Cryptoki version: `2.40`.
 
 ## Register with p11-kit

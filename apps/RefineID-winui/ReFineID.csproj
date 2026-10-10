@@ -34,13 +34,23 @@
     <AnalysisLevel>latest-all</AnalysisLevel>
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
     <Deterministic>true</Deterministic>
-    <!-- The single source of the CalVer YY.M.D.B version is the repository
-         VERSION file, stamped by script/version-stamp.ps1. All three managed
-         version fields are stamped from it: <Version> alone only sets the
-         informational version, while Assembly.GetName().Version (shown in the
-         footer) reads AssemblyVersion, which otherwise falls back to the SDK
-         default and renders as 0.0.0.0. -->
-    <RefineIdVersion>$([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)\..\..\VERSION').Trim())</RefineIdVersion>
+    <!-- The version is the UTC build instant as CalVer YY.M.D.B, B being
+         the ten-minute bucket of the day (hour * 10 + minute / 10, 0 to 235).
+         The instant is read once so every component comes from the same
+         clock reading. All three managed version fields are stamped:
+         <Version> alone only sets the informational version, while
+         Assembly.GetName().Version (shown in the footer) reads
+         AssemblyVersion, which otherwise falls back to the SDK default and
+         renders as 0.0.0.0. The package identity carries the same day with
+         revision 0, which the Store reserves. The Rust build gets the same
+         stamp through REFINEID_VERSION. -->
+    <RefineIdBuildTicks>$([System.DateTime]::UtcNow.Ticks)</RefineIdBuildTicks>
+    <RefineIdBuildYear>$([MSBuild]::Subtract($([System.DateTime]::FromBinary($(RefineIdBuildTicks)).Year), 2000))</RefineIdBuildYear>
+    <RefineIdBuildMonth>$([System.DateTime]::FromBinary($(RefineIdBuildTicks)).Month)</RefineIdBuildMonth>
+    <RefineIdBuildDay>$([System.DateTime]::FromBinary($(RefineIdBuildTicks)).Day)</RefineIdBuildDay>
+    <RefineIdBuildBucket>$([MSBuild]::Add($([MSBuild]::Multiply($([System.DateTime]::FromBinary($(RefineIdBuildTicks)).Hour), 10)), $([System.DateTime]::FromBinary($(RefineIdBuildTicks)).ToString("mm").Substring(0, 1))))</RefineIdBuildBucket>
+    <RefineIdVersion>$(RefineIdBuildYear).$(RefineIdBuildMonth).$(RefineIdBuildDay).$(RefineIdBuildBucket)</RefineIdVersion>
+    <RefineIdPackageVersion>$(RefineIdBuildYear).$(RefineIdBuildMonth).$(RefineIdBuildDay).0</RefineIdPackageVersion>
     <Version>$(RefineIdVersion)</Version>
     <AssemblyVersion>$(RefineIdVersion)</AssemblyVersion>
     <FileVersion>$(RefineIdVersion)</FileVersion>
@@ -105,7 +115,19 @@
   >
     <Exec
       Command="&quot;$(RustCargo)&quot; build -p refineid-rapp-ffi -p refineid-settings-ffi $(RustReleaseArgument)"
+      EnvironmentVariables="REFINEID_VERSION=$(RefineIdVersion)"
       WorkingDirectory="$(MSBuildProjectDirectory)\..\.."
+    />
+  </Target>
+  <!-- Stamps the package identity with the build day. The source manifest
+       keeps a placeholder version; the generated manifest in the
+       intermediate directory is the one the package is built from. -->
+  <Target Name="StampAppxManifestVersion" AfterTargets="_GenerateCurrentProjectAppxManifest">
+    <XmlPoke
+      XmlInputPath="$(FinalAppxManifestName)"
+      Namespaces="&lt;Namespace Prefix='m' Uri='http://schemas.microsoft.com/appx/manifest/foundation/windows10' /&gt;"
+      Query="/m:Package/m:Identity/@Version"
+      Value="$(RefineIdPackageVersion)"
     />
   </Target>
 </Project>
