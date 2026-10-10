@@ -84,3 +84,12 @@
 - Link newly filed or reused issues in the task handoff. If issue creation is
   unavailable, preserve a sanitized finding locally and report that it was
   not filed; never silently discard it.
+
+## No backwards compatibility
+
+- When code, a script, a command, an API, a file format or a setting is
+  replaced, remove the old one in the same change. Do not leave
+  compatibility wrappers, deprecated aliases, forwarding shims, fallback
+  readers or migration paths behind.
+- Update every caller, hook, CI job and document to the replacement in that
+  same change instead of keeping the old entry point alive for them.
