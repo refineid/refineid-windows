@@ -402,6 +402,9 @@ const MDNS_GROUP: std::net::SocketAddrV4 =
     std::net::SocketAddrV4::new(std::net::Ipv4Addr::new(224, 0, 0, 251), 5353);
 /// Poll interval while waiting for answers.
 const MDNS_POLL: Duration = Duration::from_millis(250);
+/// Interval at which the browse question is asked again within one window
+/// (RFC 6762 section 5.2); a custodian does not answer every question.
+const MDNS_REQUERY: Duration = Duration::from_secs(1);
 
 /// Records gathered from mDNS answers before they are joined per instance.
 #[derive(Debug, Default)]
@@ -537,7 +540,9 @@ fn parse_txt(rdata: &[u8]) -> BTreeMap<String, String> {
 /// advertised custodian, with the TXT attributes it published.
 ///
 /// The query asks for unicast answers from an ephemeral port (RFC 6762
-/// section 5.4), so it works beside a system mDNS responder.
+/// section 5.4), so it works beside a system mDNS responder, and it is
+/// repeated every [`MDNS_REQUERY`] within the window, because a custodian
+/// does not answer every single question.
 #[must_use]
 pub fn browse_stream_services(timeout: Duration) -> Vec<StreamService> {
     use std::net::UdpSocket;
@@ -547,6 +552,36 @@ pub fn browse_stream_services(timeout: Duration) -> Vec<StreamService> {
         return Vec::new();
     };
     let _ = socket.set_read_timeout(Some(MDNS_POLL));
+    let query = browse_query();
+    if socket.send_to(&query, MDNS_GROUP).is_err() {
+        return Vec::new();
+    }
+
+    let start = Instant::now();
+    let mut next_query = MDNS_REQUERY;
+    let mut records = MdnsRecords::default();
+    let mut buffer = [0u8; MDNS_RESPONSE_BYTES];
+    while start.elapsed() < timeout {
+        if start.elapsed() >= next_query {
+            // A failed repeat is not fatal: the first question went out.
+            let _ = socket.send_to(&query, MDNS_GROUP);
+            next_query += MDNS_REQUERY;
+        }
+        let Ok((read, peer)) = socket.recv_from(&mut buffer) else {
+            continue;
+        };
+        let responder = match peer {
+            std::net::SocketAddr::V4(v4) => Some(*v4.ip()),
+            std::net::SocketAddr::V6(_) => None,
+        };
+        parse_mdns_response(&buffer[..read], responder, &mut records);
+    }
+    records.into_services()
+}
+
+/// One PTR question for the stream service type, class IN with the
+/// unicast-response bit.
+fn browse_query() -> Vec<u8> {
     let mut query = vec![0u8; DNS_HEADER_BYTES];
     query[5] = 1;
     for label in STREAM_SERVICE_TYPE.split('.') {
@@ -559,26 +594,8 @@ pub fn browse_stream_services(timeout: Duration) -> Vec<StreamService> {
     }
     query.push(0);
     query.extend_from_slice(&RR_TYPE_PTR.to_be_bytes());
-    // Class IN with the unicast-response bit.
     query.extend_from_slice(&0x8001u16.to_be_bytes());
-    if socket.send_to(&query, MDNS_GROUP).is_err() {
-        return Vec::new();
-    }
-
-    let start = Instant::now();
-    let mut records = MdnsRecords::default();
-    let mut buffer = [0u8; MDNS_RESPONSE_BYTES];
-    while start.elapsed() < timeout {
-        let Ok((read, peer)) = socket.recv_from(&mut buffer) else {
-            continue;
-        };
-        let responder = match peer {
-            std::net::SocketAddr::V4(v4) => Some(*v4.ip()),
-            std::net::SocketAddr::V6(_) => None,
-        };
-        parse_mdns_response(&buffer[..read], responder, &mut records);
-    }
-    records.into_services()
+    query
 }
 
 /// Browses for custodians advertising `mode`, each with at least one

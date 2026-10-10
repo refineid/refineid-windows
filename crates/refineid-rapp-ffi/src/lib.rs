@@ -69,6 +69,10 @@ const BROWSE_WINDOW_MS: u64 = 3_000;
 /// pairing mode; together they span the 60 s offer lifetime.
 const MAX_PAIRING_BROWSE_ROUNDS: u32 = 20;
 
+/// Browse rounds a card read makes before reporting that the paired phone
+/// is not on the network.
+const MAX_SESSION_BROWSE_ROUNDS: u32 = 3;
+
 /// Operation expiry sent on the wire; the holder approves within this.
 const OPERATION_EXPIRY_MS: u64 = 120_000;
 
@@ -514,21 +518,23 @@ fn finish_pairing(handle_id: u64, requester: StreamRequester, pair_id: PairId) {
 }
 
 fn read_paired_card(paired: &mut Paired) -> Result<CardReadDto, ApiFailure> {
-    let services = session_candidates(
-        browse(DiscoveryMode::Session, browse_window()),
-        &paired.rendezvous,
-        unix_seconds(),
-    );
-    let session_transport = services
-        .iter()
-        .find_map(|service| {
-            dial(
-                &service.endpoints,
-                STREAM_CANDIDATE_ID,
-                receive_deadline(),
-                &StreamRendezvous::Session(paired.rendezvous),
+    let session_transport = (0..MAX_SESSION_BROWSE_ROUNDS)
+        .find_map(|_| {
+            session_candidates(
+                browse(DiscoveryMode::Session, browse_window()),
+                &paired.rendezvous,
+                unix_seconds(),
             )
-            .ok()
+            .iter()
+            .find_map(|service| {
+                dial(
+                    &service.endpoints,
+                    STREAM_CANDIDATE_ID,
+                    receive_deadline(),
+                    &StreamRendezvous::Session(paired.rendezvous),
+                )
+                .ok()
+            })
         })
         .ok_or_else(|| {
             ApiFailure::new(
