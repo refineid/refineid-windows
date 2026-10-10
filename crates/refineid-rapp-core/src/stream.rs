@@ -4,33 +4,34 @@
 //! The custodian (the phone) listens on an ephemeral TCP port and advertises
 //! `_refineid-stream._tcp.local.` under a fresh random instance name, with a
 //! TXT record naming its mode: `mode=pairing` during a pairing ceremony,
-//! `mode=session` while it serves stored pairings. The requester browses by
-//! those attributes, dials, and opens every connection with one plaintext
-//! routing preamble. The session preamble carries the pair's rendezvous token
-//! point to point; nothing derived from the token is ever published or
-//! looked up by name. An anomaly closes the connection without touching
-//! stored state (specification section 10.1, class 1).
+//! `mode=session` while it serves stored pairings, and `mode=withdrawn`
+//! briefly when it stops serving. The requester browses by those attributes,
+//! dials, and opens every connection with one plaintext routing preamble. A
+//! session preamble carries a fresh nonce and a tag keyed by the pairing's
+//! static agreement, so no value on the wire names a pairing twice. TXT
+//! records are handed to `refineid_rapp` unparsed. An anomaly closes the
+//! connection without touching stored state (specification section 10.1,
+//! class 1).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use crate::ids::RendezvousToken;
+use crate::ids::PairId;
 use crate::transport::{FrameTransport, TcpFrameTransport, TransportError};
-use refineid_rapp::{DISCOVERY_HINT_EPOCH_SECONDS, DISCOVERY_HINT_SIZE, discovery_hint};
-pub use refineid_rapp::{MAX_STREAM_RENDEZVOUS_FRAME, STREAM_PROFILE, StreamRendezvous};
+use refineid_rapp::{
+    DiscoveryKey, DiscoveryRecord, InstanceName, PairRecord, RoutingKey, SessionRouting,
+    TransportProfile, WithdrawalKey, WithdrawnRecord, discovery_epoch, withdrawal_counter,
+};
+pub use refineid_rapp::{MAX_ROUTING_PREAMBLE_FRAME, RoutingPreamble, STREAM_PROFILE};
 
 /// The DNS-SD service type of the stream tier.
 pub const STREAM_SERVICE_TYPE: &str = "_refineid-stream._tcp.local";
 
-/// The registered candidate identifier of the stream profile (RAPP v26.10.9
+/// The registered candidate identifier of the stream profile (RAPP v26.10.10
 /// section 2.2).
 pub const STREAM_CANDIDATE_ID: &str = refineid_rapp::STREAM_CANDIDATE_ID;
-
-/// TXT key carrying the rotating discovery hints (hierarchy section 4.3).
-const HINTS_KEY: &str = "hints";
-/// Most hints one record may carry (hierarchy section 4.3).
-const MAX_HINTS: usize = 4;
 
 /// TXT key naming the discovery mode.
 const MODE_KEY: &str = "mode";
@@ -39,7 +40,8 @@ const VERSION_KEY: &str = "v";
 /// The one TXT format version this requester understands.
 const SUPPORTED_TXT_VERSION: &str = "1";
 
-/// The custodian discovery modes of hierarchy section 4.3.
+/// The custodian discovery modes of hierarchy section 4.3 a requester
+/// browses for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiscoveryMode {
     /// An explicit pairing ceremony is open on the custodian.
@@ -59,100 +61,162 @@ impl DiscoveryMode {
     }
 }
 
-/// One advertised custodian: its instance, endpoints, and TXT attributes.
+/// One advertised custodian: its instance, endpoints, and TXT entries.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamService {
-    /// The advertised instance name (random; carries no identity).
+    /// The advertised instance portion of the name (random; carries no
+    /// identity).
     pub instance: String,
     /// `ip:port` endpoints that answered for this instance.
     pub endpoints: Vec<String>,
-    /// The TXT attributes, keys lowercased.
-    pub attributes: BTreeMap<String, String>,
+    /// The TXT `key=value` entries exactly as published, in order.
+    pub txt: Vec<(String, String)>,
 }
 
 impl StreamService {
-    /// Whether the TXT record names format version 1 and `mode`.
+    fn entries(&self) -> Vec<(&str, &str)> {
+        self.txt
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect()
+    }
+
+    /// Whether the record names format version 1 and `mode`; keys compare
+    /// case-insensitively (RFC 6763 section 6.4).
     #[must_use]
     pub fn advertises(&self, mode: DiscoveryMode) -> bool {
-        self.attributes.get(VERSION_KEY).map(String::as_str) == Some(SUPPORTED_TXT_VERSION)
-            && self.attributes.get(MODE_KEY).map(String::as_str) == Some(mode.txt_value())
+        match mode {
+            DiscoveryMode::Session => self.discovery_record().is_some(),
+            DiscoveryMode::Pairing => {
+                let value = |key: &str| {
+                    let mut found = self
+                        .txt
+                        .iter()
+                        .filter(|(name, _)| name.eq_ignore_ascii_case(key));
+                    let first = found.next().map(|(_, value)| value.as_str());
+                    if found.next().is_some() { None } else { first }
+                };
+                value(VERSION_KEY) == Some(SUPPORTED_TXT_VERSION)
+                    && value(MODE_KEY) == Some(DiscoveryMode::Pairing.txt_value())
+            }
+        }
     }
 
-    /// The rotating discovery hints the record publishes: at most four
-    /// comma-separated 16-digit lowercase hex values. A malformed attribute
-    /// yields none.
+    /// The well-formed `mode=session` record this service publishes.
     #[must_use]
-    pub fn hints(&self) -> Vec<[u8; DISCOVERY_HINT_SIZE]> {
-        let Some(value) = self.attributes.get(HINTS_KEY) else {
-            return Vec::new();
+    pub fn discovery_record(&self) -> Option<DiscoveryRecord> {
+        DiscoveryRecord::parse(&self.entries()).ok()
+    }
+
+    /// The well-formed `mode=withdrawn` record this service publishes.
+    #[must_use]
+    pub fn withdrawn_record(&self) -> Option<WithdrawnRecord> {
+        WithdrawnRecord::parse(&self.entries()).ok()
+    }
+
+    /// Whether this session record names `pairing` in the discovery epoch of
+    /// `unix_seconds` or an adjacent one (hierarchy section 4.3).
+    #[must_use]
+    pub fn names_pairing(&self, pairing: &PairRecord, unix_seconds: u64) -> bool {
+        let (Some(record), Ok(key)) = (self.discovery_record(), DiscoveryKey::derive(pairing))
+        else {
+            return false;
         };
-        let parsed: Option<Vec<_>> = value.split(',').map(decode_hint).collect();
-        parsed
-            .filter(|hints| !hints.is_empty() && hints.len() <= MAX_HINTS)
-            .unwrap_or_default()
+        key.matches_record(&record, discovery_epoch(unix_seconds))
     }
 
-    /// Whether a published hint names the pairing whose token is `token`, in
-    /// the epoch of `unix_seconds` or an adjacent one (hierarchy section
-    /// 4.3).
+    /// Whether this service announces that the custodian of `pairing`
+    /// stopped serving (specification section 4.5).
     #[must_use]
-    pub fn names_pairing(&self, token: &RendezvousToken, unix_seconds: u64) -> bool {
-        let hints = self.hints();
-        let epoch = unix_seconds / DISCOVERY_HINT_EPOCH_SECONDS;
-        [epoch.saturating_sub(1), epoch, epoch.saturating_add(1)]
-            .into_iter()
-            .map(|candidate| discovery_hint(token, candidate))
-            .any(|expected| hints.contains(&expected))
+    pub fn withdraws(&self, pairing: &PairRecord, unix_seconds: u64) -> bool {
+        let (Some(record), Ok(instance), Ok(key)) = (
+            self.withdrawn_record(),
+            InstanceName::new(&self.instance),
+            WithdrawalKey::derive(pairing),
+        ) else {
+            return false;
+        };
+        key.matches(&record, &instance, withdrawal_counter(unix_seconds))
     }
 }
 
-/// Orders session-mode services for one stored pairing: those whose hints
-/// name it first, then those publishing no hints. A service whose hints name
+/// Pairings whose custodian announced it stopped serving. A requester does
+/// not dial them again until a session record names them (specification
+/// section 4.5).
+static WITHDRAWN: Mutex<BTreeSet<[u8; 16]>> = Mutex::new(BTreeSet::new());
+
+/// Records that the custodian of `pair_id` stopped serving, as announced by a
+/// withdrawn record or a `service_withdrawn` session close.
+pub fn mark_withdrawn(pair_id: PairId) {
+    WITHDRAWN
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(*pair_id.as_bytes());
+}
+
+/// Whether the custodian of `pair_id` announced it stopped serving and has
+/// not been seen serving since.
+#[must_use]
+pub fn is_withdrawn(pair_id: PairId) -> bool {
+    WITHDRAWN
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(pair_id.as_bytes())
+}
+
+fn clear_withdrawn(pair_id: PairId) {
+    WITHDRAWN
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(pair_id.as_bytes());
+}
+
+/// What a browse found for one stored pairing.
+#[derive(Debug, Default)]
+pub struct SessionCandidates {
+    /// Session-mode services to try, those whose hints name the pairing
+    /// first, then those publishing no hints.
+    pub services: Vec<StreamService>,
+    /// Whether a withdrawn record named the pairing.
+    pub withdrawn: bool,
+}
+
+/// Sorts browsed services for one stored pairing. A service whose hints name
 /// only other pairings is left out.
 #[must_use]
 pub fn session_candidates(
     services: Vec<StreamService>,
-    token: &RendezvousToken,
+    pairing: &PairRecord,
     unix_seconds: u64,
-) -> Vec<StreamService> {
+) -> SessionCandidates {
+    let withdrawn = services
+        .iter()
+        .any(|service| service.withdraws(pairing, unix_seconds));
     let (named, rest): (Vec<_>, Vec<_>) = services
         .into_iter()
         .filter(|service| service.advertises(DiscoveryMode::Session))
-        .partition(|service| service.names_pairing(token, unix_seconds));
-    named
-        .into_iter()
-        .chain(
-            rest.into_iter()
-                .filter(|service| service.hints().is_empty()),
-        )
-        .collect()
-}
-
-fn decode_hint(text: &str) -> Option<[u8; DISCOVERY_HINT_SIZE]> {
-    if text.len() != DISCOVERY_HINT_SIZE * 2
-        || !text
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return None;
+        .partition(|service| service.names_pairing(pairing, unix_seconds));
+    let unhinted = rest.into_iter().filter(|service| {
+        service
+            .discovery_record()
+            .is_some_and(|record| record.hints().is_empty())
+    });
+    SessionCandidates {
+        services: named.into_iter().chain(unhinted).collect(),
+        withdrawn,
     }
-    let mut hint = [0_u8; DISCOVERY_HINT_SIZE];
-    for (index, slot) in hint.iter_mut().enumerate() {
-        *slot = u8::from_str_radix(text.get(index * 2..index * 2 + 2)?, 16).ok()?;
-    }
-    Some(hint)
 }
 
 /// One accepted, preamble-classified stream connection.
 #[derive(Debug)]
 pub enum StreamAccept {
-    /// The dialing proxy asked for the active pairing offer.
+    /// The dialing requester asked for the active pairing offer.
     Pairing(TcpFrameTransport),
-    /// The dialing proxy asked for a fresh session with a stored pairing.
+    /// The dialing requester asked for a fresh session with a stored pairing.
     Session {
-        /// The pair-specific token from the preamble. The caller looks it
-        /// up among non-revoked pairings and closes on no match.
-        rendezvous_token: RendezvousToken,
+        /// The routing value from the preamble. The caller matches it
+        /// against non-revoked pairings and closes on no match.
+        routing: SessionRouting,
         /// The connection, positioned after the preamble.
         transport: TcpFrameTransport,
     },
@@ -249,30 +313,53 @@ impl StreamListener {
             TcpFrameTransport::new(socket, &self.candidate_id, self.receive_deadline)
                 .map_err(|_| StreamError::Accept)?;
         let preamble = transport.receive_frame().map_err(StreamError::Preamble)?;
-        match StreamRendezvous::decode(&preamble)? {
-            StreamRendezvous::Pairing => Ok(StreamAccept::Pairing(transport)),
-            StreamRendezvous::Session(rendezvous_token) => Ok(StreamAccept::Session {
-                rendezvous_token,
-                transport,
-            }),
+        match RoutingPreamble::decode(TransportProfile::Stream, &preamble)? {
+            RoutingPreamble::Pairing => Ok(StreamAccept::Pairing(transport)),
+            RoutingPreamble::Session(routing) => Ok(StreamAccept::Session { routing, transport }),
         }
     }
 }
 
+/// What a dial sends first: the pairing preamble, or a fresh session routing
+/// value for one stored pairing.
+#[derive(Clone, Copy, Debug)]
+pub enum DialPurpose<'a> {
+    /// Ask for the custodian's active pairing offer.
+    Pairing,
+    /// Open a session with this stored pairing.
+    Session(&'a RoutingKey),
+}
+
+impl DialPurpose<'_> {
+    fn preamble(self) -> Result<Vec<u8>, StreamError> {
+        let profile = TransportProfile::Stream;
+        let preamble = match self {
+            Self::Pairing => RoutingPreamble::Pairing,
+            Self::Session(key) => RoutingPreamble::Session(
+                key.route(profile, |bytes| {
+                    getrandom::fill(bytes).map_err(|_| refineid_rapp::RandomUnavailable)
+                })
+                .map_err(|_| StreamError::Random)?,
+            ),
+        };
+        Ok(preamble.encode(profile)?)
+    }
+}
+
 /// Dials an advertised custodian and sends the routing preamble, as the
-/// requester does for pairing and for every session.
+/// requester does for pairing and for every session. A session preamble is
+/// built afresh for every connection attempt.
 ///
 /// # Errors
 ///
 /// Fails when no endpoint accepts the connection or the preamble cannot be
-/// sent.
+/// built or sent.
 pub fn dial(
     endpoints: &[String],
     candidate_id: &str,
     receive_deadline: Duration,
-    rendezvous: &StreamRendezvous,
+    purpose: DialPurpose<'_>,
 ) -> Result<TcpFrameTransport, StreamError> {
-    let preamble = rendezvous.encode()?;
     for endpoint in endpoints {
         let Ok(mut addresses) = endpoint.as_str().to_socket_addrs() else {
             continue;
@@ -283,6 +370,7 @@ pub fn dial(
         let Ok(socket) = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) else {
             continue;
         };
+        let preamble = purpose.preamble()?;
         let mut transport = TcpFrameTransport::new(socket, candidate_id, receive_deadline)
             .map_err(|_| StreamError::Accept)?;
         transport
@@ -293,24 +381,29 @@ pub fn dial(
     Err(StreamError::Unreachable)
 }
 
-/// Dials the custodian serving the stored pairing whose rendezvous token is
-/// `token`, with the session preamble.
+/// Dials the custodian serving the stored `pairing` with a session preamble.
 ///
 /// Endpoints in `preferred` are tried first, then the session-mode services a
 /// `browse_window` browse finds, those whose hints name this pairing ahead of
-/// those publishing none (hierarchy section 4.3), then `fallback`. The token
-/// travels only inside the preamble.
+/// those publishing none (hierarchy section 4.3), then `fallback`.
+///
+/// A pairing whose custodian announced it stopped serving is not dialed
+/// again until a session record names it; the browse that sees such an
+/// announcement ends the attempt.
 ///
 /// # Errors
-/// [`StreamError::Unreachable`] when no endpoint accepts the connection.
+/// [`StreamError::Withdrawn`] when the custodian announced it stopped
+/// serving; [`StreamError::Unreachable`] when no endpoint accepts the
+/// connection; [`StreamError::Malformed`] when the pairing's keys are
+/// unusable.
 pub fn dial_session(
-    token: RendezvousToken,
+    pairing: &PairRecord,
     preferred: &[String],
     fallback: &[String],
     browse_window: Duration,
     receive_deadline: Duration,
 ) -> Result<TcpFrameTransport, StreamError> {
-    let rendezvous = StreamRendezvous::Session(token);
+    let key = RoutingKey::derive(pairing).map_err(|_| StreamError::Malformed)?;
     let attempt = |endpoints: &[String]| {
         if endpoints.is_empty() {
             return None;
@@ -319,21 +412,31 @@ pub fn dial_session(
             endpoints,
             STREAM_CANDIDATE_ID,
             receive_deadline,
-            &rendezvous,
+            DialPurpose::Session(&key),
         )
         .ok()
     };
-    if let Some(transport) = attempt(preferred) {
+    let withdrawn = is_withdrawn(pairing.pair_id());
+    if !withdrawn && let Some(transport) = attempt(preferred) {
         return Ok(transport);
     }
     let unix_seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
-    for service in session_candidates(
-        browse(DiscoveryMode::Session, browse_window),
-        &token,
-        unix_seconds,
-    ) {
+    let found = session_candidates(browse_stream_services(browse_window), pairing, unix_seconds);
+    let named = found
+        .services
+        .iter()
+        .any(|service| service.names_pairing(pairing, unix_seconds));
+    if named {
+        clear_withdrawn(pairing.pair_id());
+    } else if found.withdrawn {
+        mark_withdrawn(pairing.pair_id());
+        return Err(StreamError::Withdrawn);
+    } else if withdrawn {
+        return Err(StreamError::Withdrawn);
+    }
+    for service in found.services {
         if let Some(transport) = attempt(&service.endpoints) {
             return Ok(transport);
         }
@@ -408,7 +511,7 @@ const MDNS_POLL: Duration = Duration::from_millis(250);
 struct MdnsRecords {
     instances: Vec<String>,
     services: BTreeMap<String, (u16, String, Option<std::net::Ipv4Addr>)>,
-    texts: BTreeMap<String, BTreeMap<String, String>>,
+    texts: BTreeMap<String, Vec<(String, String)>>,
     addresses: BTreeMap<String, std::net::Ipv4Addr>,
 }
 
@@ -438,7 +541,7 @@ impl MdnsRecords {
             found.push(StreamService {
                 instance: label,
                 endpoints,
-                attributes: self.texts.get(&instance).cloned().unwrap_or_default(),
+                txt: self.texts.get(&instance).cloned().unwrap_or_default(),
             });
         }
         found
@@ -511,9 +614,11 @@ fn parse_mdns_response(
     }
 }
 
-/// Reads TXT rdata: length-prefixed `key=value` strings (RFC 6763 section 6).
-fn parse_txt(rdata: &[u8]) -> BTreeMap<String, String> {
-    let mut attributes = BTreeMap::new();
+/// Splits TXT rdata into its length-prefixed `key=value` strings (RFC 6763
+/// section 6), unchanged and in order; interpreting them is left to
+/// `refineid_rapp`.
+fn parse_txt(rdata: &[u8]) -> Vec<(String, String)> {
+    let mut entries = Vec::new();
     let mut offset = 0;
     while offset < rdata.len() {
         let length = usize::from(rdata[offset]);
@@ -524,17 +629,15 @@ fn parse_txt(rdata: &[u8]) -> BTreeMap<String, String> {
         if let Ok(text) = core::str::from_utf8(entry)
             && let Some((key, value)) = text.split_once('=')
         {
-            attributes
-                .entry(key.to_ascii_lowercase())
-                .or_insert_with(|| value.to_owned());
+            entries.push((key.to_owned(), value.to_owned()));
         }
         offset = end;
     }
-    attributes
+    entries
 }
 
 /// Browses `_refineid-stream._tcp.local.` for `timeout` and returns every
-/// advertised custodian, with the TXT attributes it published.
+/// advertised custodian, with the TXT entries it published.
 ///
 /// The query asks for unicast answers from an ephemeral port (RFC 6762
 /// section 5.4), so it works beside a system mDNS responder.
@@ -594,9 +697,9 @@ pub fn browse(mode: DiscoveryMode, timeout: Duration) -> Vec<StreamService> {
 /// Rejected stream-profile bytes, parameters, or connection steps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamError {
-    /// Structure, domain, type, or token length was not as specified.
+    /// The preamble or a pairing key was not as specified.
     Malformed,
-    /// Preamble frame exceeded [`MAX_STREAM_RENDEZVOUS_FRAME`].
+    /// Preamble frame exceeded [`MAX_ROUTING_PREAMBLE_FRAME`].
     Oversized,
     /// Purpose string is not registered; the connection closes unanswered.
     UnknownPurpose,
@@ -608,14 +711,18 @@ pub enum StreamError {
     Preamble(TransportError),
     /// No advertised endpoint accepted the connection.
     Unreachable,
+    /// The custodian announced it stopped serving this pairing.
+    Withdrawn,
+    /// The platform random source failed.
+    Random,
 }
 
-impl From<refineid_rapp::StreamError> for StreamError {
-    fn from(err: refineid_rapp::StreamError) -> Self {
+impl From<refineid_rapp::PreambleError> for StreamError {
+    fn from(err: refineid_rapp::PreambleError) -> Self {
         match err {
-            refineid_rapp::StreamError::Malformed => Self::Malformed,
-            refineid_rapp::StreamError::Oversized => Self::Oversized,
-            refineid_rapp::StreamError::UnknownPurpose => Self::UnknownPurpose,
+            refineid_rapp::PreambleError::Oversized => Self::Oversized,
+            refineid_rapp::PreambleError::UnknownPurpose => Self::UnknownPurpose,
+            refineid_rapp::PreambleError::Malformed => Self::Malformed,
         }
     }
 }
@@ -624,12 +731,14 @@ impl core::fmt::Display for StreamError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Malformed => write!(f, "malformed stream profile data"),
-            Self::Oversized => write!(f, "oversized stream rendezvous frame"),
-            Self::UnknownPurpose => write!(f, "unknown stream rendezvous purpose"),
+            Self::Oversized => write!(f, "oversized routing preamble frame"),
+            Self::UnknownPurpose => write!(f, "unknown routing preamble purpose"),
             Self::Bind => write!(f, "failed to bind stream listener"),
             Self::Accept => write!(f, "failed to accept stream connection"),
             Self::Preamble(e) => write!(f, "failed to move preamble frame: {e}"),
             Self::Unreachable => write!(f, "stream endpoint unreachable"),
+            Self::Withdrawn => write!(f, "the phone stopped serving this pairing"),
+            Self::Random => write!(f, "random source unavailable"),
         }
     }
 }
@@ -652,32 +761,60 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        DiscoveryMode, MdnsRecords, StreamAccept, StreamError, StreamListener, StreamRendezvous,
-        dial, parse_mdns_response,
+        DialPurpose, DiscoveryMode, MdnsRecords, StreamAccept, StreamError, StreamListener,
+        StreamService, dial, parse_mdns_response,
     };
-    use crate::ids::RendezvousToken;
+    use crate::ids::{GrantsHash, PairId};
     use crate::transport::FrameTransport;
-    use refineid_rapp::{DISCOVERY_HINT_EPOCH_SECONDS, discovery_hint};
+    use refineid_rapp::noise::x25519_public_key;
+    use refineid_rapp::{
+        DISCOVERY_HINT_EPOCH_SECONDS, DiscoveryKey, EndpointRole, InstanceName, PairRecord,
+        ProfileName, RoutingKey, RoutingPreamble, SessionRouting, TransportProfile, WithdrawalKey,
+        route_session, withdrawal_counter,
+    };
 
     const DEADLINE: Duration = Duration::from_secs(2);
     const CANDIDATE: &str = "stream-test";
 
-    fn token() -> RendezvousToken {
-        RendezvousToken::from_array([0x5A; 16])
+    /// Synthetic keys of `rapp-routing-v26.10.10.json` (`pair_keys`).
+    const PAIR_ID: [u8; 16] = [0x33; 16];
+    const CUSTODIAN_PRIVATE: [u8; 32] = [0x11; 32];
+    const REQUESTER_PRIVATE: [u8; 32] = [0x22; 32];
+    /// `routing_tag[RAPP-stream-v1]` of the same corpus.
+    const STREAM_NONCE: [u8; 16] = [0x44; 16];
+    const STREAM_TAG_HEX: &str = "f073a90d6f9fc979301b3db7eda0551f";
+    /// `discovery_hint[epoch-1990560]` of the same corpus.
+    const HINT_EPOCH: u64 = 1_990_560;
+    const HINT_AT_EPOCH_HEX: &str = "054526c9fdd3b180";
+
+    fn pair_record(role: EndpointRole, local: [u8; 32], remote: [u8; 32]) -> PairRecord {
+        PairRecord::new(
+            PairId::from_array(PAIR_ID),
+            role,
+            local,
+            x25519_public_key(&local),
+            x25519_public_key(&remote),
+            GrantsHash::from_array([0x55; 32]),
+            vec![ProfileName::parse(crate::profiles::PROFILE_AUTHENTICATION).unwrap()],
+            0,
+        )
+        .unwrap()
     }
 
-    fn service(instance: &str, mode: &str, hints: Option<String>) -> super::StreamService {
-        let mut attributes = std::collections::BTreeMap::new();
-        attributes.insert("v".to_owned(), "1".to_owned());
-        attributes.insert("mode".to_owned(), mode.to_owned());
-        if let Some(hints) = hints {
-            attributes.insert("hints".to_owned(), hints);
-        }
-        super::StreamService {
-            instance: instance.to_owned(),
-            endpoints: vec![format!("{instance}:1")],
-            attributes,
-        }
+    fn requester() -> PairRecord {
+        pair_record(
+            EndpointRole::Requester,
+            REQUESTER_PRIVATE,
+            CUSTODIAN_PRIVATE,
+        )
+    }
+
+    fn custodian() -> PairRecord {
+        pair_record(EndpointRole::Proxy, CUSTODIAN_PRIVATE, REQUESTER_PRIVATE)
+    }
+
+    fn stranger() -> PairRecord {
+        pair_record(EndpointRole::Requester, [0x66; 32], CUSTODIAN_PRIVATE)
     }
 
     fn hex(bytes: &[u8]) -> String {
@@ -688,62 +825,119 @@ mod tests {
         })
     }
 
+    fn service(instance: &str, txt: &[(&str, &str)]) -> StreamService {
+        StreamService {
+            instance: instance.to_owned(),
+            endpoints: vec![format!("{instance}:1")],
+            txt: txt
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect(),
+        }
+    }
+
+    fn session(instance: &str, hints: Option<&str>) -> StreamService {
+        let mut txt = vec![("v", "1"), ("mode", "session")];
+        if let Some(hints) = hints {
+            txt.push(("hints", hints));
+        }
+        service(instance, &txt)
+    }
+
     #[test]
-    fn hints_parse_only_well_formed_lists() {
-        let hint = hex(&discovery_hint(&token(), 1));
-        assert_eq!(service("a", "session", Some(hint.clone())).hints().len(), 1);
-        assert!(
-            service("a", "session", Some(hint.to_uppercase()))
-                .hints()
-                .is_empty()
-        );
-        assert!(
-            service("a", "session", Some([hint.as_str(); 5].join(",")))
-                .hints()
-                .is_empty()
-        );
-        assert!(
-            service("a", "session", Some(format!("{hint},zz")))
-                .hints()
-                .is_empty()
+    fn the_requester_derives_the_corpus_routing_tag() {
+        let key = RoutingKey::derive(&requester()).unwrap();
+        assert_eq!(
+            hex(&key.tag(TransportProfile::Stream, &STREAM_NONCE)),
+            STREAM_TAG_HEX
         );
     }
 
     #[test]
     fn a_hint_names_its_pairing_in_adjacent_epochs() {
-        let epoch = 1000;
-        let now = epoch * DISCOVERY_HINT_EPOCH_SECONDS;
-        let named = service("a", "session", Some(hex(&discovery_hint(&token(), epoch))));
-        assert!(named.names_pairing(&token(), now));
-        assert!(named.names_pairing(&token(), now + DISCOVERY_HINT_EPOCH_SECONDS));
-        assert!(!named.names_pairing(&token(), now + 2 * DISCOVERY_HINT_EPOCH_SECONDS));
-        assert!(!named.names_pairing(&RendezvousToken::from_array([1; 16]), now));
+        let now = HINT_EPOCH * DISCOVERY_HINT_EPOCH_SECONDS;
+        let named = session("a", Some(HINT_AT_EPOCH_HEX));
+        assert!(named.names_pairing(&requester(), now));
+        assert!(named.names_pairing(&requester(), now + DISCOVERY_HINT_EPOCH_SECONDS));
+        assert!(!named.names_pairing(&requester(), now + 2 * DISCOVERY_HINT_EPOCH_SECONDS));
+        assert!(!named.names_pairing(&stranger(), now));
+    }
+
+    #[test]
+    fn hint_values_must_be_lowercase_but_keys_may_be_any_case() {
+        let now = HINT_EPOCH * DISCOVERY_HINT_EPOCH_SECONDS;
+        let upper_value = session("a", Some(&HINT_AT_EPOCH_HEX.to_uppercase()));
+        assert!(!upper_value.names_pairing(&requester(), now));
+        let upper_keys = service(
+            "a",
+            &[
+                ("V", "1"),
+                ("Mode", "session"),
+                ("HINTS", HINT_AT_EPOCH_HEX),
+            ],
+        );
+        assert!(upper_keys.names_pairing(&requester(), now));
     }
 
     #[test]
     fn session_candidates_put_named_services_first_and_drop_foreign_ones() {
-        let epoch = 1000;
-        let now = epoch * DISCOVERY_HINT_EPOCH_SECONDS;
-        let other = RendezvousToken::from_array([1; 16]);
+        let now = HINT_EPOCH * DISCOVERY_HINT_EPOCH_SECONDS;
+        let foreign = hex(&DiscoveryKey::derive(&stranger()).unwrap().hint(HINT_EPOCH));
         let services = vec![
-            service("silent", "session", None),
-            service(
-                "foreign",
-                "session",
-                Some(hex(&discovery_hint(&other, epoch))),
-            ),
-            service("pairing", "pairing", None),
-            service(
-                "named",
-                "session",
-                Some(hex(&discovery_hint(&token(), epoch))),
-            ),
+            session("silent", None),
+            session("foreign", Some(&foreign)),
+            service("pairing", &[("v", "1"), ("mode", "pairing")]),
+            session("named", Some(HINT_AT_EPOCH_HEX)),
         ];
-        let ordered: Vec<String> = super::session_candidates(services, &token(), now)
+        let found = super::session_candidates(services, &requester(), now);
+        let ordered: Vec<String> = found
+            .services
             .into_iter()
             .map(|service| service.instance)
             .collect();
         assert_eq!(ordered, ["named", "silent"]);
+        assert!(!found.withdrawn);
+    }
+
+    fn withdrawn(instance: &str, pairing: &PairRecord, now: u64) -> StreamService {
+        let hint = WithdrawalKey::derive(pairing).unwrap().hint(
+            &InstanceName::new(instance).unwrap(),
+            withdrawal_counter(now),
+        );
+        let mut entries = vec![hex(&hint)];
+        entries.extend((0_u8..7).map(|filler| hex(&[filler; 8])));
+        let list = entries.join(",");
+        service(
+            instance,
+            &[("v", "1"), ("mode", "withdrawn"), ("withdrawn", &list)],
+        )
+    }
+
+    #[test]
+    fn a_withdrawn_record_names_only_its_own_pairing() {
+        let now = 1_791_504_899;
+        let record = withdrawn("refineid-7f2a1c84", &custodian(), now);
+        assert!(record.withdraws(&requester(), now));
+        assert!(!record.withdraws(&stranger(), now));
+        assert!(!record.withdraws(&requester(), now + 180));
+        let renamed = StreamService {
+            instance: "refineid-0b9e44d1".to_owned(),
+            ..record.clone()
+        };
+        assert!(!renamed.withdraws(&requester(), now));
+        let found = super::session_candidates(vec![record], &requester(), now);
+        assert!(found.withdrawn);
+        assert!(found.services.is_empty());
+    }
+
+    #[test]
+    fn a_withdrawn_pairing_is_remembered_until_cleared() {
+        let pair = PairId::from_array([0x77; 16]);
+        assert!(!super::is_withdrawn(pair));
+        super::mark_withdrawn(pair);
+        assert!(super::is_withdrawn(pair));
+        super::clear_withdrawn(pair);
+        assert!(!super::is_withdrawn(pair));
     }
 
     fn name(labels: &[&str]) -> Vec<u8> {
@@ -834,64 +1028,68 @@ mod tests {
     }
 
     #[test]
-    fn preambles_round_trip_and_reject_foreign_purposes() {
-        let pairing = StreamRendezvous::Pairing.encode().unwrap();
+    fn preambles_round_trip_and_reject_oversized_frames() {
+        let profile = TransportProfile::Stream;
+        let pairing = RoutingPreamble::Pairing.encode(profile).unwrap();
         assert_eq!(
-            StreamRendezvous::decode(&pairing).unwrap(),
-            StreamRendezvous::Pairing
+            RoutingPreamble::decode(profile, &pairing).unwrap(),
+            RoutingPreamble::Pairing
         );
-        let session = StreamRendezvous::Session(token()).encode().unwrap();
+        let oversized = vec![0u8; super::MAX_ROUTING_PREAMBLE_FRAME + 1];
         assert_eq!(
-            StreamRendezvous::decode(&session).unwrap(),
-            StreamRendezvous::Session(token())
-        );
-        let oversized = vec![0u8; super::MAX_STREAM_RENDEZVOUS_FRAME + 1];
-        assert_eq!(
-            StreamRendezvous::decode(&oversized),
-            Err(refineid_rapp::StreamError::Oversized)
+            RoutingPreamble::decode(profile, &oversized),
+            Err(refineid_rapp::PreambleError::Oversized)
         );
     }
 
     #[test]
-    fn custodian_listener_classifies_requester_dials() {
+    fn custodian_listener_routes_requester_dials_by_tag() {
         let listener = StreamListener::bind("127.0.0.1:0", CANDIDATE, DEADLINE).unwrap();
         let port = listener.local_port().unwrap();
         let endpoints = vec![format!("127.0.0.1:{port}")];
 
         let dial_endpoints = endpoints.clone();
         let dialer = std::thread::spawn(move || {
-            dial(
-                &dial_endpoints,
-                CANDIDATE,
-                DEADLINE,
-                &StreamRendezvous::Pairing,
-            )
-            .unwrap()
+            dial(&dial_endpoints, CANDIDATE, DEADLINE, DialPurpose::Pairing).unwrap()
         });
         let accepted = listener.accept().unwrap();
         assert!(matches!(accepted, StreamAccept::Pairing(_)));
         drop(dialer.join().unwrap());
 
-        let dialer = std::thread::spawn(move || {
-            let mut transport = dial(
-                &endpoints,
-                CANDIDATE,
-                DEADLINE,
-                &StreamRendezvous::Session(RendezvousToken::from_array([0x5A; 16])),
-            )
-            .unwrap();
-            transport.send_frame(&[0x01, 0x02]).unwrap();
-        });
-        let StreamAccept::Session {
-            rendezvous_token,
-            mut transport,
-        } = listener.accept().unwrap()
-        else {
-            panic!("expected a session accept");
-        };
-        assert_eq!(rendezvous_token, token());
-        assert_eq!(transport.receive_frame().unwrap(), vec![0x01, 0x02]);
-        dialer.join().unwrap();
+        let mut seen: Vec<SessionRouting> = Vec::new();
+        for _ in 0..2 {
+            let dial_endpoints = endpoints.clone();
+            let dialer = std::thread::spawn(move || {
+                let key = RoutingKey::derive(&requester()).unwrap();
+                let mut transport = dial(
+                    &dial_endpoints,
+                    CANDIDATE,
+                    DEADLINE,
+                    DialPurpose::Session(&key),
+                )
+                .unwrap();
+                transport.send_frame(&[0x01, 0x02]).unwrap();
+            });
+            let StreamAccept::Session {
+                routing,
+                mut transport,
+            } = listener.accept().unwrap()
+            else {
+                panic!("expected a session accept");
+            };
+            let keys = [
+                RoutingKey::derive(&stranger()).unwrap(),
+                RoutingKey::derive(&custodian()).unwrap(),
+            ];
+            assert_eq!(
+                route_session(&keys, TransportProfile::Stream, &routing),
+                Some(1)
+            );
+            assert_eq!(transport.receive_frame().unwrap(), vec![0x01, 0x02]);
+            dialer.join().unwrap();
+            seen.push(routing);
+        }
+        assert_ne!(seen[0].nonce(), seen[1].nonce());
     }
 
     #[test]
@@ -918,7 +1116,7 @@ mod tests {
                 &[format!("127.0.0.1:{port}")],
                 CANDIDATE,
                 DEADLINE,
-                &StreamRendezvous::Pairing
+                DialPurpose::Pairing
             ),
             Err(StreamError::Unreachable)
         ));

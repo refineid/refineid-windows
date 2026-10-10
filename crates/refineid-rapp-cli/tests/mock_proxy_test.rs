@@ -12,7 +12,7 @@ use refineid_rapp_core::operations::{
 };
 use refineid_rapp_core::store::{MemoryJournal, MemoryPairingStore, PairingStore};
 use refineid_rapp_core::stream::{
-    STREAM_CANDIDATE_ID, StreamListener, StreamRendezvous, dial, dial_session,
+    DialPurpose, STREAM_CANDIDATE_ID, StreamListener, dial, dial_session,
 };
 
 const DEADLINE: Duration = Duration::from_secs(5);
@@ -51,7 +51,7 @@ fn a_mistyped_code_is_refused_by_the_custodian() {
         &[endpoint],
         STREAM_CANDIDATE_ID,
         DEADLINE,
-        &StreamRendezvous::Pairing,
+        DialPurpose::Pairing,
     )
     .expect("dial pairing");
     let outcome =
@@ -87,7 +87,7 @@ fn test_mock_proxy_pairing_and_card_operations() {
         std::slice::from_ref(&endpoint),
         STREAM_CANDIDATE_ID,
         DEADLINE,
-        &StreamRendezvous::Pairing,
+        DialPurpose::Pairing,
     )
     .expect("dial pairing");
     let pair_id = requester
@@ -98,13 +98,14 @@ fn test_mock_proxy_pairing_and_card_operations() {
         })
         .expect("requester pairing failed");
 
-    let token = requester
+    let pairing = requester
         .store()
         .get(pair_id)
         .expect("stored record")
-        .rendezvous_token;
+        .to_core_pair_record()
+        .expect("usable pairing");
     let transport = dial_session(
-        token,
+        &pairing,
         std::slice::from_ref(&endpoint),
         &[],
         Duration::ZERO,

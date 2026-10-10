@@ -25,7 +25,7 @@
 //! a pairing with the code the phone shows, polls its state, confirms it,
 //! then reads the paired card. Each handle owns one background pairing
 //! thread that finds the phone by its DNS-SD `mode=pairing` record and dials
-//! it (RAPP v26.10.9 section 2.2), and, after pairing, the live `Requester`
+//! it (RAPP v26.10.10 section 2.2), and, after pairing, the live `Requester`
 //! whose device-only credential store persists the pairing so the minidriver
 //! can later load and use it behind this same ABI. This computer only ever
 //! dials out; it listens on no port.
@@ -48,13 +48,13 @@ use std::thread::JoinHandle;
 use refineid_rapp_core::engine::{
     OperationOutcome, PairingError, PeerIntroduction, Requester, RequesterConfig,
 };
-use refineid_rapp_core::ids::{PairId, RendezvousToken};
+use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::message::CloseReason;
 use refineid_rapp_core::offer::normalize_pairing_code;
 use refineid_rapp_core::operations::{CardOperation, CardOperationResult};
 use refineid_rapp_core::store::{MemoryJournal, PairingStore};
 use refineid_rapp_core::stream::{
-    DiscoveryMode, STREAM_CANDIDATE_ID, StreamRendezvous, browse, dial, session_candidates,
+    DialPurpose, DiscoveryMode, STREAM_CANDIDATE_ID, StreamError, browse, dial, dial_session,
 };
 use refineid_windows_credential_store::{CredentialPairingStore, delete_pairing_set};
 use serde::Serialize;
@@ -171,7 +171,7 @@ enum Phase {
 struct Paired {
     requester: StreamRequester,
     pair_id: PairId,
-    rendezvous: RendezvousToken,
+    pairing: refineid_rapp::PairRecord,
 }
 
 /// State a pairing handle shares across threads.
@@ -231,7 +231,7 @@ pub extern "C" fn refineid_rapp_forget_pairings() -> *mut c_char {
 /// Begin a pairing with the code the phone shows.
 ///
 /// Returns `{ handle }` immediately, or `invalid_code` when the input is not
-/// a six-character pairing code (RAPP v26.10.9 section 3.1). The background
+/// a six-character pairing code (RAPP v26.10.10 section 3.1). The background
 /// thread finds the phone in pairing mode, dials it, reads its offer, and
 /// runs the pairing handshake; the caller drives confirmation through
 /// [`refineid_rapp_poll_pairing`] and [`refineid_rapp_confirm_pairing`].
@@ -452,7 +452,7 @@ fn pairing_thread(handle_id: u64, mut requester: StreamRequester, code: &str) {
                 &service.endpoints,
                 STREAM_CANDIDATE_ID,
                 receive_deadline(),
-                &StreamRendezvous::Pairing,
+                DialPurpose::Pairing,
             ) else {
                 continue;
             };
@@ -498,7 +498,13 @@ fn finish_pairing(handle_id: u64, requester: StreamRequester, pair_id: PairId) {
         );
         return;
     };
-    let rendezvous = record.rendezvous_token;
+    let Ok(pairing) = record.to_core_pair_record() else {
+        set_phase(
+            handle_id,
+            Phase::Failed("The stored pairing could not be read.".to_owned()),
+        );
+        return;
+    };
     let pair_id_hex = hex::encode(pair_id.as_bytes());
     // If the handle is gone, the closure is never run and the moved
     // requester is dropped here instead.
@@ -508,34 +514,28 @@ fn finish_pairing(handle_id: u64, requester: StreamRequester, pair_id: PairId) {
         shared.paired = Some(Paired {
             requester,
             pair_id,
-            rendezvous,
+            pairing,
         });
     });
 }
 
 fn read_paired_card(paired: &mut Paired) -> Result<CardReadDto, ApiFailure> {
-    let services = session_candidates(
-        browse(DiscoveryMode::Session, browse_window()),
-        &paired.rendezvous,
-        unix_seconds(),
-    );
-    let session_transport = services
-        .iter()
-        .find_map(|service| {
-            dial(
-                &service.endpoints,
-                STREAM_CANDIDATE_ID,
-                receive_deadline(),
-                &StreamRendezvous::Session(paired.rendezvous),
-            )
-            .ok()
-        })
-        .ok_or_else(|| {
-            ApiFailure::new(
-                "no_session",
-                "The paired phone was not found on this network.",
-            )
-        })?;
+    let session_transport = dial_session(
+        &paired.pairing,
+        &[],
+        &[],
+        browse_window(),
+        receive_deadline(),
+    )
+    .map_err(|error| match error {
+        StreamError::Withdrawn => {
+            ApiFailure::new("withdrawn", "The paired phone turned remote access off.")
+        }
+        _ => ApiFailure::new(
+            "no_session",
+            "The paired phone was not found on this network.",
+        ),
+    })?;
 
     let mut session = paired
         .requester
@@ -764,12 +764,6 @@ const fn receive_deadline() -> std::time::Duration {
 
 const fn browse_window() -> std::time::Duration {
     std::time::Duration::from_millis(BROWSE_WINDOW_MS)
-}
-
-fn unix_seconds() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 fn lock_registry() -> Result<MutexGuard<'static, HashMap<u64, Handle>>, ApiFailure> {

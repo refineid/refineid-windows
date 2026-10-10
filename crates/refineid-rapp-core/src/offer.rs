@@ -1,6 +1,6 @@
 //! The pairing code and the offer the custodian serves.
 //!
-//! In RAPP v26.10.9 the custodian (the phone) shows a six-character code and
+//! In RAPP v26.10.10 the custodian (the phone) shows a six-character code and
 //! the requester types it (section 3). The custodian creates the offer with a
 //! random `offer_id` and sends it as its first frame after the pairing
 //! preamble (section 4.2); nothing derived from the code is ever published.

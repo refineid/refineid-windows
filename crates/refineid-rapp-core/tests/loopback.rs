@@ -111,7 +111,7 @@ fn custodian_offer() -> refineid_rapp::PairingOffer {
     .unwrap()
 }
 
-/// Serves the offer bootstrap (RAPP v26.10.9 section 4.2) and returns the
+/// Serves the offer bootstrap (RAPP v26.10.10 section 4.2) and returns the
 /// offer and its `CPace` context.
 fn serve_offer<T: FrameTransport>(transport: &mut T) -> (refineid_rapp::PairingOffer, Vec<u8>) {
     let offer = custodian_offer();
@@ -264,11 +264,7 @@ fn pairing_stores_matching_records_on_both_sides() {
     assert_eq!(record.granted_profiles, granted);
     assert_eq!(record.disposition, PairingDisposition::Paired);
     assert_eq!(record.peer_display_name, "Phone");
-    assert_ne!(record.rendezvous_token.as_bytes(), &[0u8; 16]);
-    assert_ne!(
-        record.rendezvous_token.as_bytes(),
-        record.pair_id.as_bytes()
-    );
+    assert!(record.to_core_pair_record().is_ok());
 }
 
 #[test]
@@ -555,8 +551,8 @@ fn first_sequence_violation_revokes_the_pairing() {
 
 #[test]
 fn stream_pairing_and_session_route_only_by_their_preambles() {
-    use refineid_rapp::StreamRendezvous;
-    use refineid_rapp_core::stream::{StreamAccept, StreamListener, dial};
+    use refineid_rapp::{RoutingKey, TransportProfile, route_session};
+    use refineid_rapp_core::stream::{DialPurpose, StreamAccept, StreamListener, dial};
 
     let listener = StreamListener::bind("127.0.0.1:0", STREAM_CANDIDATE_ID, DEADLINE).unwrap();
     let endpoints = vec![format!("127.0.0.1:{}", listener.local_port().unwrap())];
@@ -565,14 +561,14 @@ fn stream_pairing_and_session_route_only_by_their_preambles() {
             panic!("pairing opens with the pairing preamble");
         };
         let record = proxy_pair(transport, SHOWN_CODE);
-        let StreamAccept::Session {
-            rendezvous_token,
-            transport,
-        } = listener.accept().unwrap()
-        else {
+        let StreamAccept::Session { routing, transport } = listener.accept().unwrap() else {
             panic!("a session opens with the session preamble");
         };
-        assert_eq!(rendezvous_token, record.rendezvous_token());
+        let key = RoutingKey::derive(&record).unwrap();
+        assert_eq!(
+            route_session(&[key], TransportProfile::Stream, &routing),
+            Some(0)
+        );
         let mut session = proxy_accept_session(&record, transport);
         let TypedMessage::OperationRequest(request) = session.receive() else {
             panic!("expected an operation request");
@@ -598,18 +594,26 @@ fn stream_pairing_and_session_route_only_by_their_preambles() {
         &endpoints,
         STREAM_CANDIDATE_ID,
         DEADLINE,
-        &StreamRendezvous::Pairing,
+        DialPurpose::Pairing,
     )
     .unwrap();
     let pair_id = requester
         .pair_with_code(SHOWN_CODE, pairing, |_, requested| Some(requested.to_vec()))
         .unwrap();
-    let token = requester.store().get(pair_id).unwrap().rendezvous_token;
+    let key = RoutingKey::derive(
+        &requester
+            .store()
+            .get(pair_id)
+            .unwrap()
+            .to_core_pair_record()
+            .unwrap(),
+    )
+    .unwrap();
     let transport = dial(
         &endpoints,
         STREAM_CANDIDATE_ID,
         DEADLINE,
-        &StreamRendezvous::Session(token),
+        DialPurpose::Session(&key),
     )
     .unwrap();
     let mut session = requester.connect(pair_id, transport).unwrap();

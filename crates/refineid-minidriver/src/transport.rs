@@ -278,8 +278,12 @@ impl RemoteCardTransport {
             .filter(|endpoint| !endpoint.is_empty())
             .into_iter()
             .collect();
+        let pairing = self
+            .pairing_record
+            .to_core_pair_record()
+            .map_err(|_| "the stored pairing is unusable; pair again".to_owned())?;
         refineid_rapp_core::stream::dial_session(
-            self.pairing_record.rendezvous_token,
+            &pairing,
             &preferred,
             &[LOCAL_MOCK_CUSTODIAN.to_owned()],
             Duration::from_secs(2),

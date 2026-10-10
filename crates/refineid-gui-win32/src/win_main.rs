@@ -62,7 +62,7 @@ use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::limits::OFFER_TTL_MS;
 use refineid_rapp_core::offer::normalize_pairing_code;
 use refineid_rapp_core::store::{MemoryJournal, PairingStore as _};
-use refineid_rapp_core::stream::StreamRendezvous;
+use refineid_rapp_core::stream::DialPurpose;
 use refineid_rapp_core::transport::FrameTransport;
 use refineid_windows_credential_store::CredentialPairingStore;
 use std::path::{Path, PathBuf};
@@ -2291,7 +2291,7 @@ fn start_doc_verify() {
 /// Pair with the code the phone shows, on a worker thread; the
 /// refresh timer picks progress and the outcome up from `INBOX`. The
 /// phone advertises a pairing-mode record over DNS-SD and serves its
-/// offer on the connection (RAPP v26.10.9 section 4.2); this side
+/// offer on the connection (RAPP v26.10.10 section 4.2); this side
 /// browses, dials, and types the code into `CPace`.
 fn start_pairing() {
     let snapshot = STATE.with(|cell| {
@@ -2385,7 +2385,7 @@ fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<S
                 &service.endpoints,
                 refineid_rapp_core::stream::STREAM_CANDIDATE_ID,
                 Duration::from_secs(10),
-                &StreamRendezvous::Pairing,
+                DialPurpose::Pairing,
             ) && let Some(outcome) = attempt_pair(&mut requester, code, transport, main_raw)
             {
                 return outcome;

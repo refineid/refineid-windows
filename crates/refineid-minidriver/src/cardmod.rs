@@ -493,7 +493,7 @@ impl CardModel {
 
 /// Normalizes a remote ECDSA signature to IEEE P1363 (`r || s`).
 ///
-/// RAPP v26.10.9 section 9.2 sends the fixed-width raw form, which may itself
+/// RAPP v26.10.10 section 9.2 sends the fixed-width raw form, which may itself
 /// begin with the DER sequence tag, so the raw length is checked before any
 /// DER decoding; other lengths are accepted only as DER.
 pub(crate) fn remote_ecdsa_to_p1363(signature: &[u8], field_bytes: usize) -> Option<Vec<u8>> {

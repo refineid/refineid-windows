@@ -73,7 +73,7 @@ impl CredentialPairingStore {
     /// The first usable (non-revoked) stored pairing, if any.
     ///
     /// A caller that reconnects to a stored pairing needs its `pair_id` and
-    /// rendezvous token without having kept them from the pairing ceremony.
+    /// keys without having kept them from the pairing ceremony.
     #[must_use]
     pub fn usable_pairing(&self) -> Option<&PairingRecord> {
         self.records
@@ -379,7 +379,7 @@ pub const fn delete_pairing_set() -> Result<(), CredentialStoreError> {
 
 #[cfg(all(test, windows))]
 mod tests {
-    use refineid_rapp_core::ids::{PairId, RendezvousToken};
+    use refineid_rapp_core::ids::PairId;
     use refineid_rapp_core::store::{PairingDisposition, PairingRecord, PairingStore};
     use zeroize::Zeroizing;
 
@@ -388,7 +388,6 @@ mod tests {
     fn record(pair_id: PairId) -> PairingRecord {
         PairingRecord {
             pair_id,
-            rendezvous_token: RendezvousToken::from_array([9; 16]),
             local_private: Zeroizing::new(vec![1; 32]),
             local_public: vec![2; 32],
             peer_public: vec![3; 32],

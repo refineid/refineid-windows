@@ -1,7 +1,7 @@
 # RefineID Windows: Remote Transport & Discovery Architecture
 
 - **Document Version**: `26.10.3`
-- **Protocol Version**: `26.10.9`
+- **Protocol Version**: `26.10.10`
 - **Status**: Normative Architecture & Migration Plan
 - **Applies To**: `RefineID-Windows` (`RefineID-winui`, `refineid-minidriver`, `refineid-pkcs11`, `refineid-rapp-core`)
 - **Companion Specification**: [RAPP Transport and Discovery Hierarchy Specification](../../refineid-core/docs/protocols/rapp-transport-and-discovery-hierarchy.md)
@@ -126,6 +126,8 @@ In the legacy codebase:
        ```
    - Resolves the phone's advertised IP address and dynamic port without requiring administrative privileges.
    - When the user toggles "Enable Remote Phone Reader" off, `watcher.Stop()` is invoked immediately, stopping discovery and releasing all resources.
+   - TXT records are handed to `refineid_rapp` unparsed: `DiscoveryRecord::parse` and `DiscoveryKey::matches_record` decide whether a `mode=session` record names a stored pairing, and `WithdrawnRecord::parse` with `WithdrawalKey::matches` decides whether a `mode=withdrawn` record announces that its custodian stopped serving (RAPP v26.10.10 §4.5).
+   - A verified withdrawal, or an authenticated `session.close` with reason `service_withdrawn`, marks the pairing withdrawn: the requester does not dial it again until a `mode=session` record names it. A custodian that disappears without announcing it is simply not found at the next dial; the pairing is unchanged either way.
 2. **Outbound Stream Connection**:
    - Establish outbound connection using standard `System.Net.Sockets.TcpClient`:
      ```csharp
@@ -133,6 +135,7 @@ In the legacy codebase:
      await client.ConnectAsync(phoneIp, phonePort);
      ```
    - No inbound firewall rule is required for established outbound connections.
+   - The first frame is the routing preamble: `pairing` for a pairing ceremony, or for a session a fresh 16-byte nonce and a 16-byte tag keyed by the pairing's static agreement (`RoutingKey::route`). Each connection attempt builds a new one, so no value on the wire names a pairing twice.
 3. **Removal of `FirewallService.cs`**:
    - Delete `apps/RefineID-winui/FirewallService.cs`.
    - Remove firewall check dialogs from `MainPage.xaml.cs`.
@@ -154,7 +157,7 @@ In the legacy codebase:
    - When unchecked, the application generates zero network traffic and listens on zero sockets.
    - When checked, DNS-SD service browsing and BLE scanning activate to discover announced mobile readers.
 3. **One-Time Pairing UI**:
-   - When pairing a new phone, the desktop prompts for the 6-character Crockford Base32 code displayed on the phone (per RAPP v26.10.9 §3).
+   - When pairing a new phone, the desktop prompts for the 6-character Crockford Base32 code displayed on the phone (per RAPP v26.10.10 §3).
    - Once paired, the trust record is stored in Windows Credential Store (`refineid-windows-credential-store`).
 
 ---

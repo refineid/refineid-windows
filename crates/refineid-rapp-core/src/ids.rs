@@ -3,8 +3,8 @@
 use getrandom::fill;
 
 pub use refineid_rapp::{
-    GrantsHash, OfferId, OperationId, PairId, PairingSecret, RendezvousToken, RequestHash,
-    SessionId, derive_pair_id, derive_rendezvous_token, derive_session_id,
+    GrantsHash, OfferId, OperationId, PairId, PairingSecret, RequestHash, SessionId,
+    derive_pair_id, derive_session_id,
 };
 
 /// The random-generator failure surfaced by identifier creation.
