@@ -56,6 +56,9 @@ internal static partial class NativeRappService
         nuint nameLength
     );
 
+    [LibraryImport(Library, EntryPoint = "refineid_rapp_open_pairing")]
+    private static partial nint OpenPairingNative(byte[] name, nuint nameLength);
+
     [LibraryImport(Library, EntryPoint = "refineid_rapp_poll_pairing")]
     private static partial nint PollPairingNative(ulong handle);
 
@@ -94,6 +97,20 @@ internal static partial class NativeRappService
                     nameBytes,
                     (nuint)nameBytes.Length
                 ),
+            RappJsonContext.Default.NativeEnvelopeBeginPairingResult
+        );
+    }
+
+    /// <summary>
+    /// Opens the pairing this device already holds and returns its handle,
+    /// parked in the paired state. Fails with code <c>no_pairing</c> when
+    /// none is stored.
+    /// </summary>
+    internal static BeginPairingResult OpenPairing(string name)
+    {
+        byte[] nameBytes = Encoding.UTF8.GetBytes(name);
+        return Invoke(
+            () => OpenPairingNative(nameBytes, (nuint)nameBytes.Length),
             RappJsonContext.Default.NativeEnvelopeBeginPairingResult
         );
     }

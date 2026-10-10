@@ -80,12 +80,13 @@ internal sealed partial class MainPage : Page
         // the phone, when that needs no administrator rights.
         _ = Task.Run(FirewallService.DisableLegacyRule);
         this.ShowDriverLaneHintIfNeeded();
+        await this.RunRemoteCardAsync(quiet: true).ConfigureAwait(true);
 #if DEBUG
         if (
             Array.Exists(Environment.GetCommandLineArgs(), argument => argument == AutoPairArgument)
         )
         {
-            await this.RunRemoteCardAsync().ConfigureAwait(true);
+            await this.RunRemoteCardAsync(quiet: false).ConfigureAwait(true);
         }
 #endif
     }
@@ -105,9 +106,49 @@ internal sealed partial class MainPage : Page
     }
 
     private async void ConnectRemoteReader_Click(object sender, RoutedEventArgs args) =>
-        await this.RunRemoteCardAsync().ConfigureAwait(true);
+        await this.RunRemoteCardAsync(quiet: false).ConfigureAwait(true);
 
-    private async Task RunRemoteCardAsync()
+    /// <summary>
+    /// Reads the card through the pairing this device already holds, and
+    /// pairs first only when it holds none. On launch the read is quiet: a
+    /// phone that is not around is not an error worth a notice.
+    /// </summary>
+    private async Task RunRemoteCardAsync(bool quiet)
+    {
+        ulong handle;
+        try
+        {
+            handle = (
+                await Task.Run(() => NativeRappService.OpenPairing(RequesterName))
+                    .ConfigureAwait(true)
+            ).Handle;
+        }
+        catch (NativeRappException error) when (error.Code == "no_pairing")
+        {
+            if (!quiet)
+            {
+                await this.PairAndReadAsync().ConfigureAwait(true);
+            }
+
+            return;
+        }
+        catch (NativeRappException error)
+        {
+            if (!quiet)
+            {
+                this.ShowError(error.Message);
+            }
+
+            return;
+        }
+
+        // The pairing exists, so forgetting it is an action even before a
+        // read has succeeded.
+        this.IdentityMenuButton.Visibility = Visibility.Visible;
+        await this.ReadPairedCardAsync(handle, quiet).ConfigureAwait(true);
+    }
+
+    private async Task PairAndReadAsync()
     {
         var dialog = new PairingDialog(RequesterName, this.dispatcher, PollInterval)
         {
@@ -117,7 +158,8 @@ internal sealed partial class MainPage : Page
 
         if (dialog.PairedHandle is ulong pairedHandle)
         {
-            await this.ReadPairedCardAsync(pairedHandle).ConfigureAwait(true);
+            this.IdentityMenuButton.Visibility = Visibility.Visible;
+            await this.ReadPairedCardAsync(pairedHandle, quiet: false).ConfigureAwait(true);
         }
         else if (dialog.Failure is string failure)
         {
@@ -125,7 +167,7 @@ internal sealed partial class MainPage : Page
         }
     }
 
-    private async Task ReadPairedCardAsync(ulong handle)
+    private async Task ReadPairedCardAsync(ulong handle, bool quiet)
     {
         this.SetBusy(true);
         try
@@ -137,13 +179,15 @@ internal sealed partial class MainPage : Page
             this.remoteHolder = holder;
             this.HolderText.Text = holder;
             this.HolderText.Visibility = Visibility.Visible;
-            this.IdentityMenuButton.Visibility = Visibility.Visible;
             this.ConnectRemoteReaderButton.Visibility = Visibility.Collapsed;
             this.StatusInfoBar.IsOpen = false;
         }
         catch (NativeRappException error)
         {
-            this.ShowError(error.Message);
+            if (!quiet)
+            {
+                this.ShowError(error.Message);
+            }
         }
         finally
         {
