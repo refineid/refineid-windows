@@ -17,6 +17,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 
 namespace RefineID_Settings;
 
@@ -136,21 +137,64 @@ internal sealed class MutationResult
     public ushort? StatusWord { get; init; }
 }
 
+internal sealed class NativeEnvelope<T>
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; init; }
+
+    [JsonPropertyName("data")]
+    public T? Data { get; init; }
+
+    [JsonPropertyName("error")]
+    public NativeError? Error { get; init; }
+}
+
+internal sealed class NativeError
+{
+    [JsonPropertyName("code")]
+    public string Code { get; init; } = string.Empty;
+
+    [JsonPropertyName("message")]
+    public string Message { get; init; } = string.Empty;
+}
+
+// Release builds are trimmed, which disables reflection-based System.Text.Json,
+// so every native response is deserialized through generated metadata.
+[JsonSerializable(typeof(NativeEnvelope<ReaderList>), TypeInfoPropertyName = "ReaderListEnvelope")]
+[JsonSerializable(
+    typeof(NativeEnvelope<LocalCardSupport>),
+    TypeInfoPropertyName = "LocalCardSupportEnvelope"
+)]
+[JsonSerializable(
+    typeof(NativeEnvelope<CardSnapshot>),
+    TypeInfoPropertyName = "CardSnapshotEnvelope"
+)]
+[JsonSerializable(
+    typeof(NativeEnvelope<ContactlessSnapshot>),
+    TypeInfoPropertyName = "ContactlessSnapshotEnvelope"
+)]
+[JsonSerializable(
+    typeof(NativeEnvelope<MutationResult>),
+    TypeInfoPropertyName = "MutationResultEnvelope"
+)]
+internal sealed partial class NativeJsonContext : JsonSerializerContext;
+
 internal static class NativeCardService
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNameCaseInsensitive = false,
-    };
-
     internal static string[] PresentReaders()
     {
-        return Invoke<ReaderList>(NativeMethods.PresentReaders).Readers;
+        return Invoke(
+            NativeMethods.PresentReaders,
+            NativeJsonContext.Default.ReaderListEnvelope
+        ).Readers;
     }
 
     internal static LocalCardSupport DetectLocalCardSupport()
     {
-        return Invoke<LocalCardSupport>(NativeMethods.DetectLocalCardSupport);
+        return Invoke(
+            NativeMethods.DetectLocalCardSupport,
+            NativeJsonContext.Default.LocalCardSupportEnvelope
+        );
     }
 
     internal static CardSnapshot Inspect(string reader)
@@ -158,8 +202,9 @@ internal static class NativeCardService
         byte[] readerBytes = Encoding.UTF8.GetBytes(reader);
         try
         {
-            return Invoke<CardSnapshot>(() =>
-                NativeMethods.Inspect(readerBytes, (nuint)readerBytes.Length)
+            return Invoke(
+                () => NativeMethods.Inspect(readerBytes, (nuint)readerBytes.Length),
+                NativeJsonContext.Default.CardSnapshotEnvelope
             );
         }
         finally
@@ -174,13 +219,15 @@ internal static class NativeCardService
         byte[] canBytes = Encoding.ASCII.GetBytes(can);
         try
         {
-            return Invoke<ContactlessSnapshot>(() =>
-                NativeMethods.PrimeContactless(
-                    readerBytes,
-                    (nuint)readerBytes.Length,
-                    canBytes,
-                    (nuint)canBytes.Length
-                )
+            return Invoke(
+                () =>
+                    NativeMethods.PrimeContactless(
+                        readerBytes,
+                        (nuint)readerBytes.Length,
+                        canBytes,
+                        (nuint)canBytes.Length
+                    ),
+                NativeJsonContext.Default.ContactlessSnapshotEnvelope
             );
         }
         finally
@@ -206,20 +253,22 @@ internal static class NativeCardService
         byte[] confirmationBytes = Encoding.ASCII.GetBytes(confirmation);
         try
         {
-            return Invoke<MutationResult>(() =>
-                NativeMethods.ChangePin(
-                    readerBytes,
-                    (nuint)readerBytes.Length,
-                    serialBytes,
-                    (nuint)serialBytes.Length,
-                    (byte)slot,
-                    currentBytes,
-                    (nuint)currentBytes.Length,
-                    newBytes,
-                    (nuint)newBytes.Length,
-                    confirmationBytes,
-                    (nuint)confirmationBytes.Length
-                )
+            return Invoke(
+                () =>
+                    NativeMethods.ChangePin(
+                        readerBytes,
+                        (nuint)readerBytes.Length,
+                        serialBytes,
+                        (nuint)serialBytes.Length,
+                        (byte)slot,
+                        currentBytes,
+                        (nuint)currentBytes.Length,
+                        newBytes,
+                        (nuint)newBytes.Length,
+                        confirmationBytes,
+                        (nuint)confirmationBytes.Length
+                    ),
+                NativeJsonContext.Default.MutationResultEnvelope
             );
         }
         finally
@@ -244,20 +293,22 @@ internal static class NativeCardService
         byte[] confirmationBytes = Encoding.ASCII.GetBytes(confirmation);
         try
         {
-            return Invoke<MutationResult>(() =>
-                NativeMethods.UnblockPin(
-                    readerBytes,
-                    (nuint)readerBytes.Length,
-                    serialBytes,
-                    (nuint)serialBytes.Length,
-                    (byte)slot,
-                    pukBytes,
-                    (nuint)pukBytes.Length,
-                    newBytes,
-                    (nuint)newBytes.Length,
-                    confirmationBytes,
-                    (nuint)confirmationBytes.Length
-                )
+            return Invoke(
+                () =>
+                    NativeMethods.UnblockPin(
+                        readerBytes,
+                        (nuint)readerBytes.Length,
+                        serialBytes,
+                        (nuint)serialBytes.Length,
+                        (byte)slot,
+                        pukBytes,
+                        (nuint)pukBytes.Length,
+                        newBytes,
+                        (nuint)newBytes.Length,
+                        confirmationBytes,
+                        (nuint)confirmationBytes.Length
+                    ),
+                NativeJsonContext.Default.MutationResultEnvelope
             );
         }
         finally
@@ -286,24 +337,26 @@ internal static class NativeCardService
         byte[] pin2ConfirmationBytes = Encoding.ASCII.GetBytes(pin2Confirmation);
         try
         {
-            return Invoke<MutationResult>(() =>
-                NativeMethods.Activate(
-                    readerBytes,
-                    (nuint)readerBytes.Length,
-                    serialBytes,
-                    (nuint)serialBytes.Length,
-                    activationBytes,
-                    (nuint)activationBytes.Length,
-                    pin1Bytes,
-                    (nuint)pin1Bytes.Length,
-                    pin1ConfirmationBytes,
-                    (nuint)pin1ConfirmationBytes.Length,
-                    pin2Bytes,
-                    (nuint)pin2Bytes.Length,
-                    pin2ConfirmationBytes,
-                    (nuint)pin2ConfirmationBytes.Length,
-                    allowReactivate ? (byte)1 : (byte)0
-                )
+            return Invoke(
+                () =>
+                    NativeMethods.Activate(
+                        readerBytes,
+                        (nuint)readerBytes.Length,
+                        serialBytes,
+                        (nuint)serialBytes.Length,
+                        activationBytes,
+                        (nuint)activationBytes.Length,
+                        pin1Bytes,
+                        (nuint)pin1Bytes.Length,
+                        pin1ConfirmationBytes,
+                        (nuint)pin1ConfirmationBytes.Length,
+                        pin2Bytes,
+                        (nuint)pin2Bytes.Length,
+                        pin2ConfirmationBytes,
+                        (nuint)pin2ConfirmationBytes.Length,
+                        allowReactivate ? (byte)1 : (byte)0
+                    ),
+                NativeJsonContext.Default.MutationResultEnvelope
             );
         }
         finally
@@ -320,7 +373,7 @@ internal static class NativeCardService
         }
     }
 
-    private static T Invoke<T>(Func<nint> operation)
+    private static T Invoke<T>(Func<nint> operation, JsonTypeInfo<NativeEnvelope<T>> typeInfo)
     {
         nint response = operation();
         if (response == nint.Zero)
@@ -340,7 +393,7 @@ internal static class NativeCardService
                     "The native card service returned invalid UTF-8."
                 );
             NativeEnvelope<T> envelope =
-                JsonSerializer.Deserialize<NativeEnvelope<T>>(json, JsonOptions)
+                JsonSerializer.Deserialize(json, typeInfo)
                 ?? throw new NativeCardException(
                     "native_response_invalid",
                     "The native card service returned invalid JSON."
@@ -371,27 +424,6 @@ internal static class NativeCardService
         {
             CryptographicOperations.ZeroMemory(buffer);
         }
-    }
-
-    private sealed class NativeEnvelope<T>
-    {
-        [JsonPropertyName("ok")]
-        public bool Ok { get; init; }
-
-        [JsonPropertyName("data")]
-        public T? Data { get; init; }
-
-        [JsonPropertyName("error")]
-        public NativeError? Error { get; init; }
-    }
-
-    private sealed class NativeError
-    {
-        [JsonPropertyName("code")]
-        public string Code { get; init; } = string.Empty;
-
-        [JsonPropertyName("message")]
-        public string Message { get; init; } = string.Empty;
     }
 
     private static class NativeMethods
