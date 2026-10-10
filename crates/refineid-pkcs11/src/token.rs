@@ -1220,6 +1220,24 @@ fn parse_der_len(der: &[u8], idx: &mut usize) -> Option<usize> {
     Some(len)
 }
 
+/// Normalizes a remote ECDSA signature to IEEE P1363 (`r || s`).
+///
+/// RAPP v26.10.9 section 9.2 sends the fixed-width raw form, which may itself
+/// begin with the DER sequence tag, so the raw length is checked before any
+/// DER decoding; other lengths are accepted only as DER.
+#[cfg_attr(
+    not(windows),
+    allow(dead_code, reason = "P1363 ECDSA conversion used on Windows/tests")
+)]
+#[must_use]
+pub fn remote_ecdsa_to_p1363(signature: &[u8], field_bytes: usize) -> Option<Vec<u8>> {
+    if signature.len() == field_bytes * 2 {
+        Some(signature.to_vec())
+    } else {
+        ecdsa_der_to_p1363(signature, field_bytes)
+    }
+}
+
 #[cfg_attr(
     not(windows),
     allow(dead_code, reason = "P1363 ECDSA conversion used on Windows/tests")
@@ -1362,10 +1380,6 @@ impl RemoteCardTransport {
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "remote_card_sign handles pairing retrieval, algorithm mapping, RAPP execution and signature conversion in one transaction"
-)]
 fn remote_card_sign(
     hex_id: &str,
     origin: &str,
@@ -1463,13 +1477,7 @@ fn remote_card_sign(
         match result {
             CardOperationResult::Signature(signature_bytes) => match mechanism {
                 Mechanism::Ecdsa => {
-                    if signature_bytes.first() == Some(&0x30) {
-                        ecdsa_der_to_p1363(&signature_bytes, 48).ok_or(CKR_DEVICE_ERROR)
-                    } else if signature_bytes.len() == 96 {
-                        Ok(signature_bytes)
-                    } else {
-                        Err(CKR_DEVICE_ERROR)
-                    }
+                    remote_ecdsa_to_p1363(&signature_bytes, 48).ok_or(CKR_DEVICE_ERROR)
                 }
                 Mechanism::RsaPkcs => Ok(signature_bytes),
             },
@@ -1647,6 +1655,13 @@ pub(super) fn card_change_pin1(
     reason = "unit tests assert on fixed offsets of compile-time-known byte fixtures; production code stays panic-free."
 )]
 mod tests {
+    #[test]
+    fn raw_remote_signature_starting_with_the_der_tag_stays_raw() {
+        let mut raw = vec![0x30u8];
+        raw.extend(vec![0x5au8; 95]);
+        assert_eq!(super::remote_ecdsa_to_p1363(&raw, 48), Some(raw));
+    }
+
     use refineid_lib_core::apdu::status_word::PinRetries;
     use refineid_lib_core::auth::PinStatus;
 

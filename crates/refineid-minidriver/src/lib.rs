@@ -103,9 +103,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 #[cfg(windows)]
-use cardmod::{
-    CardCapabilityModel, CardModel, ContainerDescriptor, Ctx, KeyAlgorithm, Log, ecdsa_der_to_p1363,
-};
+use cardmod::{CardCapabilityModel, CardModel, ContainerDescriptor, Ctx, KeyAlgorithm, Log};
 #[cfg(windows)]
 #[allow(
     clippy::wildcard_imports,
@@ -1846,23 +1844,15 @@ unsafe extern "system" fn CardSignData(
             sig_bytes.reverse();
         } else if let KeyAlgorithm::Ec(curve) = &container.key_alg {
             let field_bytes = curve.bits() / 8;
-            if sig_bytes.first() == Some(&0x30) {
-                let Some(p1363) = ecdsa_der_to_p1363(&sig_bytes, field_bytes) else {
-                    Log::dbg(&format!(
-                        "CardSignData: failed to convert remote ECDSA DER signature ({} bytes) to P1363",
-                        sig_bytes.len()
-                    ));
-                    return SCARD_F_INTERNAL_ERROR;
-                };
-                sig_bytes = p1363;
-            } else if sig_bytes.len() != field_bytes * 2 {
+            let Some(p1363) = cardmod::remote_ecdsa_to_p1363(&sig_bytes, field_bytes) else {
                 Log::dbg(&format!(
                     "CardSignData: unexpected remote ECDSA signature length: {} (expected {})",
                     sig_bytes.len(),
                     field_bytes * 2
                 ));
                 return SCARD_F_INTERNAL_ERROR;
-            }
+            };
+            sig_bytes = p1363;
         }
 
         let Some(needed) = try_dword_len(sig_bytes.len()) else {

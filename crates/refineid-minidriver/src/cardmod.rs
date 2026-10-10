@@ -491,6 +491,19 @@ impl CardModel {
     }
 }
 
+/// Normalizes a remote ECDSA signature to IEEE P1363 (`r || s`).
+///
+/// RAPP v26.10.9 section 9.2 sends the fixed-width raw form, which may itself
+/// begin with the DER sequence tag, so the raw length is checked before any
+/// DER decoding; other lengths are accepted only as DER.
+pub(crate) fn remote_ecdsa_to_p1363(signature: &[u8], field_bytes: usize) -> Option<Vec<u8>> {
+    if signature.len() == field_bytes * 2 {
+        Some(signature.to_vec())
+    } else {
+        ecdsa_der_to_p1363(signature, field_bytes)
+    }
+}
+
 /// Converts an ECDSA signature from ASN.1 DER (`SEQUENCE { r INTEGER, s INTEGER }`)
 /// to IEEE P1363 raw concatenation format (`r || s`, where each component is fixed-width
 /// big-endian and padded with leading zeros or stripped of sign padding to `field_bytes`).
@@ -585,6 +598,7 @@ fn parse_der_len(der: &[u8], idx: &mut usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use super::remote_ecdsa_to_p1363;
     use super::{
         CONTAINER_MAP_DEFAULT_CONTAINER, CONTAINER_MAP_RECORD, CONTAINER_MAP_VALID_CONTAINER,
         CardCapabilityModel, KEY_REF_SIGN, KeyAlgorithm, PIN_ID_QUALIFIED_SIG, ecdsa_der_to_p1363,
@@ -650,6 +664,27 @@ mod tests {
         );
         records[1] = model.cmapfile_records[1];
         assert_eq!(records[1].wSigKeySizeBits, 3072);
+    }
+
+    #[test]
+    fn raw_signature_starting_with_the_der_tag_stays_raw() {
+        let mut raw = vec![0x30u8];
+        raw.extend(vec![0x5au8; 95]);
+        assert_eq!(remote_ecdsa_to_p1363(&raw, 48), Some(raw));
+    }
+
+    #[test]
+    fn non_raw_length_is_read_as_der() {
+        let r_raw = vec![0x33u8; 47];
+        let s_raw = vec![0x44u8; 48];
+        let mut der = vec![0x30u8, 99, 0x02, 47];
+        der.extend_from_slice(&r_raw);
+        der.extend_from_slice(&[0x02, 48]);
+        der.extend_from_slice(&s_raw);
+        let p1363 = remote_ecdsa_to_p1363(&der, 48).expect("valid DER");
+        assert_eq!(p1363.len(), 96);
+        assert_eq!(&p1363[48..], &s_raw);
+        assert_eq!(remote_ecdsa_to_p1363(&[0x01, 0x02], 48), None);
     }
 
     #[test]
