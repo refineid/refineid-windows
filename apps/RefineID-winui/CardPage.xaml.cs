@@ -229,9 +229,8 @@ internal sealed partial class CardPage : Page
                     this.ReaderComboBox.SelectedItem =
                         previous is not null && readers.Contains(previous, StringComparer.Ordinal)
                             ? previous
-                            : readers.Count > 0
-                                ? readers[0]
-                                : null;
+                        : readers.Count > 0 ? readers[0]
+                        : null;
                 }
                 finally
                 {

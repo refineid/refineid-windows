@@ -111,7 +111,7 @@ internal sealed partial class MainWindow : Window
     private void OnNavigated(object sender, NavigationEventArgs args)
     {
         this.AppTitleBar.IsBackButtonVisible = this.RootFrame.CanGoBack;
-        this.AppTitleBar.IsBackEnabled = this.RootFrame.CanGoBack;
+        this.AppTitleBar.IsBackButtonEnabled = this.RootFrame.CanGoBack;
     }
 
     private void AppTitleBar_BackRequested(TitleBar sender, object args)

@@ -83,11 +83,7 @@
                                 IsTextSelectionEnabled="True"
                                 TextWrapping="Wrap"
                             />
-                            <TextBlock
-                                Grid.Row="1"
-                                FontWeight="SemiBold"
-                                Text="Card model"
-                            />
+                            <TextBlock Grid.Row="1" FontWeight="SemiBold" Text="Card model" />
                             <TextBlock
                                 x:Name="ModelText"
                                 Grid.Row="1"
@@ -96,11 +92,7 @@
                                 AutomationProperties.Name="Card model"
                                 TextWrapping="Wrap"
                             />
-                            <TextBlock
-                                Grid.Row="2"
-                                FontWeight="SemiBold"
-                                Text="Card serial"
-                            />
+                            <TextBlock Grid.Row="2" FontWeight="SemiBold" Text="Card serial" />
                             <TextBlock
                                 x:Name="SerialText"
                                 Grid.Row="2"
@@ -110,11 +102,7 @@
                                 IsTextSelectionEnabled="True"
                                 TextWrapping="Wrap"
                             />
-                            <TextBlock
-                                Grid.Row="3"
-                                FontWeight="SemiBold"
-                                Text="PIN1"
-                            />
+                            <TextBlock Grid.Row="3" FontWeight="SemiBold" Text="PIN1" />
                             <TextBlock
                                 x:Name="Pin1StatusText"
                                 Grid.Row="3"
@@ -122,11 +110,7 @@
                                 AutomationProperties.AutomationId="Pin1StatusText"
                                 AutomationProperties.Name="PIN1 status"
                             />
-                            <TextBlock
-                                Grid.Row="4"
-                                FontWeight="SemiBold"
-                                Text="PIN2"
-                            />
+                            <TextBlock Grid.Row="4" FontWeight="SemiBold" Text="PIN2" />
                             <TextBlock
                                 x:Name="Pin2StatusText"
                                 Grid.Row="4"
@@ -134,11 +118,7 @@
                                 AutomationProperties.AutomationId="Pin2StatusText"
                                 AutomationProperties.Name="PIN2 status"
                             />
-                            <TextBlock
-                                Grid.Row="5"
-                                FontWeight="SemiBold"
-                                Text="Recovery code"
-                            />
+                            <TextBlock Grid.Row="5" FontWeight="SemiBold" Text="Recovery code" />
                             <TextBlock
                                 x:Name="PukStatusText"
                                 Grid.Row="5"
@@ -146,11 +126,7 @@
                                 AutomationProperties.AutomationId="PukStatusText"
                                 AutomationProperties.Name="Recovery code status"
                             />
-                            <TextBlock
-                                Grid.Row="6"
-                                FontWeight="SemiBold"
-                                Text="Issuance scheme"
-                            />
+                            <TextBlock Grid.Row="6" FontWeight="SemiBold" Text="Issuance scheme" />
                             <TextBlock
                                 x:Name="GenerationText"
                                 Grid.Row="6"
@@ -170,7 +146,10 @@
                         Header="Contactless NFC"
                     >
                         <StackPanel Padding="0,12,0,4" Spacing="12">
-                            <TextBlock Text="Enter the CAN printed on the card." TextWrapping="Wrap" />
+                            <TextBlock
+                                Text="Enter the CAN printed on the card."
+                                TextWrapping="Wrap"
+                            />
                             <Grid ColumnSpacing="12">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="220" />
@@ -293,7 +272,10 @@
                             Header="Reset PIN (PUK)"
                         >
                             <StackPanel Padding="0,12,0,4" Spacing="10">
-                                <TextBlock Text="Wrong code uses one recovery attempt." TextWrapping="Wrap" />
+                                <TextBlock
+                                    Text="Wrong code uses one recovery attempt."
+                                    TextWrapping="Wrap"
+                                />
                                 <ComboBox
                                     x:Name="UnblockSlotBox"
                                     AutomationProperties.AutomationId="UnblockSlotBox"
