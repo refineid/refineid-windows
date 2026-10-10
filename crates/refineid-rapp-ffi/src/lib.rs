@@ -232,6 +232,30 @@ pub extern "C" fn refineid_rapp_forget_pairings() -> *mut c_char {
     })
 }
 
+/// Open the pairing this device already holds, without a new ceremony.
+///
+/// Returns `{ handle }` parked in the paired state, so
+/// [`refineid_rapp_read_card`] drives the card through the stored pairing,
+/// or `no_pairing` when the store holds no usable one. The handle is
+/// released with [`refineid_rapp_end_pairing`] like any other.
+///
+/// # Safety
+///
+/// `name` must address `name_length` readable UTF-8 bytes for the duration
+/// of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn refineid_rapp_open_pairing(
+    name: *const u8,
+    name_length: usize,
+) -> *mut c_char {
+    reply_json(|| {
+        // SAFETY: The input is pointer- and bound-checked before the slice
+        // is formed, then copied into owned Rust before use.
+        let name = unsafe { copy_utf8(name, name_length, MAX_NAME_BYTES, "name") }?;
+        open_pairing(name)
+    })
+}
+
 /// Begin a pairing with the code the phone shows.
 ///
 /// Returns `{ handle }` immediately, or `invalid_code` when the input is not
@@ -410,23 +434,12 @@ fn begin_pairing(code: String, name: String) -> Result<BeginPairingDto, ApiFailu
         MemoryJournal::new(),
     );
 
-    let handle_id = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
-    let shared = Mutex::new(Shared {
+    let handle_id = register_handle(Shared {
         phase: Phase::Offer,
         decision_tx: None,
         end_requested: false,
         paired: None,
-    });
-    {
-        let mut registry = lock_registry()?;
-        registry.insert(
-            handle_id,
-            Handle {
-                shared,
-                thread: None,
-            },
-        );
-    }
+    })?;
     // The thread reaches the shared state through the registry by handle id,
     // owning the pieces it moves and locking only briefly each time.
     let thread = std::thread::spawn(move || {
@@ -438,6 +451,49 @@ fn begin_pairing(code: String, name: String) -> Result<BeginPairingDto, ApiFailu
         entry.thread = Some(thread);
     }
     Ok(BeginPairingDto { handle: handle_id })
+}
+
+fn open_pairing(name: String) -> Result<BeginPairingDto, ApiFailure> {
+    let pairing_store = CredentialPairingStore::load()
+        .map_err(|error| ApiFailure::new("pairing_store_unavailable", format!("{error}")))?;
+    let (pair_id, rendezvous) = pairing_store
+        .usable_pairing()
+        .map(|record| (record.pair_id, record.rendezvous_token))
+        .ok_or_else(|| ApiFailure::new("no_pairing", "No phone is paired with this device."))?;
+    let requester = Requester::new(
+        RequesterConfig {
+            display_name: name,
+            platform: "Windows".to_owned(),
+        },
+        pairing_store,
+        MemoryJournal::new(),
+    );
+    let handle_id = register_handle(Shared {
+        phase: Phase::Paired {
+            pair_id_hex: hex::encode(pair_id.as_bytes()),
+        },
+        decision_tx: None,
+        end_requested: false,
+        paired: Some(Paired {
+            requester,
+            pair_id,
+            rendezvous,
+        }),
+    })?;
+    Ok(BeginPairingDto { handle: handle_id })
+}
+
+/// Parks shared state in the registry under a fresh handle id.
+fn register_handle(shared: Shared) -> Result<u64, ApiFailure> {
+    let handle_id = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+    lock_registry()?.insert(
+        handle_id,
+        Handle {
+            shared: Mutex::new(shared),
+            thread: None,
+        },
+    );
+    Ok(handle_id)
 }
 
 /// Finds a phone in pairing mode, dials it with the pairing preamble, and
