@@ -16,6 +16,13 @@ namespace RefineID;
 
 using System.Text.Json.Serialization;
 
+/// <summary>The two user PINs of a FINEID card, as the native layer numbers them.</summary>
+internal enum PinSlot : byte
+{
+    Pin1 = 1,
+    Pin2 = 2,
+}
+
 /// <summary>Reader list result from settings FFI.</summary>
 internal sealed class ReaderList
 {
@@ -73,11 +80,57 @@ internal sealed class LocalCardSnapshot
     public bool? Pin2Changed { get; init; }
 }
 
+/// <summary>What a PACE-protected contactless session reports about the card.</summary>
+internal sealed class ContactlessSnapshot
+{
+    [JsonPropertyName("reader")]
+    public string Reader { get; init; } = string.Empty;
+
+    [JsonPropertyName("serial")]
+    public string Serial { get; init; } = string.Empty;
+
+    [JsonPropertyName("person")]
+    public string Person { get; init; } = string.Empty;
+
+    [JsonPropertyName("generation")]
+    public string Generation { get; init; } = "unknown";
+
+    [JsonPropertyName("pin1")]
+    public CredentialStatus? Pin1 { get; init; }
+
+    [JsonPropertyName("pin2")]
+    public CredentialStatus? Pin2 { get; init; }
+
+    [JsonPropertyName("puk")]
+    public CredentialStatus? Puk { get; init; }
+}
+
+/// <summary>The outcome of a PIN change, PIN reset, or card activation.</summary>
+internal sealed class MutationResult
+{
+    [JsonPropertyName("succeeded")]
+    public bool Succeeded { get; init; }
+
+    [JsonPropertyName("outcome")]
+    public string Outcome { get; init; } = string.Empty;
+
+    [JsonPropertyName("message")]
+    public string Message { get; init; } = string.Empty;
+
+    [JsonPropertyName("attempts_remaining")]
+    public byte? AttemptsRemaining { get; init; }
+
+    [JsonPropertyName("status_word")]
+    public ushort? StatusWord { get; init; }
+}
+
 /// <summary>Reflection-free serialization metadata for the Local Card boundary.</summary>
 [JsonSourceGenerationOptions(PropertyNameCaseInsensitive = false)]
 [JsonSerializable(typeof(NativeEnvelope<ReaderList>))]
 [JsonSerializable(typeof(NativeEnvelope<LocalCardSnapshot>))]
 [JsonSerializable(typeof(NativeEnvelope<LocalCardSupport>))]
+[JsonSerializable(typeof(NativeEnvelope<ContactlessSnapshot>))]
+[JsonSerializable(typeof(NativeEnvelope<MutationResult>))]
 internal sealed partial class LocalCardJsonContext : JsonSerializerContext;
 
 /// Mirror of the settings-ffi JSON for the local-card lane probe.

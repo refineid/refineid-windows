@@ -44,6 +44,7 @@ internal sealed partial class MainPage : Page
     private readonly DispatcherTimer cardPollTimer;
     private string? remoteHolder;
     private string? selectedReader;
+    private bool started;
 
     public MainPage()
     {
@@ -53,6 +54,7 @@ internal sealed partial class MainPage : Page
         this.cardPollTimer.Tick += (s, e) => this.CheckLocalCard();
         this.DiagnosticsText.Text = DiagnosticsLabel();
         this.Loaded += this.OnLoaded;
+        this.Unloaded += this.OnUnloaded;
     }
 
 #if DEBUG
@@ -60,14 +62,23 @@ internal sealed partial class MainPage : Page
     private const string AutoPairArgument = "--pair";
 #endif
 
+    /// <summary>
+    /// Runs on every return to this page (it is cached across navigation to
+    /// the settings page); the once-per-run work is guarded.
+    /// </summary>
     private async void OnLoaded(object sender, RoutedEventArgs args)
     {
-        this.Loaded -= this.OnLoaded;
+        this.CheckLocalCard();
+        this.cardPollTimer.Start();
+        if (this.started)
+        {
+            return;
+        }
+
+        this.started = true;
         // Once per run: disable the inbound rule earlier releases opened for
         // the phone, when that needs no administrator rights.
         _ = Task.Run(FirewallService.DisableLegacyRule);
-        this.CheckLocalCard();
-        this.cardPollTimer.Start();
         this.ShowDriverLaneHintIfNeeded();
 #if DEBUG
         if (
@@ -78,6 +89,12 @@ internal sealed partial class MainPage : Page
         }
 #endif
     }
+
+    /// <summary>The settings page polls the readers itself while it is shown.</summary>
+    private void OnUnloaded(object sender, RoutedEventArgs args) => this.cardPollTimer.Stop();
+
+    private void Settings_Click(object sender, RoutedEventArgs args) =>
+        this.Frame.Navigate(typeof(CardPage));
 
     private static string DiagnosticsLabel()
     {
@@ -229,16 +246,13 @@ internal sealed partial class MainPage : Page
 
             if (targetReader is not null)
             {
-                LocalCardSnapshot? snapshot = await Task.Run(() =>
+                LocalCardSnapshot snapshot = await Task.Run(() =>
                         LocalCardService.Inspect(targetReader)
                     )
                     .ConfigureAwait(true);
-                if (snapshot is not null)
-                {
-                    this.selectedReader = targetReader;
-                    this.UpdateLocalCardUi(snapshot);
-                    return;
-                }
+                this.selectedReader = targetReader;
+                this.UpdateLocalCardUi(snapshot);
+                return;
             }
 
             this.UpdateLocalCardDisconnected();
