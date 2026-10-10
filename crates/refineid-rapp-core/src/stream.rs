@@ -403,9 +403,7 @@ const MDNS_GROUP: std::net::SocketAddrV4 =
 /// Poll interval while waiting for answers.
 const MDNS_POLL: Duration = Duration::from_millis(250);
 /// Interval at which the browse question is asked again within one window
-/// (RFC 6762 section 5.2). A custodian answers a single question only most
-/// of the time: measured against an iPhone on 2026-10-10, one question per
-/// 3 s window was answered in 7 of 12 windows, three questions in 12 of 12.
+/// (RFC 6762 section 5.2); a custodian does not answer every question.
 const MDNS_REQUERY: Duration = Duration::from_secs(1);
 
 /// Records gathered from mDNS answers before they are joined per instance.
