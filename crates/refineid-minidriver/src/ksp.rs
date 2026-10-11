@@ -477,7 +477,7 @@ unsafe extern "system" fn IsAlgSupported(
 
 unsafe extern "system" fn EnumAlgorithms(
     hProvider: NCRYPT_PROV_HANDLE,
-    dwAlgClass: u32,
+    dwAlgOperations: u32,
     pdwAlgCount: *mut u32,
     ppAlgList: *mut *mut NCryptAlgorithmName,
     _dwFlags: u32,
@@ -488,7 +488,9 @@ unsafe extern "system" fn EnumAlgorithms(
     if pdwAlgCount.is_null() || ppAlgList.is_null() {
         return NTE_INVALID_PARAMETER;
     }
-    if dwAlgClass != 0 && dwAlgClass != NCRYPT_SIGNATURE_INTERFACE {
+    // The caller asks for a set of `NCRYPT_*_OPERATION` classes, zero
+    // meaning all; this provider only signs.
+    if dwAlgOperations != 0 && dwAlgOperations & NCRYPT_SIGNATURE_OPERATION == 0 {
         // SAFETY: checked non-null; both slots are the caller's.
         unsafe {
             *pdwAlgCount = 0;

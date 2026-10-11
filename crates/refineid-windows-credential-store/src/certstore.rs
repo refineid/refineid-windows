@@ -233,7 +233,7 @@ pub fn remove_browser_certificates() -> Result<usize, CredentialStoreError> {
     use windows_sys::Win32::Security::Cryptography::{
         CERT_CONTEXT, CERT_KEY_PROV_INFO_PROP_ID, CRYPT_KEY_PROV_INFO,
         CertDeleteCertificateFromStore, CertDuplicateCertificateContext,
-        CertEnumCertificatesInStore, CertGetCertificateContextProperty,
+        CertEnumCertificatesInStore, CertFreeCertificateContext, CertGetCertificateContextProperty,
     };
 
     let store = PersonalStore::open()?;
@@ -287,8 +287,13 @@ pub fn remove_browser_certificates() -> Result<usize, CredentialStoreError> {
         let deleted =
             unsafe { CertDeleteCertificateFromStore(CertDuplicateCertificateContext(context)) };
         if deleted == 0 {
-            // SAFETY: `GetLastError` is read before any other Windows call.
-            let code = unsafe { GetLastError() };
+            // SAFETY: `GetLastError` is read before any other Windows call;
+            // the enumeration context is ours to free once the loop ends.
+            let code = unsafe {
+                let code = GetLastError();
+                CertFreeCertificateContext(context);
+                code
+            };
             return Err(CredentialStoreError::CertificateStore { code });
         }
         removed += 1;
