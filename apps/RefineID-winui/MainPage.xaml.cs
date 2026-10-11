@@ -107,13 +107,18 @@ internal sealed partial class MainPage : Page
             : $"RefineID {version.Major}.{version.Minor}.{version.Build}.{version.Revision}";
     }
 
+    /// <summary>
+    /// The button stays only while no read through the stored pairing has
+    /// succeeded, so pressing it pairs afresh: a new pairing replaces the
+    /// stored one, which is the only way out when the phone forgot it.
+    /// </summary>
     private async void ConnectRemoteReader_Click(object sender, RoutedEventArgs args) =>
-        await this.RunRemoteCardAsync(quiet: false).ConfigureAwait(true);
+        await this.PairAndReadAsync().ConfigureAwait(true);
 
     /// <summary>
-    /// Reads the card through the pairing this device already holds, and
-    /// pairs first only when it holds none. On launch the read is quiet: a
-    /// phone that is not around is not an error worth a notice.
+    /// Reads the card through the pairing this device already holds. On
+    /// launch the read is quiet: a phone that is not around is not an error
+    /// worth a notice.
     /// </summary>
     private async Task RunRemoteCardAsync(bool quiet)
     {

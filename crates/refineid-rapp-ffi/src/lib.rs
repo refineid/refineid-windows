@@ -559,7 +559,22 @@ fn pairing_thread(handle_id: u64, mut requester: StreamRequester, code: &str) {
     );
 }
 
-fn finish_pairing(handle_id: u64, requester: StreamRequester, pair_id: PairId) {
+fn finish_pairing(handle_id: u64, mut requester: StreamRequester, pair_id: PairId) {
+    // This device holds one phone. A pairing made afresh replaces whatever
+    // was stored before, dead or alive, together with the certificate the
+    // old phone left for browsers; the first read places the new one.
+    let stale: Vec<PairId> = requester
+        .store()
+        .pair_ids()
+        .into_iter()
+        .filter(|stored| *stored != pair_id)
+        .collect();
+    if !stale.is_empty() {
+        forget_browser_certificates();
+        for stored in stale {
+            let _ = requester.store_mut().remove(stored);
+        }
+    }
     let Ok(record) = requester.store().get(pair_id) else {
         set_phase(
             handle_id,
