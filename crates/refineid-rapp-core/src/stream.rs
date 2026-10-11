@@ -386,16 +386,18 @@ pub fn dial(
 /// Endpoints in `preferred` are tried first, then the session-mode services a
 /// `browse_window` browse finds, those whose hints name this pairing ahead of
 /// those publishing none (hierarchy section 4.3), then `fallback`.
+/// `preferred` and `fallback` are configured endpoints and are always tried.
 ///
-/// A pairing whose custodian announced it stopped serving is not dialed
-/// again until a session record names it; the browse that sees such an
-/// announcement ends the attempt.
+/// Discovered phones follow the withdrawal rule (specification section 4.5):
+/// once the custodian announced it stopped serving this pairing, discovered
+/// endpoints are dialed again only after a session record that names the
+/// pairing, or one publishing no hints, shows it serving.
 ///
 /// # Errors
 /// [`StreamError::Withdrawn`] when the custodian announced it stopped
-/// serving; [`StreamError::Unreachable`] when no endpoint accepts the
-/// connection; [`StreamError::Malformed`] when the pairing's keys are
-/// unusable.
+/// serving and nothing shows it serving again; [`StreamError::Unreachable`]
+/// when no endpoint accepts the connection; [`StreamError::Malformed`] when
+/// the pairing's keys are unusable.
 pub fn dial_session(
     pairing: &PairRecord,
     preferred: &[String],
@@ -416,32 +418,58 @@ pub fn dial_session(
         )
         .ok()
     };
-    let withdrawn = is_withdrawn(pairing.pair_id());
-    if !withdrawn && let Some(transport) = attempt(preferred) {
+    if let Some(transport) = attempt(preferred) {
         return Ok(transport);
     }
     let unix_seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
     let found = session_candidates(browse_stream_services(browse_window), pairing, unix_seconds);
-    let named = found
-        .services
-        .iter()
-        .any(|service| service.names_pairing(pairing, unix_seconds));
-    if named {
-        clear_withdrawn(pairing.pair_id());
-    } else if found.withdrawn {
-        mark_withdrawn(pairing.pair_id());
-        return Err(StreamError::Withdrawn);
-    } else if withdrawn {
-        return Err(StreamError::Withdrawn);
+    match withdrawal_step(&found) {
+        WithdrawalStep::Serving => clear_withdrawn(pairing.pair_id()),
+        WithdrawalStep::Announced => mark_withdrawn(pairing.pair_id()),
+        WithdrawalStep::Unchanged => {}
     }
-    for service in found.services {
-        if let Some(transport) = attempt(&service.endpoints) {
-            return Ok(transport);
+    if !is_withdrawn(pairing.pair_id()) {
+        for service in &found.services {
+            if let Some(transport) = attempt(&service.endpoints) {
+                return Ok(transport);
+            }
         }
     }
-    attempt(fallback).ok_or(StreamError::Unreachable)
+    if let Some(transport) = attempt(fallback) {
+        return Ok(transport);
+    }
+    if is_withdrawn(pairing.pair_id()) {
+        Err(StreamError::Withdrawn)
+    } else {
+        Err(StreamError::Unreachable)
+    }
+}
+
+/// How one browse changes a pairing's withdrawal mark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WithdrawalStep {
+    /// A session record shows the custodian serving: clear the mark.
+    Serving,
+    /// A withdrawn record names the pairing and nothing shows it serving:
+    /// set the mark.
+    Announced,
+    /// Neither: keep the mark as it is.
+    Unchanged,
+}
+
+/// Any session record still offered for this pairing — one naming it, or one
+/// publishing no hints — shows its custodian serving, and outweighs a
+/// withdrawal seen in the same browse.
+const fn withdrawal_step(found: &SessionCandidates) -> WithdrawalStep {
+    if !found.services.is_empty() {
+        WithdrawalStep::Serving
+    } else if found.withdrawn {
+        WithdrawalStep::Announced
+    } else {
+        WithdrawalStep::Unchanged
+    }
 }
 
 /// How long one TCP connect may take before the next endpoint is tried.
@@ -618,8 +646,8 @@ fn parse_mdns_response(
 }
 
 /// Splits TXT rdata into its length-prefixed `key=value` strings (RFC 6763
-/// section 6), unchanged and in order; interpreting them is left to
-/// `refineid_rapp`.
+/// section 6), unchanged and in order; a bare `key` keeps an empty value.
+/// Interpreting them is left to `refineid_rapp`.
 fn parse_txt(rdata: &[u8]) -> Vec<(String, String)> {
     let mut entries = Vec::new();
     let mut offset = 0;
@@ -630,8 +658,9 @@ fn parse_txt(rdata: &[u8]) -> Vec<(String, String)> {
             break;
         };
         if let Ok(text) = core::str::from_utf8(entry)
-            && let Some((key, value)) = text.split_once('=')
+            && !text.is_empty()
         {
+            let (key, value) = text.split_once('=').unwrap_or((text, ""));
             entries.push((key.to_owned(), value.to_owned()));
         }
         offset = end;
@@ -792,6 +821,7 @@ mod tests {
 
     const DEADLINE: Duration = Duration::from_secs(2);
     const CANDIDATE: &str = "stream-test";
+    const STREAM_CANDIDATE: &str = super::STREAM_CANDIDATE_ID;
 
     /// Synthetic keys of `rapp-routing-v26.10.10.json` (`pair_keys`).
     const PAIR_ID: [u8; 16] = [0x33; 16];
@@ -955,6 +985,59 @@ mod tests {
         assert!(super::is_withdrawn(pair));
         super::clear_withdrawn(pair);
         assert!(!super::is_withdrawn(pair));
+    }
+
+    #[test]
+    fn a_session_record_outweighs_a_withdrawal_in_the_same_browse() {
+        let now = 1_791_504_899;
+        let withdrawal = withdrawn("refineid-7f2a1c84", &custodian(), now);
+        let both = super::session_candidates(
+            vec![withdrawal.clone(), session("refineid-0b9e44d1", None)],
+            &requester(),
+            now,
+        );
+        assert_eq!(
+            super::withdrawal_step(&both),
+            super::WithdrawalStep::Serving
+        );
+        let only = super::session_candidates(vec![withdrawal], &requester(), now);
+        assert_eq!(
+            super::withdrawal_step(&only),
+            super::WithdrawalStep::Announced
+        );
+        let neither = super::session_candidates(Vec::new(), &requester(), now);
+        assert_eq!(
+            super::withdrawal_step(&neither),
+            super::WithdrawalStep::Unchanged
+        );
+    }
+
+    #[test]
+    fn a_withdrawn_pairing_still_dials_its_configured_endpoint() {
+        let pairing = pair_record(EndpointRole::Requester, [0x88; 32], CUSTODIAN_PRIVATE);
+        super::mark_withdrawn(pairing.pair_id());
+        let listener = StreamListener::bind("127.0.0.1:0", STREAM_CANDIDATE, DEADLINE).unwrap();
+        let endpoint = format!("127.0.0.1:{}", listener.local_port().unwrap());
+        let accepter = std::thread::spawn(move || listener.accept().map(|_| ()));
+        let dialed = super::dial_session(&pairing, &[endpoint], &[], Duration::ZERO, DEADLINE);
+        assert!(dialed.is_ok());
+        accepter.join().unwrap().unwrap();
+        assert!(super::is_withdrawn(pairing.pair_id()));
+        super::clear_withdrawn(pairing.pair_id());
+    }
+
+    #[test]
+    fn bare_txt_keys_reach_the_record_parser() {
+        assert_eq!(
+            super::parse_txt(b"\x03v=1\x0cmode=session\x05debug"),
+            [
+                ("v".to_owned(), "1".to_owned()),
+                ("mode".to_owned(), "session".to_owned()),
+                ("debug".to_owned(), String::new()),
+            ]
+        );
+        let flagged = service("a", &[("v", "1"), ("mode", "session"), ("debug", "")]);
+        assert!(flagged.discovery_record().is_none());
     }
 
     fn name(labels: &[&str]) -> Vec<u8> {

@@ -127,7 +127,7 @@ In the legacy codebase:
    - Resolves the phone's advertised IP address and dynamic port without requiring administrative privileges.
    - When the user toggles "Enable Remote Phone Reader" off, `watcher.Stop()` is invoked immediately, stopping discovery and releasing all resources.
    - TXT records are handed to `refineid_rapp` unparsed: `DiscoveryRecord::parse` and `DiscoveryKey::matches_record` decide whether a `mode=session` record names a stored pairing, and `WithdrawnRecord::parse` with `WithdrawalKey::matches` decides whether a `mode=withdrawn` record announces that its custodian stopped serving (RAPP v26.10.10 §4.5).
-   - A verified withdrawal, or an authenticated `session.close` with reason `service_withdrawn`, marks the pairing withdrawn: the requester does not dial it again until a `mode=session` record names it. A custodian that disappears without announcing it is simply not found at the next dial; the pairing is unchanged either way.
+   - A verified withdrawal, or an authenticated `session.close` with reason `service_withdrawn`, marks the pairing withdrawn: discovered phones are not dialed for it again until a `mode=session` record that names it, or one publishing no hints, shows its custodian serving. Configured endpoints (`REFINEID_RAPP_ENDPOINT`, `--connect`, the local mock custodian) are always dialed. A custodian that disappears without announcing it is simply not found at the next dial; the pairing is unchanged either way.
 2. **Outbound Stream Connection**:
    - Establish outbound connection using standard `System.Net.Sockets.TcpClient`:
      ```csharp
