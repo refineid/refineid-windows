@@ -91,25 +91,30 @@ function Set-KeyStorageProviderRegistration {
     # a paired phone, consulted by Edge, Chrome and Schannel through the
     # certificates the RefineID app places in the user's store.
     $name = 'RefineID Key Storage Provider'
-    $provider = "HKLM:\SYSTEM\CurrentControlSet\Control\Cryptography\Providers\$name\UM\00010001"
-    New-Item -Path $provider -Force | Out-Null
+    # Same layout as Microsoft's own providers: the image on the UM key,
+    # the interface under it, and the name in the machine's Providers list.
+    $provider = "HKLM:\SYSTEM\CurrentControlSet\Control\Cryptography\Providers\$name\UM"
+    $interface = "$provider\00010001"
+    New-Item -Path $interface -Force | Out-Null
     New-ItemProperty -Path $provider -Name Image -PropertyType String `
         -Value (Join-Path $env:SystemRoot 'System32\refineid_minidriver.dll') -Force | Out-Null
-    New-ItemProperty -Path $provider -Name Flags -PropertyType DWord -Value 0 -Force | Out-Null
-    New-ItemProperty -Path $provider -Name Functions -PropertyType MultiString `
+    New-ItemProperty -Path $interface -Name '(default)' -PropertyType String `
+        -Value 'CRYPT_KEY_STORAGE_INTERFACE' -Force | Out-Null
+    New-ItemProperty -Path $interface -Name Flags -PropertyType DWord -Value 0 -Force | Out-Null
+    New-ItemProperty -Path $interface -Name Functions -PropertyType MultiString `
         -Value @('KEY_STORAGE') -Force | Out-Null
 
-    $functions = 'HKLM:\SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\Default\00010001\KEY_STORAGE'
-    New-Item -Path $functions -Force | Out-Null
+    $list = 'HKLM:\SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\Default\00010001\KEY_STORAGE'
+    New-Item -Path $list -Force | Out-Null
     [string[]]$providers = @()
-    $existing = Get-ItemProperty -Path $functions -Name Functions -ErrorAction SilentlyContinue
+    $existing = Get-ItemProperty -Path $list -Name Providers -ErrorAction SilentlyContinue
     if ($null -ne $existing) {
-        $providers = @($existing.Functions)
+        $providers = @($existing.Providers)
     }
     if ($providers -notcontains $name) {
         $providers += $name
     }
-    New-ItemProperty -Path $functions -Name Functions -PropertyType MultiString `
+    New-ItemProperty -Path $list -Name Providers -PropertyType MultiString `
         -Value $providers -Force | Out-Null
 }
 

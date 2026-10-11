@@ -166,8 +166,9 @@ mod windows_main {
             .iter()
             .map(|card| format!("{CALAIS}\\{}", card.name))
             .collect();
-        let provider_key = format!("{CNG_PROVIDERS}\\{KEY_STORAGE_PROVIDER}\\UM\\00010001");
-        let mut registry = Vec::with_capacity(CARDS.len() * 5 + 4);
+        let provider_key = format!("{CNG_PROVIDERS}\\{KEY_STORAGE_PROVIDER}\\UM");
+        let interface_key = format!("{provider_key}\\00010001");
+        let mut registry = Vec::with_capacity(CARDS.len() * 5 + 5);
         for (card, key) in CARDS.iter().zip(&keys) {
             registry.extend([
                 RegistryValue {
@@ -200,8 +201,10 @@ mod windows_main {
 
         // The paired phone reaches browsers through CNG rather than through a
         // reader, so the module also registers as a user-mode key storage
-        // provider, the way `BCryptRegisterProvider` and
-        // `BCryptAddContextFunctionProvider` would.
+        // provider, laid out the way `BCryptRegisterProvider` and
+        // `BCryptAddContextFunctionProvider` lay out Microsoft's own: the
+        // image on the `UM` key, the interface under it, and the provider
+        // appended to the machine's `Providers` list for `KEY_STORAGE`.
         registry.extend([
             RegistryValue {
                 key: &provider_key,
@@ -209,18 +212,23 @@ mod windows_main {
                 data: RegistryData::Text("[System64Folder]refineid_minidriver.dll"),
             },
             RegistryValue {
-                key: &provider_key,
+                key: &interface_key,
+                name: "",
+                data: RegistryData::Text("CRYPT_KEY_STORAGE_INTERFACE"),
+            },
+            RegistryValue {
+                key: &interface_key,
                 name: "Flags",
                 data: RegistryData::Dword(0),
             },
             RegistryValue {
-                key: &provider_key,
+                key: &interface_key,
                 name: "Functions",
                 data: RegistryData::MultiText(&["KEY_STORAGE"]),
             },
             RegistryValue {
                 key: CNG_KEY_STORAGE_FUNCTIONS,
-                name: "Functions",
+                name: "Providers",
                 data: RegistryData::AppendText(KEY_STORAGE_PROVIDER),
             },
         ]);

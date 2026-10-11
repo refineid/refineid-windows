@@ -176,10 +176,11 @@ CryptoAPI and CNG. For a mutual-TLS site (such as `https://suomi.fi` or
      `RefineID Key Storage Provider` and the key `rapp:<pair id>`.
    - Forgetting the pairing removes every certificate bound to the provider.
 2. **Provider registration** (written by the driver MSI and `install-dev.ps1`):
-   - `HKLM\SYSTEM\CurrentControlSet\Control\Cryptography\Providers\RefineID Key Storage Provider\UM\00010001`
-     with `Image` = `refineid_minidriver.dll` in System32, `Flags` = 0 and
-     `Functions` = `KEY_STORAGE`.
-   - The provider name is appended to `Functions` under
+   - `HKLM\SYSTEM\CurrentControlSet\Control\Cryptography\Providers\RefineID Key Storage Provider\UM`
+     with `Image` = `refineid_minidriver.dll` in System32, and its `00010001`
+     subkey with the default value `CRYPT_KEY_STORAGE_INTERFACE`, `Flags` = 0
+     and `Functions` = `KEY_STORAGE`, the layout of Microsoft's own providers.
+   - The provider name is appended to `Providers` under
      `...\Cryptography\Configuration\Local\Default\00010001\KEY_STORAGE`.
 3. **Signing**:
    - The browser calls `CryptAcquireCertificatePrivateKey`; `ncrypt.dll` loads the
@@ -211,8 +212,8 @@ Packaging is implemented natively in Rust via `crates/refineid-msi`:
   2. `FINEID-S4-1-v4.0` (Physical card)
   3. `FINEID-RAPP-Remote` (Remote wireless card, for the later virtual reader)
 - Registers the same DLL as the `RefineID Key Storage Provider` for CNG
-  (section 6); the Registry table appends it to the machine's key storage
-  provider list and removes it again on uninstall.
+  (section 6); the Registry table appends it to the machine's `Providers`
+  list for `KEY_STORAGE` and removes it again on uninstall.
 - Automatically notifies and restarts `SCardSvr` upon installation.
 
 ---

@@ -206,7 +206,8 @@ pub enum RegistryData<'a> {
 pub struct RegistryValue<'a> {
     /// Subkey path, without the root.
     pub key: &'a str,
-    /// Value name.
+    /// Value name; empty for the key's default value (the installer stores
+    /// an empty string as a null `Name` column).
     pub name: &'a str,
     /// Value data.
     pub data: RegistryData<'a>,
