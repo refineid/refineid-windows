@@ -143,7 +143,7 @@ find target -type d -name "incremental" -prune -exec rm -rf {} +
 Build the unpackaged x64 app:
 
 ```powershell
-dotnet build apps/RefineID-winui/ReFineID.csproj `
+dotnet build apps/RefineID-winui/RefineID.csproj `
   -c Release `
   -p:Platform=x64 `
   -p:WindowsPackageType=None `
