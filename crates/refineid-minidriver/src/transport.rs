@@ -38,6 +38,7 @@ use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::message::CloseReason;
 use refineid_rapp_core::operations::{CardOperation, CardOperationResult};
 use refineid_rapp_core::store::{MemoryJournal, MemoryPairingStore, PairingRecord, PairingStore};
+use refineid_rapp_core::stream::StreamError;
 use refineid_rapp_core::transport::TcpFrameTransport;
 
 use crate::ffi::SCARDHANDLE;
@@ -244,6 +245,20 @@ pub(crate) fn is_remote_card(atr: &[u8]) -> bool {
 /// The endpoint the development mock custodian listens on.
 const LOCAL_MOCK_CUSTODIAN: &str = "127.0.0.1:47110";
 
+/// How long one DNS-SD browse listens for the phone's session record.
+const BROWSE_ROUND: Duration = Duration::from_secs(3);
+
+/// Browse rounds before the phone counts as unreachable; a single query
+/// goes unanswered often enough that one round is not a verdict.
+const BROWSE_ROUNDS: u32 = 3;
+
+/// Frame receive deadline while an operation waits for the holder, who
+/// approves on the phone and may have to present the card.
+const OPERATION_RECEIVE_DEADLINE: Duration = Duration::from_secs(120);
+
+/// Operation expiry sent on the wire; the holder approves within this.
+const OPERATION_LIFETIME_MS: u64 = 120_000;
+
 /// Remote card transport backed by the RAPP requester engine over a stream session.
 pub(crate) struct RemoteCardTransport {
     pub(crate) atr: Vec<u8>,
@@ -275,14 +290,23 @@ impl RemoteCardTransport {
             .pairing_record
             .to_core_pair_record()
             .map_err(|_| "the stored pairing is unusable; pair again".to_owned())?;
-        refineid_rapp_core::stream::dial_session(
-            &pairing,
-            &preferred,
-            &[LOCAL_MOCK_CUSTODIAN.to_owned()],
-            Duration::from_secs(2),
-            Duration::from_secs(5),
-        )
-        .map_err(|_| "unable to reach the paired phone".to_owned())
+        let mut outcome = Err(StreamError::Unreachable);
+        for _ in 0..BROWSE_ROUNDS {
+            outcome = refineid_rapp_core::stream::dial_session(
+                &pairing,
+                &preferred,
+                &[LOCAL_MOCK_CUSTODIAN.to_owned()],
+                BROWSE_ROUND,
+                OPERATION_RECEIVE_DEADLINE,
+            );
+            if matches!(outcome, Ok(_) | Err(StreamError::Withdrawn)) {
+                break;
+            }
+        }
+        outcome.map_err(|error| match error {
+            StreamError::Withdrawn => "the paired phone turned remote access off".to_owned(),
+            _ => "unable to reach the paired phone".to_owned(),
+        })
     }
 
     /// Executes a typed card operation via RAPP.
@@ -307,7 +331,7 @@ impl RemoteCardTransport {
             .map_err(|e| format!("session connect failed: {e:?}"))?;
 
         let outcome = requester
-            .execute(&mut session, operation, 30_000)
+            .execute(&mut session, operation, OPERATION_LIFETIME_MS)
             .map_err(|e| format!("operation execute failed: {e:?}"))?;
 
         requester.disconnect(&mut session, CloseReason::UserDisconnect);
