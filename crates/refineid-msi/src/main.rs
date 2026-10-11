@@ -55,6 +55,15 @@ mod windows_main {
     const BASE_CSP: &str = "Microsoft Base Smart Card Crypto Provider";
     const BASE_KSP: &str = "Microsoft Smart Card Key Storage Provider";
 
+    /// Where CNG keeps its provider registrations.
+    const CNG_PROVIDERS: &str = r"SYSTEM\CurrentControlSet\Control\Cryptography\Providers";
+    /// The machine-wide list of key storage providers CNG consults.
+    const CNG_KEY_STORAGE_FUNCTIONS: &str = r"SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\Default\00010001\KEY_STORAGE";
+    /// The key storage provider exported by the same module for a paired
+    /// phone. The name must match what the `RefineID` app binds certificates
+    /// to (`refineid_windows_credential_store::KEY_STORAGE_PROVIDER`).
+    const KEY_STORAGE_PROVIDER: &str = "RefineID Key Storage Provider";
+
     /// A card family Windows should bind to this Card Module.
     struct CardRegistration {
         /// Registration name, which becomes the Calais subkey.
@@ -95,14 +104,6 @@ mod windows_main {
                 0x50, 0x50, 0x00, 0x82, 0x90, 0x00,
             ],
             mask: &[0xff; 20],
-        },
-        CardRegistration {
-            name: "FINEID-RAPP-Virtual",
-            atr: &[
-                0x3b, 0x8d, 0x01, 0x80, 0xfb, 0xa0, 0x00, 0x00, 0x03, 0x97, 0x42, 0x54, 0x46, 0x59,
-                0x04, 0x01, 0xcf,
-            ],
-            mask: &[0xff; 17],
         },
     ];
 
@@ -165,7 +166,8 @@ mod windows_main {
             .iter()
             .map(|card| format!("{CALAIS}\\{}", card.name))
             .collect();
-        let mut registry = Vec::with_capacity(CARDS.len() * 5);
+        let provider_key = format!("{CNG_PROVIDERS}\\{KEY_STORAGE_PROVIDER}\\UM\\00010001");
+        let mut registry = Vec::with_capacity(CARDS.len() * 5 + 4);
         for (card, key) in CARDS.iter().zip(&keys) {
             registry.extend([
                 RegistryValue {
@@ -195,6 +197,33 @@ mod windows_main {
                 },
             ]);
         }
+
+        // The paired phone reaches browsers through CNG rather than through a
+        // reader, so the module also registers as a user-mode key storage
+        // provider, the way `BCryptRegisterProvider` and
+        // `BCryptAddContextFunctionProvider` would.
+        registry.extend([
+            RegistryValue {
+                key: &provider_key,
+                name: "Image",
+                data: RegistryData::Text("[System64Folder]refineid_minidriver.dll"),
+            },
+            RegistryValue {
+                key: &provider_key,
+                name: "Flags",
+                data: RegistryData::Dword(0),
+            },
+            RegistryValue {
+                key: &provider_key,
+                name: "Functions",
+                data: RegistryData::MultiText(&["KEY_STORAGE"]),
+            },
+            RegistryValue {
+                key: CNG_KEY_STORAGE_FUNCTIONS,
+                name: "Functions",
+                data: RegistryData::AppendText(KEY_STORAGE_PROVIDER),
+            },
+        ]);
 
         let package = Package {
             product_name: "RefineID Card Driver",

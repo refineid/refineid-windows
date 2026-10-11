@@ -228,23 +228,16 @@ pub(crate) const REMOTE_SYNTHETIC_ATR: [u8; 20] = [
     0x00, 0x82, 0x90, 0x00,
 ];
 
-/// Virtual smart card ATR produced by Windows TPM Virtual Smart Card.
-pub(crate) const VIRTUAL_SMART_CARD_ATR: [u8; 17] = [
-    0x3B, 0x8D, 0x01, 0x80, 0xFB, 0xA0, 0x00, 0x00, 0x03, 0x97, 0x42, 0x54, 0x46, 0x59, 0x04, 0x01,
-    0xCF,
-];
-
 /// Development test CCID card ATR (e.g. for development on Windows VMs with USB CCID readers).
 pub(crate) const DEV_TEST_CARD_ATR: [u8; 23] = [
     0x3B, 0xFD, 0x13, 0x00, 0x00, 0x81, 0x31, 0xFE, 0x15, 0x80, 0x73, 0xC0, 0x21, 0xC0, 0x57, 0x59,
     0x75, 0x62, 0x69, 0x4B, 0x65, 0x79, 0x40,
 ];
 
-/// Returns true if the ATR identifies a RAPP remote card or virtual card.
+/// Returns true if the ATR identifies a RAPP remote card.
 pub(crate) fn is_remote_card(atr: &[u8]) -> bool {
     atr == REMOTE_SYNTHETIC_ATR
         || (atr.len() >= 17 && &atr[12..16] == b"RAPP")
-        || atr == VIRTUAL_SMART_CARD_ATR
         || atr == DEV_TEST_CARD_ATR
 }
 

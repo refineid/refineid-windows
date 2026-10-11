@@ -890,6 +890,7 @@ dependencies = [
  "refineid-lib-core",
  "refineid-rapp-core",
  "refineid-windows-credential-store",
+ "windows-sys",
 ]
 
 [[package]]

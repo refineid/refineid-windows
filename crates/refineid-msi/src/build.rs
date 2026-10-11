@@ -192,6 +192,13 @@ pub enum RegistryData<'a> {
     Text(&'a str),
     /// A `REG_BINARY` value.
     Binary(&'a [u8]),
+    /// A `REG_DWORD` value.
+    Dword(u32),
+    /// A `REG_MULTI_SZ` value, written whole.
+    MultiText(&'a [&'a str]),
+    /// One string appended to an existing `REG_MULTI_SZ` value, and removed
+    /// from it again on uninstall. The value is created when absent.
+    AppendText(&'a str),
 }
 
 /// One value under `HKEY_LOCAL_MACHINE`.
@@ -275,7 +282,10 @@ impl From<std::io::Error> for BuildError {
 
 /// Encodes registry data the way the `Registry` table expects it.
 ///
-/// A leading `#x` marks hexadecimal binary; plain text is stored as written.
+/// A leading `#x` marks hexadecimal binary and a leading `#` a decimal
+/// `DWORD`; plain text is stored as written. `[~]` separates the strings of
+/// a `REG_MULTI_SZ`: a value that both starts and ends with it is written
+/// whole, and one that only starts with it is appended to what is there.
 fn encode_registry(data: RegistryData<'_>) -> String {
     match data {
         RegistryData::Text(text) => text.to_owned(),
@@ -288,6 +298,9 @@ fn encode_registry(data: RegistryData<'_>) -> String {
             }
             encoded
         }
+        RegistryData::Dword(value) => format!("#{value}"),
+        RegistryData::MultiText(strings) => format!("[~]{}[~]", strings.join("[~]")),
+        RegistryData::AppendText(text) => format!("[~]{text}"),
     }
 }
 
@@ -758,6 +771,32 @@ mod tests {
     #[test]
     fn empty_binary_data_still_carries_the_prefix() {
         assert_eq!(encode_registry(RegistryData::Binary(&[])), "#x");
+    }
+
+    #[test]
+    fn dword_data_is_decimal_behind_a_hash() {
+        assert_eq!(encode_registry(RegistryData::Dword(0)), "#0");
+        assert_eq!(encode_registry(RegistryData::Dword(65537)), "#65537");
+    }
+
+    #[test]
+    fn multi_strings_are_delimited_at_both_ends() {
+        assert_eq!(
+            encode_registry(RegistryData::MultiText(&["KEY_STORAGE"])),
+            "[~]KEY_STORAGE[~]"
+        );
+        assert_eq!(
+            encode_registry(RegistryData::MultiText(&["a", "b"])),
+            "[~]a[~]b[~]"
+        );
+    }
+
+    #[test]
+    fn an_appended_string_is_delimited_only_in_front() {
+        assert_eq!(
+            encode_registry(RegistryData::AppendText("RefineID Key Storage Provider")),
+            "[~]RefineID Key Storage Provider"
+        );
     }
 
     #[test]

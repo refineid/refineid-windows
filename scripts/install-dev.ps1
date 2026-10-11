@@ -86,6 +86,33 @@ function Set-CardRegistration(
         -Value 'refineid_minidriver.dll' -Force | Out-Null
 }
 
+function Set-KeyStorageProviderRegistration {
+    # Mirrors the driver MSI: the same DLL is a CNG key storage provider for
+    # a paired phone, consulted by Edge, Chrome and Schannel through the
+    # certificates the RefineID app places in the user's store.
+    $name = 'RefineID Key Storage Provider'
+    $provider = "HKLM:\SYSTEM\CurrentControlSet\Control\Cryptography\Providers\$name\UM\00010001"
+    New-Item -Path $provider -Force | Out-Null
+    New-ItemProperty -Path $provider -Name Image -PropertyType String `
+        -Value (Join-Path $env:SystemRoot 'System32\refineid_minidriver.dll') -Force | Out-Null
+    New-ItemProperty -Path $provider -Name Flags -PropertyType DWord -Value 0 -Force | Out-Null
+    New-ItemProperty -Path $provider -Name Functions -PropertyType MultiString `
+        -Value @('KEY_STORAGE') -Force | Out-Null
+
+    $functions = 'HKLM:\SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\Default\00010001\KEY_STORAGE'
+    New-Item -Path $functions -Force | Out-Null
+    [string[]]$providers = @()
+    $existing = Get-ItemProperty -Path $functions -Name Functions -ErrorAction SilentlyContinue
+    if ($null -ne $existing) {
+        $providers = @($existing.Functions)
+    }
+    if ($providers -notcontains $name) {
+        $providers += $name
+    }
+    New-ItemProperty -Path $functions -Name Functions -PropertyType MultiString `
+        -Value $providers -Force | Out-Null
+}
+
 Assert-Administrator
 
 $contactlessAtr = $null
@@ -149,9 +176,12 @@ try {
         -Atr ([byte[]](0x3B,0x7F,0x96,0x00,0x00,0x80,0x31,0xB8,0x65,0xB0,0x85,0x05,0x52,0x41,0x50,0x50,0x00,0x82,0x90,0x00)) `
         -AtrMask ([byte[]](0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF))
 
-    Set-CardRegistration -Name 'FINEID-RAPP-Virtual' `
-        -Atr ([byte[]](0x3B,0x8D,0x01,0x80,0xFB,0xA0,0x00,0x00,0x03,0x97,0x42,0x54,0x46,0x59,0x04,0x01,0xCF)) `
-        -AtrMask ([byte[]](0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF))
+    # The TPM virtual-card registration of earlier builds claimed every
+    # TPM virtual smart card on the machine; remove it where it is left.
+    Remove-Item -Path 'HKLM:\SOFTWARE\Microsoft\Cryptography\Calais\SmartCards\FINEID-RAPP-Virtual' `
+        -Recurse -Force -ErrorAction SilentlyContinue
+
+    Set-KeyStorageProviderRegistration
 
     Set-CardRegistration -Name 'FINEID-Dev-CCID' `
         -Atr ([byte[]](0x3B,0xFD,0x13,0x00,0x00,0x81,0x31,0xFE,0x15,0x80,0x73,0xC0,0x21,0xC0,0x57,0x59,0x75,0x62,0x69,0x4B,0x65,0x79,0x40)) `

@@ -51,12 +51,14 @@ use refineid_rapp_core::engine::{
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::message::CloseReason;
 use refineid_rapp_core::offer::normalize_pairing_code;
-use refineid_rapp_core::operations::{CardOperation, CardOperationResult};
+use refineid_rapp_core::operations::{CardOperation, CardOperationResult, CertificateKind};
 use refineid_rapp_core::store::{MemoryJournal, PairingStore};
 use refineid_rapp_core::stream::{
     DialPurpose, DiscoveryMode, STREAM_CANDIDATE_ID, StreamError, browse, dial, dial_session,
 };
 use refineid_windows_credential_store::{CredentialPairingStore, delete_pairing_set};
+#[cfg(windows)]
+use refineid_windows_credential_store::{install_browser_certificate, remove_browser_certificates};
 use serde::Serialize;
 
 /// Frame receive deadline on a dialed stream connection.
@@ -226,6 +228,7 @@ pub unsafe extern "C" fn refineid_rapp_string_free(json: *mut c_char) {
 #[unsafe(no_mangle)]
 pub extern "C" fn refineid_rapp_forget_pairings() -> *mut c_char {
     reply_json(|| {
+        forget_browser_certificates();
         delete_pairing_set()
             .map_err(|error| ApiFailure::new("forget_failed", format!("{error}")))?;
         Ok(AckDto { ok: true })
@@ -625,12 +628,80 @@ fn read_paired_card(paired: &mut Paired) -> Result<CardReadDto, ApiFailure> {
         _ => return Err(unexpected_result("read_identity")),
     };
 
+    // Browsers reach the phone through the key storage provider, which
+    // needs the authentication certificate on the pairing record and in the
+    // user's certificate store. Fetch it once; a failure here leaves the
+    // identity read intact.
+    if let Some(certificate) = cached_or_fetched_certificate(paired, &mut session) {
+        offer_to_browsers(&certificate, paired.pair_id);
+    }
+
     paired
         .requester
         .disconnect(&mut session, CloseReason::UserDisconnect);
 
     Ok(CardReadDto { identity })
 }
+
+/// The authentication certificate from the pairing record, or from the
+/// phone when the record has none yet, in which case it is cached there.
+fn cached_or_fetched_certificate(
+    paired: &mut Paired,
+    session: &mut refineid_rapp_core::engine::Session<
+        refineid_rapp_core::transport::TcpFrameTransport,
+    >,
+) -> Option<Vec<u8>> {
+    let cached = paired
+        .requester
+        .store()
+        .get(paired.pair_id)
+        .ok()
+        .and_then(|record| record.auth_cert.clone());
+    if cached.is_some() {
+        return cached;
+    }
+    let operation = CardOperation::ReadCertificate {
+        kind: CertificateKind::Authentication,
+    };
+    let CardOperationResult::Certificate(certificate) =
+        run_operation(paired, session, &operation).ok()?
+    else {
+        return None;
+    };
+    let cached = certificate.clone();
+    // A refused write only means the next read fetches the certificate
+    // again.
+    let _ = paired
+        .requester
+        .store_mut()
+        .update(paired.pair_id, &mut |record| {
+            record.auth_cert = Some(cached.clone());
+        });
+    Some(certificate)
+}
+
+/// Places the certificate in the user's certificate store, bound to the
+/// `RefineID` key storage provider, so Edge and Chrome offer it.
+#[cfg(windows)]
+fn offer_to_browsers(certificate: &[u8], pair_id: PairId) {
+    // The read succeeded either way; a store refusal only means the
+    // browser offers nothing until the next read.
+    let _ = install_browser_certificate(certificate, pair_id);
+}
+
+#[cfg(not(windows))]
+const fn offer_to_browsers(_certificate: &[u8], _pair_id: PairId) {}
+
+/// Removes the certificates the app placed for browsers.
+#[cfg(windows)]
+fn forget_browser_certificates() {
+    // Forgetting the pairing is the action that matters; a certificate
+    // left behind opens nothing without it.
+    let _ = remove_browser_certificates();
+}
+
+#[cfg(not(windows))]
+const fn forget_browser_certificates() {}
 
 fn run_operation(
     paired: &mut Paired,

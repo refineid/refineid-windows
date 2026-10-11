@@ -111,6 +111,23 @@ this by disabling Firefox revocation checking.
 - `ffi.rs` -- the Windows FFI declarations.
 - `transport.rs` -- SCard-handle transport with T=0 chaining.
 - `msroots.rs` -- the `msroots` (intermediate/root store) file scaffolding.
+- `ksp.rs` -- the CNG key storage provider for a paired phone, exported as
+  `GetKeyStorageInterface` from the same DLL.
+- `ksp_codec.rs` -- the CNG key blob and signature encodings the provider
+  hands out, tested on the host.
+
+## Paired phone for browsers
+
+The DLL is also registered as the `RefineID Key Storage Provider`. The
+RefineID app places a paired phone's authentication certificate in
+`Cert:\CurrentUser\My` bound to that provider, so Edge, Chrome and Schannel
+sign through `SignHash`, which runs `BrowserAuthenticate` over RAPP. No reader
+or driver is involved; see
+[browser-architecture-and-rapp.md](../../docs/browser-architecture-and-rapp.md)
+section 6. The provider answers `NTE_BAD_KEYSET` for a key whose pairing is
+gone or has no cached certificate, `NTE_USER_CANCELLED` when the holder
+declines on the phone, and `NTE_NOT_SUPPORTED` for everything but opening,
+describing and signing.
 
 ## Public build and development install
 
