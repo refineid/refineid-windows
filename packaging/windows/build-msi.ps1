@@ -121,7 +121,7 @@ if ($CertificateThumbprint) {
 }
 
 # The version is the UTC build instant as CalVer YY.M.D.B, the same stamp
-# ReFineID.csproj gives the app: B is the ten-minute bucket of the day.
+# RefineID.csproj gives the app: B is the ten-minute bucket of the day.
 $now = [datetime]::UtcNow
 $productVersion = '{0}.{1}.{2}.{3}' -f ($now.Year - 2000), $now.Month, $now.Day,
     ($now.Hour * 10 + [math]::Floor($now.Minute / 10))
