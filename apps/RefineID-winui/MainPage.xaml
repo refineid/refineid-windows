@@ -148,18 +148,22 @@
                     </controls:SettingsCard>
                 </StackPanel>
 
-                <!--  Card settings: PIN, recovery, activation, contactless.  -->
+                <!--  PINs of the card in a local reader: change, reset,
+                      activation and NFC access. The phone manages its own
+                      card, so the entry exists only while a reader is
+                      connected.  -->
                 <controls:SettingsCard
-                    x:Name="SettingsCard"
-                    AutomationProperties.AutomationId="SettingsCard"
-                    AutomationProperties.HelpText="PIN, recovery code, activation and NFC access of the card"
-                    AutomationProperties.Name="Card settings"
-                    Click="Settings_Click"
-                    Header="Settings"
+                    x:Name="PinsCard"
+                    AutomationProperties.AutomationId="PinsCard"
+                    AutomationProperties.HelpText="Change or reset the PINs of the card in the reader"
+                    AutomationProperties.Name="PINs"
+                    Click="Pins_Click"
+                    Header="PINs"
                     IsClickEnabled="True"
+                    Visibility="Collapsed"
                 >
                     <controls:SettingsCard.HeaderIcon>
-                        <FontIcon Glyph="&#xE713;" />
+                        <FontIcon Glyph="&#xE8D7;" />
                     </controls:SettingsCard.HeaderIcon>
                 </controls:SettingsCard>
 

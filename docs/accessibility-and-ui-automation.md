@@ -52,7 +52,7 @@ All user-facing XAML views in RefineID (`apps/RefineID-winui`) implement compreh
 Headings guide screen reader users and AI agents through logical document hierarchy:
 ```xml
 <TextBlock
-    Text="Card management"
+    Text="Document"
     Style="{StaticResource BodyStrongTextBlockStyle}"
     AutomationProperties.HeadingLevel="Level2" />
 ```

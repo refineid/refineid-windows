@@ -195,20 +195,6 @@
                         Opacity="0.6"
                         Spacing="12"
                     >
-                        <TextBlock
-                            Margin="4,0,0,0"
-                            AutomationProperties.HeadingLevel="Level2"
-                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                            Style="{StaticResource BodyStrongTextBlockStyle}"
-                            Text="Card management"
-                        />
-                        <InfoBar
-                            IsClosable="False"
-                            IsOpen="True"
-                            Message="PIN1: login. PIN2: signing."
-                            Severity="Informational"
-                        />
-
                         <Expander
                             x:Name="ChangePinExpander"
                             HorizontalAlignment="Stretch"

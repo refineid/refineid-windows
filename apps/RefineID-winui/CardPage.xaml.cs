@@ -21,7 +21,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 
 /// <summary>
-/// The card settings screen: the card in the selected reader, its PIN and
+/// The PIN page: the card in the selected reader, its PIN and
 /// recovery status, PIN change and reset, activation, and the contactless
 /// CAN. Every modifying command is bound to the inspected reader and card
 /// serial; PINs are read from the boxes, cleared at once, and only ever
