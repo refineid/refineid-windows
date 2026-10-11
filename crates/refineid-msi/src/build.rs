@@ -205,6 +205,20 @@ pub struct RegistryValue<'a> {
     pub data: RegistryData<'a>,
 }
 
+/// An entry point of the installed module that the installer calls with
+/// elevation.
+#[derive(Debug, Clone, Copy)]
+pub struct CustomAction<'a> {
+    /// Action name, unique within the package.
+    pub name: &'a str,
+    /// The exported function, with the Windows Installer custom action
+    /// signature.
+    pub entry_point: &'a str,
+    /// Whether the action runs on uninstall (before the files go) rather
+    /// than on install and repair (after the files are in place).
+    pub on_uninstall: bool,
+}
+
 /// Everything needed to produce one architecture's package.
 #[derive(Debug, Clone, Copy)]
 pub struct Package<'a> {
@@ -225,6 +239,8 @@ pub struct Package<'a> {
     pub file: SystemFile<'a>,
     /// Registry values binding the module to supported cards.
     pub registry: &'a [RegistryValue<'a>],
+    /// Entry points of the module the installer calls.
+    pub custom_actions: &'a [CustomAction<'a>],
     /// A service stopped before installation and started afterwards.
     pub restart_service: Option<&'a str>,
 }
@@ -425,6 +441,8 @@ pub fn build(package: &Package<'_>, output: &Path, scratch: &Path) -> Result<(),
     write_layout(&database, package)?;
     write_payload(&database, package, &cabinet, payload_size)?;
     write_registry(&database, package)?;
+
+    write_custom_actions(&database, package)?;
     write_service(&database, package)?;
     write_upgrade_rules(&database, package, &upgrade_code, &version)?;
     write_sequences(&database)?;
@@ -632,6 +650,42 @@ fn write_registry(database: &Database, package: &Package<'_>) -> Result<(), Buil
         )?;
     }
 
+    Ok(())
+}
+
+/// Writes the custom actions and sequences them: uninstall ones before the
+/// files go, install ones after they are in place.
+fn write_custom_actions(database: &Database, package: &Package<'_>) -> Result<(), BuildError> {
+    let mut next_install = schema::INSTALL_ACTION_SEQUENCE;
+    let mut next_uninstall = schema::UNINSTALL_ACTION_SEQUENCE;
+    for action in package.custom_actions {
+        insert(
+            database,
+            "INSERT INTO `CustomAction` (`Action`,`Type`,`Source`,`Target`) VALUES (?,?,?,?)",
+            &[
+                Value::Text(action.name),
+                Value::Integer(schema::CUSTOM_ACTION_INSTALLED_DLL_DEFERRED),
+                Value::Text(package.file.key),
+                Value::Text(action.entry_point),
+            ],
+        )?;
+        let (condition, sequence) = if action.on_uninstall {
+            next_uninstall += 1;
+            ("REMOVE~=\"ALL\"", next_uninstall)
+        } else {
+            next_install += 1;
+            ("NOT REMOVE~=\"ALL\"", next_install)
+        };
+        insert(
+            database,
+            "INSERT INTO `InstallExecuteSequence` (`Action`,`Condition`,`Sequence`) VALUES (?,?,?)",
+            &[
+                Value::Text(action.name),
+                Value::Text(condition),
+                Value::Integer(sequence),
+            ],
+        )?;
+    }
     Ok(())
 }
 

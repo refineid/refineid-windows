@@ -90,6 +90,13 @@ mod cardmod;
 #[cfg(windows)]
 mod ffi;
 #[cfg(windows)]
+mod ksp;
+#[cfg(windows)]
+mod ksp_register;
+// Pure byte codecs: compiled on the host too so `cargo test` covers them.
+#[cfg(any(windows, test))]
+mod ksp_codec;
+#[cfg(windows)]
 mod msroots;
 #[cfg(windows)]
 mod transport;

@@ -30,14 +30,25 @@ does, and the phone is that pad.
 ## Presence
 
 A minidriver loads when Windows sees a card arrive in a reader. A
-remote card has no reader, so presence is simulated: a virtual reader
-device reports a synthetic ATR when a paired phone is available, which
-makes the existing minidriver load, publish the remote certificate, and
-serve Windows exactly as it does for a local card. The virtual reader
-carries presence only; card semantics flow through RAPP, never as APDUs
-over the virtual reader. This is the end state: any Windows software —
-Edge, Schannel, RDP, EAP-TLS — uses the remote card without knowing it
-is remote.
+remote card has no reader, so the bridge has two doors.
+
+The first needs no presence at all. CNG asks a key storage provider for
+a signature whenever a certificate in the user's store names it, so the
+same DLL exports a provider that answers for a paired phone: the
+RefineID app places the authentication certificate in the store after a
+read, and Edge, Chrome and every Schannel client sign through the
+provider, which runs the operation over RAPP. This is what ships today.
+
+The second is the end state for software that only speaks the smart-card
+stack: a virtual reader device reports a synthetic ATR when a paired
+phone is available, which makes the existing minidriver load, publish
+the remote certificate, and serve Windows exactly as it does for a local
+card. The virtual reader carries presence only; card semantics flow
+through RAPP, never as APDUs over the virtual reader. With it, Windows
+logon, RDP and EAP-TLS use the remote card without knowing it is remote.
+A TPM virtual smart card was tried as a stand-in and dropped: its
+registration claimed every TPM virtual card on the machine, and a
+Hyper-V guest cannot create one.
 
 ## Staging
 
@@ -60,13 +71,16 @@ is remote.
    pairing time so `CardAcquireContext` can build its model without a
    session, `sync_transport_handle` as a no-op for the remote arm, and
    the externally-verified PIN report.
-4. **Virtual reader / Browser Integration** — For Chromium browsers (Edge, Chrome),
-   a user-mode driver presenting the synthetic ATR on phone availability triggers
-   the minidriver's remote arm, or a user-mode CNG KSP (`refineid_ksp.dll`) surfaces
-   the certificate directly. For Firefox, no virtual reader driver is required:
-   `refineid_pkcs11.dll` discovers paired devices directly from the vault and
-   exposes them as virtual PKCS#11 slots in user space. See
+4. **Browser integration** — done. For Chromium browsers (Edge, Chrome)
+   and Schannel, the key storage provider in `refineid_minidriver.dll`
+   (`ksp.rs`) signs for the certificate the app places in the user's
+   store. For Firefox, `refineid_pkcs11.dll` discovers paired devices
+   directly from the vault and exposes them as virtual PKCS#11 slots in
+   user space. See
    [browser-architecture-and-rapp.md](browser-architecture-and-rapp.md) for details.
+5. **Virtual reader** — later. A user-mode driver presenting the
+   synthetic ATR on phone availability, so the minidriver's remote arm
+   also serves Windows logon, RDP and EAP-TLS. Needs driver signing.
 
 ## What never changes
 

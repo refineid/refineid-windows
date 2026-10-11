@@ -96,16 +96,19 @@ RAPP allows Windows to authenticate using a FINEID card held by the holder's pho
 - **100% user-space**: zero kernel or virtual reader drivers needed.
 
 ### B. In Edge and Chrome
-- Chromium browsers query `Cert:\CurrentUser\My` populated by the minidriver.
-- The minidriver contains the remote arm (`CardSessionTransport::Remote` in `transport.rs`).
-- When a remote card is selected, the minidriver's `execute_operation` sends
-  `CardOperation::BrowserAuthenticate` to the phone.
-- Presence is signaled either via:
-  1. **User-Mode Virtual Smart Card Reader (UMDF)**: Simulating the synthetic ATR
-     `REMOTE_SYNTHETIC_ATR` when a paired phone is in range.
-  2. **Direct CNG Key Storage Provider (`refineid_ksp.dll`)**: A lightweight user-mode
-     CNG provider pointing certificates in `Cert:\CurrentUser\My` directly to the RAPP
-     requester.
+- Chromium browsers pick client certificates from `Cert:\CurrentUser\My` and sign
+  through CNG, so a paired phone needs no reader at all.
+- The RefineID app places the phone's authentication certificate in that store
+  when it reads the card, bound to the **RefineID Key Storage Provider**
+  (`ksp.rs` in the minidriver DLL, key name `rapp:<pair id>`).
+- The browser's `NCryptSignHash` lands in the provider's `SignHash`, which sends
+  `CardOperation::BrowserAuthenticate` to the phone over RAPP and returns the
+  signature. The phone prompts the holder; Windows collects no PIN.
+- **100% user-space**: the provider is a DLL loaded into the browser process; no
+  driver, no virtual reader, no elevation at run time.
+- A user-mode virtual reader presenting `REMOTE_SYNTHETIC_ATR` remains the later
+  stage for software that only speaks the smart-card stack (Windows logon, RDP,
+  EAP-TLS); it reuses the minidriver's remote arm unchanged.
 
 ---
 
@@ -160,29 +163,46 @@ assigns the generic null driver `scunknown.inf`, rendering the card as
 
 ---
 
-## 6. Virtual Smart Card Reader & BaseCSP Integration (Edge & Chrome)
+## 6. Key Storage Provider for a Paired Phone (Edge & Chrome)
 
 On Windows, Microsoft Edge and Google Chrome authenticate client certificates through
-the CryptoAPI/CNG smart card subsystem. When accessing mutual-TLS sites (such as
-`https://suomi.fi` or `https://card.refineid.fi`):
+CryptoAPI and CNG. For a mutual-TLS site (such as `https://suomi.fi` or
+`https://card.refineid.fi`) the path to the phone is:
 
-1. **Virtual Smart Card Device (`ROOT\SMARTCARDREADER\0000`)**:
-   - Windows manages virtual smart cards through the Microsoft Virtual Smart Card Reader
-     (`MICROSOFT_VIRTUAL_SMART_CARD_0` / `VSC01`).
-   - The virtual card exposes the standard RAPP Virtual ATR:
-     `3B 8D 01 80 FB A0 00 00 03 97 42 54 46 59 04 01 CF`
-2. **Registry Smart Card Binding (`Calais\SmartCards`)**:
-   - The registration under `HKLM\SOFTWARE\Microsoft\Cryptography\Calais\SmartCards\FINEID-RAPP-Virtual`
-     associates this ATR with:
-     - `Crypto Provider`: `Microsoft Base Smart Card Crypto Provider`
-     - `Smart Card Key Storage Provider`: `Microsoft Smart Card Key Storage Provider`
-     - `80000001`: `refineid_minidriver.dll`
-3. **Minidriver Execution & Zero-PIN Wire**:
-   - Windows Smart Card Service (`SCardSvr`) loads `refineid_minidriver.dll`.
-   - When the browser requests signing (`CardSignData`), the minidriver uses RAPP over
-     mDNS / TCP stream to the user's paired smartphone.
-   - The smartphone prompts for biometric/PIN confirmation.
+1. **Certificate in the user store**:
+   - The `read_identity` answer carries the authentication certificate. The
+     RefineID app keeps it on the pairing record and adds it to
+     `Cert:\CurrentUser\My` with `CERT_KEY_PROV_INFO` naming the provider
+     `RefineID Key Storage Provider` and the key `rapp:<pair id>`; a store
+     refusal fails the read with `certificate_store_failed`.
+   - Forgetting the pairing removes every certificate bound to the provider.
+2. **Provider registration**:
+   - The DLL registers itself through `BCryptRegisterProvider` and
+     `BCryptAddContextFunctionProvider` (`ksp_register.rs`), which write
+     `HKLM\SYSTEM\CurrentControlSet\Control\Cryptography\Providers\RefineID Key Storage Provider`
+     and append the name to the machine's `KEY_STORAGE` provider list, and
+     tell CNG about them. A registration written straight to the registry is
+     not seen until the next boot, because CNG caches its configuration.
+   - The driver MSI calls the DLL's `RefineIdRegisterKeyStorageProvider`
+     custom action after the file is installed and
+     `RefineIdUnregisterKeyStorageProvider` before it is removed;
+     `install-dev.ps1` runs the same code through `rundll32`.
+3. **Signing**:
+   - The browser calls `CryptAcquireCertificatePrivateKey`; `ncrypt.dll` loads the
+     DLL into the browser process, resolves `GetKeyStorageInterface`, and opens the
+     key. `OpenKey` finds the pairing by its id in the Credential Manager store and
+     fails with `NTE_BAD_KEYSET` unless it is paired and carries the certificate.
+   - `SignHash` maps the hash and padding to a RAPP signature algorithm
+     (ECDSA by digest length; RSA PKCS#1 v1.5 with SHA-256/384/512; RSA-PSS with
+     SHA-256), sends `CardOperation::BrowserAuthenticate` to the phone, and
+     returns `r || s` or the big-endian RSA integer. A denial on the phone is
+     `NTE_USER_CANCELLED`.
+   - The provider is read-only: no key creation, import, decryption or secret
+     agreement; every such entry answers `NTE_NOT_SUPPORTED`.
    - Zero PIN transport occurs over the network, and zero PIN logging occurs on either host.
+
+The TPM virtual smart card of earlier builds is gone: its registration claimed every
+TPM virtual card on the machine (issue #71), and Hyper-V guests cannot create one.
 
 ---
 
@@ -192,11 +212,13 @@ Packaging is implemented natively in Rust via `crates/refineid-msi`:
 - Generates standalone architecture-specific MSIs (`RefineID.CardDriver-<version>-<arch>.msi`)
   using the Windows Installer Win32 API and `makecab.exe` without third-party dependencies.
 - Installs `refineid_minidriver.dll` to `C:\Windows\System32`.
-- Registers all four FINEID card identities in `Calais\SmartCards`:
+- Registers the three FINEID card identities in `Calais\SmartCards`:
   1. `FINEID-S4-1-v3.1` (Physical card)
   2. `FINEID-S4-1-v4.0` (Physical card)
-  3. `FINEID-RAPP-Remote` (Remote wireless card)
-  4. `FINEID-RAPP-Virtual` (Virtual reader card)
+  3. `FINEID-RAPP-Remote` (Remote wireless card, for the later virtual reader)
+- Registers the same DLL as the `RefineID Key Storage Provider` for CNG
+  through two custom actions in the DLL itself (section 6), and removes the
+  registration on uninstall.
 - Automatically notifies and restarts `SCardSvr` upon installation.
 
 ---

@@ -37,7 +37,8 @@ mod windows_main {
     use std::path::PathBuf;
 
     use refineid_msi::{
-        Architecture, Guid, Package, RegistryData, RegistryValue, SystemFile, Version, build,
+        Architecture, CustomAction, Guid, Package, RegistryData, RegistryValue, SystemFile,
+        Version, build,
     };
 
     /// Where Windows keeps per-card Smart Card Crypto Provider registrations.
@@ -54,6 +55,24 @@ mod windows_main {
     /// two providers, rather than a bespoke CSP, drive the card.
     const BASE_CSP: &str = "Microsoft Base Smart Card Crypto Provider";
     const BASE_KSP: &str = "Microsoft Smart Card Key Storage Provider";
+
+    /// The module's own entry points that register it with CNG as the key
+    /// storage provider for a paired phone, and remove that registration.
+    /// CNG caches its configuration, so a registry write alone is not seen
+    /// until the next boot; these call `BCryptRegisterProvider` and
+    /// `BCryptAddContextFunctionProvider` (and their reverse) instead.
+    const CUSTOM_ACTIONS: &[CustomAction<'static>] = &[
+        CustomAction {
+            name: "RegisterKeyStorageProvider",
+            entry_point: "RefineIdRegisterKeyStorageProvider",
+            on_uninstall: false,
+        },
+        CustomAction {
+            name: "UnregisterKeyStorageProvider",
+            entry_point: "RefineIdUnregisterKeyStorageProvider",
+            on_uninstall: true,
+        },
+    ];
 
     /// A card family Windows should bind to this Card Module.
     struct CardRegistration {
@@ -95,14 +114,6 @@ mod windows_main {
                 0x50, 0x50, 0x00, 0x82, 0x90, 0x00,
             ],
             mask: &[0xff; 20],
-        },
-        CardRegistration {
-            name: "FINEID-RAPP-Virtual",
-            atr: &[
-                0x3b, 0x8d, 0x01, 0x80, 0xfb, 0xa0, 0x00, 0x00, 0x03, 0x97, 0x42, 0x54, 0x46, 0x59,
-                0x04, 0x01, 0xcf,
-            ],
-            mask: &[0xff; 17],
         },
     ];
 
@@ -209,6 +220,7 @@ mod windows_main {
                 source: &arguments.minidriver,
             },
             registry: &registry,
+            custom_actions: CUSTOM_ACTIONS,
             // Windows caches the card database, so it must be restarted for a
             // new or removed registration to take effect.
             restart_service: Some("SCardSvr"),

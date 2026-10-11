@@ -57,6 +57,8 @@ use refineid_rapp_core::stream::{
     DialPurpose, DiscoveryMode, STREAM_CANDIDATE_ID, StreamError, browse, dial, dial_session,
 };
 use refineid_windows_credential_store::{CredentialPairingStore, delete_pairing_set};
+#[cfg(windows)]
+use refineid_windows_credential_store::{install_browser_certificate, remove_browser_certificates};
 use serde::Serialize;
 
 /// Frame receive deadline on a dialed stream connection.
@@ -226,6 +228,7 @@ pub unsafe extern "C" fn refineid_rapp_string_free(json: *mut c_char) {
 #[unsafe(no_mangle)]
 pub extern "C" fn refineid_rapp_forget_pairings() -> *mut c_char {
     reply_json(|| {
+        forget_browser_certificates();
         delete_pairing_set()
             .map_err(|error| ApiFailure::new("forget_failed", format!("{error}")))?;
         Ok(AckDto { ok: true })
@@ -556,7 +559,22 @@ fn pairing_thread(handle_id: u64, mut requester: StreamRequester, code: &str) {
     );
 }
 
-fn finish_pairing(handle_id: u64, requester: StreamRequester, pair_id: PairId) {
+fn finish_pairing(handle_id: u64, mut requester: StreamRequester, pair_id: PairId) {
+    // This device holds one phone. A pairing made afresh replaces whatever
+    // was stored before, dead or alive, together with the certificate the
+    // old phone left for browsers; the first read places the new one.
+    let stale: Vec<PairId> = requester
+        .store()
+        .pair_ids()
+        .into_iter()
+        .filter(|stored| *stored != pair_id)
+        .collect();
+    if !stale.is_empty() {
+        forget_browser_certificates();
+        for stored in stale {
+            let _ = requester.store_mut().remove(stored);
+        }
+    }
     let Ok(record) = requester.store().get(pair_id) else {
         set_phase(
             handle_id,
@@ -615,22 +633,80 @@ fn read_paired_card(paired: &mut Paired) -> Result<CardReadDto, ApiFailure> {
         .map_err(|error| ApiFailure::new("session_failed", format!("{error:?}")))?;
 
     // The requester screen shows only the holder identity, so the read is one
-    // operation and the phone reads the card once. Card status and the
-    // certificate bytes are separate operations added when a screen needs them.
-    let identity = match run_operation(paired, &mut session, &CardOperation::ReadIdentity)? {
-        CardOperationResult::Identity(identity) => IdentityDto {
-            display_name: identity.holder_name,
-            person_id: identity.card_id,
-        },
-        _ => return Err(unexpected_result("read_identity")),
-    };
+    // operation and the phone reads the card once. The answer carries the
+    // authentication certificate, which browsers need through the key
+    // storage provider: on the pairing record for signing, and in the user's
+    // certificate store so Edge and Chrome offer it.
+    let (identity, certificate) =
+        match run_operation(paired, &mut session, &CardOperation::ReadIdentity)? {
+            CardOperationResult::Identity(mut identity) => {
+                let certificate = identity.certificates.drain(..).next();
+                (
+                    IdentityDto {
+                        display_name: identity.holder_name,
+                        person_id: identity.card_id,
+                    },
+                    certificate,
+                )
+            }
+            _ => return Err(unexpected_result("read_identity")),
+        };
 
     paired
         .requester
         .disconnect(&mut session, CloseReason::UserDisconnect);
 
+    let certificate = certificate.ok_or_else(|| {
+        ApiFailure::new(
+            "no_certificate",
+            "The phone sent no certificate with the identity.",
+        )
+    })?;
+    remember_certificate(paired, &certificate);
+    offer_to_browsers(&certificate, paired.pair_id)?;
+
     Ok(CardReadDto { identity })
 }
+
+/// Keeps the authentication certificate on the pairing record, where the
+/// key storage provider reads it when a browser asks for a signature.
+fn remember_certificate(paired: &mut Paired, certificate: &[u8]) {
+    // A refused write only means the next read stores it again.
+    let _ = paired
+        .requester
+        .store_mut()
+        .update(paired.pair_id, &mut |record| {
+            record.auth_cert = Some(certificate.to_vec());
+        });
+}
+
+/// Places the certificate in the user's certificate store, bound to the
+/// `RefineID` key storage provider, so Edge and Chrome offer it.
+#[cfg(windows)]
+fn offer_to_browsers(certificate: &[u8], pair_id: PairId) -> Result<(), ApiFailure> {
+    install_browser_certificate(certificate, pair_id)
+        .map_err(|error| ApiFailure::new("certificate_store_failed", format!("{error}")))
+}
+
+#[cfg(not(windows))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the Windows arm fails; this one keeps the caller's signature"
+)]
+const fn offer_to_browsers(_certificate: &[u8], _pair_id: PairId) -> Result<(), ApiFailure> {
+    Ok(())
+}
+
+/// Removes the certificates the app placed for browsers.
+#[cfg(windows)]
+fn forget_browser_certificates() {
+    // Forgetting the pairing is the action that matters; a certificate
+    // left behind opens nothing without it.
+    let _ = remove_browser_certificates();
+}
+
+#[cfg(not(windows))]
+const fn forget_browser_certificates() {}
 
 fn run_operation(
     paired: &mut Paired,

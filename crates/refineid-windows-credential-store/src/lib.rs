@@ -24,7 +24,7 @@
     windows,
     expect(
         unsafe_code,
-        reason = "CredReadW, CredWriteW, CredDeleteW, and CredFree are the small Windows Credential Manager FFI boundary"
+        reason = "CredReadW, CredWriteW, CredDeleteW, CredFree, and the certificate store calls are the small Windows FFI boundary"
     )
 )]
 
@@ -37,8 +37,14 @@ use refineid_lib_core::can::Can;
 #[cfg(windows)]
 use zeroize::Zeroize as _;
 
+mod certstore;
 mod pairing;
 
+pub use certstore::{
+    BROWSER_KEY_PREFIX, KEY_STORAGE_PROVIDER, browser_key_name, browser_key_pair_id,
+};
+#[cfg(windows)]
+pub use certstore::{install_browser_certificate, remove_browser_certificates};
 pub use pairing::{CredentialPairingStore, delete_pairing_set};
 
 /// Maximum PC/SC ATR size accepted by the shared credential namespace.
@@ -72,6 +78,11 @@ pub enum CredentialStoreError {
     InvalidStoredCan,
     /// A stored pairing-set blob was malformed.
     InvalidStoredPairing,
+    /// Windows rejected a certificate store operation.
+    CertificateStore {
+        /// `GetLastError` value returned by the failing API.
+        code: u32,
+    },
     /// This build is not running on Windows.
     UnsupportedPlatform,
 }
@@ -93,6 +104,12 @@ impl fmt::Display for CredentialStoreError {
                 formatter.write_str("stored contactless credential is malformed")
             }
             Self::InvalidStoredPairing => formatter.write_str("stored pairing set is malformed"),
+            Self::CertificateStore { code } => {
+                write!(
+                    formatter,
+                    "Windows certificate store failed with code {code}"
+                )
+            }
             Self::UnsupportedPlatform => {
                 formatter.write_str("Windows Credential Manager is unavailable")
             }
