@@ -130,4 +130,17 @@
       Value="$(RefineIdPackageVersion)"
     />
   </Target>
+  <!-- The package file and its test directory are named after the identity
+       version the packaging targets read from the source manifest, which is
+       the placeholder. Naming them from the stamp instead gives
+       RefineID_YY.M.D.0_<arch>.msix, the version the package carries. -->
+  <Target
+    Name="StampAppxPackageFileName"
+    DependsOnTargets="_ValidatePresenceOfAppxManifestItems"
+    BeforeTargets="_ComputeAppxPackageOutput"
+  >
+    <PropertyGroup>
+      <AppxManifestIdentityVersion>$(RefineIdPackageVersion)</AppxManifestIdentityVersion>
+    </PropertyGroup>
+  </Target>
 </Project>
