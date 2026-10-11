@@ -51,7 +51,7 @@ use refineid_rapp_core::engine::{
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::message::CloseReason;
 use refineid_rapp_core::offer::normalize_pairing_code;
-use refineid_rapp_core::operations::{CardOperation, CardOperationResult, CertificateKind};
+use refineid_rapp_core::operations::{CardOperation, CardOperationResult};
 use refineid_rapp_core::store::{MemoryJournal, PairingStore};
 use refineid_rapp_core::stream::{
     DialPurpose, DiscoveryMode, STREAM_CANDIDATE_ID, StreamError, browse, dial, dial_session,
@@ -618,79 +618,69 @@ fn read_paired_card(paired: &mut Paired) -> Result<CardReadDto, ApiFailure> {
         .map_err(|error| ApiFailure::new("session_failed", format!("{error:?}")))?;
 
     // The requester screen shows only the holder identity, so the read is one
-    // operation and the phone reads the card once. Card status and the
-    // certificate bytes are separate operations added when a screen needs them.
-    let identity = match run_operation(paired, &mut session, &CardOperation::ReadIdentity)? {
-        CardOperationResult::Identity(identity) => IdentityDto {
-            display_name: identity.holder_name,
-            person_id: identity.card_id,
-        },
-        _ => return Err(unexpected_result("read_identity")),
-    };
-
-    // Browsers reach the phone through the key storage provider, which
-    // needs the authentication certificate on the pairing record and in the
-    // user's certificate store. Fetch it once; a failure here leaves the
-    // identity read intact.
-    if let Some(certificate) = cached_or_fetched_certificate(paired, &mut session) {
-        offer_to_browsers(&certificate, paired.pair_id);
-    }
+    // operation and the phone reads the card once. The answer carries the
+    // authentication certificate, which browsers need through the key
+    // storage provider: on the pairing record for signing, and in the user's
+    // certificate store so Edge and Chrome offer it.
+    let (identity, certificate) =
+        match run_operation(paired, &mut session, &CardOperation::ReadIdentity)? {
+            CardOperationResult::Identity(mut identity) => {
+                let certificate = identity.certificates.drain(..).next();
+                (
+                    IdentityDto {
+                        display_name: identity.holder_name,
+                        person_id: identity.card_id,
+                    },
+                    certificate,
+                )
+            }
+            _ => return Err(unexpected_result("read_identity")),
+        };
 
     paired
         .requester
         .disconnect(&mut session, CloseReason::UserDisconnect);
 
+    let certificate = certificate.ok_or_else(|| {
+        ApiFailure::new(
+            "no_certificate",
+            "The phone sent no certificate with the identity.",
+        )
+    })?;
+    remember_certificate(paired, &certificate);
+    offer_to_browsers(&certificate, paired.pair_id)?;
+
     Ok(CardReadDto { identity })
 }
 
-/// The authentication certificate from the pairing record, or from the
-/// phone when the record has none yet, in which case it is cached there.
-fn cached_or_fetched_certificate(
-    paired: &mut Paired,
-    session: &mut refineid_rapp_core::engine::Session<
-        refineid_rapp_core::transport::TcpFrameTransport,
-    >,
-) -> Option<Vec<u8>> {
-    let cached = paired
-        .requester
-        .store()
-        .get(paired.pair_id)
-        .ok()
-        .and_then(|record| record.auth_cert.clone());
-    if cached.is_some() {
-        return cached;
-    }
-    let operation = CardOperation::ReadCertificate {
-        kind: CertificateKind::Authentication,
-    };
-    let CardOperationResult::Certificate(certificate) =
-        run_operation(paired, session, &operation).ok()?
-    else {
-        return None;
-    };
-    let cached = certificate.clone();
-    // A refused write only means the next read fetches the certificate
-    // again.
+/// Keeps the authentication certificate on the pairing record, where the
+/// key storage provider reads it when a browser asks for a signature.
+fn remember_certificate(paired: &mut Paired, certificate: &[u8]) {
+    // A refused write only means the next read stores it again.
     let _ = paired
         .requester
         .store_mut()
         .update(paired.pair_id, &mut |record| {
-            record.auth_cert = Some(cached.clone());
+            record.auth_cert = Some(certificate.to_vec());
         });
-    Some(certificate)
 }
 
 /// Places the certificate in the user's certificate store, bound to the
 /// `RefineID` key storage provider, so Edge and Chrome offer it.
 #[cfg(windows)]
-fn offer_to_browsers(certificate: &[u8], pair_id: PairId) {
-    // The read succeeded either way; a store refusal only means the
-    // browser offers nothing until the next read.
-    let _ = install_browser_certificate(certificate, pair_id);
+fn offer_to_browsers(certificate: &[u8], pair_id: PairId) -> Result<(), ApiFailure> {
+    install_browser_certificate(certificate, pair_id)
+        .map_err(|error| ApiFailure::new("certificate_store_failed", format!("{error}")))
 }
 
 #[cfg(not(windows))]
-const fn offer_to_browsers(_certificate: &[u8], _pair_id: PairId) {}
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the Windows arm fails; this one keeps the caller's signature"
+)]
+const fn offer_to_browsers(_certificate: &[u8], _pair_id: PairId) -> Result<(), ApiFailure> {
+    Ok(())
+}
 
 /// Removes the certificates the app placed for browsers.
 #[cfg(windows)]

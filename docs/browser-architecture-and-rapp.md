@@ -170,10 +170,11 @@ CryptoAPI and CNG. For a mutual-TLS site (such as `https://suomi.fi` or
 `https://card.refineid.fi`) the path to the phone is:
 
 1. **Certificate in the user store**:
-   - After a card read, the RefineID app fetches the authentication certificate
-     once (`ReadCertificate`), caches it on the pairing record, and adds it to
+   - The `read_identity` answer carries the authentication certificate. The
+     RefineID app keeps it on the pairing record and adds it to
      `Cert:\CurrentUser\My` with `CERT_KEY_PROV_INFO` naming the provider
-     `RefineID Key Storage Provider` and the key `rapp:<pair id>`.
+     `RefineID Key Storage Provider` and the key `rapp:<pair id>`; a store
+     refusal fails the read with `certificate_store_failed`.
    - Forgetting the pairing removes every certificate bound to the provider.
 2. **Provider registration**:
    - The DLL registers itself through `BCryptRegisterProvider` and
