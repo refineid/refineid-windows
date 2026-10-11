@@ -13,6 +13,7 @@ refineid-remote.workspace = true
 getrandom.workspace = true
 sha2.workspace = true
 zeroize.workspace = true
+socket2.workspace = true
 
 [dev-dependencies]
 serde = { workspace = true }
