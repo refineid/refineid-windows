@@ -269,11 +269,25 @@ internal sealed partial class MainPage : Page
 
     private async void CheckLocalCard()
     {
+        IReadOnlyList<string> readers;
         try
         {
-            IReadOnlyList<string> readers = await Task.Run(LocalCardService.PresentReaders)
-                .ConfigureAwait(true);
+            readers = await Task.Run(LocalCardService.PresentReaders).ConfigureAwait(true);
+        }
+        catch (NativeRappException ex)
+        {
+            Debug.WriteLine($"CheckLocalCardAsync reader list error: {ex.Message}");
+            this.PinsCard.Visibility = Visibility.Collapsed;
+            this.UpdateLocalCardDisconnected();
+            return;
+        }
 
+        // The PIN page works on a reader attached to this computer, with or
+        // without a card in it, so the entry follows the reader list alone.
+        this.PinsCard.Visibility = readers.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        try
+        {
             // Prefer the last selected reader if still present.
             string? targetReader = null;
             if (this.selectedReader is not null)
@@ -323,7 +337,6 @@ internal sealed partial class MainPage : Page
     private void UpdateLocalCardUi(LocalCardSnapshot snapshot)
     {
         this.SignCard.IsEnabled = true;
-        this.PinsCard.Visibility = Visibility.Visible;
 
         if (!string.IsNullOrWhiteSpace(snapshot.Person))
         {
@@ -343,7 +356,6 @@ internal sealed partial class MainPage : Page
 
     private void UpdateLocalCardDisconnected()
     {
-        this.PinsCard.Visibility = Visibility.Collapsed;
         if (this.remoteHolder is null)
         {
             this.HolderText.Text = string.Empty;
