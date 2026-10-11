@@ -1,4 +1,4 @@
-//! The credential-profile registry (RAPP v26.10.9 section 9).
+//! The credential-profile registry (RAPP v26.10.10 section 9).
 //!
 //! The names reserve design space; the card-specific payload schemas need a
 //! separate reviewed profile specification, so this module carries only

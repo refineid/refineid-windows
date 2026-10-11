@@ -1,4 +1,4 @@
-//! The requester engine: the workstation side of RAPP v26.10.9.
+//! The requester engine: the workstation side of RAPP v26.10.10.
 //!
 //! The engine drives pairing, sessions, and operations using the canonical
 //! protocol boundaries from `refineid_rapp`.
@@ -296,7 +296,7 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
     }
 
     /// Pairs with the custodian showing `code`, as the requester (RAPP
-    /// v26.10.9 sections 3, 4.2 and 6).
+    /// v26.10.10 sections 3, 4.2 and 6).
     ///
     /// The transport is already past its `"pairing"` routing preamble. The
     /// custodian's first frame is its offer; the requester checks it lists
@@ -830,7 +830,7 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
             return Ok(outcome);
         }
 
-        // RAPP v26.10.9 section 8.2 executes directly: once a consequential
+        // RAPP v26.10.10 section 8.2 executes directly: once a consequential
         // request is sent the custodian may act on it after consent, so an
         // unanswered one is in flight and ends ambiguous, never cancelled.
         let mut state = if consequential {
@@ -1155,6 +1155,7 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
             | CloseReason::CredentialRejected => {
                 self.revoke_pairing(pair_id, true);
             }
+            CloseReason::ServiceWithdrawn => crate::stream::mark_withdrawn(pair_id),
             CloseReason::Normal
             | CloseReason::Complete
             | CloseReason::UserDisconnect

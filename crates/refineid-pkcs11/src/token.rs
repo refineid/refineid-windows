@@ -1222,7 +1222,7 @@ fn parse_der_len(der: &[u8], idx: &mut usize) -> Option<usize> {
 
 /// Normalizes a remote ECDSA signature to IEEE P1363 (`r || s`).
 ///
-/// RAPP v26.10.9 section 9.2 sends the fixed-width raw form, which may itself
+/// RAPP v26.10.10 section 9.2 sends the fixed-width raw form, which may itself
 /// begin with the DER sequence tag, so the raw length is checked before any
 /// DER decoding; other lengths are accepted only as DER.
 #[cfg_attr(
@@ -1327,8 +1327,12 @@ impl RemoteCardTransport {
         use core::time::Duration;
 
         crate::diag::diag!("connect_session_transport: discovering the paired phone");
+        let pairing = self
+            .pairing_record
+            .to_core_pair_record()
+            .map_err(|_| "the stored pairing is unusable; pair again".to_owned())?;
         refineid_rapp_core::stream::dial_session(
-            self.pairing_record.rendezvous_token,
+            &pairing,
             &[],
             &["127.0.0.1:47110".to_owned()],
             Duration::from_secs(2),

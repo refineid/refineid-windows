@@ -1,9 +1,9 @@
 //! Durable pairing records and the operation journal.
 //!
 //! A pairing record is the atomic result of pairing: pair keys, `pair_id`,
-//! the rendezvous token, granted profiles, `grants_hash`, labels, and the
+//! granted profiles, `grants_hash`, labels, and the
 //! fail-stop marker. The journal records each operation from the moment its
-//! request is written (RAPP v26.10.9 section 8): an unanswered consequential
+//! request is written (RAPP v26.10.10 section 8): an unanswered consequential
 //! request is in flight and ends ambiguous, and terminal states are
 //! permanent.
 //!
@@ -14,7 +14,7 @@
 
 use zeroize::Zeroizing;
 
-use crate::ids::{OperationId, PairId, RendezvousToken};
+use crate::ids::{OperationId, PairId};
 pub use refineid_rapp::OperationState;
 
 /// The fail-stop disposition of a stored pairing (Section 14.2).
@@ -33,8 +33,6 @@ pub enum PairingDisposition {
 pub struct PairingRecord {
     /// The derived pair identifier.
     pub pair_id: PairId,
-    /// The derived pair-specific transport rendezvous token (Section 8.5).
-    pub rendezvous_token: RendezvousToken,
     /// The local pair-specific private key; emptied on revocation.
     pub local_private: Zeroizing<Vec<u8>>,
     /// The local pair-specific public key.
@@ -116,7 +114,6 @@ impl PairingRecord {
         let grants_hash = refineid_rapp::GrantsHash::from_array(self.grants_hash);
         refineid_rapp::PairRecord::new(
             self.pair_id,
-            self.rendezvous_token,
             refineid_rapp::EndpointRole::Requester,
             local_private,
             local_public,
@@ -136,7 +133,6 @@ impl PairingRecord {
     ) -> Self {
         Self {
             pair_id: core.pair_id(),
-            rendezvous_token: core.rendezvous_token(),
             local_private: Zeroizing::new(core.local_static_private().to_vec()),
             local_public: core.local_static_public().to_vec(),
             peer_public: core.remote_static_public().to_vec(),
@@ -432,13 +428,12 @@ mod tests {
         JournalEntry, MemoryJournal, MemoryPairingStore, OperationJournal, OperationState,
         PairingDisposition, PairingRecord, PairingStore, StoreError,
     };
-    use crate::ids::{OperationId, PairId, RendezvousToken};
+    use crate::ids::{OperationId, PairId};
     use zeroize::Zeroizing;
 
     fn record(pair_id: PairId) -> PairingRecord {
         PairingRecord {
             pair_id,
-            rendezvous_token: RendezvousToken::from_array([9; 16]),
             local_private: Zeroizing::new(vec![1; 32]),
             local_public: vec![2; 32],
             peer_public: vec![3; 32],
