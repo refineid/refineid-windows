@@ -93,3 +93,14 @@
   readers or migration paths behind.
 - Update every caller, hook, CI job and document to the replacement in that
   same change instead of keeping the old entry point alive for them.
+
+## Independent review
+
+- Before a pull request merges, review its diff independently with the `agy`
+  CLI and Gemini models: `gemini-3.8-flash-high` always, plus
+  `gemini-3.1-pro-high` for protocol, cryptography or state-machine changes.
+- Run `agy` headless in its sandbox and plan mode, from an empty directory,
+  with the diff pasted into the prompt and no tool use. Frame the request as
+  a code review from the project's author.
+- Check every finding against the code. Fix the real ones and list the
+  rejected ones, with the reason, in the pull request description.
