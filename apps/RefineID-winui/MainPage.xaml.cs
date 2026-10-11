@@ -96,7 +96,7 @@ internal sealed partial class MainPage : Page
     /// <summary>The settings page polls the readers itself while it is shown.</summary>
     private void OnUnloaded(object sender, RoutedEventArgs args) => this.cardPollTimer.Stop();
 
-    private void Settings_Click(object sender, RoutedEventArgs args) =>
+    private void Pins_Click(object sender, RoutedEventArgs args) =>
         this.Frame.Navigate(typeof(CardPage));
 
     private static string DiagnosticsLabel()
@@ -269,11 +269,25 @@ internal sealed partial class MainPage : Page
 
     private async void CheckLocalCard()
     {
+        IReadOnlyList<string> readers;
         try
         {
-            IReadOnlyList<string> readers = await Task.Run(LocalCardService.PresentReaders)
-                .ConfigureAwait(true);
+            readers = await Task.Run(LocalCardService.PresentReaders).ConfigureAwait(true);
+        }
+        catch (NativeRappException ex)
+        {
+            Debug.WriteLine($"CheckLocalCardAsync reader list error: {ex.Message}");
+            this.PinsCard.Visibility = Visibility.Collapsed;
+            this.UpdateLocalCardDisconnected();
+            return;
+        }
 
+        // The PIN page works on a reader attached to this computer, with or
+        // without a card in it, so the entry follows the reader list alone.
+        this.PinsCard.Visibility = readers.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        try
+        {
             // Prefer the last selected reader if still present.
             string? targetReader = null;
             if (this.selectedReader is not null)

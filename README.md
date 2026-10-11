@@ -44,7 +44,7 @@ S4-1 v3.1 RSA card and an ACR39U reader:
 
 - `certutil -scinfo -silent` selected the RefineID Card Module without an
   unknown-card error;
-- the card settings page restored PIN2 with the recovery code and the card reported
+- the PIN page restored PIN2 with the recovery code and the card reported
   five attempts plus the changed-from-factory flag afterwards; and
 - Microsoft KSP calls completed and locally verified RSA-3072 PKCS #1 v1.5 and
   RSA-PSS signatures with both PIN1 and PIN2.
@@ -58,7 +58,7 @@ The browser and Windows KSP acceptance tests above currently use the contact
 interface. The repository now contains an experimental end-to-end contactless
 path:
 
-- the card settings page proves the printed six-digit CAN with the Apple-reference
+- the PIN page proves the printed six-digit CAN with the Apple-reference
   `SELECT MF`, PACE, and protected PKCS #15 sequence before saving it;
 - only the CAN is stored in the current Windows user's Credential Manager,
   keyed by the complete PC/SC contactless ATR; no PIN or PUK is stored;
@@ -73,10 +73,11 @@ an ACS ACR1581 PICC reader. The new Windows Credential Manager-to-minidriver
 handoff still needs real-reader acceptance before contactless browser use can be
 called supported. Contact mode remains the supported path meanwhile.
 
-### Card settings
+### PINs
 
-The Settings entry of `apps/RefineID-winui` opens the card settings page, a
-narrow C# UI over the Rust card-service DLL (`refineid_settings_ffi`). It can:
+The PINs entry of `apps/RefineID-winui`, shown while a card reader is
+connected, opens the PIN page, a narrow C# UI over the Rust card-service DLL
+(`refineid_settings_ffi`). It can:
 
 - inspect a card and show counter-safe PIN1, PIN2, and recovery status;
 - change PIN1 or PIN2;

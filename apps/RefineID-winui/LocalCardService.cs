@@ -24,7 +24,7 @@ using System.Text.Json.Serialization.Metadata;
 /// <summary>
 /// Safe managed bridge to refineid_settings_ffi: local card detection and
 /// inspection for the main screen, and the PIN, recovery, activation, and
-/// contactless operations of the card settings screen. Secrets cross the
+/// contactless operations of the PIN page. Secrets cross the
 /// boundary as bounded byte arrays that are zeroed after the call.
 /// </summary>
 internal static partial class LocalCardService
