@@ -115,6 +115,8 @@ this by disabling Firefox revocation checking.
   `GetKeyStorageInterface` from the same DLL.
 - `ksp_codec.rs` -- the CNG key blob and signature encodings the provider
   hands out, tested on the host.
+- `ksp_register.rs` -- registers the provider with CNG through the BCrypt
+  registration API; entry points for the driver MSI and for `rundll32`.
 
 ## Paired phone for browsers
 

@@ -192,13 +192,6 @@ pub enum RegistryData<'a> {
     Text(&'a str),
     /// A `REG_BINARY` value.
     Binary(&'a [u8]),
-    /// A `REG_DWORD` value.
-    Dword(u32),
-    /// A `REG_MULTI_SZ` value, written whole.
-    MultiText(&'a [&'a str]),
-    /// One string appended to an existing `REG_MULTI_SZ` value, and removed
-    /// from it again on uninstall. The value is created when absent.
-    AppendText(&'a str),
 }
 
 /// One value under `HKEY_LOCAL_MACHINE`.
@@ -206,11 +199,24 @@ pub enum RegistryData<'a> {
 pub struct RegistryValue<'a> {
     /// Subkey path, without the root.
     pub key: &'a str,
-    /// Value name; empty for the key's default value (the installer stores
-    /// an empty string as a null `Name` column).
+    /// Value name.
     pub name: &'a str,
     /// Value data.
     pub data: RegistryData<'a>,
+}
+
+/// An entry point of the installed module that the installer calls with
+/// elevation.
+#[derive(Debug, Clone, Copy)]
+pub struct CustomAction<'a> {
+    /// Action name, unique within the package.
+    pub name: &'a str,
+    /// The exported function, with the Windows Installer custom action
+    /// signature.
+    pub entry_point: &'a str,
+    /// Whether the action runs on uninstall (before the files go) rather
+    /// than on install and repair (after the files are in place).
+    pub on_uninstall: bool,
 }
 
 /// Everything needed to produce one architecture's package.
@@ -233,6 +239,8 @@ pub struct Package<'a> {
     pub file: SystemFile<'a>,
     /// Registry values binding the module to supported cards.
     pub registry: &'a [RegistryValue<'a>],
+    /// Entry points of the module the installer calls.
+    pub custom_actions: &'a [CustomAction<'a>],
     /// A service stopped before installation and started afterwards.
     pub restart_service: Option<&'a str>,
 }
@@ -283,10 +291,7 @@ impl From<std::io::Error> for BuildError {
 
 /// Encodes registry data the way the `Registry` table expects it.
 ///
-/// A leading `#x` marks hexadecimal binary and a leading `#` a decimal
-/// `DWORD`; plain text is stored as written. `[~]` separates the strings of
-/// a `REG_MULTI_SZ`: a value that both starts and ends with it is written
-/// whole, and one that only starts with it is appended to what is there.
+/// A leading `#x` marks hexadecimal binary; plain text is stored as written.
 fn encode_registry(data: RegistryData<'_>) -> String {
     match data {
         RegistryData::Text(text) => text.to_owned(),
@@ -299,9 +304,6 @@ fn encode_registry(data: RegistryData<'_>) -> String {
             }
             encoded
         }
-        RegistryData::Dword(value) => format!("#{value}"),
-        RegistryData::MultiText(strings) => format!("[~]{}[~]", strings.join("[~]")),
-        RegistryData::AppendText(text) => format!("[~]{text}"),
     }
 }
 
@@ -439,6 +441,8 @@ pub fn build(package: &Package<'_>, output: &Path, scratch: &Path) -> Result<(),
     write_layout(&database, package)?;
     write_payload(&database, package, &cabinet, payload_size)?;
     write_registry(&database, package)?;
+
+    write_custom_actions(&database, package)?;
     write_service(&database, package)?;
     write_upgrade_rules(&database, package, &upgrade_code, &version)?;
     write_sequences(&database)?;
@@ -649,6 +653,42 @@ fn write_registry(database: &Database, package: &Package<'_>) -> Result<(), Buil
     Ok(())
 }
 
+/// Writes the custom actions and sequences them: uninstall ones before the
+/// files go, install ones after they are in place.
+fn write_custom_actions(database: &Database, package: &Package<'_>) -> Result<(), BuildError> {
+    let mut next_install = schema::INSTALL_ACTION_SEQUENCE;
+    let mut next_uninstall = schema::UNINSTALL_ACTION_SEQUENCE;
+    for action in package.custom_actions {
+        insert(
+            database,
+            "INSERT INTO `CustomAction` (`Action`,`Type`,`Source`,`Target`) VALUES (?,?,?,?)",
+            &[
+                Value::Text(action.name),
+                Value::Integer(schema::CUSTOM_ACTION_INSTALLED_DLL_DEFERRED),
+                Value::Text(package.file.key),
+                Value::Text(action.entry_point),
+            ],
+        )?;
+        let (condition, sequence) = if action.on_uninstall {
+            next_uninstall += 1;
+            ("REMOVE~=\"ALL\"", next_uninstall)
+        } else {
+            next_install += 1;
+            ("NOT REMOVE~=\"ALL\"", next_install)
+        };
+        insert(
+            database,
+            "INSERT INTO `InstallExecuteSequence` (`Action`,`Condition`,`Sequence`) VALUES (?,?,?)",
+            &[
+                Value::Text(action.name),
+                Value::Text(condition),
+                Value::Integer(sequence),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 /// Writes the service restart, if the package asks for one.
 fn write_service(database: &Database, package: &Package<'_>) -> Result<(), BuildError> {
     if let Some(service) = package.restart_service {
@@ -772,32 +812,6 @@ mod tests {
     #[test]
     fn empty_binary_data_still_carries_the_prefix() {
         assert_eq!(encode_registry(RegistryData::Binary(&[])), "#x");
-    }
-
-    #[test]
-    fn dword_data_is_decimal_behind_a_hash() {
-        assert_eq!(encode_registry(RegistryData::Dword(0)), "#0");
-        assert_eq!(encode_registry(RegistryData::Dword(65537)), "#65537");
-    }
-
-    #[test]
-    fn multi_strings_are_delimited_at_both_ends() {
-        assert_eq!(
-            encode_registry(RegistryData::MultiText(&["KEY_STORAGE"])),
-            "[~]KEY_STORAGE[~]"
-        );
-        assert_eq!(
-            encode_registry(RegistryData::MultiText(&["a", "b"])),
-            "[~]a[~]b[~]"
-        );
-    }
-
-    #[test]
-    fn an_appended_string_is_delimited_only_in_front() {
-        assert_eq!(
-            encode_registry(RegistryData::AppendText("RefineID Key Storage Provider")),
-            "[~]RefineID Key Storage Provider"
-        );
     }
 
     #[test]

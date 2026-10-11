@@ -48,6 +48,6 @@ pub use crate::guid::{Guid, GuidParseError};
 mod build;
 #[cfg(windows)]
 pub use crate::build::{
-    Architecture, BuildError, Package, ProductVersion, RegistryData, RegistryValue, SystemFile,
-    Version, VersionParseError, build,
+    Architecture, BuildError, CustomAction, Package, ProductVersion, RegistryData, RegistryValue,
+    SystemFile, Version, VersionParseError, build,
 };

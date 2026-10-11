@@ -69,6 +69,12 @@ pub const TABLES: &[&str] = &[
         `VolumeLabel` CHAR(32), \
         `Source` CHAR(72) \
         PRIMARY KEY `DiskId`)",
+    "CREATE TABLE `CustomAction` (\
+        `Action` CHAR(72) NOT NULL, \
+        `Type` SHORT NOT NULL, \
+        `Source` CHAR(72), \
+        `Target` CHAR(255) \
+        PRIMARY KEY `Action`)",
     "CREATE TABLE `Registry` (\
         `Registry` CHAR(72) NOT NULL, \
         `Root` SHORT NOT NULL, \
@@ -191,6 +197,20 @@ pub const ADVT_EXECUTE_SEQUENCE: &[SequencedAction] = &[
 
 /// `HKEY_LOCAL_MACHINE` in the `Registry` table's `Root` column.
 pub const REGISTRY_ROOT_LOCAL_MACHINE: i32 = 2;
+
+/// A custom action that calls an entry point of an installed DLL
+/// (`msidbCustomActionTypeDll | msidbCustomActionTypeSourceFile`), deferred
+/// into the installation script and run without impersonation, so it has
+/// the installer's elevation after the file is in place.
+pub const CUSTOM_ACTION_INSTALLED_DLL_DEFERRED: i32 = 1 | 0x10 | 0x400 | 0x800;
+
+/// Sequence number of the first uninstall custom action: after services
+/// stop and before registry values and files go.
+pub const UNINSTALL_ACTION_SEQUENCE: i32 = 2500;
+
+/// Sequence number of the first install custom action: after the files are
+/// in place.
+pub const INSTALL_ACTION_SEQUENCE: i32 = 4100;
 
 /// Component installs locally and its key path is a registry value.
 pub const COMPONENT_REGISTRY_KEY_PATH: i32 = 4;

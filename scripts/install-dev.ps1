@@ -86,36 +86,17 @@ function Set-CardRegistration(
         -Value 'refineid_minidriver.dll' -Force | Out-Null
 }
 
-function Set-KeyStorageProviderRegistration {
+function Set-KeyStorageProviderRegistration([string]$Module) {
     # Mirrors the driver MSI: the same DLL is a CNG key storage provider for
     # a paired phone, consulted by Edge, Chrome and Schannel through the
-    # certificates the RefineID app places in the user's store.
-    $name = 'RefineID Key Storage Provider'
-    # Same layout as Microsoft's own providers: the image on the UM key,
-    # the interface under it, and the name in the machine's Providers list.
-    $provider = "HKLM:\SYSTEM\CurrentControlSet\Control\Cryptography\Providers\$name\UM"
-    $interface = "$provider\00010001"
-    New-Item -Path $interface -Force | Out-Null
-    New-ItemProperty -Path $provider -Name Image -PropertyType String `
-        -Value (Join-Path $env:SystemRoot 'System32\refineid_minidriver.dll') -Force | Out-Null
-    New-ItemProperty -Path $interface -Name '(default)' -PropertyType String `
-        -Value 'CRYPT_KEY_STORAGE_INTERFACE' -Force | Out-Null
-    New-ItemProperty -Path $interface -Name Flags -PropertyType DWord -Value 0 -Force | Out-Null
-    New-ItemProperty -Path $interface -Name Functions -PropertyType MultiString `
-        -Value @('KEY_STORAGE') -Force | Out-Null
-
-    $list = 'HKLM:\SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\Default\00010001\KEY_STORAGE'
-    New-Item -Path $list -Force | Out-Null
-    [string[]]$providers = @()
-    $existing = Get-ItemProperty -Path $list -Name Providers -ErrorAction SilentlyContinue
-    if ($null -ne $existing) {
-        $providers = @($existing.Providers)
+    # certificates the RefineID app places in the user's store. CNG caches
+    # its configuration, so the DLL registers itself through the BCrypt
+    # registration API rather than through registry writes.
+    $process = Start-Process -FilePath "$env:SystemRoot\System32\rundll32.exe" `
+        -ArgumentList "`"$Module`",RefineIdRegisterProvider" -Wait -PassThru
+    if ($process.ExitCode -ne 0) {
+        throw "Registering the key storage provider failed with exit code $($process.ExitCode)."
     }
-    if ($providers -notcontains $name) {
-        $providers += $name
-    }
-    New-ItemProperty -Path $list -Name Providers -PropertyType MultiString `
-        -Value $providers -Force | Out-Null
 }
 
 Assert-Administrator
@@ -186,7 +167,7 @@ try {
     Remove-Item -Path 'HKLM:\SOFTWARE\Microsoft\Cryptography\Calais\SmartCards\FINEID-RAPP-Virtual' `
         -Recurse -Force -ErrorAction SilentlyContinue
 
-    Set-KeyStorageProviderRegistration
+    Set-KeyStorageProviderRegistration -Module $destination
 
     Set-CardRegistration -Name 'FINEID-Dev-CCID' `
         -Atr ([byte[]](0x3B,0xFD,0x13,0x00,0x00,0x81,0x31,0xFE,0x15,0x80,0x73,0xC0,0x21,0xC0,0x57,0x59,0x75,0x62,0x69,0x4B,0x65,0x79,0x40)) `

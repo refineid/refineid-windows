@@ -175,13 +175,17 @@ CryptoAPI and CNG. For a mutual-TLS site (such as `https://suomi.fi` or
      `Cert:\CurrentUser\My` with `CERT_KEY_PROV_INFO` naming the provider
      `RefineID Key Storage Provider` and the key `rapp:<pair id>`.
    - Forgetting the pairing removes every certificate bound to the provider.
-2. **Provider registration** (written by the driver MSI and `install-dev.ps1`):
-   - `HKLM\SYSTEM\CurrentControlSet\Control\Cryptography\Providers\RefineID Key Storage Provider\UM`
-     with `Image` = `refineid_minidriver.dll` in System32, and its `00010001`
-     subkey with the default value `CRYPT_KEY_STORAGE_INTERFACE`, `Flags` = 0
-     and `Functions` = `KEY_STORAGE`, the layout of Microsoft's own providers.
-   - The provider name is appended to `Providers` under
-     `...\Cryptography\Configuration\Local\Default\00010001\KEY_STORAGE`.
+2. **Provider registration**:
+   - The DLL registers itself through `BCryptRegisterProvider` and
+     `BCryptAddContextFunctionProvider` (`ksp_register.rs`), which write
+     `HKLM\SYSTEM\CurrentControlSet\Control\Cryptography\Providers\RefineID Key Storage Provider`
+     and append the name to the machine's `KEY_STORAGE` provider list, and
+     tell CNG about them. A registration written straight to the registry is
+     not seen until the next boot, because CNG caches its configuration.
+   - The driver MSI calls the DLL's `RefineIdRegisterKeyStorageProvider`
+     custom action after the file is installed and
+     `RefineIdUnregisterKeyStorageProvider` before it is removed;
+     `install-dev.ps1` runs the same code through `rundll32`.
 3. **Signing**:
    - The browser calls `CryptAcquireCertificatePrivateKey`; `ncrypt.dll` loads the
      DLL into the browser process, resolves `GetKeyStorageInterface`, and opens the
@@ -212,8 +216,8 @@ Packaging is implemented natively in Rust via `crates/refineid-msi`:
   2. `FINEID-S4-1-v4.0` (Physical card)
   3. `FINEID-RAPP-Remote` (Remote wireless card, for the later virtual reader)
 - Registers the same DLL as the `RefineID Key Storage Provider` for CNG
-  (section 6); the Registry table appends it to the machine's `Providers`
-  list for `KEY_STORAGE` and removes it again on uninstall.
+  through two custom actions in the DLL itself (section 6), and removes the
+  registration on uninstall.
 - Automatically notifies and restarts `SCardSvr` upon installation.
 
 ---
