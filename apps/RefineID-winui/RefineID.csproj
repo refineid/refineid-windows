@@ -41,16 +41,19 @@
          <Version> alone only sets the informational version, while
          Assembly.GetName().Version (shown in the footer) reads
          AssemblyVersion, which otherwise falls back to the SDK default and
-         renders as 0.0.0.0. The package identity carries the same day with
-         revision 0, which the Store reserves. The Rust build gets the same
-         stamp through REFINEID_VERSION. -->
+         renders as 0.0.0.0. The package identity carries the same stamp,
+         so a later build of the same day installs over an earlier one; a
+         Store build (RefineIdStoreBuild=true) carries revision 0 instead,
+         which the Store reserves. The Rust build gets the same stamp
+         through REFINEID_VERSION. -->
     <RefineIdBuildTicks>$([System.DateTime]::UtcNow.Ticks)</RefineIdBuildTicks>
     <RefineIdBuildYear>$([MSBuild]::Subtract($([System.DateTime]::FromBinary($(RefineIdBuildTicks)).Year), 2000))</RefineIdBuildYear>
     <RefineIdBuildMonth>$([System.DateTime]::FromBinary($(RefineIdBuildTicks)).Month)</RefineIdBuildMonth>
     <RefineIdBuildDay>$([System.DateTime]::FromBinary($(RefineIdBuildTicks)).Day)</RefineIdBuildDay>
     <RefineIdBuildBucket>$([MSBuild]::Add($([MSBuild]::Multiply($([System.DateTime]::FromBinary($(RefineIdBuildTicks)).Hour), 10)), $([System.DateTime]::FromBinary($(RefineIdBuildTicks)).ToString("mm").Substring(0, 1))))</RefineIdBuildBucket>
     <RefineIdVersion>$(RefineIdBuildYear).$(RefineIdBuildMonth).$(RefineIdBuildDay).$(RefineIdBuildBucket)</RefineIdVersion>
-    <RefineIdPackageVersion>$(RefineIdBuildYear).$(RefineIdBuildMonth).$(RefineIdBuildDay).0</RefineIdPackageVersion>
+    <RefineIdPackageVersion Condition="'$(RefineIdStoreBuild)' != 'true'">$(RefineIdVersion)</RefineIdPackageVersion>
+    <RefineIdPackageVersion Condition="'$(RefineIdStoreBuild)' == 'true'">$(RefineIdBuildYear).$(RefineIdBuildMonth).$(RefineIdBuildDay).0</RefineIdPackageVersion>
     <Version>$(RefineIdVersion)</Version>
     <AssemblyVersion>$(RefineIdVersion)</AssemblyVersion>
     <FileVersion>$(RefineIdVersion)</FileVersion>
@@ -119,7 +122,7 @@
       WorkingDirectory="$(MSBuildProjectDirectory)\..\.."
     />
   </Target>
-  <!-- Stamps the package identity with the build day. The source manifest
+  <!-- Stamps the package identity with the build instant. The source manifest
        keeps a placeholder version; the generated manifest in the
        intermediate directory is the one the package is built from. -->
   <Target Name="StampAppxManifestVersion" AfterTargets="_GenerateCurrentProjectAppxManifest">
@@ -133,7 +136,7 @@
   <!-- The package file and its test directory are named after the identity
        version the packaging targets read from the source manifest, which is
        the placeholder. Naming them from the stamp instead gives
-       RefineID_YY.M.D.0_<arch>.msix, the version the package carries. -->
+       RefineID_YY.M.D.B_<arch>.msix, the version the package carries. -->
   <Target
     Name="StampAppxPackageFileName"
     DependsOnTargets="_ValidatePresenceOfAppxManifestItems"
