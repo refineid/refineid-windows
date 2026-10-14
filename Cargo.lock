@@ -814,8 +814,8 @@ dependencies = [
 
 [[package]]
 name = "refineid-digest"
-version = "26.10.10"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#8cc1b340e72c5f606b40b035ec7a83eb1305d319"
+version = "26.10.11"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#3e94146ac899b88872a4bf52fbbb6130faf2d440"
 dependencies = [
  "sha1",
  "sha2 0.11.0",
@@ -915,8 +915,8 @@ dependencies = [
 
 [[package]]
 name = "refineid-rapp"
-version = "26.10.10"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#8cc1b340e72c5f606b40b035ec7a83eb1305d319"
+version = "26.10.11"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#3e94146ac899b88872a4bf52fbbb6130faf2d440"
 dependencies = [
  "chacha20poly1305",
  "curve25519-dalek",
@@ -971,8 +971,8 @@ dependencies = [
 
 [[package]]
 name = "refineid-remote"
-version = "26.10.10"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#8cc1b340e72c5f606b40b035ec7a83eb1305d319"
+version = "26.10.11"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#3e94146ac899b88872a4bf52fbbb6130faf2d440"
 dependencies = [
  "refineid-digest",
 ]
