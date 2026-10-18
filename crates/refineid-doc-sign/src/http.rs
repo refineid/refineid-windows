@@ -381,13 +381,6 @@ fn roundtrip(
     let session = Handle(session);
     unsafe {
         WinHttpSetTimeouts(session.0, 10_000, 10_000, 30_000, 30_000).map_err(map_winhttp_error)?;
-        let flag = WINHTTP_DISABLE_REDIRECTS.to_ne_bytes();
-        WinHttpSetOption(
-            Some(session.0.cast_const()),
-            WINHTTP_OPTION_DISABLE_FEATURE,
-            Some(&flag),
-        )
-        .map_err(map_winhttp_error)?;
     }
     let connection =
         unsafe { WinHttpConnect(session.0, PCWSTR(host_wide.as_ptr()), url.port(), 0) };
@@ -415,6 +408,15 @@ fn roundtrip(
         return Err(map_winhttp_null_handle());
     }
     let request = Handle(request);
+    unsafe {
+        let flag = WINHTTP_DISABLE_REDIRECTS.to_ne_bytes();
+        WinHttpSetOption(
+            Some(request.0.cast_const()),
+            WINHTTP_OPTION_DISABLE_FEATURE,
+            Some(&flag),
+        )
+        .map_err(map_winhttp_error)?;
+    }
 
     let mut headers = String::new();
     if let Some(content_type) = content_type {
