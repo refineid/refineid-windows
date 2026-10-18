@@ -369,58 +369,21 @@ struct VerifyReportJson {
     failure_reason: Option<String>,
 }
 
-/// A verified container: every file against its manifest digest and
-/// every signature against its signer.
+/// A verified container: its verdict and the report as the crate renders
+/// it, file by file and signature by signature.
 #[derive(Serialize)]
 struct ContainerVerifyJson {
     container: String,
     ok: bool,
-    files: Vec<ContainerFileJson>,
-    signatures: Vec<ContainerSignatureJson>,
     report: String,
-}
-
-#[derive(Serialize)]
-struct ContainerFileJson {
-    name: String,
-    algorithm: String,
-    digest_ok: bool,
-    detail: String,
-}
-
-#[derive(Serialize)]
-struct ContainerSignatureJson {
-    signer_cn: Option<String>,
-    valid: bool,
-    detail: String,
 }
 
 impl From<DocumentVerifyReport> for ContainerVerifyJson {
     fn from(report: DocumentVerifyReport) -> Self {
-        let rendered = report.render();
         Self {
+            report: report.render(),
             container: report.container,
             ok: report.ok,
-            files: report
-                .files
-                .into_iter()
-                .map(|file| ContainerFileJson {
-                    name: file.name,
-                    algorithm: file.algorithm,
-                    digest_ok: file.digest_ok,
-                    detail: file.detail,
-                })
-                .collect(),
-            signatures: report
-                .signatures
-                .into_iter()
-                .map(|signature| ContainerSignatureJson {
-                    signer_cn: signature.signer_cn,
-                    valid: signature.valid,
-                    detail: signature.detail,
-                })
-                .collect(),
-            report: rendered,
         }
     }
 }
@@ -519,7 +482,7 @@ pub unsafe extern "C" fn refineid_settings_sign_document(
                 "A PDF signature needs a .pdf file; other files go into a container.",
             ));
         }
-        let output = derive_output(&input, format);
+        let output = derive_output(&input, format)?;
         let request = DocumentRequest {
             format,
             additional_inputs: Vec::new(),
@@ -548,9 +511,18 @@ pub unsafe extern "C" fn refineid_settings_sign_document(
             can: None,
             document: Some(request),
         };
-        sign_with_slot(PcscBackend, slot, options)
-            .map(DocumentSignJson::from)
-            .map_err(|error| ApiFailure::new("sign_failed", error.to_string()))
+        let report = sign_with_slot(PcscBackend, slot, options)
+            .map_err(|error| ApiFailure::new("sign_failed", error.to_string()))?;
+        if let LocalVerifyOutcome::Failed(detail) = &report.local_verify {
+            return Err(ApiFailure::new(
+                "local_verify_failed",
+                format!(
+                    "The signature written to {} did not verify: {detail}",
+                    report.signature_path.display()
+                ),
+            ));
+        }
+        Ok(DocumentSignJson::from(report))
     })
 }
 
@@ -574,21 +546,56 @@ const fn sign_slot(slot: PinManageSlot) -> SignSlot {
     }
 }
 
-/// Output next to the input: `-signed.pdf` for a PDF signature, `.asice`
-/// appended for a container.
-fn derive_output(input: &std::path::Path, format: Format) -> PathBuf {
-    if format == Format::Pades {
-        let stem = input
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("document");
-        input.with_file_name(format!("{stem}-signed.pdf"))
+/// The last ordinal tried for a free output name.
+const MAX_OUTPUT_ORDINAL: u32 = 1_000;
+
+/// Output beside the input, under a name no file holds yet: `-signed.pdf`
+/// for a PDF signature, `.asice` appended for a container, `-signed.asice`
+/// for a container signed again, and `-signed-2`, `-signed-3` and so on
+/// while the name is taken.
+///
+/// # Errors
+/// `invalid_path` when the input has no file name.
+fn derive_output(input: &std::path::Path, format: Format) -> Result<PathBuf, ApiFailure> {
+    let name = input
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| ApiFailure::new("invalid_path", "The path names no file"))?;
+    let (stem, suffix) = if format == Format::Pades {
+        (
+            name.strip_suffix_ignore_case(".pdf").unwrap_or(name),
+            ".pdf",
+        )
+    } else if let Some(stem) = name.strip_suffix_ignore_case(".asice") {
+        (stem, ".asice")
     } else {
-        let name = input
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("document");
-        input.with_file_name(format!("{name}.asice"))
+        (name, ".asice")
+    };
+    let first = if format == Format::Pades || name.len() != stem.len() {
+        format!("{stem}-signed{suffix}")
+    } else {
+        format!("{name}{suffix}")
+    };
+    std::iter::once(first)
+        .chain((2..=MAX_OUTPUT_ORDINAL).map(|ordinal| format!("{stem}-signed-{ordinal}{suffix}")))
+        .map(|candidate| input.with_file_name(candidate))
+        .find(|candidate| !candidate.exists())
+        .ok_or_else(|| ApiFailure::new("invalid_path", "No free output name"))
+}
+
+/// Case-insensitive suffix removal for file names.
+trait StripSuffixIgnoreCase {
+    fn strip_suffix_ignore_case<'a>(&'a self, suffix: &str) -> Option<&'a str>;
+}
+
+impl StripSuffixIgnoreCase for str {
+    fn strip_suffix_ignore_case<'a>(&'a self, suffix: &str) -> Option<&'a str> {
+        let cut = self.len().checked_sub(suffix.len())?;
+        self.is_char_boundary(cut)
+            .then(|| &self[cut..])
+            .filter(|tail| tail.eq_ignore_ascii_case(suffix))
+            .map(|_| &self[..cut])
     }
 }
 
@@ -1130,6 +1137,10 @@ fn serialize_envelope<T: Serialize>(envelope: &ApiEnvelope<'_, T>) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test fixtures are constructed to be infallible"
+)]
 mod tests {
     use super::{
         FORMAT_ASICE, FORMAT_PADES, PIN1_SLOT, PIN2_SLOT, derive_output, is_pdf, parse_format,
@@ -1159,16 +1170,33 @@ mod tests {
     }
 
     #[test]
-    fn the_output_lands_beside_the_input() {
+    fn the_output_is_named_beside_the_input_under_a_free_name() {
+        let directory =
+            std::env::temp_dir().join(format!("refineid-settings-ffi-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let contract = directory.join("contract.pdf");
+        let notes = directory.join("notes.txt");
+        let container = directory.join("notes.txt.asice");
         assert_eq!(
-            derive_output(Path::new("C:\\docs\\contract.pdf"), Format::Pades),
-            Path::new("C:\\docs\\contract-signed.pdf")
+            derive_output(&contract, Format::Pades).unwrap(),
+            directory.join("contract-signed.pdf")
         );
         assert_eq!(
-            derive_output(Path::new("C:\\docs\\notes.txt"), Format::AsicECades),
-            Path::new("C:\\docs\\notes.txt.asice")
+            derive_output(&notes, Format::AsicECades).unwrap(),
+            container
         );
-        assert!(is_pdf(Path::new("C:\\docs\\CONTRACT.PDF")));
-        assert!(!is_pdf(Path::new("C:\\docs\\notes.txt")));
+        assert_eq!(
+            derive_output(&container, Format::AsicECades).unwrap(),
+            directory.join("notes.txt-signed.asice")
+        );
+        std::fs::write(directory.join("contract-signed.pdf"), b"taken").unwrap();
+        assert_eq!(
+            derive_output(&contract, Format::Pades).unwrap(),
+            directory.join("contract-signed-2.pdf")
+        );
+        assert!(derive_output(Path::new(".."), Format::Pades).is_err());
+        assert!(is_pdf(Path::new("CONTRACT.PDF")));
+        assert!(!is_pdf(Path::new("notes.txt")));
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 }

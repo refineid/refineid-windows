@@ -139,7 +139,7 @@ internal static partial class LocalCardService
     )
     {
         byte[] pathBytes = Encoding.UTF8.GetBytes(path);
-        byte[] pinBytes = Encoding.ASCII.GetBytes(pin);
+        byte[] pinBytes = Encoding.UTF8.GetBytes(pin);
         byte[] reasonBytes = Encoding.UTF8.GetBytes(reason);
         try
         {

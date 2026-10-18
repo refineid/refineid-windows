@@ -37,7 +37,7 @@ internal enum DocumentMode
     Sign,
 }
 
-/// <summary>A verified container: its files and signatures, and the report as text.</summary>
+/// <summary>A verified container: its verdict and the report as text.</summary>
 internal sealed class ContainerVerifyReport
 {
     [JsonPropertyName("container")]

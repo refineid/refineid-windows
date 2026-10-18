@@ -15,6 +15,9 @@
 namespace RefineID;
 
 using System;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
@@ -27,6 +30,13 @@ using WinRT.Interop;
 /// <summary>Verifies a signed document, or signs one with the card.</summary>
 internal sealed partial class DocumentPage : Page
 {
+    /// <summary>The PIN lengths the card accepts.</summary>
+    private const int PinMinimumLength = 4;
+    private const int PinMaximumLength = 12;
+
+    /// <summary>The reason bytes the native service accepts.</summary>
+    private const int ReasonMaximumBytes = 256;
+
     private DocumentMode mode;
     private bool busy;
 
@@ -65,19 +75,28 @@ internal sealed partial class DocumentPage : Page
             picker.FileTypeFilter.Add("*");
         }
 
-        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(window));
-        StorageFile? file = await picker.PickSingleFileAsync();
+        StorageFile? file;
+        try
+        {
+            InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(window));
+            file = await picker.PickSingleFileAsync();
+        }
+        catch (Exception error) when (error is COMException or InvalidOperationException)
+        {
+            this.ShowStatus(InfoBarSeverity.Error, "The file chooser could not be opened.");
+            return;
+        }
+
         if (file is not null)
         {
             this.FileBox.Text = file.Path;
-            this.StatusInfoBar.IsOpen = false;
-            this.ResultText.Text = string.Empty;
+            this.ClearOutcome();
         }
     }
 
     private async void VerifyButton_Click(object sender, RoutedEventArgs args)
     {
-        if (!this.TryGetFile(out string path))
+        if (this.busy || !this.TryGetFile(out string path))
         {
             return;
         }
@@ -99,7 +118,7 @@ internal sealed partial class DocumentPage : Page
 
     private async void SignButton_Click(object sender, RoutedEventArgs args)
     {
-        if (!this.TryGetFile(out string path))
+        if (this.busy || !this.TryGetFile(out string path))
         {
             return;
         }
@@ -109,14 +128,36 @@ internal sealed partial class DocumentPage : Page
         PinSlot slot = this.SlotBox.SelectedIndex == 1 ? PinSlot.Pin1 : PinSlot.Pin2;
         string pin = this.PinBox.Password;
         string reason = this.ReasonBox.Text;
-        this.PinBox.Password = string.Empty;
+        if (!IsPin(pin))
+        {
+            this.ShowStatus(
+                InfoBarSeverity.Warning,
+                $"The PIN is {PinMinimumLength} to {PinMaximumLength} digits."
+            );
+            return;
+        }
+
+        if (Encoding.UTF8.GetByteCount(reason) > ReasonMaximumBytes)
+        {
+            this.ShowStatus(InfoBarSeverity.Warning, "The reason is too long.");
+            return;
+        }
 
         await this.RunAsync(async () =>
             {
-                DocumentSignReport report = await Task.Run(() =>
-                        LocalCardService.SignDocument(path, format, slot, pin, reason)
-                    )
-                    .ConfigureAwait(true);
+                DocumentSignReport report;
+                try
+                {
+                    report = await Task.Run(() =>
+                            LocalCardService.SignDocument(path, format, slot, pin, reason)
+                        )
+                        .ConfigureAwait(true);
+                }
+                finally
+                {
+                    this.PinBox.Password = string.Empty;
+                }
+
                 this.ResultText.Text =
                     $"{report.OutputPath}\n{report.OutputLength} bytes, {report.Slot} signature, local verify {report.LocalVerify}"
                     + (report.SignerCommonName is string signer ? $"\n{signer}" : string.Empty);
@@ -124,6 +165,12 @@ internal sealed partial class DocumentPage : Page
             })
             .ConfigureAwait(true);
     }
+
+    /// <summary>Whether the typed PIN is digits of a length the card accepts.</summary>
+    private static bool IsPin(string pin) =>
+        pin.Length >= PinMinimumLength
+        && pin.Length <= PinMaximumLength
+        && pin.All(character => character is >= '0' and <= '9');
 
     private bool TryGetFile(out string path)
     {
@@ -144,6 +191,7 @@ internal sealed partial class DocumentPage : Page
             return;
         }
 
+        this.ClearOutcome();
         this.SetBusy(true);
         try
         {
@@ -157,10 +205,20 @@ internal sealed partial class DocumentPage : Page
         {
             this.ShowStatus(InfoBarSeverity.Error, "The card service response could not be read.");
         }
+        catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException)
+        {
+            this.ShowStatus(InfoBarSeverity.Error, "The card service is not installed.");
+        }
         finally
         {
             this.SetBusy(false);
         }
+    }
+
+    private void ClearOutcome()
+    {
+        this.StatusInfoBar.IsOpen = false;
+        this.ResultText.Text = string.Empty;
     }
 
     private void SetBusy(bool busy)
