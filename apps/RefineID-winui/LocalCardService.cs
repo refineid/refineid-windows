@@ -97,8 +97,72 @@ internal static partial class LocalCardService
         byte allowReactivate
     );
 
+    [LibraryImport(Library, EntryPoint = "refineid_settings_verify_container")]
+    private static partial nint VerifyContainerNative([In] byte[] path, nuint pathLength);
+
+    [LibraryImport(Library, EntryPoint = "refineid_settings_sign_document")]
+    private static partial nint SignDocumentNative(
+        [In] byte[] path,
+        nuint pathLength,
+        byte format,
+        byte slot,
+        [In] byte[] pin,
+        nuint pinLength,
+        [In] byte[] reason,
+        nuint reasonLength
+    );
+
     [LibraryImport(Library, EntryPoint = "refineid_settings_string_free")]
     private static partial void StringFree(nint value);
+
+    /// <summary>Verifies a signed container or PDF offline.</summary>
+    /// <exception cref="NativeRappException">The container could not be verified.</exception>
+    /// <exception cref="JsonException">The service reply was malformed.</exception>
+    internal static ContainerVerifyReport VerifyContainer(string path)
+    {
+        byte[] pathBytes = Encoding.UTF8.GetBytes(path);
+        return Invoke(
+            () => VerifyContainerNative(pathBytes, (nuint)pathBytes.Length),
+            LocalCardJsonContext.Default.NativeEnvelopeContainerVerifyReport
+        );
+    }
+
+    /// <summary>Signs a document with the card in the attached reader.</summary>
+    /// <exception cref="NativeRappException">The card or the service refused.</exception>
+    /// <exception cref="JsonException">The service reply was malformed.</exception>
+    internal static DocumentSignReport SignDocument(
+        string path,
+        DocumentFormat format,
+        PinSlot slot,
+        string pin,
+        string reason
+    )
+    {
+        byte[] pathBytes = Encoding.UTF8.GetBytes(path);
+        byte[] pinBytes = Encoding.UTF8.GetBytes(pin);
+        byte[] reasonBytes = Encoding.UTF8.GetBytes(reason);
+        try
+        {
+            return Invoke(
+                () =>
+                    SignDocumentNative(
+                        pathBytes,
+                        (nuint)pathBytes.Length,
+                        (byte)format,
+                        (byte)slot,
+                        pinBytes,
+                        (nuint)pinBytes.Length,
+                        reasonBytes,
+                        (nuint)reasonBytes.Length
+                    ),
+                LocalCardJsonContext.Default.NativeEnvelopeDocumentSignReport
+            );
+        }
+        finally
+        {
+            Zero(pinBytes);
+        }
+    }
 
     /// <summary>Lists the readers that currently hold a card; empty on failure.</summary>
     internal static IReadOnlyList<string> PresentReaders()

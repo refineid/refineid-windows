@@ -34,6 +34,13 @@ use refineid_card_manager_core::card_pin::{
     ActivateOptions, ActivatePreflightOutcome, ChangePinOptions, PinManageSlot, UnblockPinOptions,
 };
 use refineid_card_manager_core::service::{self, CardSnapshot, ContactlessSnapshot};
+use refineid_doc_sign::asic_verify::{DocumentVerifyReport, verify_document};
+use refineid_doc_sign::cades::SigningTime;
+use refineid_doc_sign::document::Format;
+use refineid_doc_sign::pades::SignatureMetadata;
+use refineid_doc_sign::service::{
+    DocumentRequest, LocalVerifyOutcome, SignOptions, SignReport, SignSlot, sign_with_slot,
+};
 use refineid_doc_sign::verify::VerifyOptions;
 use refineid_lib_core::apdu::status_word::PinRetries;
 use refineid_lib_core::auth::{ChangePinOutcome, PinStatus, PukStatus, UnblockOutcome};
@@ -43,6 +50,7 @@ use refineid_lib_core::pin::{
     ActivationCode, ActivationPinEight, ActivationPinSeven, PinBytes, Puk,
 };
 use refineid_lib_core::pkcs15::CardGeneration;
+use refineid_lib_pcsc::PcscBackend;
 use refineid_windows_credential_store::save_can;
 use refineid_windows_driver_probe::{self, LocalCardSupport};
 use serde::Serialize;
@@ -58,8 +66,13 @@ struct LocalCardSupportReport {
 const MAX_READER_NAME_BYTES: usize = 1_024;
 const MAX_SERIAL_BYTES: usize = 256;
 const MAX_SECRET_BYTES: usize = PinBytes::MAX_LENGTH;
+const MAX_PATH_BYTES: usize = 4_096;
+const MAX_REASON_BYTES: usize = 256;
 const PIN1_SLOT: u8 = 1;
 const PIN2_SLOT: u8 = 2;
+/// The document formats the signing export takes.
+const FORMAT_PADES: u8 = 1;
+const FORMAT_ASICE: u8 = 2;
 
 #[derive(Debug)]
 struct ApiFailure {
@@ -354,6 +367,246 @@ struct VerifyReportJson {
     signature_len: usize,
     ok: bool,
     failure_reason: Option<String>,
+}
+
+/// A verified container: its verdict and the report as the crate renders
+/// it, file by file and signature by signature.
+#[derive(Serialize)]
+struct ContainerVerifyJson {
+    container: String,
+    ok: bool,
+    report: String,
+}
+
+impl From<DocumentVerifyReport> for ContainerVerifyJson {
+    fn from(report: DocumentVerifyReport) -> Self {
+        Self {
+            report: report.render(),
+            container: report.container,
+            ok: report.ok,
+        }
+    }
+}
+
+/// Verify a signed container (`.asice`, `.bdoc`) or a signed PDF offline:
+/// no card, no PIN, no network.
+///
+/// # Safety
+///
+/// `path` must point to `path_length` readable bytes of valid UTF-8 within
+/// the documented path bound.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn refineid_settings_verify_container(
+    path: *const u8,
+    path_length: usize,
+) -> *mut c_char {
+    reply_json(|| {
+        // SAFETY: The pointer and bound are validated before the read.
+        let path = unsafe { copy_utf8(path, path_length, MAX_PATH_BYTES, "path") }?;
+        verify_document(std::path::Path::new(&path))
+            .map(ContainerVerifyJson::from)
+            .map_err(|error| ApiFailure::new("verify_failed", error.to_string()))
+    })
+}
+
+/// A signed document: where it was written and what signed it.
+#[derive(Serialize)]
+struct DocumentSignJson {
+    output_path: PathBuf,
+    output_len: usize,
+    slot: &'static str,
+    signer_cn: Option<String>,
+    /// Whether the written signature passed the local check; a skipped
+    /// check counts as passed, a failed one does not.
+    verified: bool,
+    local_verify: String,
+}
+
+impl From<SignReport> for DocumentSignJson {
+    fn from(report: SignReport) -> Self {
+        Self {
+            output_path: report.signature_path,
+            output_len: report.output_len,
+            slot: match report.slot {
+                SignSlot::Qualified => "qualified",
+                SignSlot::Auth => "authentication",
+            },
+            signer_cn: report.cert_subject_cn.map(|cn| cn.as_str().to_owned()),
+            verified: !matches!(report.local_verify, LocalVerifyOutcome::Failed(_)),
+            local_verify: match report.local_verify {
+                LocalVerifyOutcome::Ok => "ok".to_owned(),
+                LocalVerifyOutcome::Failed(detail) => format!("failed: {detail}"),
+                LocalVerifyOutcome::Skipped(reason) => format!("skipped: {reason}"),
+            },
+        }
+    }
+}
+
+/// Sign a document with the card in the single attached reader.
+///
+/// `PAdES` goes into a copy of the PDF beside it, an `ASiC-E` container
+/// beside any file. `format` is [`FORMAT_PADES`] or [`FORMAT_ASICE`];
+/// `slot` is the PIN slot whose key signs, PIN 2 for the qualified
+/// signature and PIN 1 for the authentication key; `reason` may be empty.
+///
+/// # Safety
+///
+/// `path` and `reason` must point to as many readable bytes of valid UTF-8
+/// as their lengths say, within the documented bounds; `pin` must point to
+/// `pin_length` readable bytes within the PIN bound.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn refineid_settings_sign_document(
+    path: *const u8,
+    path_length: usize,
+    format: u8,
+    slot: u8,
+    pin: *const u8,
+    pin_length: usize,
+    reason: *const u8,
+    reason_length: usize,
+) -> *mut c_char {
+    reply_json(|| {
+        // SAFETY: The pointer and bound are validated before the read.
+        let path = unsafe { copy_utf8(path, path_length, MAX_PATH_BYTES, "path") }?;
+        let format = parse_format(format)?;
+        let slot = sign_slot(parse_slot(slot)?);
+        // SAFETY: The secret is copied into PinBytes, whose constructor
+        // zeroizes its temporary Vec on both success and failure.
+        let pin = unsafe { copy_pin(pin, pin_length, "PIN") }?;
+        let reason = if reason_length == 0 {
+            None
+        } else {
+            // SAFETY: As for `path`.
+            Some(unsafe { copy_utf8(reason, reason_length, MAX_REASON_BYTES, "reason") }?)
+        };
+        let input = PathBuf::from(path);
+        if format == Format::Pades && !is_pdf(&input) {
+            return Err(ApiFailure::new(
+                "not_pdf",
+                "A PDF signature needs a .pdf file; other files go into a container.",
+            ));
+        }
+        let output = derive_output(&input, format)?;
+        let request = DocumentRequest {
+            format,
+            additional_inputs: Vec::new(),
+            signing_time: SigningTime::now(),
+            metadata: SignatureMetadata {
+                reason,
+                location: None,
+                contact: None,
+                name: None,
+                signing_time: None,
+                visible_signature: None,
+            },
+            expected_serial: None,
+            visible_signature: None,
+            archive: false,
+            long_term: false,
+            timestamp_authorities: Vec::new(),
+            timestamp_credentials: None,
+        };
+        let options = SignOptions {
+            input,
+            output,
+            pin,
+            save_cert: None,
+            reader_filter: None,
+            can: None,
+            document: Some(request),
+        };
+        sign_with_slot(PcscBackend, slot, options)
+            .map(DocumentSignJson::from)
+            .map_err(|error| ApiFailure::new("sign_failed", error.to_string()))
+    })
+}
+
+/// The document format a wire value names.
+fn parse_format(format: u8) -> Result<Format, ApiFailure> {
+    match format {
+        FORMAT_PADES => Ok(Format::Pades),
+        FORMAT_ASICE => Ok(Format::AsicECades),
+        other => Err(ApiFailure::new(
+            "invalid_format",
+            format!("format {other} is not a document format"),
+        )),
+    }
+}
+
+/// The signing key a PIN slot guards.
+const fn sign_slot(slot: PinManageSlot) -> SignSlot {
+    match slot {
+        PinManageSlot::Pin1 => SignSlot::Auth,
+        PinManageSlot::Pin2 => SignSlot::Qualified,
+    }
+}
+
+/// The last ordinal tried for a free output name.
+const MAX_OUTPUT_ORDINAL: u32 = 1_000;
+
+/// Output beside the input, under a name no file holds yet.
+///
+/// A PDF signature of `name.pdf` is `name-signed.pdf`; a container made
+/// from a file that is not one is `name.asice`; a container signed again
+/// is `name-signed.asice`. A `-signed` or `-signed-N` the input already
+/// carries is counted up, and a taken name moves on to `-2`, `-3` and so
+/// on after the `-signed` or the `.asice`.
+///
+/// # Errors
+/// `invalid_path` when the input has no file name or every name is taken.
+fn derive_output(input: &std::path::Path, format: Format) -> Result<PathBuf, ApiFailure> {
+    let name = input
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| ApiFailure::new("invalid_path", "The path names no file"))?;
+    let (base, suffix) = if format == Format::Pades {
+        let stem = name.strip_suffix_ignore_case(".pdf").unwrap_or(name);
+        (format!("{}-signed", strip_signed(stem)), ".pdf")
+    } else if let Some(stem) = name.strip_suffix_ignore_case(".asice") {
+        (format!("{}-signed", strip_signed(stem)), ".asice")
+    } else {
+        (name.to_owned(), ".asice")
+    };
+    std::iter::once(format!("{base}{suffix}"))
+        .chain((2..=MAX_OUTPUT_ORDINAL).map(|ordinal| format!("{base}-{ordinal}{suffix}")))
+        .map(|candidate| input.with_file_name(candidate))
+        .find(|candidate| !candidate.exists())
+        .ok_or_else(|| ApiFailure::new("invalid_path", "No free output name"))
+}
+
+/// The stem without a trailing `-signed` or `-signed-N`.
+fn strip_signed(stem: &str) -> &str {
+    if let Some(base) = stem.strip_suffix("-signed") {
+        return base;
+    }
+    stem.rsplit_once("-signed-")
+        .filter(|(_, ordinal)| {
+            !ordinal.is_empty() && ordinal.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        .map_or(stem, |(base, _)| base)
+}
+
+/// Case-insensitive suffix removal for file names.
+trait StripSuffixIgnoreCase {
+    fn strip_suffix_ignore_case<'a>(&'a self, suffix: &str) -> Option<&'a str>;
+}
+
+impl StripSuffixIgnoreCase for str {
+    fn strip_suffix_ignore_case<'a>(&'a self, suffix: &str) -> Option<&'a str> {
+        let cut = self.len().checked_sub(suffix.len())?;
+        self.is_char_boundary(cut)
+            .then(|| &self[cut..])
+            .filter(|tail| tail.eq_ignore_ascii_case(suffix))
+            .map(|_| &self[..cut])
+    }
+}
+
+fn is_pdf(input: &std::path::Path) -> bool {
+    input
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
 }
 
 /// Inspect one selected contact-interface card without presenting a secret.
@@ -887,9 +1140,19 @@ fn serialize_envelope<T: Serialize>(envelope: &ApiEnvelope<'_, T>) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test fixtures are constructed to be infallible"
+)]
 mod tests {
-    use super::{PIN1_SLOT, PIN2_SLOT, parse_slot};
+    use super::{
+        FORMAT_ASICE, FORMAT_PADES, PIN1_SLOT, PIN2_SLOT, derive_output, is_pdf, parse_format,
+        parse_slot, sign_slot,
+    };
     use refineid_card_manager_core::card_pin::PinManageSlot;
+    use refineid_doc_sign::document::Format;
+    use refineid_doc_sign::service::SignSlot;
+    use std::path::Path;
 
     #[test]
     fn slot_values_are_closed() {
@@ -897,5 +1160,65 @@ mod tests {
         assert_eq!(parse_slot(PIN2_SLOT).ok(), Some(PinManageSlot::Pin2));
         assert!(parse_slot(0).is_err());
         assert!(parse_slot(3).is_err());
+    }
+
+    #[test]
+    fn format_values_are_closed_and_a_slot_names_its_key() {
+        assert_eq!(parse_format(FORMAT_PADES).ok(), Some(Format::Pades));
+        assert_eq!(parse_format(FORMAT_ASICE).ok(), Some(Format::AsicECades));
+        assert!(parse_format(0).is_err());
+        assert!(parse_format(3).is_err());
+        assert_eq!(sign_slot(PinManageSlot::Pin1), SignSlot::Auth);
+        assert_eq!(sign_slot(PinManageSlot::Pin2), SignSlot::Qualified);
+    }
+
+    #[test]
+    fn the_output_is_named_beside_the_input_under_a_free_name() {
+        let directory =
+            std::env::temp_dir().join(format!("refineid-settings-ffi-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let pdf = |name: &str| derive_output(&directory.join(name), Format::Pades).unwrap();
+        let container =
+            |name: &str| derive_output(&directory.join(name), Format::AsicECades).unwrap();
+        let taken = |name: &str| std::fs::write(directory.join(name), b"taken").unwrap();
+
+        assert_eq!(pdf("contract.pdf"), directory.join("contract-signed.pdf"));
+        taken("contract-signed.pdf");
+        assert_eq!(pdf("contract.pdf"), directory.join("contract-signed-2.pdf"));
+        assert_eq!(
+            pdf("contract-signed.pdf"),
+            directory.join("contract-signed-2.pdf")
+        );
+        taken("contract-signed-2.pdf");
+        assert_eq!(
+            pdf("contract-signed-2.pdf"),
+            directory.join("contract-signed-3.pdf")
+        );
+
+        assert_eq!(container("notes.txt"), directory.join("notes.txt.asice"));
+        taken("notes.txt.asice");
+        assert_eq!(container("notes.txt"), directory.join("notes.txt-2.asice"));
+        assert_eq!(
+            container("notes.txt.asice"),
+            directory.join("notes.txt-signed.asice")
+        );
+        taken("notes.txt-signed.asice");
+        assert_eq!(
+            container("notes.txt.asice"),
+            directory.join("notes.txt-signed-2.asice")
+        );
+        assert_eq!(
+            container("notes.txt-signed.asice"),
+            directory.join("notes.txt-signed-2.asice")
+        );
+        assert_eq!(
+            container("notes.txt-signed-7.asice"),
+            directory.join("notes.txt-signed-2.asice")
+        );
+
+        assert!(derive_output(Path::new(".."), Format::Pades).is_err());
+        assert!(is_pdf(Path::new("CONTRACT.PDF")));
+        assert!(!is_pdf(Path::new("notes.txt")));
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 }

@@ -26,7 +26,8 @@ using Microsoft.UI.Xaml;
 )]
 public partial class App : Application
 {
-    private Window? window;
+    /// <summary>The one window, for the pickers that need its handle.</summary>
+    internal static Window? MainWindow { get; private set; }
 
     public App()
     {
@@ -47,8 +48,8 @@ public partial class App : Application
     {
         try
         {
-            this.window = new MainWindow();
-            this.window.Activate();
+            MainWindow = new MainWindow();
+            MainWindow.Activate();
         }
         // codeql[cs/catch-of-all-exceptions]
         catch (Exception ex)

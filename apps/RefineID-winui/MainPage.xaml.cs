@@ -103,6 +103,12 @@ internal sealed partial class MainPage : Page
     private void Pins_Click(object sender, RoutedEventArgs args) =>
         this.Frame.Navigate(typeof(CardPage));
 
+    private void Verify_Click(object sender, RoutedEventArgs args) =>
+        this.Frame.Navigate(typeof(DocumentPage), DocumentMode.Verify);
+
+    private void Sign_Click(object sender, RoutedEventArgs args) =>
+        this.Frame.Navigate(typeof(DocumentPage), DocumentMode.Sign);
+
     private static string DiagnosticsLabel()
     {
         Version? version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;

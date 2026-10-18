@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  Copyright 2026 Petri Koistinen
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      https:www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+<Page
+    x:Class="RefineID.DocumentPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+>
+    <Grid>
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" MaxWidth="920" />
+                </Grid.ColumnDefinitions>
+                <StackPanel x:Name="ActionRoot" Padding="32,20,32,40" Spacing="16">
+                    <TextBlock
+                        x:Name="TitleText"
+                        AutomationProperties.HeadingLevel="Level1"
+                        Style="{StaticResource TitleTextBlockStyle}"
+                    />
+                    <InfoBar
+                        x:Name="StatusInfoBar"
+                        AutomationProperties.AutomationId="StatusInfoBar"
+                        IsClosable="True"
+                        IsOpen="False"
+                    />
+                    <Grid ColumnSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBox
+                            x:Name="FileBox"
+                            AutomationProperties.AutomationId="FileBox"
+                            AutomationProperties.Name="File"
+                            Header="File"
+                            IsReadOnly="True"
+                        />
+                        <Button
+                            x:Name="ChooseFileButton"
+                            Grid.Column="1"
+                            VerticalAlignment="Bottom"
+                            AutomationProperties.AutomationId="ChooseFileButton"
+                            AutomationProperties.Name="Choose file"
+                            Click="ChooseFileButton_Click"
+                            Content="Choose"
+                        />
+                    </Grid>
+                    <StackPanel x:Name="SignPanel" Spacing="12" Visibility="Collapsed">
+                        <ComboBox
+                            x:Name="FormatBox"
+                            AutomationProperties.AutomationId="FormatBox"
+                            AutomationProperties.Name="Signature format"
+                            Header="Format"
+                            SelectedIndex="0"
+                        >
+                            <ComboBoxItem Content="PDF signature" />
+                            <ComboBoxItem Content="ASiC-E container" />
+                        </ComboBox>
+                        <ComboBox
+                            x:Name="SlotBox"
+                            AutomationProperties.AutomationId="SlotBox"
+                            AutomationProperties.Name="Signing key"
+                            Header="Key"
+                            SelectedIndex="0"
+                        >
+                            <ComboBoxItem Content="PIN2 - qualified signature" />
+                            <ComboBoxItem Content="PIN1 - authentication" />
+                        </ComboBox>
+                        <PasswordBox
+                            x:Name="PinBox"
+                            AutomationProperties.AutomationId="PinBox"
+                            AutomationProperties.Name="PIN"
+                            Header="PIN"
+                            MaxLength="12"
+                            PasswordRevealMode="Hidden"
+                        />
+                        <TextBox
+                            x:Name="ReasonBox"
+                            AutomationProperties.AutomationId="ReasonBox"
+                            AutomationProperties.Name="Reason"
+                            Header="Reason"
+                            MaxLength="256"
+                        />
+                        <Button
+                            x:Name="SignButton"
+                            AutomationProperties.AutomationId="SignButton"
+                            AutomationProperties.Name="Sign"
+                            Click="SignButton_Click"
+                            Content="Sign"
+                            Style="{StaticResource AccentButtonStyle}"
+                        />
+                    </StackPanel>
+                    <Button
+                        x:Name="VerifyButton"
+                        AutomationProperties.AutomationId="VerifyButton"
+                        AutomationProperties.Name="Verify"
+                        Click="VerifyButton_Click"
+                        Content="Verify"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Visibility="Collapsed"
+                    />
+                    <TextBlock
+                        x:Name="ResultText"
+                        AutomationProperties.AutomationId="ResultText"
+                        FontFamily="Consolas"
+                        IsTextSelectionEnabled="True"
+                        TextWrapping="Wrap"
+                    />
+                </StackPanel>
+            </Grid>
+        </ScrollViewer>
+        <Grid
+            x:Name="BusyOverlay"
+            Background="{ThemeResource SmokeFillColorDefaultBrush}"
+            IsHitTestVisible="False"
+            Visibility="Collapsed"
+        >
+            <ProgressRing IsActive="True" />
+        </Grid>
+    </Grid>
+</Page>
