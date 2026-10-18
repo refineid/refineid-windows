@@ -25,9 +25,13 @@
 //! a pairing with the code the phone shows, polls its state, confirms it,
 //! then reads the paired card. Each handle owns one background pairing
 //! thread that finds the phone by its DNS-SD `mode=pairing` record and dials
-//! it (RAPP v26.10.10 section 2.2), and, after pairing, the live `Requester`
+//! it (RAPP v26.10.18 section 2.2), and, after pairing, the live `Requester`
 //! whose device-only credential store persists the pairing so the minidriver
-//! can later load and use it behind this same ABI. This computer only ever
+//! can later load and use it behind this same ABI. After a card read the
+//! handle also holds the offering session of section 8.4 on a watch thread:
+//! the phone's certificate is offered to browsers only while that session
+//! reports a card, and withdrawn the moment it closes, the card leaves, or
+//! the phone announces it forgot this computer. This computer only ever
 //! dials out; it listens on no port.
 
 #![expect(
@@ -45,8 +49,9 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
+use refineid_rapp::ProgressEvent;
 use refineid_rapp_core::engine::{
-    OperationOutcome, PairingError, PeerIntroduction, Requester, RequesterConfig,
+    OperationOutcome, PairingError, PeerIntroduction, Requester, RequesterConfig, SessionEnd,
 };
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::message::CloseReason;
@@ -86,6 +91,31 @@ const MAX_NAME_BYTES: usize = 256;
 
 /// Longest granted-profile JSON array accepted, in bytes.
 const MAX_GRANTED_BYTES: usize = 4_096;
+
+/// Frame receive deadline on the offering session: a liveness answer or a
+/// card status arrives well within it.
+const WATCH_RECEIVE_DEADLINE_MS: u64 = 15_000;
+
+/// Pause between liveness pings on the offering session.
+const LIVENESS_INTERVAL_MS: u64 = 10_000;
+
+/// Pause before the watch dials the phone again after losing it.
+const WATCH_RETRY_MS: u64 = 15_000;
+
+/// How long the forget action browses for the phone to tell it, once.
+const FORGET_BROWSE_WINDOW_MS: u64 = 1_500;
+
+/// Shown while the phone's consent view is on screen.
+const CONSENT_SHOWN_STATUS: &str = "Approve the request on your phone.";
+
+/// Shown while the offering session reports no card on the phone.
+const CARD_ABSENT_STATUS: &str = "The phone has no card.";
+
+/// Shown while the phone cannot be reached and nothing is offered.
+const PHONE_UNREACHABLE_STATUS: &str = "The phone is not reachable.";
+
+/// Shown once the phone announced it forgot this computer.
+const REVOKED_STATUS: &str = "The phone forgot this computer. Pair again.";
 
 /// The requester engine specialised to the device-only credential-store
 /// pairing store and the in-memory operation journal.
@@ -130,6 +160,9 @@ struct PairingStateDto {
     peer: Option<PeerDto>,
     pair_id_hex: Option<String>,
     message: Option<String>,
+    /// What the offering session last heard about the phone's card; absent
+    /// until a session reports it.
+    card_present: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -186,6 +219,12 @@ struct Shared {
     decision_tx: Option<Sender<Option<Vec<String>>>>,
     end_requested: bool,
     paired: Option<Paired>,
+    /// The phone's card as the offering session last reported it.
+    card_present: Option<bool>,
+    /// A line for the user about the phone, or nothing.
+    status: Option<String>,
+    /// Whether the offering watch thread runs for this handle.
+    watching: bool,
 }
 
 /// One pairing handle: its shared state and the background pairing thread.
@@ -229,10 +268,55 @@ pub unsafe extern "C" fn refineid_rapp_string_free(json: *mut c_char) {
 pub extern "C" fn refineid_rapp_forget_pairings() -> *mut c_char {
     reply_json(|| {
         forget_browser_certificates();
+        tell_phones_they_are_forgotten();
         delete_pairing_set()
             .map_err(|error| ApiFailure::new("forget_failed", format!("{error}")))?;
         Ok(AckDto { ok: true })
     })
+}
+
+/// Tells each paired phone that this computer is forgetting it, over one
+/// short-lived session, before the pairings are deleted (RAPP v26.10.18
+/// section 4.6 item 1). A phone that is not on the network learns nothing
+/// and is forgotten regardless.
+fn tell_phones_they_are_forgotten() {
+    let Ok(store) = CredentialPairingStore::load() else {
+        return;
+    };
+    let usable: Vec<(PairId, refineid_rapp::PairRecord)> = store
+        .records()
+        .iter()
+        .filter(|record| {
+            store
+                .usable_pairing()
+                .is_some_and(|usable| usable.pair_id == record.pair_id)
+        })
+        .filter_map(|record| {
+            record
+                .to_core_pair_record()
+                .ok()
+                .map(|pairing| (record.pair_id, pairing))
+        })
+        .collect();
+    let mut requester = Requester::new(
+        RequesterConfig {
+            display_name: String::new(),
+            platform: "Windows".to_owned(),
+        },
+        store,
+        MemoryJournal::new(),
+    );
+    for (pair_id, pairing) in usable {
+        let transport = dial_session(
+            &pairing,
+            &[],
+            &[],
+            std::time::Duration::from_millis(FORGET_BROWSE_WINDOW_MS),
+            receive_deadline(),
+        )
+        .ok();
+        requester.forget_pairing(pair_id, transport);
+    }
 }
 
 /// Open the pairing this device already holds, without a new ceremony.
@@ -307,7 +391,7 @@ pub extern "C" fn refineid_rapp_poll_pairing(handle: u64) -> *mut c_char {
             .get(&handle)
             .ok_or_else(|| ApiFailure::new("unknown_handle", "No such pairing handle."))?;
         let shared = lock_shared(&entry.shared)?;
-        Ok(state_dto(&shared.phase))
+        Ok(handle_state(&shared))
     })
 }
 
@@ -367,8 +451,11 @@ pub extern "C" fn refineid_rapp_read_card(handle: u64) -> *mut c_char {
         // Take the paired card out under a brief lock so the blocking read
         // does not hold the global registry while it waits for a session.
         let mut paired = take_paired(handle)?;
-        let result = read_paired_card(&mut paired);
+        let result = read_paired_card(handle, &mut paired);
         restore_paired(handle, paired);
+        if result.is_ok() {
+            start_offering_watch(handle);
+        }
         result
     })
 }
@@ -414,11 +501,16 @@ pub extern "C" fn refineid_rapp_end_pairing(handle: u64) -> *mut c_char {
         // Release a thread waiting for a decision. A thread blocked on the
         // network finishes on its receive deadline, sees the handle gone,
         // and drops the requester it owns; it is not joined here.
-        if let Ok(mut shared) = entry.shared.lock() {
+        let watching = entry.shared.lock().is_ok_and(|mut shared| {
             shared.end_requested = true;
             if let Some(decision_tx) = shared.decision_tx.take() {
                 let _ = decision_tx.send(None);
             }
+            shared.watching
+        });
+        if watching {
+            // The offering session ends with its handle; so does the offer.
+            forget_browser_certificates();
         }
         drop(entry.thread.take());
         Ok(AckDto { ok: true })
@@ -442,6 +534,9 @@ fn begin_pairing(code: String, name: String) -> Result<BeginPairingDto, ApiFailu
         decision_tx: None,
         end_requested: false,
         paired: None,
+        card_present: None,
+        status: None,
+        watching: false,
     })?;
     // The thread reaches the shared state through the registry by handle id,
     // owning the pieces it moves and locking only briefly each time.
@@ -488,6 +583,9 @@ fn open_pairing(name: String) -> Result<BeginPairingDto, ApiFailure> {
             pair_id,
             pairing,
         }),
+        card_present: None,
+        status: None,
+        watching: false,
     })?;
     Ok(BeginPairingDto { handle: handle_id })
 }
@@ -603,7 +701,7 @@ fn finish_pairing(handle_id: u64, mut requester: StreamRequester, pair_id: PairI
     });
 }
 
-fn read_paired_card(paired: &mut Paired) -> Result<CardReadDto, ApiFailure> {
+fn read_paired_card(handle_id: u64, paired: &mut Paired) -> Result<CardReadDto, ApiFailure> {
     let mut outcome = Err(StreamError::Unreachable);
     for _ in 0..MAX_SESSION_BROWSE_ROUNDS {
         outcome = dial_session(
@@ -613,13 +711,21 @@ fn read_paired_card(paired: &mut Paired) -> Result<CardReadDto, ApiFailure> {
             browse_window(),
             receive_deadline(),
         );
-        if matches!(outcome, Ok(_) | Err(StreamError::Withdrawn)) {
+        if matches!(
+            outcome,
+            Ok(_) | Err(StreamError::Withdrawn | StreamError::Revoked)
+        ) {
             break;
         }
     }
     let session_transport = outcome.map_err(|error| match error {
         StreamError::Withdrawn => {
             ApiFailure::new("withdrawn", "The paired phone turned remote access off.")
+        }
+        StreamError::Revoked => {
+            paired.requester.apply_verified_revocation(paired.pair_id);
+            forget_browser_certificates();
+            ApiFailure::new("revoked", REVOKED_STATUS)
         }
         _ => ApiFailure::new(
             "no_session",
@@ -635,22 +741,27 @@ fn read_paired_card(paired: &mut Paired) -> Result<CardReadDto, ApiFailure> {
     // The requester screen shows only the holder identity, so the read is one
     // operation and the phone reads the card once. The answer carries the
     // authentication certificate, which browsers need through the key
-    // storage provider: on the pairing record for signing, and in the user's
-    // certificate store so Edge and Chrome offer it.
-    let (identity, certificate) =
-        match run_operation(paired, &mut session, &CardOperation::ReadIdentity)? {
-            CardOperationResult::Identity(mut identity) => {
-                let certificate = identity.certificates.drain(..).next();
-                (
-                    IdentityDto {
-                        display_name: identity.holder_name,
-                        person_id: identity.card_id,
-                    },
-                    certificate,
-                )
-            }
-            _ => return Err(unexpected_result("read_identity")),
-        };
+    // storage provider: on the pairing record for signing, and, once the
+    // offering session reports the card, in the user's certificate store so
+    // Edge and Chrome offer it.
+    let (identity, certificate) = match run_operation(
+        handle_id,
+        paired,
+        &mut session,
+        &CardOperation::ReadIdentity,
+    )? {
+        CardOperationResult::Identity(mut identity) => {
+            let certificate = identity.certificates.drain(..).next();
+            (
+                IdentityDto {
+                    display_name: identity.holder_name,
+                    person_id: identity.card_id,
+                },
+                certificate,
+            )
+        }
+        _ => return Err(unexpected_result("read_identity")),
+    };
 
     paired
         .requester
@@ -663,9 +774,128 @@ fn read_paired_card(paired: &mut Paired) -> Result<CardReadDto, ApiFailure> {
         )
     })?;
     remember_certificate(paired, &certificate);
-    offer_to_browsers(&certificate, paired.pair_id)?;
 
     Ok(CardReadDto { identity })
+}
+
+/// Starts the offering watch for a handle that has none yet.
+fn start_offering_watch(handle_id: u64) {
+    let started = registry_entry_apply(handle_id, |shared| {
+        let fresh = !shared.watching;
+        shared.watching = true;
+        fresh
+    });
+    if started == Some(true) {
+        std::thread::spawn(move || offering_watch(handle_id));
+    }
+}
+
+/// The offering session of section 8.4: holds a session to the paired phone
+/// for as long as the handle lives, offers the phone's certificate to
+/// browsers while that session reports a card, and withdraws it the moment
+/// the session ends, the card leaves, or the phone announces it forgot this
+/// computer.
+fn offering_watch(handle_id: u64) {
+    let mut offered = false;
+    while !ended(handle_id) {
+        let Ok(store) = CredentialPairingStore::load() else {
+            withdraw_offer(handle_id, &mut offered, PHONE_UNREACHABLE_STATUS);
+            pause(WATCH_RETRY_MS);
+            continue;
+        };
+        let Some((pair_id, pairing, certificate)) = store.usable_pairing().and_then(|record| {
+            record
+                .to_core_pair_record()
+                .ok()
+                .map(|pairing| (record.pair_id, pairing, record.auth_cert.clone()))
+        }) else {
+            withdraw_offer(handle_id, &mut offered, REVOKED_STATUS);
+            return;
+        };
+        let mut requester = Requester::new(
+            RequesterConfig {
+                display_name: String::new(),
+                platform: "Windows".to_owned(),
+            },
+            store,
+            MemoryJournal::new(),
+        );
+        let transport = match dial_session(
+            &pairing,
+            &[],
+            &[],
+            browse_window(),
+            std::time::Duration::from_millis(WATCH_RECEIVE_DEADLINE_MS),
+        ) {
+            Ok(transport) => transport,
+            Err(StreamError::Revoked) => {
+                requester.apply_verified_revocation(pair_id);
+                withdraw_offer(handle_id, &mut offered, REVOKED_STATUS);
+                set_phase(handle_id, Phase::Failed(REVOKED_STATUS.to_owned()));
+                return;
+            }
+            Err(_) => {
+                withdraw_offer(handle_id, &mut offered, PHONE_UNREACHABLE_STATUS);
+                pause(WATCH_RETRY_MS);
+                continue;
+            }
+        };
+        let Ok(mut session) = requester.connect(pair_id, transport) else {
+            withdraw_offer(handle_id, &mut offered, PHONE_UNREACHABLE_STATUS);
+            pause(WATCH_RETRY_MS);
+            continue;
+        };
+        while !ended(handle_id) {
+            if requester.check_liveness(&mut session).is_err() {
+                break;
+            }
+            let present = session.card_present();
+            registry_entry_apply(handle_id, |shared| shared.card_present = present);
+            match present {
+                Some(true) => {
+                    if !offered
+                        && let Some(certificate) = &certificate
+                        && offer_to_browsers(certificate, pair_id).is_ok()
+                    {
+                        offered = true;
+                    }
+                    registry_entry_apply(handle_id, |shared| shared.status = None);
+                }
+                Some(false) => withdraw_offer(handle_id, &mut offered, CARD_ABSENT_STATUS),
+                None => {}
+            }
+            pause(LIVENESS_INTERVAL_MS);
+        }
+        let revoked = matches!(
+            StreamRequester::session_end(&session),
+            Some(SessionEnd::PeerClose(CloseReason::PairingRevoked))
+        );
+        if revoked {
+            withdraw_offer(handle_id, &mut offered, REVOKED_STATUS);
+            set_phase(handle_id, Phase::Failed(REVOKED_STATUS.to_owned()));
+            return;
+        }
+        withdraw_offer(handle_id, &mut offered, PHONE_UNREACHABLE_STATUS);
+        if !ended(handle_id) {
+            pause(WATCH_RETRY_MS);
+        }
+    }
+    withdraw_offer(handle_id, &mut offered, PHONE_UNREACHABLE_STATUS);
+}
+
+/// Withdraws the offer, if one stands, and tells the user why.
+fn withdraw_offer(handle_id: u64, offered: &mut bool, status: &str) {
+    if *offered {
+        forget_browser_certificates();
+        *offered = false;
+    }
+    registry_entry_apply(handle_id, |shared| {
+        shared.status = Some(status.to_owned());
+    });
+}
+
+fn pause(milliseconds: u64) {
+    std::thread::sleep(std::time::Duration::from_millis(milliseconds));
 }
 
 /// Keeps the authentication certificate on the pairing record, where the
@@ -709,6 +939,7 @@ fn forget_browser_certificates() {
 const fn forget_browser_certificates() {}
 
 fn run_operation(
+    handle_id: u64,
     paired: &mut Paired,
     session: &mut refineid_rapp_core::engine::Session<
         refineid_rapp_core::transport::TcpFrameTransport,
@@ -717,8 +948,15 @@ fn run_operation(
 ) -> Result<CardOperationResult, ApiFailure> {
     let outcome = paired
         .requester
-        .execute(session, operation, OPERATION_EXPIRY_MS)
+        .execute_observed(session, operation, OPERATION_EXPIRY_MS, &mut |event| {
+            if event == ProgressEvent::ConsentShown {
+                registry_entry_apply(handle_id, |shared| {
+                    shared.status = Some(CONSENT_SHOWN_STATUS.to_owned());
+                });
+            }
+        })
         .map_err(|error| ApiFailure::new("operation_not_admitted", format!("{error:?}")))?;
+    registry_entry_apply(handle_id, |shared| shared.status = None);
     match outcome {
         OperationOutcome::Completed(result) => Ok(result),
         OperationOutcome::Denied => Err(ApiFailure::new(
@@ -751,6 +989,17 @@ fn unexpected_result(action: &str) -> ApiFailure {
     )
 }
 
+/// The handle's state as the caller sees it: the phase, and, once a card
+/// has been read, what the offering session says about the phone.
+fn handle_state(shared: &Shared) -> PairingStateDto {
+    let mut dto = state_dto(&shared.phase);
+    dto.card_present = shared.card_present;
+    if dto.message.is_none() {
+        dto.message.clone_from(&shared.status);
+    }
+    dto
+}
+
 fn state_dto(phase: &Phase) -> PairingStateDto {
     match phase {
         Phase::Offer => PairingStateDto {
@@ -758,6 +1007,7 @@ fn state_dto(phase: &Phase) -> PairingStateDto {
             peer: None,
             pair_id_hex: None,
             message: None,
+            card_present: None,
         },
         Phase::AwaitingConfirmation {
             display_name,
@@ -772,30 +1022,35 @@ fn state_dto(phase: &Phase) -> PairingStateDto {
             }),
             pair_id_hex: None,
             message: None,
+            card_present: None,
         },
         Phase::Paired { pair_id_hex } => PairingStateDto {
             state: "paired",
             peer: None,
             pair_id_hex: Some(pair_id_hex.clone()),
             message: None,
+            card_present: None,
         },
         Phase::Denied => PairingStateDto {
             state: "denied",
             peer: None,
             pair_id_hex: None,
             message: None,
+            card_present: None,
         },
         Phase::Cancelled => PairingStateDto {
             state: "cancelled",
             peer: None,
             pair_id_hex: None,
             message: None,
+            card_present: None,
         },
         Phase::Failed(message) => PairingStateDto {
             state: "failed",
             peer: None,
             pair_id_hex: None,
             message: Some(message.clone()),
+            card_present: None,
         },
     }
 }
@@ -881,12 +1136,11 @@ fn fail_attempt(handle_id: u64, error: PairingError) -> bool {
     clippy::significant_drop_tightening,
     reason = "the guard yields a borrow that must outlive it in this lock chain"
 )]
-fn registry_entry_apply<F: FnOnce(&mut Shared)>(handle_id: u64, update: F) -> Option<()> {
+fn registry_entry_apply<R, F: FnOnce(&mut Shared) -> R>(handle_id: u64, update: F) -> Option<R> {
     let registry = REGISTRY.lock().ok()?;
     let entry = registry.get(&handle_id)?;
     let mut shared = entry.shared.lock().ok()?;
-    update(&mut shared);
-    Some(())
+    Some(update(&mut shared))
 }
 
 #[allow(

@@ -1,17 +1,17 @@
 //! Mock RAPP custodian for automated verification and testing.
 //!
-//! Listens like a phone does (RAPP v26.10.10 section 2.2.2), shows a pairing
+//! Listens like a phone does (RAPP v26.10.18 section 2.2.2), shows a pairing
 //! code, serves a random offer after the pairing preamble, answers `CPace`
-//! KC2 as responder and `Noise_XXpsk3` with the hello and confirmation
-//! exchange, then accepts sessions routed by their routing tag and
-//! serves typed card operations (inspection, identity, certificate, and
-//! signatures). It publishes no DNS-SD record: requesters dial it by
-//! address.
+//! KC2 as responder and `Noise_XXpsk3` with the hello, confirmation, and
+//! storage confirmation exchange, then accepts sessions routed by their
+//! routing tag, each on its own thread, reports its card on every session,
+//! and serves typed card operations (inspection, identity, certificate, and
+//! signatures), showing the consent view before a consequential one. It
+//! publishes no DNS-SD record: requesters dial it by address.
 
 #![expect(
     clippy::too_many_lines,
     clippy::missing_errors_doc,
-    clippy::needless_pass_by_value,
     clippy::collapsible_if,
     clippy::cast_possible_truncation,
     clippy::similar_names,
@@ -19,15 +19,17 @@
     reason = "Mock proxy test harness with mock state serialization and session handling"
 )]
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use refineid_rapp::{
-    BinaryFrame, CardInspection, CardOperation, CardOperationResult, CpaceKc2Responder,
-    EndpointRole, EstablishedEndpoint, LivenessMessage, MAXIMUM_CPACE_ATTEMPTS, OfferId,
-    OperationReference, OperationRequest, OperationResultMessage, PairRecord, PairStore,
-    PairStoreError, PairTombstone, PairingHandshake, PairingOffer, ReceiveOutcome, RoutingKey,
-    SessionHandshake, TransportProfile, TypedMessage, decode_pair_record, encode_pair_record,
-    generate_pair_key_material, route_session, standard_pairing_context_v2,
+    BinaryFrame, CardInspection, CardOperation, CardOperationResult, CardStatusMessage,
+    CpaceKc2Responder, EndpointRole, EstablishedEndpoint, LivenessMessage, MAXIMUM_CPACE_ATTEMPTS,
+    OfferId, OperationProgressMessage, OperationReference, OperationRequest,
+    OperationResultMessage, PairRecord, PairStore, PairStoreError, PairTombstone, PairingHandshake,
+    PairingOffer, ProgressEvent, ReceiveOutcome, RoutingKey, SessionHandshake, TransportProfile,
+    TypedMessage, decode_pair_record, encode_pair_record, generate_pair_key_material,
+    route_session, standard_pairing_context_v2,
 };
 use refineid_rapp_core::offer::{format_pairing_code, generate_pairing_code};
 use refineid_rapp_core::stream::{STREAM_CANDIDATE_ID, StreamAccept, StreamListener};
@@ -94,6 +96,9 @@ pub struct MockProxyOptions {
     pub resume_state: Option<String>,
     /// Path to save proxy pairing state to.
     pub save_state: Option<String>,
+    /// Report the card as absent on every session (section 8.4), so a
+    /// requester under test withdraws what it offers.
+    pub card_absent: bool,
 }
 
 impl Default for MockProxyOptions {
@@ -113,6 +118,7 @@ impl Default for MockProxyOptions {
             pin2_attempts: 5,
             resume_state: None,
             save_state: None,
+            card_absent: false,
         }
     }
 }
@@ -175,12 +181,27 @@ pub fn serve_mock_proxy(
         hex::encode(pairing.record.pair_id().as_bytes())
     );
 
+    // A requester holds one session while it offers the card to its
+    // browsers (section 8.4) and opens another for each operation, so
+    // sessions are served concurrently, each on its own thread.
+    let pairing = Arc::new(pairing);
+    let options = Arc::new(options);
     let mut sessions_served = 0;
+    let mut workers = Vec::new();
     while options.count == 0 || sessions_served < options.count {
         let transport = accept_session(listener, &pairing)?;
         sessions_served += 1;
         println!("serving session {sessions_served}...");
-        serve_one_session(transport, &pairing, &options)?;
+        let pairing = Arc::clone(&pairing);
+        let options = Arc::clone(&options);
+        workers.push(std::thread::spawn(move || {
+            if let Err(error) = serve_one_session(transport, &pairing, &options) {
+                println!("session ended with an error: {error}");
+            }
+        }));
+    }
+    for worker in workers {
+        let _ = worker.join();
     }
     println!("mock proxy finished successfully (served {sessions_served} sessions)");
     Ok(())
@@ -369,9 +390,32 @@ fn pair_once(
         .send_frame(proxy_conf.as_bytes())
         .map_err(|e| format!("send confirm frame failed: {e:?}"))?;
 
-    confirmation
-        .into_pair_record(now_ms)
-        .map_err(|e| format!("into_pair_record failed: {e:?}"))
+    // The record is stored (here: held) before its confirmation is sent,
+    // and is active only once the requester's confirmation arrives
+    // (section 4.3 item 4).
+    let (record, mut storage) = confirmation
+        .into_storage(now_ms)
+        .map_err(|e| format!("into_storage failed: {e:?}"))?;
+    let stored = storage
+        .send_stored()
+        .map_err(|e| format!("send stored failed: {e:?}"))?;
+    transport
+        .send_frame(stored.as_bytes())
+        .map_err(|e| format!("send stored frame failed: {e:?}"))?;
+    let requester_stored = BinaryFrame::reconstruct(
+        transport
+            .receive_frame()
+            .map_err(|e| format!("receive stored failed: {e:?}"))?,
+    )
+    .map_err(|e| format!("stored frame decode failed: {e:?}"))?;
+    storage
+        .receive_stored(&requester_stored, now_ms)
+        .map_err(|e| format!("verify stored failed: {e:?}"))?;
+    storage
+        .into_active()
+        .map_err(|e| format!("pairing not active: {e:?}"))?
+        .confirm(record)
+        .map_err(|e| format!("confirm failed: {e:?}"))
 }
 
 /// Accepts connections until one opens a session for this pairing; others
@@ -484,6 +528,15 @@ fn serve_one_session(
     let mut endpoint = auth
         .into_established()
         .map_err(|e| format!("into_established failed: {e:?}"))?;
+    let status = TypedMessage::CardStatus(CardStatusMessage {
+        card_present: !options.card_absent,
+    });
+    let status_frame = endpoint
+        .send(&status)
+        .map_err(|e| format!("send card status failed: {e:?}"))?;
+    transport
+        .send_frame(status_frame.as_bytes())
+        .map_err(|e| format!("send card status frame failed: {e:?}"))?;
     println!("session ready; awaiting operation requests...");
 
     loop {
@@ -537,6 +590,9 @@ fn serve_one_session(
                 println!("requester closed session gracefully: {:?}", close.reason);
                 break;
             }
+            ReceiveOutcome::Message(TypedMessage::OperationResultAck(_)) => {
+                println!("acknowledgement for an operation already retired");
+            }
             other => {
                 println!("unexpected outcome in session: {other:?}");
                 break;
@@ -544,6 +600,25 @@ fn serve_one_session(
         }
     }
     Ok(())
+}
+
+/// Tells the requester the consent view is on screen (section 8.2 item 3)
+/// before a consequential operation is served.
+fn show_consent<T: FrameTransport>(
+    transport: &mut T,
+    endpoint: &mut EstablishedEndpoint,
+    op_ref: OperationReference,
+) -> Result<(), String> {
+    let progress = TypedMessage::OperationProgress(OperationProgressMessage {
+        reference: op_ref,
+        event: ProgressEvent::ConsentShown,
+    });
+    let frame = endpoint
+        .send(&progress)
+        .map_err(|e| format!("send progress failed: {e:?}"))?;
+    transport
+        .send_frame(frame.as_bytes())
+        .map_err(|e| format!("send progress frame failed: {e:?}"))
 }
 
 fn handle_operation_request<T: FrameTransport>(
@@ -561,6 +636,9 @@ fn handle_operation_request<T: FrameTransport>(
         operation_id,
         request_hash,
     };
+    if request.operation.is_consequential() {
+        show_consent(transport, endpoint, op_ref)?;
+    }
 
     match request.operation {
         CardOperation::InspectCard => {

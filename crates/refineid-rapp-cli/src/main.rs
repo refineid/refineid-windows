@@ -81,7 +81,9 @@ fn main() {
             eprintln!("  refineid-rapp mock-proxy [--listen <bind-address>] [--code <code>] \\");
             eprintln!("      [--resume <state>] [--save-state <path>] \\");
             eprintln!("      [--cert <path>] [--root-ca <path>] [--intermediate-ca <path>] \\");
-            eprintln!("      [--count <n>] [--identity-name <name>] [--person-id <id>]");
+            eprintln!(
+                "      [--count <n>] [--identity-name <name>] [--person-id <id>] [--card-absent]"
+            );
             eprintln!(
                 "  refineid-rapp setup-mock-pairing [--cert <path>] [--root-ca <path>] [--intermediate-ca <path>] [--state <path>] [--serve]"
             );
@@ -481,6 +483,7 @@ fn mock_proxy_cmd(arguments: &[String]) -> Result<(), String> {
                     .map_err(|_| format!("invalid pin2 attempts: {val}"))?;
             }
             "--listen" => options.listen = value()?,
+            "--card-absent" => options.card_absent = true,
             "--resume" => options.resume_state = Some(value()?),
             "--save-state" => options.save_state = Some(value()?),
             other => return Err(format!("unknown flag {other}")),
