@@ -38,24 +38,6 @@ pub enum StampLanguage {
     English,
 }
 
-impl StampLanguage {
-    /// The language of a BCP 47 tag such as `fi-FI` or `sv`; English for
-    /// any other.
-    #[must_use]
-    pub fn from_language_tag(tag: &str) -> Self {
-        let language = tag
-            .split(['-', '_'])
-            .next()
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        match language.as_str() {
-            "fi" => Self::Finnish,
-            "sv" => Self::Swedish,
-            _ => Self::English,
-        }
-    }
-}
-
 /// The outer ring's radius, in points.
 pub(super) const RADIUS: f64 = 64.0;
 /// Stroke bleed outside the outer ring.
@@ -285,8 +267,20 @@ const fn glyph(character: char) -> Option<Glyph> {
     })
 }
 
+/// The fixed bits of a two-byte UTF-8 lead and the bits it carries.
+const TWO_BYTE_LEAD_MASK: u8 = 0b1110_0000;
+const TWO_BYTE_LEAD: u8 = 0b1100_0000;
+const TWO_BYTE_LEAD_BITS: u8 = 0b0001_1111;
+/// The fixed bits of a UTF-8 trail byte and the bits it carries.
+const TRAIL_MASK: u8 = 0b1100_0000;
+const TRAIL: u8 = 0b1000_0000;
+const TRAIL_BITS: u8 = 0b0011_1111;
+const TRAIL_BIT_COUNT: u32 = 6;
+
 /// Whether every character of `text` has a glyph and a literal, judged
 /// when the texts are built so a text outside the set does not compile.
+/// Only ASCII and two-byte sequences can name a glyph, so any other lead
+/// byte refuses the text.
 const fn representable(text: &str) -> bool {
     let bytes = text.as_bytes();
     let mut index = 0;
@@ -294,12 +288,15 @@ const fn representable(text: &str) -> bool {
         let byte = bytes[index];
         let character = if byte.is_ascii() {
             byte as char
-        } else if index + 1 < bytes.len() {
+        } else if byte & TWO_BYTE_LEAD_MASK == TWO_BYTE_LEAD
+            && index + 1 < bytes.len()
+            && bytes[index + 1] & TRAIL_MASK == TRAIL
+        {
             // Two-byte UTF-8: five bits of the lead, six of the trail.
-            let lead = (byte & 0b0001_1111) as u32;
-            let trail = (bytes[index + 1] & 0b0011_1111) as u32;
+            let lead = (byte & TWO_BYTE_LEAD_BITS) as u32;
+            let trail = (bytes[index + 1] & TRAIL_BITS) as u32;
             index += 1;
-            match char::from_u32((lead << 6) | trail) {
+            match char::from_u32((lead << TRAIL_BIT_COUNT) | trail) {
                 Some(character) => character,
                 None => return false,
             }
@@ -339,8 +336,9 @@ const _: () = {
     assert!(representable(ENGLISH_BAND));
 };
 
-/// The band's text sits on the axis of a flat capital's outline, the
-/// same for every language whatever letters it carries.
+/// The band's text sits on the axis of a line of capitals' outline, the
+/// round ones' overshoot included: the axis of the Swedish and English
+/// bands, applied to every band whatever letters it carries.
 const BAND_TEXT_MID_Y: f64 = f64::midpoint(ROUND_BOTTOM, ROUND_TOP);
 
 /// What the mark says: the middle in the reader's language, the band in
@@ -690,26 +688,6 @@ mod tests {
     }
 
     #[test]
-    fn a_language_tag_picks_the_middle_language() {
-        assert_eq!(
-            StampLanguage::from_language_tag("fi-FI"),
-            StampLanguage::Finnish
-        );
-        assert_eq!(
-            StampLanguage::from_language_tag("sv"),
-            StampLanguage::Swedish
-        );
-        assert_eq!(
-            StampLanguage::from_language_tag("en_US"),
-            StampLanguage::English
-        );
-        assert_eq!(
-            StampLanguage::from_language_tag("de-DE"),
-            StampLanguage::English
-        );
-    }
-
-    #[test]
     fn the_mark_has_two_closed_rings_and_two_bullets_in_their_own_states() {
         let mark = text(StampLanguage::Finnish);
         assert!(mark.starts_with("q\n"));
@@ -847,6 +825,12 @@ mod tests {
         assert!(representable(FINNISH_BAND));
         assert!(!representable("Z"));
         assert!(!representable("\u{00E4}"));
+        assert!(!representable("\u{2014}"), "a three-byte sequence");
+        assert!(!representable("\u{1F600}"), "a four-byte sequence");
+        assert!(
+            !representable("A\u{00C4}\u{2014}"),
+            "refused where the lead is wrong"
+        );
         assert_eq!(literal('\u{00C4}'), "\\304");
         assert_eq!(literal('\u{00D6}'), "\\326");
         assert_eq!(literal('('), "\\(");

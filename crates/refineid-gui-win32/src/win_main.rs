@@ -2978,13 +2978,46 @@ const LANGUAGE_FINNISH: u16 = 0x0b;
 const LANGUAGE_SWEDISH: u16 = 0x1d;
 
 /// The language the user's Windows interface is shown in, as the stamp
-/// names it; English for any language the stamp does not carry.
+/// names it.
 fn user_interface_language() -> StampLanguage {
     // SAFETY: the call takes no arguments and returns a language identifier.
-    let language = unsafe { GetUserDefaultUILanguage() } & PRIMARY_LANGUAGE_MASK;
-    match language {
+    stamp_language_for(unsafe { GetUserDefaultUILanguage() })
+}
+
+/// The stamp language of a Windows language identifier, judged by its
+/// primary language whatever its region; English for any language the
+/// stamp does not carry.
+const fn stamp_language_for(language_id: u16) -> StampLanguage {
+    match language_id & PRIMARY_LANGUAGE_MASK {
         LANGUAGE_FINNISH => StampLanguage::Finnish,
         LANGUAGE_SWEDISH => StampLanguage::Swedish,
         _ => StampLanguage::English,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stamp_language_for;
+    use refineid_doc_sign::pades::StampLanguage;
+
+    /// Windows language identifiers of winnt.h: Finnish (Finland), Swedish
+    /// (Sweden), Swedish (Finland), English (United States), and one the
+    /// stamp does not carry, German (Germany).
+    const FINNISH_FINLAND: u16 = 0x040b;
+    const SWEDISH_SWEDEN: u16 = 0x041d;
+    const SWEDISH_FINLAND: u16 = 0x081d;
+    const ENGLISH_UNITED_STATES: u16 = 0x0409;
+    const GERMAN_GERMANY: u16 = 0x0407;
+
+    #[test]
+    fn the_stamp_language_follows_the_primary_language_of_the_identifier() {
+        assert_eq!(stamp_language_for(FINNISH_FINLAND), StampLanguage::Finnish);
+        assert_eq!(stamp_language_for(SWEDISH_SWEDEN), StampLanguage::Swedish);
+        assert_eq!(stamp_language_for(SWEDISH_FINLAND), StampLanguage::Swedish);
+        assert_eq!(
+            stamp_language_for(ENGLISH_UNITED_STATES),
+            StampLanguage::English
+        );
+        assert_eq!(stamp_language_for(GERMAN_GERMANY), StampLanguage::English);
     }
 }
