@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use zeroize::Zeroize;
 
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Globalization::GetUserDefaultUILanguage;
 use windows::Win32::Graphics::Gdi::{
     COLOR_BTNFACE, COLOR_WINDOW, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontIndirectW,
     CreateFontW, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_QUALITY, DeleteDC, DeleteObject,
@@ -50,9 +51,9 @@ use windows::core::{HSTRING, PCWSTR, PWSTR, w};
 use refineid_doc_sign::asic_verify::verify_document;
 use refineid_doc_sign::cades::SigningTime;
 use refineid_doc_sign::document::Format;
-use refineid_doc_sign::pades::SignatureMetadata;
+use refineid_doc_sign::pades::{SignatureMetadata, StampLanguage};
 use refineid_doc_sign::service::{
-    DocumentRequest, SignOptions, SignReport, SignSlot, sign_with_slot,
+    DocumentRequest, SignOptions, SignReport, SignSlot, VisibleSignatureRequest, sign_with_slot,
 };
 use refineid_lib_core::identity::CommonName;
 use refineid_lib_core::pin::PinBytes;
@@ -2227,7 +2228,8 @@ fn start_doc_sign() {
         signing_time: SigningTime::now(),
         metadata,
         expected_serial: None,
-        visible_signature: None,
+        visible_signature: (format == Format::Pades)
+            .then(|| VisibleSignatureRequest::Verification(user_interface_language())),
         archive: false,
         long_term: false,
         timestamp_authorities: Vec::new(),
@@ -2965,4 +2967,24 @@ fn message_font() -> HFONT {
 
 fn utf16_nul(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// The bits of a Windows language identifier that name the language,
+/// `PRIMARYLANGID` of winnt.h.
+const PRIMARY_LANGUAGE_MASK: u16 = 0x03ff;
+/// `LANG_FINNISH` of winnt.h.
+const LANGUAGE_FINNISH: u16 = 0x0b;
+/// `LANG_SWEDISH` of winnt.h.
+const LANGUAGE_SWEDISH: u16 = 0x1d;
+
+/// The language the user's Windows interface is shown in, as the stamp
+/// names it; English for any language the stamp does not carry.
+fn user_interface_language() -> StampLanguage {
+    // SAFETY: the call takes no arguments and returns a language identifier.
+    let language = unsafe { GetUserDefaultUILanguage() } & PRIMARY_LANGUAGE_MASK;
+    match language {
+        LANGUAGE_FINNISH => StampLanguage::Finnish,
+        LANGUAGE_SWEDISH => StampLanguage::Swedish,
+        _ => StampLanguage::English,
+    }
 }

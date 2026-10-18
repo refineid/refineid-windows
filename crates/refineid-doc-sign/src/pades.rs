@@ -43,9 +43,11 @@ use crate::cades::DigestAlgorithm;
 
 mod appearance;
 mod spot;
+mod stamp;
 mod xref_stream;
 
 pub use appearance::{SignatureInk, VisibleSignature};
+pub use stamp::StampLanguage;
 use std::collections::HashSet;
 
 /// Signature dictionary `/SubFilter` for `PAdES` (EN 319 142-1 sec.5.1).
@@ -521,18 +523,20 @@ fn signature_field_objects(
     let mut form = format!(
         "{appearance_number} 0 obj\n<< /Type /XObject /Subtype /Form \
          /BBox [0 0 {:.4} {:.4}] \
-         /Resources << /Font << /F1 {font_number} 0 R >> >> \
+         /Resources << /Font << /{} {font_number} 0 R >> >> \
          /Length {} >>\nstream\n",
         appearance.side,
         appearance.side,
+        appearance::FONT_RESOURCE_NAME,
         appearance.operators.len()
     )
     .into_bytes();
     form.extend_from_slice(&appearance.operators);
     form.extend_from_slice(b"endstream\nendobj\n");
     let font = format!(
-        "{font_number} 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica \
-         /Encoding /WinAnsiEncoding >>\nendobj\n"
+        "{font_number} 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /{} \
+         /Encoding /WinAnsiEncoding >>\nendobj\n",
+        appearance.font
     );
     vec![
         (field_number, field.into_bytes()),
