@@ -49,6 +49,10 @@ internal sealed partial class MainPage : Page
     private string? selectedReader;
     private bool started;
 
+    /// <summary>The readers holding a card at the last inspection.</summary>
+    private IReadOnlyList<string>? inspectedReaders;
+    private bool checkingLocalCard;
+
     public MainPage()
     {
         this.InitializeComponent();
@@ -272,7 +276,30 @@ internal sealed partial class MainPage : Page
         }
     }
 
+    /// <summary>
+    /// A tick lists the readers holding a card, which touches no card; the
+    /// card is inspected only when that list changes, so an idle window
+    /// leaves the reader alone.
+    /// </summary>
     private async void CheckLocalCard()
+    {
+        if (this.checkingLocalCard)
+        {
+            return;
+        }
+
+        this.checkingLocalCard = true;
+        try
+        {
+            await this.InspectLocalCardOnChangeAsync().ConfigureAwait(true);
+        }
+        finally
+        {
+            this.checkingLocalCard = false;
+        }
+    }
+
+    private async Task InspectLocalCardOnChangeAsync()
     {
         IReadOnlyList<string> readers;
         try
@@ -282,14 +309,24 @@ internal sealed partial class MainPage : Page
         catch (NativeRappException ex)
         {
             Debug.WriteLine($"CheckLocalCardAsync reader list error: {ex.Message}");
+            this.inspectedReaders = null;
             this.PinsCard.Visibility = Visibility.Collapsed;
             this.UpdateLocalCardDisconnected();
+            return;
+        }
+
+        if (
+            this.inspectedReaders is not null
+            && readers.SequenceEqual(this.inspectedReaders, StringComparer.Ordinal)
+        )
+        {
             return;
         }
 
         // The PIN page works on a reader attached to this computer, with or
         // without a card in it, so the entry follows the reader list alone.
         this.PinsCard.Visibility = readers.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        this.inspectedReaders = readers;
 
         try
         {
