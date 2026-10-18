@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use zeroize::Zeroize;
 
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Globalization::GetUserDefaultLocaleName;
+use windows::Win32::Globalization::GetUserDefaultUILanguage;
 use windows::Win32::Graphics::Gdi::{
     COLOR_BTNFACE, COLOR_WINDOW, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontIndirectW,
     CreateFontW, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_QUALITY, DeleteDC, DeleteObject,
@@ -2228,11 +2228,8 @@ fn start_doc_sign() {
         signing_time: SigningTime::now(),
         metadata,
         expected_serial: None,
-        visible_signature: (format == Format::Pades).then(|| {
-            VisibleSignatureRequest::Verification(StampLanguage::from_language_tag(
-                &user_locale_name(),
-            ))
-        }),
+        visible_signature: (format == Format::Pades)
+            .then(|| VisibleSignatureRequest::Verification(user_interface_language())),
         archive: false,
         long_term: false,
         timestamp_authorities: Vec::new(),
@@ -2972,16 +2969,22 @@ fn utf16_nul(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// The capacity of a locale name buffer, `LOCALE_NAME_MAX_LENGTH` of the
-/// Windows SDK, in UTF-16 units including the terminator.
-const LOCALE_NAME_CAPACITY: usize = 85;
+/// The bits of a Windows language identifier that name the language,
+/// `PRIMARYLANGID` of winnt.h.
+const PRIMARY_LANGUAGE_MASK: u16 = 0x03ff;
+/// `LANG_FINNISH` of winnt.h.
+const LANGUAGE_FINNISH: u16 = 0x0b;
+/// `LANG_SWEDISH` of winnt.h.
+const LANGUAGE_SWEDISH: u16 = 0x1d;
 
-/// The user's locale name, such as `fi-FI`; empty when Windows gives none.
-fn user_locale_name() -> String {
-    let mut name = [0u16; LOCALE_NAME_CAPACITY];
-    // SAFETY: the buffer and its capacity are passed together, and the
-    // call writes at most that many UTF-16 units.
-    let written = unsafe { GetUserDefaultLocaleName(&mut name) };
-    let length = usize::try_from(written.saturating_sub(1)).unwrap_or(0);
-    String::from_utf16_lossy(&name[..length.min(name.len())])
+/// The language the user's Windows interface is shown in, as the stamp
+/// names it; English for any language the stamp does not carry.
+fn user_interface_language() -> StampLanguage {
+    // SAFETY: the call takes no arguments and returns a language identifier.
+    let language = unsafe { GetUserDefaultUILanguage() } & PRIMARY_LANGUAGE_MASK;
+    match language {
+        LANGUAGE_FINNISH => StampLanguage::Finnish,
+        LANGUAGE_SWEDISH => StampLanguage::Swedish,
+        _ => StampLanguage::English,
+    }
 }

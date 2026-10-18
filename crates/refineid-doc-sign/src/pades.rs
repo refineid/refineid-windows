@@ -523,10 +523,11 @@ fn signature_field_objects(
     let mut form = format!(
         "{appearance_number} 0 obj\n<< /Type /XObject /Subtype /Form \
          /BBox [0 0 {:.4} {:.4}] \
-         /Resources << /Font << /F1 {font_number} 0 R >> >> \
+         /Resources << /Font << /{} {font_number} 0 R >> >> \
          /Length {} >>\nstream\n",
         appearance.side,
         appearance.side,
+        appearance::FONT_RESOURCE_NAME,
         appearance.operators.len()
     )
     .into_bytes();

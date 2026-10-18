@@ -268,6 +268,8 @@ pub(super) struct RenderedAppearance {
 
 /// The base font the identity mark's text is set in.
 const BASE_FONT: &str = "Helvetica";
+/// The name the form registers its one font under, without the slash.
+pub(super) const FONT_RESOURCE_NAME: &str = "F1";
 const MARK_SIDE: f64 = 128.0;
 const CENTRE: f64 = MARK_SIDE / 2.0;
 const LEAST_TILT_DEGREES: f64 = 10.0;
@@ -324,7 +326,9 @@ fn text_line(text: &str, baseline: f64, maximum_size: f64) -> String {
     let size = maximum_size.min(TEXT_ROOM * 1_000.0 / units);
     let width = units * size / 1_000.0;
     let x = CENTRE - width / 2.0;
-    format!("BT\n/F1 {size:.4} Tf\n1 0 0 1 {x:.4} {baseline:.4} Tm\n({encoded}) Tj\nET\n")
+    format!(
+        "BT\n/{FONT_RESOURCE_NAME} {size:.4} Tf\n1 0 0 1 {x:.4} {baseline:.4} Tm\n({encoded}) Tj\nET\n"
+    )
 }
 
 fn helvetica_width(text: &str) -> f64 {
