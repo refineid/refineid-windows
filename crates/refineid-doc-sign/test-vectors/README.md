@@ -16,3 +16,11 @@ Copied here so the `cert_chain` tests can build a real two-link chain without re
 The intermediate's `issuer` DN is byte-identical to the ECC root's `subject` DN,
 and the root's key verifies the intermediate's signature,
 so `walk_chain` resolves the issuer from the pool and exercises the real ECDSA-P384/SHA-384 chain-verify path.
+
+## `sectigo-qualified-tsa-signer-3.der` and `sectigo-qualified-tsa-ca-r35.der`
+
+The Sectigo *Qualified Time Stamping Signer #3* leaf certificate and *Qualified Time Stamping CA R35*
+intermediate CA certificate embedded in RFC 3161 tokens from `http://timestamp.sectigo.com/qualified`.
+Copied here so timestamp chain verification tests can exercise the full 3-certificate chain
+(`Signer #3` -> `CA R35` -> `Sectigo Qualified Time Stamping Root R45`) offline without network access.
+

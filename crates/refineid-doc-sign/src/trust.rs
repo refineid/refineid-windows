@@ -149,6 +149,56 @@ pub fn pinned_root_der_by_fingerprint(fingerprint: Sha256) -> Option<&'static [u
         .map(|(_, (_, der))| *der)
 }
 
+/// Accepted qualified Time Stamping Authority (TSA) root certs as
+/// `(label, sha256)` pairs.
+///
+/// Fingerprints sourced from Sectigo official root publication
+/// and verified against the canonical DER at
+/// `https://crt.sectigo.com/SectigoQualifiedTimeStampingRootR45.crt`.
+pub const PINNED_TSA_ROOT_SHA256: &[(&str, Sha256)] = &[(
+    "Sectigo Qualified Time Stamping Root R45",
+    Sha256::from_bytes([
+        0xF8, 0x71, 0xF8, 0x97, 0x6B, 0x40, 0x68, 0xD7, 0x00, 0xD5, 0xF2, 0x81, 0x08, 0x4B, 0x4A,
+        0x29, 0xEA, 0xF4, 0xB8, 0xF3, 0x57, 0x43, 0x33, 0x0B, 0xA0, 0x62, 0xFA, 0xB4, 0x6F, 0x58,
+        0xC2, 0xED,
+    ]),
+)];
+
+/// Embedded DER bytes for every pinned TSA root CA.
+pub const PINNED_TSA_ROOT_DER: &[(&str, &[u8])] = &[(
+    "Sectigo Qualified Time Stamping Root R45",
+    include_bytes!("../trust-anchors/sectigo-qualified-time-stamping-root-r45.der"),
+)];
+
+/// `true` if `fingerprint` matches one of the pinned TSA roots.
+#[must_use]
+pub fn is_pinned_tsa_root(fingerprint: Sha256) -> bool {
+    PINNED_TSA_ROOT_SHA256
+        .iter()
+        .any(|(_, pinned)| *pinned == fingerprint)
+}
+
+/// Return the label of the pinned TSA root matching
+/// `fingerprint`, or `None` if no pin matches.
+#[must_use]
+pub fn pinned_tsa_root_label(fingerprint: Sha256) -> Option<&'static str> {
+    PINNED_TSA_ROOT_SHA256
+        .iter()
+        .find(|(_, fp)| *fp == fingerprint)
+        .map(|(label, _)| *label)
+}
+
+/// Return the embedded DER bytes of the pinned TSA root with the
+/// given SHA-256 fingerprint, or `None` if no pin matches.
+#[must_use]
+pub fn pinned_tsa_root_der_by_fingerprint(fingerprint: Sha256) -> Option<&'static [u8]> {
+    PINNED_TSA_ROOT_SHA256
+        .iter()
+        .zip(PINNED_TSA_ROOT_DER.iter())
+        .find(|((_, fp), _)| *fp == fingerprint)
+        .map(|(_, (_, der))| *der)
+}
+
 /// Accepted Country Signing CA (CSCA) certs by SHA-256 fingerprint
 /// -- the trust anchors for eMRTD Passive Authentication. Each
 /// entry is `(label, sha256)` so the matched country shows up
@@ -219,7 +269,11 @@ pub fn pinned_icao_root_label(fingerprint: Sha256) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PINNED_ROOT_DER, PINNED_ROOT_SHA256, pinned_root_der_by_fingerprint};
+    use super::{
+        PINNED_ROOT_DER, PINNED_ROOT_SHA256, PINNED_TSA_ROOT_DER, PINNED_TSA_ROOT_SHA256,
+        is_pinned_tsa_root, pinned_root_der_by_fingerprint, pinned_tsa_root_der_by_fingerprint,
+        pinned_tsa_root_label,
+    };
     use crate::test_util::{TestResult, check, check_true};
     use refineid_lib_core::crypto::digest::Sha256;
 
@@ -263,6 +317,61 @@ mod tests {
         check_true(
             pinned_root_der_by_fingerprint(bogus).is_none(),
             "bogus pin returns None",
+        )
+    }
+
+    /// The embedded DER bytes for each pinned TSA root must hash to
+    /// the fingerprint stated in `PINNED_TSA_ROOT_SHA256`.
+    #[test]
+    fn pinned_tsa_der_fingerprints_match_pins() -> TestResult {
+        check(
+            &PINNED_TSA_ROOT_DER.len(),
+            &PINNED_TSA_ROOT_SHA256.len(),
+            "PINNED_TSA_ROOT_DER and PINNED_TSA_ROOT_SHA256 must have the same length",
+        )?;
+        for ((label_der, der), (label_pin, pin)) in PINNED_TSA_ROOT_DER
+            .iter()
+            .zip(PINNED_TSA_ROOT_SHA256.iter())
+        {
+            check(label_der, label_pin, "label order must match")?;
+            let computed = Sha256::of(der);
+            check(
+                &computed,
+                pin,
+                &format!("fingerprint mismatch for {label_der}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// `pinned_tsa_root_der_by_fingerprint` and `is_pinned_tsa_root` round-trip.
+    #[test]
+    fn tsa_lookup_by_fingerprint_round_trips() -> TestResult {
+        for (label, pin) in PINNED_TSA_ROOT_SHA256 {
+            let der = pinned_tsa_root_der_by_fingerprint(*pin)
+                .ok_or_else(|| format!("DER missing for pin labelled {label}"))?;
+            let recomputed = Sha256::of(der);
+            check(&recomputed, pin, &format!("recompute for {label}"))?;
+            check(
+                &pinned_tsa_root_label(*pin),
+                &Some(*label),
+                "pinned_tsa_root_label matches label",
+            )?;
+            check_true(is_pinned_tsa_root(*pin), "is_pinned_tsa_root true for pin")?;
+        }
+        let bogus = Sha256::from_bytes([0_u8; 32]);
+        check_true(
+            pinned_tsa_root_der_by_fingerprint(bogus).is_none(),
+            "bogus pin returns None",
+        )?;
+        check_true(
+            !is_pinned_tsa_root(bogus),
+            "is_pinned_tsa_root false for bogus",
+        )?;
+        check(
+            &pinned_tsa_root_label(bogus),
+            &None,
+            "pinned_tsa_root_label None for bogus",
         )
     }
 }

@@ -638,7 +638,18 @@ fn validate_direct_issuer_for_path(
         validate_certificate_time(issuer, reference_time)
             .map_err(|e| MaterialError::InvalidIssuer(e.to_string()))?;
     } else {
-        validate_issuing_certificate(issuer, reference_time, subordinate_ca_count)?;
+        let issuer_profile =
+            validate_issuing_certificate(issuer, reference_time, subordinate_ca_count)?;
+        if issuer_profile.time_stamping_extended_key_usage {
+            let subject_profile = validate_non_anchor_extensions(subject)
+                .map_err(|e| MaterialError::InvalidIssuer(format!("subject extensions: {e}")))?;
+            if !subject_profile.time_stamping_extended_key_usage {
+                return Err(MaterialError::InvalidIssuer(
+                    "issuer restricted to Time Stamping cannot issue certificate without Time Stamping EKU"
+                        .to_owned(),
+                ));
+            }
+        }
     }
     subject
         .verify_signed_by(*issuer)
@@ -668,7 +679,7 @@ fn validate_issuing_certificate(
     issuer: &Certificate<'_>,
     reference_time: DateTime,
     subordinate_ca_count: u32,
-) -> Result<(), MaterialError> {
+) -> Result<PathExtensionProfile, MaterialError> {
     validate_certificate_time(issuer, reference_time)
         .map_err(|e| MaterialError::InvalidIssuer(e.to_string()))?;
     let profile = validate_path_extensions(issuer).map_err(MaterialError::InvalidIssuer)?;
@@ -692,7 +703,7 @@ fn validate_issuing_certificate(
             "issuer has no Key Usage permitting certificate signing".to_owned(),
         ));
     }
-    Ok(())
+    Ok(profile)
 }
 
 fn validate_non_anchor_extensions(
@@ -724,6 +735,11 @@ struct PathExtensionProfile {
     extended_key_usage_present: bool,
     /// Whether the strict Extended Key Usage contains `id-kp-OCSPSigning`.
     ocsp_signing_extended_key_usage: bool,
+    /// Whether the strict Extended Key Usage contains `id-kp-timeStamping`.
+    time_stamping_extended_key_usage: bool,
+    /// Whether an Extended Key Usage extension contains any purpose
+    /// other than `id-kp-OCSPSigning` or `id-kp-timeStamping`.
+    other_extended_key_usage_present: bool,
     /// Whether an exact, non-critical `id-pkix-ocsp-nocheck` is present.
     ocsp_no_check_present: bool,
     /// Whether Name Constraints is present. The path builder currently rejects
@@ -782,6 +798,8 @@ fn path_extension_profile(extensions: &[u8]) -> Result<PathExtensionProfile, Pat
         key_usage: None,
         extended_key_usage_present: false,
         ocsp_signing_extended_key_usage: false,
+        time_stamping_extended_key_usage: false,
+        other_extended_key_usage_present: false,
         ocsp_no_check_present: false,
         name_constraints_present: false,
     };
@@ -844,7 +862,10 @@ fn path_extension_profile(extensions: &[u8]) -> Result<PathExtensionProfile, Pat
         } else if oid == oids::KEY_USAGE {
             profile.key_usage = Some(parse_path_key_usage(value.value, critical)?);
         } else if oid == oids::EXT_KEY_USAGE {
-            profile.ocsp_signing_extended_key_usage = parse_path_extended_key_usage(value.value)?;
+            let (ocsp, ts, other) = parse_path_extended_key_usage(value.value)?;
+            profile.ocsp_signing_extended_key_usage = ocsp;
+            profile.time_stamping_extended_key_usage = ts;
+            profile.other_extended_key_usage_present = other;
             profile.extended_key_usage_present = true;
         } else if oid == oids::NAME_CONSTRAINTS {
             profile.name_constraints_present = true;
@@ -1018,9 +1039,10 @@ fn parse_path_key_usage(value: &[u8], critical: bool) -> Result<KeyUsageMeta, Pa
     })
 }
 
-fn parse_path_extended_key_usage(value: &[u8]) -> Result<bool, PathExtensionError> {
+fn parse_path_extended_key_usage(value: &[u8]) -> Result<(bool, bool, bool), PathExtensionError> {
     let outer = exact_path_extension_tlv::<Sequence>(value, "Extended Key Usage")?;
     let mut seen = Vec::new();
+    let mut other = false;
     for purpose in outer.iter_children() {
         let purpose = purpose
             .map_err(|_ignored| PathExtensionError::Malformed("Extended Key Usage entry"))?
@@ -1033,12 +1055,19 @@ fn parse_path_extended_key_usage(value: &[u8]) -> Result<bool, PathExtensionErro
                 "duplicate Extended Key Usage purpose",
             ));
         }
+        if purpose != oids::KP_OCSP_SIGNING && purpose != oids::KP_TIME_STAMPING {
+            other = true;
+        }
         seen.push(purpose);
     }
     if seen.is_empty() {
         return Err(PathExtensionError::Malformed("Extended Key Usage is empty"));
     }
-    Ok(seen.contains(&oids::KP_OCSP_SIGNING))
+    Ok((
+        seen.contains(&oids::KP_OCSP_SIGNING),
+        seen.contains(&oids::KP_TIME_STAMPING),
+        other,
+    ))
 }
 
 fn parse_path_ocsp_no_check(value: &[u8], critical: bool) -> Result<(), PathExtensionError> {
@@ -1081,9 +1110,12 @@ fn enforce_non_anchor_extension_policy(profile: PathExtensionProfile) -> Result<
                 .to_owned(),
         );
     }
-    if profile.basic_constraints.ca && profile.extended_key_usage_present {
+    if profile.basic_constraints.ca
+        && profile.extended_key_usage_present
+        && (!profile.time_stamping_extended_key_usage || profile.other_extended_key_usage_present)
+    {
         return Err(
-            "non-anchor CA carries Extended Key Usage, whose purpose constraints this generic path builder cannot enforce"
+            "non-anchor CA carries Extended Key Usage other than exclusive Time Stamping, whose purpose constraints this generic path builder cannot enforce"
                 .to_owned(),
         );
     }
@@ -2063,6 +2095,39 @@ mod tests {
             &collect_with_timestamps(DVV_INTERMEDIATE_DER, &[]),
             &Err(MaterialError::NoTrustAnchor),
             "legacy timestamp collector",
+        )
+    }
+
+    #[test]
+    fn time_stamping_ca_requires_child_to_assert_time_stamping_eku() -> TestResult {
+        let signer_der =
+            include_bytes!("../test-vectors/sectigo-qualified-tsa-signer-3.der").to_vec();
+        let ca_der = include_bytes!("../test-vectors/sectigo-qualified-tsa-ca-r35.der").to_vec();
+        let signer = OwnedCert::from_der(&signer_der)?;
+        let ca = OwnedCert::from_der(&ca_der)?;
+        let valid_instant = DateTime::new(2023, 11, 14, 22, 13, 20)?;
+
+        check(
+            &validate_direct_issuer_for_path(&signer.view(), &ca.view(), valid_instant, 0, false),
+            &Ok(()),
+            "signer with time stamping EKU accepted under time stamping CA",
+        )?;
+
+        let tampered_signer_der =
+            replace_extension_oid_last_arc(&signer_der, oids::KP_TIME_STAMPING)?;
+        let tampered_signer = OwnedCert::from_der(tampered_signer_der)?;
+        let error = validate_direct_issuer_for_path(
+            &tampered_signer.view(),
+            &ca.view(),
+            valid_instant,
+            0,
+            false,
+        )
+        .err()
+        .ok_or("signer without time stamping EKU unexpectedly accepted under time stamping CA")?;
+        check_true(
+            matches!(error, MaterialError::InvalidIssuer(detail) if detail.contains("Time Stamping")),
+            "child without time stamping EKU rejected",
         )
     }
 }

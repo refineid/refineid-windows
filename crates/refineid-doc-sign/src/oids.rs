@@ -53,3 +53,6 @@ pub const CERTIFICATE_POLICIES: Oid<'static> =
 /// Extended-key-usage purpose `id-kp-OCSPSigning` (`1.3.6.1.5.5.7.3.9`).
 pub const KP_OCSP_SIGNING: Oid<'static> =
     Oid::const_new(::const_oid::ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.9").as_bytes());
+/// Extended-key-usage purpose `id-kp-timeStamping` (`1.3.6.1.5.5.7.3.8`).
+pub const KP_TIME_STAMPING: Oid<'static> =
+    Oid::const_new(::const_oid::ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.8").as_bytes());
