@@ -326,7 +326,9 @@ internal sealed partial class MainPage : Page
         // The PIN page works on a reader attached to this computer, with or
         // without a card in it, so the entry follows the reader list alone.
         this.PinsCard.Visibility = readers.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-        this.inspectedReaders = readers;
+        // Recorded once the inspection is done, so a failed one is tried
+        // again on the next tick.
+        this.inspectedReaders = null;
 
         try
         {
@@ -359,10 +361,12 @@ internal sealed partial class MainPage : Page
                     .ConfigureAwait(true);
                 this.selectedReader = targetReader;
                 this.UpdateLocalCardUi(snapshot);
+                this.inspectedReaders = readers;
                 return;
             }
 
             this.UpdateLocalCardDisconnected();
+            this.inspectedReaders = readers;
         }
         catch (NativeRappException ex)
         {
