@@ -1553,7 +1553,7 @@ fn assemble_document(
             approved_anchor_ders: &signer_anchors,
             nonce_policy: NoncePolicy::RequireEcho,
             include_leaf: false,
-            include_anchor: false,
+            include_anchor: true,
         }])
         .map_err(|e| SignErrorKind::Material(format!("signer path: {e}")))?;
         merge_material(&mut timestamp_material, signer_material);
@@ -1793,19 +1793,19 @@ fn require_archive_path_covered(
     )
 }
 
-/// The token's certificate path, verified within its own embedded
-/// chain.
+/// The token's certificate path, verified from its signer certificate
+/// to a pinned qualified TSA root anchor.
 ///
 /// The authority is trusted as configured -- whoever names one answers
 /// for it. What is still verified is internal consistency: the signer
-/// must chain, with valid signatures and validity windows, to an
-/// anchor the token itself carries.
+/// must chain, with valid signatures and validity windows, through the
+/// token's embedded certificates to a pinned qualified TSA root.
 fn embedded_timestamp_path(token: &VerifiedTimestampToken) -> Result<Vec<Vec<u8>>, String> {
-    let anchors = embedded_anchor_ders(token);
+    let anchors = timestamp_anchor_ders();
     if anchors.is_empty() {
-        return Err("the token embeds no certificate usable as its chain anchor".to_owned());
+        return Err("no pinned TSA trust anchor is configured".to_owned());
     }
-    let embedded: Vec<&[u8]> = token
+    let candidates: Vec<&[u8]> = token
         .embedded_certificates
         .iter()
         .map(Vec::as_slice)
@@ -1814,51 +1814,35 @@ fn embedded_timestamp_path(token: &VerifiedTimestampToken) -> Result<Vec<Vec<u8>
         &token.signer_certificate,
         token.generated_at,
         &anchors,
-        &embedded,
+        &candidates,
     )
-    .map_err(|e| format!("no valid path within the token's embedded chain: {e}"))
+    .map_err(|e| format!("no valid path to a pinned TSA anchor: {e}"))
 }
 
-/// The embedded certificates a token's path may stop at: the
-/// self-issued ones, or every embedded certificate when none is.
+/// The approved trust anchors a timestamp path may stop at:
+/// strictly pinned qualified TSA roots.
 ///
-/// Preferring self-issued anchors makes the path run as deep as the
-/// token allows, so LT evidence covers the intermediates rather than
-/// stopping at the signer's immediate issuer.
-fn embedded_anchor_ders(token: &VerifiedTimestampToken) -> Vec<&[u8]> {
-    let self_issued: Vec<&[u8]> = token
-        .embedded_certificates
+/// Under no circumstances is an unvetted self-signed certificate,
+/// `token.signer_certificate`, or an intermediate CA accepted as an
+/// implicit anchor.
+fn timestamp_anchor_ders() -> Vec<&'static [u8]> {
+    crate::trust::PINNED_TSA_ROOT_DER
         .iter()
-        .filter(|der| {
-            OwnedCert::from_der(der).is_ok_and(|certificate| {
-                let view = certificate.view();
-                view.issuer.as_der() == view.subject.as_der()
-            })
-        })
-        .map(Vec::as_slice)
-        .collect();
-    if self_issued.is_empty() {
-        token
-            .embedded_certificates
-            .iter()
-            .map(Vec::as_slice)
-            .collect()
-    } else {
-        self_issued
-    }
+        .map(|(_label, der)| *der)
+        .collect()
 }
 
 /// Collect chain and current revocation evidence for one token,
-/// anchored on the certificates the token itself carries.
+/// anchored strictly on pinned qualified TSA roots.
 ///
 /// LT and LTA retain the result for their validation store; level T
 /// has no store and skips this entirely.
 fn timestamp_validation_material(
     token: &VerifiedTimestampToken,
 ) -> Result<ValidationMaterial, String> {
-    let anchors = embedded_anchor_ders(token);
+    let anchors = timestamp_anchor_ders();
     if anchors.is_empty() {
-        return Err("the token embeds no certificate usable as its chain anchor".to_owned());
+        return Err("no pinned TSA trust anchor is configured".to_owned());
     }
     let candidates: Vec<&[u8]> = token
         .embedded_certificates
@@ -2278,7 +2262,7 @@ mod tests {
 
     fn self_anchored_token_fixture() -> Result<VerifiedTimestampToken, Box<dyn core::error::Error>>
     {
-        let signer_der = crate::trust::PINNED_ROOT_DER
+        let signer_der = crate::trust::PINNED_TSA_ROOT_DER
             .first()
             .map(|(_label, der)| *der)
             .ok_or("missing test trust anchor")?;
@@ -2293,13 +2277,99 @@ mod tests {
     }
 
     #[test]
-    fn embedded_path_terminates_at_the_tokens_own_anchor() -> TestResult {
+    fn embedded_path_terminates_at_pinned_tsa_anchor() -> TestResult {
         let token = self_anchored_token_fixture()?;
         let path = embedded_timestamp_path(&token)?;
         check(
             &path,
             &vec![token.signer_certificate],
-            "the embedded self-issued certificate terminates the path",
+            "the embedded pinned root terminates the path",
+        )
+    }
+
+    #[test]
+    fn timestamp_anchors_include_pinned_tsa_roots_and_exclude_unpinned_certificates() -> TestResult
+    {
+        let signer_der =
+            include_bytes!("../test-vectors/sectigo-qualified-tsa-signer-3.der").to_vec();
+        let ca_der = include_bytes!("../test-vectors/sectigo-qualified-tsa-ca-r35.der").to_vec();
+        let anchors = timestamp_anchor_ders();
+        check_true(!anchors.is_empty(), "anchors contain pinned TSA roots")?;
+        let pinned_der = crate::trust::PINNED_TSA_ROOT_DER
+            .first()
+            .ok_or("pinned TSA root missing")?
+            .1;
+        check_true(
+            anchors.contains(&pinned_der),
+            "Sectigo Qualified Time Stamping Root R45 is in anchors",
+        )?;
+        check_true(
+            !anchors.contains(&signer_der.as_slice()),
+            "token signer certificate is not an anchor",
+        )?;
+        check_true(
+            !anchors.contains(&ca_der.as_slice()),
+            "token intermediate certificate is not an anchor",
+        )
+    }
+
+    #[test]
+    fn sectigo_timestamp_path_walks_to_pinned_root() -> TestResult {
+        const SECTIGO_TEST_VALIDITY_INSTANT: u64 = 1_700_000_000;
+        let signer_der =
+            include_bytes!("../test-vectors/sectigo-qualified-tsa-signer-3.der").to_vec();
+        let ca_der = include_bytes!("../test-vectors/sectigo-qualified-tsa-ca-r35.der").to_vec();
+        let root_der = crate::trust::PINNED_TSA_ROOT_DER
+            .first()
+            .ok_or("pinned TSA root missing")?
+            .1;
+        let signer = OwnedCert::from_der(&signer_der)?;
+        let ca = OwnedCert::from_der(&ca_der)?;
+        let root = OwnedCert::from_der(root_der)?;
+        check(
+            &signer.view().issuer.as_der(),
+            &ca.view().subject.as_der(),
+            "signer issuer equals ca subject",
+        )?;
+        check(
+            &ca.view().issuer.as_der(),
+            &root.view().subject.as_der(),
+            "ca issuer equals root subject",
+        )?;
+        let sig_ok = signer.view().verify_signed_by(ca.view());
+        check_true(
+            sig_ok.is_ok(),
+            &format!("signer verify signed by ca: {sig_ok:?}"),
+        )?;
+        let ca_sig_ok = ca.view().verify_signed_by(root.view());
+        check_true(
+            ca_sig_ok.is_ok(),
+            &format!("ca verify signed by root: {ca_sig_ok:?}"),
+        )?;
+        let token = VerifiedTimestampToken {
+            token: vec![1],
+            signer_certificate: signer_der.clone(),
+            embedded_certificates: vec![signer_der.clone(), ca_der.clone()],
+            generated_at: DateTime::from_unix_duration(core::time::Duration::from_secs(
+                SECTIGO_TEST_VALIDITY_INSTANT,
+            ))?,
+        };
+        let path = embedded_timestamp_path(&token)?;
+        check(&path.len(), &3, "path has exactly 3 certificates")?;
+        check(
+            path.first().ok_or("missing leaf in path")?,
+            &signer_der,
+            "path leaf is Sectigo Signer #3",
+        )?;
+        check(
+            path.get(1).ok_or("missing ca in path")?,
+            &ca_der,
+            "path intermediate is Sectigo CA R35",
+        )?;
+        check(
+            path.get(2).ok_or("missing root in path")?,
+            &root_der.to_vec(),
+            "path anchor is Sectigo Root R45",
         )
     }
 
