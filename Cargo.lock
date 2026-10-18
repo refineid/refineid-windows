@@ -985,6 +985,7 @@ dependencies = [
  "refineid-card-manager-core",
  "refineid-doc-sign",
  "refineid-lib-core",
+ "refineid-lib-pcsc",
  "refineid-windows-credential-store",
  "refineid-windows-driver-probe",
  "serde",

@@ -34,6 +34,13 @@ use refineid_card_manager_core::card_pin::{
     ActivateOptions, ActivatePreflightOutcome, ChangePinOptions, PinManageSlot, UnblockPinOptions,
 };
 use refineid_card_manager_core::service::{self, CardSnapshot, ContactlessSnapshot};
+use refineid_doc_sign::asic_verify::{DocumentVerifyReport, verify_document};
+use refineid_doc_sign::cades::SigningTime;
+use refineid_doc_sign::document::Format;
+use refineid_doc_sign::pades::SignatureMetadata;
+use refineid_doc_sign::service::{
+    DocumentRequest, LocalVerifyOutcome, SignOptions, SignReport, SignSlot, sign_with_slot,
+};
 use refineid_doc_sign::verify::VerifyOptions;
 use refineid_lib_core::apdu::status_word::PinRetries;
 use refineid_lib_core::auth::{ChangePinOutcome, PinStatus, PukStatus, UnblockOutcome};
@@ -43,6 +50,7 @@ use refineid_lib_core::pin::{
     ActivationCode, ActivationPinEight, ActivationPinSeven, PinBytes, Puk,
 };
 use refineid_lib_core::pkcs15::CardGeneration;
+use refineid_lib_pcsc::PcscBackend;
 use refineid_windows_credential_store::save_can;
 use refineid_windows_driver_probe::{self, LocalCardSupport};
 use serde::Serialize;
@@ -58,8 +66,13 @@ struct LocalCardSupportReport {
 const MAX_READER_NAME_BYTES: usize = 1_024;
 const MAX_SERIAL_BYTES: usize = 256;
 const MAX_SECRET_BYTES: usize = PinBytes::MAX_LENGTH;
+const MAX_PATH_BYTES: usize = 4_096;
+const MAX_REASON_BYTES: usize = 256;
 const PIN1_SLOT: u8 = 1;
 const PIN2_SLOT: u8 = 2;
+/// The document formats the signing export takes.
+const FORMAT_PADES: u8 = 1;
+const FORMAT_ASICE: u8 = 2;
 
 #[derive(Debug)]
 struct ApiFailure {
@@ -354,6 +367,236 @@ struct VerifyReportJson {
     signature_len: usize,
     ok: bool,
     failure_reason: Option<String>,
+}
+
+/// A verified container: every file against its manifest digest and
+/// every signature against its signer.
+#[derive(Serialize)]
+struct ContainerVerifyJson {
+    container: String,
+    ok: bool,
+    files: Vec<ContainerFileJson>,
+    signatures: Vec<ContainerSignatureJson>,
+    report: String,
+}
+
+#[derive(Serialize)]
+struct ContainerFileJson {
+    name: String,
+    algorithm: String,
+    digest_ok: bool,
+    detail: String,
+}
+
+#[derive(Serialize)]
+struct ContainerSignatureJson {
+    signer_cn: Option<String>,
+    valid: bool,
+    detail: String,
+}
+
+impl From<DocumentVerifyReport> for ContainerVerifyJson {
+    fn from(report: DocumentVerifyReport) -> Self {
+        let rendered = report.render();
+        Self {
+            container: report.container,
+            ok: report.ok,
+            files: report
+                .files
+                .into_iter()
+                .map(|file| ContainerFileJson {
+                    name: file.name,
+                    algorithm: file.algorithm,
+                    digest_ok: file.digest_ok,
+                    detail: file.detail,
+                })
+                .collect(),
+            signatures: report
+                .signatures
+                .into_iter()
+                .map(|signature| ContainerSignatureJson {
+                    signer_cn: signature.signer_cn,
+                    valid: signature.valid,
+                    detail: signature.detail,
+                })
+                .collect(),
+            report: rendered,
+        }
+    }
+}
+
+/// Verify a signed container (`.asice`, `.bdoc`) or a signed PDF offline:
+/// no card, no PIN, no network.
+///
+/// # Safety
+///
+/// `path` must point to `path_length` readable bytes of valid UTF-8 within
+/// the documented path bound.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn refineid_settings_verify_container(
+    path: *const u8,
+    path_length: usize,
+) -> *mut c_char {
+    reply_json(|| {
+        // SAFETY: The pointer and bound are validated before the read.
+        let path = unsafe { copy_utf8(path, path_length, MAX_PATH_BYTES, "path") }?;
+        verify_document(std::path::Path::new(&path))
+            .map(ContainerVerifyJson::from)
+            .map_err(|error| ApiFailure::new("verify_failed", error.to_string()))
+    })
+}
+
+/// A signed document: where it was written and what signed it.
+#[derive(Serialize)]
+struct DocumentSignJson {
+    output_path: PathBuf,
+    output_len: usize,
+    slot: &'static str,
+    signer_cn: Option<String>,
+    local_verify: String,
+}
+
+impl From<SignReport> for DocumentSignJson {
+    fn from(report: SignReport) -> Self {
+        Self {
+            output_path: report.signature_path,
+            output_len: report.output_len,
+            slot: match report.slot {
+                SignSlot::Qualified => "qualified",
+                SignSlot::Auth => "authentication",
+            },
+            signer_cn: report.cert_subject_cn.map(|cn| cn.as_str().to_owned()),
+            local_verify: match report.local_verify {
+                LocalVerifyOutcome::Ok => "ok".to_owned(),
+                LocalVerifyOutcome::Failed(detail) => format!("failed: {detail}"),
+                LocalVerifyOutcome::Skipped(reason) => format!("skipped: {reason}"),
+            },
+        }
+    }
+}
+
+/// Sign a document with the card in the single attached reader.
+///
+/// `PAdES` goes into a copy of the PDF beside it, an `ASiC-E` container
+/// beside any file. `format` is [`FORMAT_PADES`] or [`FORMAT_ASICE`];
+/// `slot` is the PIN slot whose key signs, PIN 2 for the qualified
+/// signature and PIN 1 for the authentication key; `reason` may be empty.
+///
+/// # Safety
+///
+/// `path` and `reason` must point to as many readable bytes of valid UTF-8
+/// as their lengths say, within the documented bounds; `pin` must point to
+/// `pin_length` readable bytes within the PIN bound.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn refineid_settings_sign_document(
+    path: *const u8,
+    path_length: usize,
+    format: u8,
+    slot: u8,
+    pin: *const u8,
+    pin_length: usize,
+    reason: *const u8,
+    reason_length: usize,
+) -> *mut c_char {
+    reply_json(|| {
+        // SAFETY: The pointer and bound are validated before the read.
+        let path = unsafe { copy_utf8(path, path_length, MAX_PATH_BYTES, "path") }?;
+        let format = parse_format(format)?;
+        let slot = sign_slot(parse_slot(slot)?);
+        // SAFETY: The secret is copied into PinBytes, whose constructor
+        // zeroizes its temporary Vec on both success and failure.
+        let pin = unsafe { copy_pin(pin, pin_length, "PIN") }?;
+        let reason = if reason_length == 0 {
+            None
+        } else {
+            // SAFETY: As for `path`.
+            Some(unsafe { copy_utf8(reason, reason_length, MAX_REASON_BYTES, "reason") }?)
+        };
+        let input = PathBuf::from(path);
+        if format == Format::Pades && !is_pdf(&input) {
+            return Err(ApiFailure::new(
+                "not_pdf",
+                "A PDF signature needs a .pdf file; other files go into a container.",
+            ));
+        }
+        let output = derive_output(&input, format);
+        let request = DocumentRequest {
+            format,
+            additional_inputs: Vec::new(),
+            signing_time: SigningTime::now(),
+            metadata: SignatureMetadata {
+                reason,
+                location: None,
+                contact: None,
+                name: None,
+                signing_time: None,
+                visible_signature: None,
+            },
+            expected_serial: None,
+            visible_signature: None,
+            archive: false,
+            long_term: false,
+            timestamp_authorities: Vec::new(),
+            timestamp_credentials: None,
+        };
+        let options = SignOptions {
+            input,
+            output,
+            pin,
+            save_cert: None,
+            reader_filter: None,
+            can: None,
+            document: Some(request),
+        };
+        sign_with_slot(PcscBackend, slot, options)
+            .map(DocumentSignJson::from)
+            .map_err(|error| ApiFailure::new("sign_failed", error.to_string()))
+    })
+}
+
+/// The document format a wire value names.
+fn parse_format(format: u8) -> Result<Format, ApiFailure> {
+    match format {
+        FORMAT_PADES => Ok(Format::Pades),
+        FORMAT_ASICE => Ok(Format::AsicECades),
+        other => Err(ApiFailure::new(
+            "invalid_format",
+            format!("format {other} is not a document format"),
+        )),
+    }
+}
+
+/// The signing key a PIN slot guards.
+const fn sign_slot(slot: PinManageSlot) -> SignSlot {
+    match slot {
+        PinManageSlot::Pin1 => SignSlot::Auth,
+        PinManageSlot::Pin2 => SignSlot::Qualified,
+    }
+}
+
+/// Output next to the input: `-signed.pdf` for a PDF signature, `.asice`
+/// appended for a container.
+fn derive_output(input: &std::path::Path, format: Format) -> PathBuf {
+    if format == Format::Pades {
+        let stem = input
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("document");
+        input.with_file_name(format!("{stem}-signed.pdf"))
+    } else {
+        let name = input
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("document");
+        input.with_file_name(format!("{name}.asice"))
+    }
+}
+
+fn is_pdf(input: &std::path::Path) -> bool {
+    input
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
 }
 
 /// Inspect one selected contact-interface card without presenting a secret.
@@ -888,8 +1131,14 @@ fn serialize_envelope<T: Serialize>(envelope: &ApiEnvelope<'_, T>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{PIN1_SLOT, PIN2_SLOT, parse_slot};
+    use super::{
+        FORMAT_ASICE, FORMAT_PADES, PIN1_SLOT, PIN2_SLOT, derive_output, is_pdf, parse_format,
+        parse_slot, sign_slot,
+    };
     use refineid_card_manager_core::card_pin::PinManageSlot;
+    use refineid_doc_sign::document::Format;
+    use refineid_doc_sign::service::SignSlot;
+    use std::path::Path;
 
     #[test]
     fn slot_values_are_closed() {
@@ -897,5 +1146,29 @@ mod tests {
         assert_eq!(parse_slot(PIN2_SLOT).ok(), Some(PinManageSlot::Pin2));
         assert!(parse_slot(0).is_err());
         assert!(parse_slot(3).is_err());
+    }
+
+    #[test]
+    fn format_values_are_closed_and_a_slot_names_its_key() {
+        assert_eq!(parse_format(FORMAT_PADES).ok(), Some(Format::Pades));
+        assert_eq!(parse_format(FORMAT_ASICE).ok(), Some(Format::AsicECades));
+        assert!(parse_format(0).is_err());
+        assert!(parse_format(3).is_err());
+        assert_eq!(sign_slot(PinManageSlot::Pin1), SignSlot::Auth);
+        assert_eq!(sign_slot(PinManageSlot::Pin2), SignSlot::Qualified);
+    }
+
+    #[test]
+    fn the_output_lands_beside_the_input() {
+        assert_eq!(
+            derive_output(Path::new("C:\\docs\\contract.pdf"), Format::Pades),
+            Path::new("C:\\docs\\contract-signed.pdf")
+        );
+        assert_eq!(
+            derive_output(Path::new("C:\\docs\\notes.txt"), Format::AsicECades),
+            Path::new("C:\\docs\\notes.txt.asice")
+        );
+        assert!(is_pdf(Path::new("C:\\docs\\CONTRACT.PDF")));
+        assert!(!is_pdf(Path::new("C:\\docs\\notes.txt")));
     }
 }

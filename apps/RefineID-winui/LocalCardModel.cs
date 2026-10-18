@@ -23,6 +23,52 @@ internal enum PinSlot : byte
     Pin2 = 2,
 }
 
+/// <summary>The document formats the card signs, as the native service numbers them.</summary>
+internal enum DocumentFormat : byte
+{
+    Pades = 1,
+    AsicE = 2,
+}
+
+/// <summary>What the document page is opened for.</summary>
+internal enum DocumentMode
+{
+    Verify,
+    Sign,
+}
+
+/// <summary>A verified container: its files and signatures, and the report as text.</summary>
+internal sealed class ContainerVerifyReport
+{
+    [JsonPropertyName("container")]
+    public string Container { get; init; } = string.Empty;
+
+    [JsonPropertyName("ok")]
+    public bool Ok { get; init; }
+
+    [JsonPropertyName("report")]
+    public string Report { get; init; } = string.Empty;
+}
+
+/// <summary>A signed document: where it was written and what signed it.</summary>
+internal sealed class DocumentSignReport
+{
+    [JsonPropertyName("output_path")]
+    public string OutputPath { get; init; } = string.Empty;
+
+    [JsonPropertyName("output_len")]
+    public long OutputLength { get; init; }
+
+    [JsonPropertyName("slot")]
+    public string Slot { get; init; } = string.Empty;
+
+    [JsonPropertyName("signer_cn")]
+    public string? SignerCommonName { get; init; }
+
+    [JsonPropertyName("local_verify")]
+    public string LocalVerify { get; init; } = string.Empty;
+}
+
 /// <summary>Reader list result from settings FFI.</summary>
 internal sealed class ReaderList
 {
@@ -131,6 +177,8 @@ internal sealed class MutationResult
 [JsonSerializable(typeof(NativeEnvelope<LocalCardSupport>))]
 [JsonSerializable(typeof(NativeEnvelope<ContactlessSnapshot>))]
 [JsonSerializable(typeof(NativeEnvelope<MutationResult>))]
+[JsonSerializable(typeof(NativeEnvelope<ContainerVerifyReport>))]
+[JsonSerializable(typeof(NativeEnvelope<DocumentSignReport>))]
 internal sealed partial class LocalCardJsonContext : JsonSerializerContext;
 
 /// Mirror of the settings-ffi JSON for the local-card lane probe.
