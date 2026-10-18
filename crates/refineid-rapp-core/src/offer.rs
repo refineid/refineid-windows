@@ -26,9 +26,9 @@ const CODE_SYMBOL_MASK: u8 = 0x1f;
 
 /// Applies the section 3.1 canonicalization pipeline.
 ///
-/// Uppercases ASCII letters, strips ASCII whitespace and hyphens, maps the
-/// Crockford aliases `I`/`L` to `1` and `O` to `0`, and accepts the result
-/// only when it is exactly six alphabet characters. Input outside ASCII is
+/// Uppercases ASCII letters, strips ASCII whitespace and hyphens, refuses
+/// the letters the alphabet excludes, and accepts the result only
+/// when it is exactly six alphabet characters. Input outside ASCII is
 /// refused rather than NFKC-normalized; every valid code is ASCII.
 ///
 /// Returns `None` for input that is not a pairing code.
@@ -39,17 +39,17 @@ pub fn normalize_pairing_code(input: &str) -> Option<String> {
         if !character.is_ascii() {
             return None;
         }
+        if matches!(
+            character,
+            ' ' | '\t' | '\n' | '\u{0B}' | '\u{0C}' | '\r' | '-'
+        ) {
+            continue;
+        }
         let upper = character.to_ascii_uppercase();
-        let mapped = match upper {
-            ' ' | '\t' | '\n' | '\u{0B}' | '\u{0C}' | '\r' | '-' => continue,
-            'I' | 'L' => '1',
-            'O' => '0',
-            other => other,
-        };
-        if !CODE_ALPHABET.contains(mapped) {
+        if !CODE_ALPHABET.contains(upper) {
             return None;
         }
-        code.push(mapped);
+        code.push(upper);
     }
     (code.len() == PAIRING_CODE_LENGTH).then_some(code)
 }
@@ -121,7 +121,8 @@ mod tests {
             normalize_pairing_code("7K X4-M9").as_deref(),
             Some("7KX4M9")
         );
-        assert_eq!(normalize_pairing_code("ilo123").as_deref(), Some("110123"));
+        assert_eq!(normalize_pairing_code("ilo123"), None);
+        assert_eq!(normalize_pairing_code("7KX4MO"), None);
         assert_eq!(normalize_pairing_code("7KX4MU"), None);
         assert_eq!(normalize_pairing_code("7KX4M"), None);
         assert_eq!(normalize_pairing_code("7KX4M99"), None);
