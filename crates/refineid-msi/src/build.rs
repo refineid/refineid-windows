@@ -857,6 +857,14 @@ mod tests {
             Version::parse("26.8.7.0905").expect("parses").to_string(),
             "26.8.7.905"
         );
+        assert_eq!(
+            Version::parse("26.8.7.905").expect("parses").to_string(),
+            "26.8.7.905"
+        );
+        assert_eq!(
+            Version::parse("26.8.7.5").expect("parses").to_string(),
+            "26.8.7.5"
+        );
     }
 
     #[test]

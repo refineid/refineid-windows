@@ -28,6 +28,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// The environment variable the build environment passes the stamp in.
 pub const ENV: &str = "REFINEID_VERSION";
 
+/// The calendar months a stamp may name.
+const MONTHS: std::ops::RangeInclusive<u8> = 1..=12;
+
+/// The days of a month a stamp may name.
+const DAYS: std::ops::RangeInclusive<u8> = 1..=31;
+
 /// One build instant as calendar version components.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stamp {
@@ -86,7 +92,9 @@ impl Stamp {
         }
         let hour = u8::try_from(time / HOUR_PLACE).ok()?;
         let minute = u8::try_from(time % HOUR_PLACE).ok()?;
-        (u16::from(hour) < MINUTES_PER_DAY / MINUTES_PER_HOUR
+        (MONTHS.contains(&month)
+            && DAYS.contains(&day)
+            && u16::from(hour) < MINUTES_PER_DAY / MINUTES_PER_HOUR
             && u16::from(minute) < MINUTES_PER_HOUR)
             .then_some(Self {
                 year,
@@ -218,6 +226,10 @@ mod tests {
         assert_eq!(Stamp::parse("26.10.10.905.1"), None);
         assert_eq!(Stamp::parse("26.10.10.2400"), None);
         assert_eq!(Stamp::parse("26.10.10.1260"), None);
+        assert_eq!(Stamp::parse("26.0.10.905"), None);
+        assert_eq!(Stamp::parse("26.13.10.905"), None);
+        assert_eq!(Stamp::parse("26.10.0.905"), None);
+        assert_eq!(Stamp::parse("26.10.32.905"), None);
         assert_eq!(Stamp::parse("1.0.0.0-beta"), None);
     }
 
