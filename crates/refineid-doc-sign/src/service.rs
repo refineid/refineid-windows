@@ -36,7 +36,7 @@ use crate::asic::DataObject;
 use crate::cades::{DigestAlgorithm, SignatureAlgorithm, SignerParameters, SigningTime};
 use crate::digest::Sha256;
 use crate::document::{self, DocumentError, DocumentPlan, Format};
-use crate::pades::{SignatureInk, SignatureMetadata, VisibleSignature};
+use crate::pades::{SignatureInk, SignatureMetadata, StampLanguage, VisibleSignature};
 use crate::timestamp::{self, TimestampError, VerifiedTimestampToken};
 use crate::validation::ValidationMaterial;
 use refineid_lib_core::apdu::iso7816::ApduClass;
@@ -315,11 +315,18 @@ pub struct DocumentRequest {
     pub timestamp_credentials: Option<TimestampCredentials>,
 }
 
-/// User-interface material for a certificate-derived visible PDF signature.
+/// The visible mark a PDF signature is asked to carry.
 #[derive(Debug, Clone)]
-pub struct VisibleSignatureRequest {
-    /// Optional DG7 handwriting read from the displayed card.
-    pub handwriting: Option<SignatureInk>,
+pub enum VisibleSignatureRequest {
+    /// The round mark advising the reader to check the electronic
+    /// signature, its middle lines in the given language.
+    Verification(StampLanguage),
+    /// The certificate's name and identifier, with the optional DG7
+    /// handwriting read from the displayed card.
+    Identity {
+        /// Optional DG7 handwriting read from the displayed card.
+        handwriting: Option<SignatureInk>,
+    },
 }
 
 impl DocumentRequest {
@@ -1302,6 +1309,14 @@ fn document_metadata(
             "visible marks are supported only for PAdES".to_owned(),
         ));
     }
+    let handwriting = match visible {
+        VisibleSignatureRequest::Verification(language) => {
+            let mut metadata = request.metadata.clone();
+            metadata.visible_signature = Some(VisibleSignature::verification(*language));
+            return Ok(metadata);
+        }
+        VisibleSignatureRequest::Identity { handwriting } => handwriting.clone(),
+    };
 
     let names = certificate.subject.given_names();
     let first = names.first.ok_or_else(|| {
@@ -1316,16 +1331,12 @@ fn document_metadata(
         SignErrorKind::VisibleSignature("signing certificate has no SATU identifier".to_owned())
     })?;
     let display_name = format!("{} {}", first.to_native(), surname.to_native());
-    let appearance = VisibleSignature::new(
-        &display_name,
-        identifier.as_str(),
-        visible.handwriting.clone(),
-    )
-    .ok_or_else(|| {
-        SignErrorKind::VisibleSignature(
-            "certificate identity cannot be rendered safely in the PDF".to_owned(),
-        )
-    })?;
+    let appearance = VisibleSignature::new(&display_name, identifier.as_str(), handwriting)
+        .ok_or_else(|| {
+            SignErrorKind::VisibleSignature(
+                "certificate identity cannot be rendered safely in the PDF".to_owned(),
+            )
+        })?;
     let mut metadata = request.metadata.clone();
     metadata.visible_signature = Some(appearance);
     Ok(metadata)

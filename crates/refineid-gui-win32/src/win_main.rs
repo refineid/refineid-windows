@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use zeroize::Zeroize;
 
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Globalization::GetUserDefaultLocaleName;
 use windows::Win32::Graphics::Gdi::{
     COLOR_BTNFACE, COLOR_WINDOW, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontIndirectW,
     CreateFontW, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_QUALITY, DeleteDC, DeleteObject,
@@ -50,9 +51,9 @@ use windows::core::{HSTRING, PCWSTR, PWSTR, w};
 use refineid_doc_sign::asic_verify::verify_document;
 use refineid_doc_sign::cades::SigningTime;
 use refineid_doc_sign::document::Format;
-use refineid_doc_sign::pades::SignatureMetadata;
+use refineid_doc_sign::pades::{SignatureMetadata, StampLanguage};
 use refineid_doc_sign::service::{
-    DocumentRequest, SignOptions, SignReport, SignSlot, sign_with_slot,
+    DocumentRequest, SignOptions, SignReport, SignSlot, VisibleSignatureRequest, sign_with_slot,
 };
 use refineid_lib_core::identity::CommonName;
 use refineid_lib_core::pin::PinBytes;
@@ -2227,7 +2228,11 @@ fn start_doc_sign() {
         signing_time: SigningTime::now(),
         metadata,
         expected_serial: None,
-        visible_signature: None,
+        visible_signature: (format == Format::Pades).then(|| {
+            VisibleSignatureRequest::Verification(StampLanguage::from_language_tag(
+                &user_locale_name(),
+            ))
+        }),
         archive: false,
         long_term: false,
         timestamp_authorities: Vec::new(),
@@ -2965,4 +2970,18 @@ fn message_font() -> HFONT {
 
 fn utf16_nul(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// The capacity of a locale name buffer, `LOCALE_NAME_MAX_LENGTH` of the
+/// Windows SDK, in UTF-16 units including the terminator.
+const LOCALE_NAME_CAPACITY: usize = 85;
+
+/// The user's locale name, such as `fi-FI`; empty when Windows gives none.
+fn user_locale_name() -> String {
+    let mut name = [0u16; LOCALE_NAME_CAPACITY];
+    // SAFETY: the buffer and its capacity are passed together, and the
+    // call writes at most that many UTF-16 units.
+    let written = unsafe { GetUserDefaultLocaleName(&mut name) };
+    let length = usize::try_from(written.saturating_sub(1)).unwrap_or(0);
+    String::from_utf16_lossy(&name[..length.min(name.len())])
 }

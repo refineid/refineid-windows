@@ -12,16 +12,19 @@
 // implied. See the License for the specific language governing
 // permissions and limitations under the License.
 
-//! Restrained visible appearance for a PDF signature widget.
+//! Visible appearance for a PDF signature widget.
 //!
 //! The appearance is presentation, not evidence. The enclosing `PAdES`
 //! signature authenticates the widget, certificate, and document. This module
-//! only renders the holder's card-carried handwriting, certificate name, and
+//! renders either the round mark advising the reader to check the electronic
+//! signature, or the holder's card-carried handwriting, certificate name, and
 //! PEUIN/SATU as a compact vector rubber stamp.
 
 use core::fmt::Write as _;
 
 use refineid_lib_core::rng;
+
+use super::stamp::{self, StampLanguage};
 
 /// One horizontal run of dark pixels in a displayed-signature image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,18 +126,53 @@ impl SignatureInk {
     }
 }
 
+/// The mark shown on the signed page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VisibleSignature {
+    /// The round mark advising the reader to check the electronic
+    /// signature, its middle lines in the given language.
+    Verification(StampLanguage),
+    /// Certificate identity and optional handwriting.
+    Identity(IdentityMark),
+}
+
 /// Certificate identity and optional handwriting shown on the signed page.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VisibleSignature {
+pub struct IdentityMark {
     name: String,
     identifier: String,
     handwriting: Option<SignatureInk>,
 }
 
 impl VisibleSignature {
-    /// Build a mark from identity already authenticated by the signing cert.
+    /// The verification mark with its middle lines in `language`.
+    #[must_use]
+    pub const fn verification(language: StampLanguage) -> Self {
+        Self::Verification(language)
+    }
+
+    /// Build an identity mark from identity already authenticated by the
+    /// signing cert.
     #[must_use]
     pub fn new(name: &str, identifier: &str, handwriting: Option<SignatureInk>) -> Option<Self> {
+        IdentityMark::new(name, identifier, handwriting).map(Self::Identity)
+    }
+
+    /// Render a self-contained Form `XObject` content stream.
+    pub(super) fn render(&self) -> RenderedAppearance {
+        match self {
+            Self::Verification(language) => RenderedAppearance {
+                side: stamp::SIDE,
+                font: stamp::BASE_FONT,
+                operators: stamp::operators(*language),
+            },
+            Self::Identity(mark) => mark.render(),
+        }
+    }
+}
+
+impl IdentityMark {
+    fn new(name: &str, identifier: &str, handwriting: Option<SignatureInk>) -> Option<Self> {
         const MAX_TEXT_BYTES: usize = 256;
         let name = name.trim();
         let identifier = identifier.trim();
@@ -153,8 +191,7 @@ impl VisibleSignature {
         })
     }
 
-    /// Render a self-contained Form `XObject` content stream.
-    pub(super) fn render(&self) -> RenderedAppearance {
+    fn render(&self) -> RenderedAppearance {
         let mut operators = String::from("q\n");
         operators.push_str(&tilt());
         operators.push_str("0.6902 0.1255 0.1255 RG\n0.6902 0.1255 0.1255 rg\n");
@@ -188,6 +225,7 @@ impl VisibleSignature {
         operators.push_str("Q\nQ\n");
         RenderedAppearance {
             side: MARK_SIDE,
+            font: BASE_FONT,
             operators: operators.into_bytes(),
         }
     }
@@ -220,12 +258,16 @@ fn tilt() -> String {
     )
 }
 
-/// Content and natural dimensions of one signature appearance.
+/// Content, natural dimensions, and the base font of one signature
+/// appearance.
 pub(super) struct RenderedAppearance {
     pub(super) side: f64,
+    pub(super) font: &'static str,
     pub(super) operators: Vec<u8>,
 }
 
+/// The base font the identity mark's text is set in.
+const BASE_FONT: &str = "Helvetica";
 const MARK_SIDE: f64 = 128.0;
 const CENTRE: f64 = MARK_SIDE / 2.0;
 const LEAST_TILT_DEGREES: f64 = 10.0;
@@ -336,7 +378,16 @@ fn circle(radius: f64, line_width: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{SignatureInk, VisibleSignature};
+    use super::{SignatureInk, StampLanguage, VisibleSignature};
+
+    #[test]
+    fn the_verification_mark_is_set_in_bold_in_its_own_box() {
+        let rendered = VisibleSignature::verification(StampLanguage::Finnish).render();
+        assert_eq!(rendered.font, "Helvetica-Bold");
+        assert_eq!(rendered.side, 132.0);
+        let text = String::from_utf8(rendered.operators).expect("ASCII operators");
+        assert!(text.contains("(TARKASTA) Tj"));
+    }
 
     #[test]
     fn rgba_trace_keeps_only_dark_opaque_runs() {
