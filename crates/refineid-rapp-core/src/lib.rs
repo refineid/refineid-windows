@@ -8,6 +8,7 @@
 //! Protocol primitives, Noise cryptography, and canonical framing are provided
 //! by `refineid_rapp`.
 
+pub mod clock;
 pub mod engine;
 pub mod ids;
 pub mod message;
@@ -20,7 +21,7 @@ pub mod stream;
 pub mod transport;
 
 /// The wire version of RAPP from canonical core.
-pub const WIRE_VERSION: (u16, u16, u16) = refineid_rapp::WIRE_VERSION_V26_10_10;
+pub const WIRE_VERSION: (u16, u16, u16) = refineid_rapp::WIRE_VERSION_V26_10_18;
 
 /// The mandatory pairing handshake construction.
 pub const PAIRING_SUITE: &str = refineid_rapp::MANDATORY_PAIRING_SUITE;

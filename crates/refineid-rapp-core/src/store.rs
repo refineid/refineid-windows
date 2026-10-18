@@ -1,11 +1,14 @@
 //! Durable pairing records and the operation journal.
 //!
 //! A pairing record is the atomic result of pairing: pair keys, `pair_id`,
-//! granted profiles, `grants_hash`, labels, and the
-//! fail-stop marker. The journal records each operation from the moment its
-//! request is written (RAPP v26.10.10 section 8): an unanswered consequential
-//! request is in flight and ends ambiguous, and terminal states are
-//! permanent.
+//! granted profiles, `grants_hash`, labels, the storage confirmation, and
+//! the fail-stop marker. A record is stored before the peer confirms its own
+//! storage (RAPP v26.10.18 section 4.3 item 4) and opens nothing until that
+//! confirmation is recorded; one found unconfirmed at load was written in a
+//! confirmation window this endpoint did not complete, and is revoked. The
+//! journal records each operation from the moment its request is written
+//! (section 8): an unanswered consequential request is in flight and ends
+//! ambiguous, and terminal states are permanent.
 //!
 //! Both stores are traits so the Windows build can put pair keys behind the
 //! platform credential store and the journal on disk, while tests use the
@@ -47,6 +50,9 @@ pub struct PairingRecord {
     pub peer_display_name: String,
     /// The peer's platform label.
     pub peer_platform: String,
+    /// Whether the peer confirmed that it stored its record (RAPP v26.10.18
+    /// section 4.3 item 4). Only a confirmed record opens sessions.
+    pub storage_confirmed: bool,
     /// The fail-stop disposition.
     pub disposition: PairingDisposition,
     /// Whether the peer initiated the revocation.
@@ -69,6 +75,7 @@ impl core::fmt::Debug for PairingRecord {
         formatter
             .debug_struct("PairingRecord")
             .field("pair_id", &self.pair_id)
+            .field("storage_confirmed", &self.storage_confirmed)
             .field("disposition", &self.disposition)
             .finish_non_exhaustive()
     }
@@ -144,6 +151,7 @@ impl PairingRecord {
             grants_hash: *core.grants_hash().as_bytes(),
             peer_display_name,
             peer_platform,
+            storage_confirmed: core.is_storage_confirmed(),
             disposition: PairingDisposition::Paired,
             peer_initiated_termination: false,
             candidate_failures: 0,
@@ -175,7 +183,7 @@ impl<S: PairingStore> refineid_rapp::PairStore for CorePairStoreAdapter<'_, S> {
     fn load(&mut self, pair_id: PairId) -> Result<Option<refineid_rapp::PairRecord>, Self::Error> {
         match self.inner.get(pair_id) {
             Ok(rec) => {
-                if rec.disposition == PairingDisposition::Paired {
+                if rec.disposition == PairingDisposition::Paired && rec.storage_confirmed {
                     rec.to_core_pair_record()
                         .map(Some)
                         .map_err(|_| StoreError::Unknown)
@@ -274,6 +282,31 @@ pub trait PairingStore {
 
     /// Every stored pairing, newest first.
     fn pair_ids(&self) -> Vec<PairId>;
+}
+
+/// Revokes every stored pairing whose peer never confirmed its storage.
+///
+/// Such a record was written inside a confirmation window this endpoint
+/// did not complete (RAPP v26.10.18 section 4.3 item 4). Keys are destroyed
+/// and the tombstone stays. Returns the revoked pair identifiers.
+pub fn revoke_unconfirmed<S: PairingStore>(store: &mut S) -> Vec<PairId> {
+    let unconfirmed: Vec<PairId> = store
+        .pair_ids()
+        .into_iter()
+        .filter(|pair_id| {
+            store.get(*pair_id).is_ok_and(|record| {
+                record.disposition == PairingDisposition::Paired && !record.storage_confirmed
+            })
+        })
+        .collect();
+    for pair_id in &unconfirmed {
+        let _ = store.update(*pair_id, &mut |record| {
+            record.disposition = PairingDisposition::Revoked;
+            record.local_private = Zeroizing::new(Vec::new());
+            record.peer_public = Vec::new();
+        });
+    }
+    unconfirmed
 }
 
 /// An in-memory pairing store for tests and composition.
@@ -441,6 +474,7 @@ mod tests {
             grants_hash: [4; 32],
             peer_display_name: "Phone".into(),
             peer_platform: "iOS".into(),
+            storage_confirmed: true,
             disposition: PairingDisposition::Paired,
             peer_initiated_termination: false,
             candidate_failures: 0,
@@ -449,6 +483,39 @@ mod tests {
             root_ca: None,
             intermediate_ca: None,
         }
+    }
+
+    #[test]
+    fn an_unconfirmed_record_is_revoked_at_load_and_opens_nothing() {
+        let mut store = MemoryPairingStore::new();
+        let confirmed = PairId::from_array([7; 16]);
+        let unconfirmed = PairId::from_array([8; 16]);
+        store.insert(record(confirmed)).unwrap();
+        let mut pending = record(unconfirmed);
+        pending.storage_confirmed = false;
+        store.insert(pending).unwrap();
+        {
+            let mut adapter = super::CorePairStoreAdapter::new(&mut store);
+            assert!(
+                refineid_rapp::PairStore::load(&mut adapter, unconfirmed)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                refineid_rapp::PairStore::load(&mut adapter, confirmed)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        assert_eq!(super::revoke_unconfirmed(&mut store), vec![unconfirmed]);
+        let revoked = store.get(unconfirmed).unwrap();
+        assert_eq!(revoked.disposition, PairingDisposition::Revoked);
+        assert!(revoked.local_private.is_empty());
+        assert_eq!(
+            store.get(confirmed).unwrap().disposition,
+            PairingDisposition::Paired
+        );
+        assert!(super::revoke_unconfirmed(&mut store).is_empty());
     }
 
     #[test]

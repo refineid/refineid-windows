@@ -4,9 +4,11 @@
 //! The proxy here is test scaffolding, not a product: the real proxies are
 //! the holder's phones. It speaks the exact wire so the requester is
 //! exercised end to end - code pairing through `CPace` KC2 and
-//! `Noise_XXpsk3` with grant agreement, `Noise_KK` sessions with the
-//! parameter echo, direct operations and their results, denial, credential
-//! rejection revoking the pairing, immediate revocation on the first
+//! `Noise_XXpsk3` with grant agreement and the storage confirmation,
+//! `Noise_KK` sessions with the parameter echo and the card status, direct
+//! operations and their results, every result acknowledged, denial,
+//! credential rejection revoking the pairing, revocation announced in-session
+//! and by the requester's own forget, immediate revocation on the first
 //! authenticated violation, and ambiguity on an unanswered consequential
 //! request.
 
@@ -23,11 +25,11 @@ use std::time::Duration;
 
 use refineid_rapp::{
     BinaryFrame, CardInspection, CardKeyProfile as KeyProfile, CardOperation, CardOperationResult,
-    CloseReason, CpaceKc2Responder, EndpointRole, EstablishedEndpoint, OperationReference,
-    OperationResultMessage, PairId, PairRecord, PairStore, PairStoreError, PairTombstone,
-    PairingHandshake, ProxyFailure, ReceiveOutcome, SessionCloseMessage, SessionHandshake,
-    SignatureAlgorithm, TransportProfile, TypedMessage, generate_pair_key_material,
-    standard_pairing_context_v2,
+    CardStatusMessage, CloseReason, CpaceKc2Responder, EndpointRole, EstablishedEndpoint,
+    OperationProgressMessage, OperationReference, OperationResultMessage, PairId, PairRecord,
+    PairStore, PairStoreError, PairTombstone, PairingHandshake, ProgressEvent, ProxyFailure,
+    ReceiveOutcome, SessionCloseMessage, SessionHandshake, SignatureAlgorithm, TransportProfile,
+    TypedMessage, generate_pair_key_material, standard_pairing_context_v2,
 };
 use refineid_rapp_core::engine::{
     OperationOutcome, PairingError, Requester, RequesterConfig, SessionError,
@@ -111,7 +113,7 @@ fn custodian_offer() -> refineid_rapp::PairingOffer {
     .unwrap()
 }
 
-/// Serves the offer bootstrap (RAPP v26.10.10 section 4.2) and returns the
+/// Serves the offer bootstrap (RAPP v26.10.18 section 4.2) and returns the
 /// offer and its `CPace` context.
 fn serve_offer<T: FrameTransport>(transport: &mut T) -> (refineid_rapp::PairingOffer, Vec<u8>) {
     let offer = custodian_offer();
@@ -127,8 +129,19 @@ fn serve_offer<T: FrameTransport>(transport: &mut T) -> (refineid_rapp::PairingO
 
 /// Runs the custodian half of pairing and returns its stored half: the
 /// offer bootstrap, `CPace` KC2 as responder, then `Noise_XXpsk3` under its
-/// key, then the hello and confirmation exchange.
-fn proxy_pair<T: FrameTransport>(mut transport: T, shown_code: &str) -> PairRecord {
+/// key, then the hello, confirmation, and storage confirmation exchange.
+fn proxy_pair<T: FrameTransport>(transport: T, shown_code: &str) -> PairRecord {
+    proxy_pair_confirming(transport, shown_code, true).unwrap()
+}
+
+/// The custodian half of pairing; with `confirm_storage` false it stops
+/// after its grant confirmation, as a custodian that died before storing
+/// its record would, and returns nothing.
+fn proxy_pair_confirming<T: FrameTransport>(
+    mut transport: T,
+    shown_code: &str,
+    confirm_storage: bool,
+) -> Option<PairRecord> {
     let now_ms = TEST_MONOTONIC_TIMESTAMP_MS;
     let candidate = transport.candidate_id().to_owned();
     let (offer, context) = serve_offer(&mut transport);
@@ -173,7 +186,16 @@ fn proxy_pair<T: FrameTransport>(mut transport: T, shown_code: &str) -> PairReco
         .to_vec();
     let proxy_confirmation = confirmation.send_confirmation(granted).unwrap();
     transport.send_frame(proxy_confirmation.as_bytes()).unwrap();
-    confirmation.into_pair_record(now_ms).unwrap()
+    let (record, mut storage) = confirmation.into_storage(now_ms).unwrap();
+    assert!(!record.is_storage_confirmed());
+    if !confirm_storage {
+        return None;
+    }
+    let stored = storage.send_stored().unwrap();
+    transport.send_frame(stored.as_bytes()).unwrap();
+    let requester_stored = BinaryFrame::reconstruct(transport.receive_frame().unwrap()).unwrap();
+    storage.receive_stored(&requester_stored, now_ms).unwrap();
+    Some(storage.into_active().unwrap().confirm(record).unwrap())
 }
 
 struct ProxySession<T: FrameTransport> {
@@ -202,10 +224,20 @@ impl<T: FrameTransport> ProxySession<T> {
     }
 }
 
-/// Accepts one session as the proxy and completes the ready exchange.
+/// Accepts one session as the proxy, completes the ready exchange, and
+/// reports a present card (section 8.4 item 1).
 fn proxy_accept_session<T: FrameTransport>(
     pair_record: &PairRecord,
+    transport: T,
+) -> ProxySession<T> {
+    proxy_accept_session_with_card(pair_record, transport, true)
+}
+
+/// Accepts one session as the proxy and reports whether a card is present.
+fn proxy_accept_session_with_card<T: FrameTransport>(
+    pair_record: &PairRecord,
     mut transport: T,
+    card_present: bool,
 ) -> ProxySession<T> {
     let now_ms = TEST_MONOTONIC_TIMESTAMP_MS;
     let mut handshake =
@@ -234,10 +266,14 @@ fn proxy_accept_session<T: FrameTransport>(
     transport.send_frame(proxy_ready.as_bytes()).unwrap();
 
     let endpoint = auth.into_established().unwrap();
-    ProxySession {
+    let mut session = ProxySession {
         endpoint,
         transport,
-    }
+    };
+    session.send(&TypedMessage::CardStatus(CardStatusMessage {
+        card_present,
+    }));
+    session
 }
 
 /// Pairs a fresh requester with a custodian thread and returns both halves.
@@ -259,12 +295,219 @@ fn paired(requester: &mut TestRequester, granted: &[String]) -> (PairId, PairRec
 fn pairing_stores_matching_records_on_both_sides() {
     let mut requester = test_requester();
     let granted = vec![PROFILE_CARD_STATUS.to_owned()];
-    let (pair_id, _proxy) = paired(&mut requester, &granted);
+    let (pair_id, proxy) = paired(&mut requester, &granted);
     let record = requester.store().get(pair_id).unwrap();
     assert_eq!(record.granted_profiles, granted);
     assert_eq!(record.disposition, PairingDisposition::Paired);
     assert_eq!(record.peer_display_name, "Phone");
+    assert!(record.storage_confirmed);
+    assert!(proxy.is_storage_confirmed());
     assert!(record.to_core_pair_record().is_ok());
+}
+
+#[test]
+fn a_custodian_that_never_confirms_storage_leaves_a_revoked_record() {
+    let mut requester = test_requester();
+    let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    let proxy = std::thread::spawn(move || {
+        assert!(proxy_pair_confirming(proxy_transport, SHOWN_CODE, false).is_none());
+    });
+    let outcome = requester.pair_with_code(SHOWN_CODE, requester_transport, |_, requested| {
+        Some(requested.to_vec())
+    });
+    proxy.join().unwrap();
+    assert_eq!(outcome, Err(PairingError::StorageUnconfirmed));
+    let pair_ids = requester.store().pair_ids();
+    assert_eq!(pair_ids.len(), 1);
+    let record = requester.store().get(pair_ids[0]).unwrap();
+    assert_eq!(record.disposition, PairingDisposition::Revoked);
+    assert!(!record.storage_confirmed);
+    assert!(record.local_private.is_empty());
+    let (requester_transport, _other) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    assert!(matches!(
+        requester.connect(pair_ids[0], requester_transport),
+        Err(SessionError::NotPaired(PairingDisposition::Revoked))
+    ));
+}
+
+#[test]
+fn an_unconfirmed_record_opens_no_session() {
+    let mut requester = test_requester();
+    let granted = vec![PROFILE_CARD_STATUS.to_owned()];
+    let (pair_id, _proxy) = paired(&mut requester, &granted);
+    requester
+        .store_mut()
+        .update(pair_id, &mut |record| record.storage_confirmed = false)
+        .unwrap();
+    let (requester_transport, _other) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    assert!(matches!(
+        requester.connect(pair_id, requester_transport),
+        Err(SessionError::StorageUnconfirmed)
+    ));
+}
+
+#[test]
+fn the_card_status_is_noted_on_the_session() {
+    let mut requester = test_requester();
+    let granted = vec![PROFILE_CARD_STATUS.to_owned()];
+    let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
+    let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    let proxy = std::thread::spawn(move || {
+        let mut session = proxy_accept_session_with_card(&proxy_pairing, proxy_transport, false);
+        let TypedMessage::LivenessPing(ping) = session.receive() else {
+            panic!("expected a liveness ping");
+        };
+        session.send(&TypedMessage::CardStatus(CardStatusMessage {
+            card_present: true,
+        }));
+        session.send(&TypedMessage::LivenessPong(
+            refineid_rapp::LivenessMessage {
+                challenge: ping.challenge,
+                last_received_sequence: 1,
+            },
+        ));
+    });
+    let mut session = requester.connect(pair_id, requester_transport).unwrap();
+    assert_eq!(session.card_present(), None);
+    requester.check_liveness(&mut session).unwrap();
+    proxy.join().unwrap();
+    assert_eq!(session.card_present(), Some(true));
+}
+
+#[test]
+fn the_consent_view_is_reported_while_a_request_waits() {
+    let mut requester = test_requester();
+    let granted = vec![PROFILE_AUTHENTICATION.to_owned()];
+    let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
+    let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    let proxy = std::thread::spawn(move || {
+        let mut session = proxy_accept_session(&proxy_pairing, proxy_transport);
+        let TypedMessage::OperationRequest(request) = session.receive() else {
+            panic!("expected an operation request");
+        };
+        let reference = OperationReference {
+            operation_id: request.operation_id,
+            request_hash: request.request_hash().unwrap(),
+        };
+        session.send(&TypedMessage::OperationProgress(OperationProgressMessage {
+            reference,
+            event: ProgressEvent::ConsentShown,
+        }));
+        session.send(&TypedMessage::OperationResult(
+            OperationResultMessage::failure(reference, ProxyFailure::UserDenied),
+        ));
+        let TypedMessage::OperationResultAck(ack_ref) = session.receive() else {
+            panic!("expected the denial to be acknowledged");
+        };
+        assert_eq!(ack_ref, reference);
+    });
+    let mut session = requester.connect(pair_id, requester_transport).unwrap();
+    let mut seen = Vec::new();
+    let outcome = requester
+        .execute_observed(
+            &mut session,
+            &authentication_operation(),
+            30_000,
+            &mut |event| seen.push(event),
+        )
+        .unwrap();
+    proxy.join().unwrap();
+    assert_eq!(outcome, OperationOutcome::Denied);
+    assert_eq!(seen, [ProgressEvent::ConsentShown]);
+    assert_eq!(session.card_present(), Some(true));
+}
+
+#[test]
+fn progress_under_another_commitment_is_not_shown() {
+    let mut requester = test_requester();
+    let granted = vec![PROFILE_AUTHENTICATION.to_owned()];
+    let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
+    let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    let proxy = std::thread::spawn(move || {
+        let mut session = proxy_accept_session(&proxy_pairing, proxy_transport);
+        let TypedMessage::OperationRequest(request) = session.receive() else {
+            panic!("expected an operation request");
+        };
+        let reference = OperationReference {
+            operation_id: request.operation_id,
+            request_hash: request.request_hash().unwrap(),
+        };
+        session.send(&TypedMessage::OperationProgress(OperationProgressMessage {
+            reference: OperationReference {
+                operation_id: request.operation_id,
+                request_hash: refineid_rapp::RequestHash::from_array([0xee; 32]),
+            },
+            event: ProgressEvent::ConsentShown,
+        }));
+        session.send(&TypedMessage::OperationResult(
+            OperationResultMessage::failure(reference, ProxyFailure::UserDenied),
+        ));
+        let TypedMessage::OperationResultAck(ack_ref) = session.receive() else {
+            panic!("expected the denial to be acknowledged");
+        };
+        assert_eq!(ack_ref, reference);
+    });
+    let mut session = requester.connect(pair_id, requester_transport).unwrap();
+    let mut seen = Vec::new();
+    let outcome = requester
+        .execute_observed(
+            &mut session,
+            &authentication_operation(),
+            30_000,
+            &mut |event| seen.push(event),
+        )
+        .unwrap();
+    proxy.join().unwrap();
+    assert_eq!(outcome, OperationOutcome::Denied);
+    assert!(seen.is_empty());
+}
+
+#[test]
+fn forgetting_a_pairing_tells_the_custodian_first() {
+    let mut requester = test_requester();
+    let granted = vec![PROFILE_CARD_STATUS.to_owned()];
+    let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
+    let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    let proxy = std::thread::spawn(move || {
+        let mut session = proxy_accept_session(&proxy_pairing, proxy_transport);
+        let TypedMessage::SessionClose(close) = session.receive() else {
+            panic!("expected the revocation close");
+        };
+        assert_eq!(close.reason, CloseReason::PairingRevoked);
+    });
+    requester.forget_pairing(pair_id, Some(requester_transport));
+    proxy.join().unwrap();
+    let record = requester.store().get(pair_id).unwrap();
+    assert_eq!(record.disposition, PairingDisposition::Revoked);
+    assert!(!record.peer_initiated_termination);
+    assert!(record.local_private.is_empty());
+}
+
+#[test]
+fn a_custodian_revocation_close_forgets_the_pairing() {
+    let mut requester = test_requester();
+    let granted = vec![PROFILE_CARD_STATUS.to_owned()];
+    let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
+    let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    let proxy = std::thread::spawn(move || {
+        let mut session = proxy_accept_session(&proxy_pairing, proxy_transport);
+        let TypedMessage::OperationRequest(_) = session.receive() else {
+            panic!("expected an operation request");
+        };
+        session.send(&TypedMessage::SessionClose(SessionCloseMessage {
+            reason: CloseReason::PairingRevoked,
+            last_received_sequence: 1,
+        }));
+    });
+    let mut session = requester.connect(pair_id, requester_transport).unwrap();
+    let outcome = requester
+        .execute(&mut session, &CardOperation::InspectCard, 30_000)
+        .unwrap();
+    proxy.join().unwrap();
+    assert_eq!(outcome, OperationOutcome::Cancelled);
+    let record = requester.store().get(pair_id).unwrap();
+    assert_eq!(record.disposition, PairingDisposition::Revoked);
+    assert!(record.peer_initiated_termination);
 }
 
 #[test]
@@ -413,6 +656,12 @@ fn denial_leaves_the_session_healthy() {
             };
             let failure_msg = OperationResultMessage::failure(reference, ProxyFailure::UserDenied);
             session.send(&TypedMessage::OperationResult(failure_msg));
+            // Every result is acknowledged, a denial included (section 8.2
+            // item 5).
+            let TypedMessage::OperationResultAck(ack_ref) = session.receive() else {
+                panic!("expected the denial to be acknowledged");
+            };
+            assert_eq!(ack_ref, reference);
         }
     });
     let mut session = requester.connect(pair_id, requester_transport).unwrap();
@@ -443,9 +692,13 @@ fn credential_rejection_revokes_the_pairing() {
         let failure_msg =
             OperationResultMessage::failure(reference, ProxyFailure::CredentialRejected);
         session.send(&TypedMessage::OperationResult(failure_msg));
+        let TypedMessage::OperationResultAck(ack_ref) = session.receive() else {
+            panic!("expected the rejection to be acknowledged");
+        };
+        assert_eq!(ack_ref, reference);
         session.send(&TypedMessage::SessionClose(SessionCloseMessage {
             reason: CloseReason::CredentialRejected,
-            last_received_sequence: 1,
+            last_received_sequence: 2,
         }));
     });
     let mut session = requester.connect(pair_id, requester_transport).unwrap();

@@ -1,4 +1,4 @@
-//! The requester engine: the workstation side of RAPP v26.10.10.
+//! The requester engine: the workstation side of RAPP v26.10.18.
 //!
 //! The engine drives pairing, sessions, and operations using the canonical
 //! protocol boundaries from `refineid_rapp`.
@@ -29,9 +29,9 @@ use crate::store::{
 use crate::transport::{BinaryFrame, FrameTransport, TransportError};
 use refineid_rapp::{
     EndpointRole, EstablishedEndpoint, ExplicitUserIntent, LivenessMessage, OperationReference,
-    OperationRequest, OperationState, PairingHandshake, PingChallenge, ProfileName,
-    ProtocolErrorMessage, ReceiveOutcome, ResultError, SessionCloseMessage, SessionHandshake,
-    SessionState, TypedMessage, generate_pair_key_material,
+    OperationRequest, OperationState, PairRecord, PairingHandshake, PairingStorage, PingChallenge,
+    ProfileName, ProgressEvent, ProtocolErrorMessage, ReceiveOutcome, ResultError,
+    SessionCloseMessage, SessionHandshake, SessionState, TypedMessage, generate_pair_key_material,
 };
 
 /// Local labels sent inside `pairing.hello`. Labels, not identities.
@@ -89,6 +89,9 @@ pub enum PairingError {
     UnregisteredTransport,
     /// A post-PAKE phase passed its section 3.3 deadline.
     DeadlineExpired,
+    /// The peer never confirmed that it stored the pairing (section 4.3
+    /// item 4); the record stored here is revoked.
+    StorageUnconfirmed,
 }
 
 impl core::fmt::Display for PairingError {
@@ -99,6 +102,7 @@ impl core::fmt::Display for PairingError {
             Self::HandshakeFailed => f.write_str("handshake failed"),
             Self::UnregisteredTransport => f.write_str("unregistered transport profile"),
             Self::DeadlineExpired => f.write_str("pairing deadline expired"),
+            Self::StorageUnconfirmed => f.write_str("the phone did not confirm the pairing"),
             Self::InvalidCode => f.write_str("not a pairing code"),
             Self::CodeMismatch => f.write_str("pairing code does not match the phone"),
             Self::Transport(e) => write!(f, "transport error: {e:?}"),
@@ -123,6 +127,9 @@ pub enum SessionError {
     UnknownPairing,
     /// The pairing is revoked.
     NotPaired(PairingDisposition),
+    /// The peer never confirmed that it stored the pairing; the record
+    /// opens no session (section 4.3 item 4).
+    StorageUnconfirmed,
     /// The session handshake failed. When `suggest_repairing` is true,
     /// three consecutive candidates failed authentication and re-pairing
     /// should be suggested without touching stored keys.
@@ -147,6 +154,7 @@ impl core::fmt::Display for SessionError {
         match self {
             Self::UnknownPairing => f.write_str("unknown pairing"),
             Self::NotPaired(d) => write!(f, "pairing not usable ({d:?})"),
+            Self::StorageUnconfirmed => f.write_str("the phone did not confirm the pairing"),
             Self::HandshakeFailed { suggest_repairing } => {
                 if *suggest_repairing {
                     f.write_str("handshake failed (repairing recommended)")
@@ -247,6 +255,21 @@ pub struct Session<Transport: FrameTransport> {
     state: SessionState,
     granted_profiles: Vec<String>,
     end: Option<SessionEnd>,
+    card_present: Option<bool>,
+}
+
+impl<Transport: FrameTransport> Session<Transport> {
+    /// What the custodian last said about its card on this session
+    /// (`card.status`, section 8.4): `None` until it has said anything.
+    #[must_use]
+    pub const fn card_present(&self) -> Option<bool> {
+        self.card_present
+    }
+
+    /// Records a `card.status` the custodian sent.
+    const fn note_card_status(&mut self, status: refineid_rapp::CardStatusMessage) {
+        self.card_present = Some(status.card_present);
+    }
 }
 
 impl<Transport: FrameTransport> core::fmt::Debug for Session<Transport> {
@@ -258,6 +281,7 @@ impl<Transport: FrameTransport> core::fmt::Debug for Session<Transport> {
             .field("state", &self.state)
             .field("granted_profiles", &self.granted_profiles)
             .field("end", &self.end)
+            .field("card_present", &self.card_present)
             .finish_non_exhaustive()
     }
 }
@@ -296,16 +320,17 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
     }
 
     /// Pairs with the custodian showing `code`, as the requester (RAPP
-    /// v26.10.10 sections 3, 4.2 and 6).
+    /// v26.10.18 sections 3, 4.2 and 6).
     ///
     /// The transport is already past its `"pairing"` routing preamble. The
     /// custodian's first frame is its offer; the requester checks it lists
     /// the connection's transport, sends `Y_A`, verifies the custodian's
     /// `Y_B || T_B`, answers with `T_A`, and hands the `CPace` key to
     /// `Noise_XXpsk3` under the 10 s post-PAKE deadlines of section 3.3; the
-    /// pairing hello and confirmation follow inside that channel. `confirm`
-    /// sees the custodian's introduction and returns the profiles to grant,
-    /// or `None` to refuse.
+    /// pairing hello, confirmation, and storage confirmation follow inside
+    /// that channel, and the record is stored before its confirmation is
+    /// sent (section 4.3 item 4). `confirm` sees the custodian's
+    /// introduction and returns the profiles to grant, or `None` to refuse.
     ///
     /// # Errors
     /// [`PairingError::InvalidCode`] for input that is not a pairing code
@@ -531,17 +556,70 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
             return Err(PairingError::DeadlineExpired);
         }
 
-        // Into PairRecord and store
-        let pair_record = confirmation
-            .into_pair_record(now_ms)
+        // The record is stored unconfirmed, then confirmed to the peer over
+        // the still-open channel; it opens nothing until the peer's
+        // confirmation is recorded (section 4.3 item 4).
+        let (pair_record, storage) = confirmation
+            .into_storage(crate::clock::unix_time_ms())
             .map_err(|_| PairingError::Channel)?;
         let local_record =
             PairingRecord::from_core_pair_record(&pair_record, intro.display_name, intro.platform);
         self.store
             .insert(local_record)
             .map_err(PairingError::Store)?;
+        match Self::confirm_storage(&mut transport, pair_record, storage, confirmation_deadline) {
+            Ok(confirmed) => {
+                self.store
+                    .update(pair_id, &mut |entry| {
+                        entry.storage_confirmed = confirmed.is_storage_confirmed();
+                    })
+                    .map_err(PairingError::Store)?;
+                Ok(pair_id)
+            }
+            Err(error) => {
+                // A pairing the peer never confirmed does not survive here
+                // (section 4.6): the stored record becomes its tombstone.
+                self.revoke_pairing(pair_id, false);
+                Err(error)
+            }
+        }
+    }
 
-        Ok(pair_id)
+    /// Sends the local storage confirmation, receives the peer's, and
+    /// returns the record in its confirmed form (section 4.3 item 4).
+    fn confirm_storage<Transport: FrameTransport>(
+        transport: &mut Transport,
+        record: PairRecord,
+        mut storage: PairingStorage,
+        confirmation_deadline: Instant,
+    ) -> Result<PairRecord, PairingError> {
+        // A transport that fails anywhere in this exchange left the peer's
+        // confirmation unreceived; the outcome is the same whichever side
+        // went first.
+        let stored_frame = storage.send_stored().map_err(|_| PairingError::Channel)?;
+        transport
+            .send_frame(stored_frame.as_bytes())
+            .map_err(|_| PairingError::StorageUnconfirmed)?;
+        let peer_stored_bytes = transport
+            .receive_frame()
+            .map_err(|_| PairingError::StorageUnconfirmed)?;
+        if Instant::now() > confirmation_deadline {
+            return Err(PairingError::StorageUnconfirmed);
+        }
+        let peer_stored_frame =
+            BinaryFrame::reconstruct(peer_stored_bytes).map_err(|_| PairingError::Channel)?;
+        storage
+            .receive_stored(&peer_stored_frame, current_time_ms())
+            .map_err(|error| match error {
+                refineid_rapp::PairingError::PairIdMismatch => PairingError::ProtocolViolation,
+                _ => PairingError::Channel,
+            })?;
+        let active = storage
+            .into_active()
+            .map_err(|_| PairingError::StorageUnconfirmed)?;
+        active
+            .confirm(record)
+            .map_err(|_| PairingError::ProtocolViolation)
     }
 
     /// Opens a session to a paired proxy over a connected transport.
@@ -564,6 +642,9 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
             .map_err(|_| SessionError::UnknownPairing)?;
         if record.disposition != PairingDisposition::Paired {
             return Err(SessionError::NotPaired(record.disposition));
+        }
+        if !record.storage_confirmed {
+            return Err(SessionError::StorageUnconfirmed);
         }
         let granted_profiles = record.granted_profiles.clone();
         let core_record = record
@@ -648,6 +729,7 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
             state: SessionState::Healthy,
             granted_profiles,
             end: None,
+            card_present: None,
         })
     }
 
@@ -714,6 +796,10 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
                     finish_close(session, SessionEnd::PeerClose(close_msg.reason));
                     return Err(SessionError::ClosedByPeer(close_msg.reason));
                 }
+                Ok(ReceiveOutcome::Message(TypedMessage::CardStatus(status))) => {
+                    session.note_card_status(status);
+                }
+                Ok(ReceiveOutcome::Message(TypedMessage::OperationProgress(_))) => {}
                 Ok(ReceiveOutcome::Message(_)) => {
                     self.handle_violation(session);
                     return Err(SessionError::EngineFault);
@@ -755,15 +841,34 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
     /// # Errors
     /// Returns [`AdmissionError`] on admission failure, profile mismatch,
     /// or session fault.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "operation execution manages request, progress, liveness, and result state transitions"
-    )]
     pub fn execute<Transport: FrameTransport>(
         &mut self,
         session: &mut Session<Transport>,
         operation: &CardOperation,
         expires_after_ms: u64,
+    ) -> Result<OperationOutcome, AdmissionError> {
+        self.execute_observed(session, operation, expires_after_ms, &mut |_| {})
+    }
+
+    /// Runs one typed operation to its outcome, reporting each
+    /// `operation.progress` event the custodian sends to `observe`: that the
+    /// consent view is on the phone's screen, or that the card is awaited
+    /// (section 8.2 item 3). Every result is acknowledged, whatever its
+    /// status (section 8.2 item 5).
+    ///
+    /// # Errors
+    /// Returns [`AdmissionError`] on admission failure, profile mismatch,
+    /// or session fault.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "operation execution manages request, progress, liveness, and result state transitions"
+    )]
+    pub fn execute_observed<Transport: FrameTransport>(
+        &mut self,
+        session: &mut Session<Transport>,
+        operation: &CardOperation,
+        expires_after_ms: u64,
+        observe: &mut dyn FnMut(ProgressEvent),
     ) -> Result<OperationOutcome, AdmissionError> {
         let profile_name = operation.required_profile();
         let profile_wire = profile_name.as_str();
@@ -830,7 +935,7 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
             return Ok(outcome);
         }
 
-        // RAPP v26.10.10 section 8.2 executes directly: once a consequential
+        // RAPP v26.10.18 section 8.2 executes directly: once a consequential
         // request is sent the custodian may act on it after consent, so an
         // unanswered one is in flight and ends ambiguous, never cancelled.
         let mut state = if consequential {
@@ -916,12 +1021,17 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
                             self.handle_violation(session);
                             return Ok(self.classify_after_close(operation_id, state));
                         }
+                        let reference = OperationReference {
+                            operation_id,
+                            request_hash: req_hash,
+                        };
                         match result_msg.status {
                             ResultStatus::Completed if result_msg.retired => {
                                 // A retired result's response was pruned; there
                                 // is nothing left to deliver.
                                 state = OperationState::Completed;
                                 self.journal_state(operation_id, state, false);
+                                acknowledge(session, reference);
                                 return Ok(OperationOutcome::Rejected(
                                     result_msg.error.map(|e| e.as_str().to_owned()),
                                 ));
@@ -937,14 +1047,7 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
                                 };
                                 state = OperationState::Completed;
                                 self.journal_state(operation_id, state, false);
-                                let ack_msg =
-                                    TypedMessage::OperationResultAck(OperationReference {
-                                        operation_id,
-                                        request_hash: req_hash,
-                                    });
-                                if let Ok(ack_frame) = session.endpoint.send(&ack_msg) {
-                                    let _ = session.transport.send_frame(ack_frame.as_bytes());
-                                }
+                                acknowledge(session, reference);
                                 return Ok(OperationOutcome::Completed(result));
                             }
                             ResultStatus::Rejected
@@ -955,16 +1058,19 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
                             {
                                 state = OperationState::Denied;
                                 self.journal_state(operation_id, state, false);
+                                acknowledge(session, reference);
                                 return Ok(OperationOutcome::Denied);
                             }
                             ResultStatus::Cancelled => {
                                 state = OperationState::Cancelled;
                                 self.journal_state(operation_id, state, false);
+                                acknowledge(session, reference);
                                 return Ok(OperationOutcome::Cancelled);
                             }
                             ResultStatus::Rejected => {
                                 state = OperationState::Rejected;
                                 self.journal_state(operation_id, state, false);
+                                acknowledge(session, reference);
                                 return Ok(OperationOutcome::Rejected(
                                     result_msg.error.map(|e| e.as_str().to_owned()),
                                 ));
@@ -973,12 +1079,14 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
                                 state = OperationState::CredentialRejected;
                                 self.revoke_pairing(session.pair_id, false);
                                 self.journal_state(operation_id, state, true);
+                                acknowledge(session, reference);
                                 self.await_close_after_credential_rejection(session);
                                 return Ok(OperationOutcome::CredentialRejected);
                             }
                             ResultStatus::Ambiguous => {
                                 state = OperationState::Ambiguous;
                                 self.journal_state(operation_id, state, true);
+                                acknowledge(session, reference);
                                 return Ok(OperationOutcome::Ambiguous);
                             }
                         }
@@ -999,8 +1107,18 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
                             "duplicate_operation".to_owned(),
                         )));
                     }
-                    TypedMessage::OperationProgress(_)
-                    | TypedMessage::Error(
+                    TypedMessage::OperationProgress(progress) => {
+                        // Progress names the operation by both halves of its
+                        // reference; a report under another commitment is
+                        // not this operation's and is not shown.
+                        if progress.reference.operation_id == operation_id
+                            && progress.reference.request_hash == req_hash
+                        {
+                            observe(progress.event);
+                        }
+                    }
+                    TypedMessage::CardStatus(status) => session.note_card_status(status),
+                    TypedMessage::Error(
                         ProtocolErrorMessage::UnknownOperation(_)
                         | ProtocolErrorMessage::DuplicateOperation(_),
                     ) => {}
@@ -1099,6 +1217,10 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
                     finish_close(session, SessionEnd::PeerClose(close_msg.reason));
                     return Err(SessionError::ClosedByPeer(close_msg.reason));
                 }
+                Ok(ReceiveOutcome::Message(TypedMessage::CardStatus(status))) => {
+                    session.note_card_status(status);
+                }
+                Ok(ReceiveOutcome::Message(TypedMessage::OperationProgress(_))) => {}
                 Ok(ReceiveOutcome::Message(_)) => {
                     self.handle_violation(session);
                     return Err(SessionError::EngineFault);
@@ -1135,6 +1257,32 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
             updated.retry_prohibited = updated.retry_prohibited || retry_prohibited;
             let _ = self.journal.record(updated);
         }
+    }
+
+    /// Records a verified revocation by the custodian (section 4.6 item 5):
+    /// its session record carried this pairing's revocation hint, or it
+    /// closed a session with `pairing_revoked`. The record becomes its
+    /// tombstone and the caller tells the user that the phone forgot this
+    /// computer.
+    pub fn apply_verified_revocation(&mut self, pair_id: PairId) {
+        self.revoke_pairing(pair_id, true);
+    }
+
+    /// Tells the custodian, over a session the caller dialed, that this
+    /// computer is forgetting the pairing (section 4.6 item 1), then revokes
+    /// it here. The notice is one attempt; a custodian that cannot be
+    /// reached learns nothing, and the pairing is revoked here regardless.
+    pub fn forget_pairing<Transport: FrameTransport>(
+        &mut self,
+        pair_id: PairId,
+        transport: Option<Transport>,
+    ) {
+        if let Some(transport) = transport
+            && let Ok(mut session) = self.connect(pair_id, transport)
+        {
+            self.disconnect(&mut session, CloseReason::PairingRevoked);
+        }
+        self.revoke_pairing(pair_id, false);
     }
 
     /// Durably revokes the pairing.
@@ -1248,13 +1396,21 @@ fn finish_close<Transport: FrameTransport>(session: &mut Session<Transport>, end
     session.end = Some(end);
 }
 
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "milliseconds since Unix epoch fits safely in u64"
-)]
+/// Acknowledges a delivered result, whatever its status (section 8.2 item
+/// 5), after the outcome is journaled. A lost acknowledgement is recovered
+/// by the custodian's re-delivery on the next session.
+fn acknowledge<Transport: FrameTransport>(
+    session: &mut Session<Transport>,
+    reference: OperationReference,
+) {
+    let ack_msg = TypedMessage::OperationResultAck(reference);
+    if let Ok(ack_frame) = session.endpoint.send(&ack_msg) {
+        let _ = session.transport.send_frame(ack_frame.as_bytes());
+    }
+}
+
+/// The continuous clock every protocol deadline is measured on (section
+/// 8.2 item 1).
 fn current_time_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    crate::clock::continuous_ms()
 }

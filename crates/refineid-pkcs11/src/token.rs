@@ -1340,6 +1340,17 @@ impl RemoteCardTransport {
         )
         .map_err(|error| {
             crate::diag::diag!("connect_session_transport: dial failed: {error:?}");
+            if error == refineid_rapp_core::stream::StreamError::Revoked {
+                // A verified revocation (RAPP v26.10.18 section 4.6 item 5):
+                // the pairing is forgotten here and the user told to pair
+                // again.
+                if let Ok(mut store) =
+                    refineid_windows_credential_store::CredentialPairingStore::load()
+                {
+                    let _ = store.forget_after_revocation(self.pair_id);
+                }
+                return "the phone forgot this computer; pair again".to_owned();
+            }
             "unable to reach the paired phone".to_owned()
         })
     }

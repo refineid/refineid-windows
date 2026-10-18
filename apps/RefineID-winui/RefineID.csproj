@@ -52,8 +52,10 @@
     <RefineIdBuildDay>$([System.DateTime]::FromBinary($(RefineIdBuildTicks)).Day)</RefineIdBuildDay>
     <RefineIdBuildBucket>$([MSBuild]::Add($([MSBuild]::Multiply($([System.DateTime]::FromBinary($(RefineIdBuildTicks)).Hour), 10)), $([System.DateTime]::FromBinary($(RefineIdBuildTicks)).ToString("mm").Substring(0, 1))))</RefineIdBuildBucket>
     <RefineIdVersion>$(RefineIdBuildYear).$(RefineIdBuildMonth).$(RefineIdBuildDay).$(RefineIdBuildBucket)</RefineIdVersion>
-    <RefineIdPackageVersion Condition="'$(RefineIdStoreBuild)' != 'true'">$(RefineIdVersion)</RefineIdPackageVersion>
-    <RefineIdPackageVersion Condition="'$(RefineIdStoreBuild)' == 'true'">$(RefineIdBuildYear).$(RefineIdBuildMonth).$(RefineIdBuildDay).0</RefineIdPackageVersion>
+    <RefineIdPackageVersion Condition="'$(RefineIdStoreBuild)' != 'true'"
+      >$(RefineIdVersion)</RefineIdPackageVersion>
+    <RefineIdPackageVersion Condition="'$(RefineIdStoreBuild)' == 'true'"
+      >$(RefineIdBuildYear).$(RefineIdBuildMonth).$(RefineIdBuildDay).0</RefineIdPackageVersion>
     <Version>$(RefineIdVersion)</Version>
     <AssemblyVersion>$(RefineIdVersion)</AssemblyVersion>
     <FileVersion>$(RefineIdVersion)</FileVersion>

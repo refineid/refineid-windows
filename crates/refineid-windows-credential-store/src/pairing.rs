@@ -28,7 +28,10 @@
 
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::persistence::{decode_pairing_records, encode_pairing_records};
-use refineid_rapp_core::store::{PairingDisposition, PairingRecord, PairingStore, StoreError};
+use refineid_rapp_core::store::{
+    PairingDisposition, PairingRecord, PairingStore, StoreError, revoke_unconfirmed,
+};
+use zeroize::Zeroizing;
 
 use crate::CredentialStoreError;
 
@@ -45,6 +48,10 @@ pub struct CredentialPairingStore {
 impl CredentialPairingStore {
     /// Loads the stored pairing set, or an empty store when none exists yet.
     ///
+    /// A record whose peer never confirmed its storage was written inside a
+    /// pairing this computer did not complete; it is revoked here, at the
+    /// first load after that pairing (RAPP v26.10.18 section 4.3 item 4).
+    ///
     /// # Errors
     ///
     /// Fails when the Credential Manager rejects the read, the stored blob is
@@ -55,7 +62,13 @@ impl CredentialPairingStore {
                 .map_err(|_error| CredentialStoreError::InvalidStoredPairing)?,
             None => Vec::new(),
         };
-        Ok(Self { records })
+        let mut store = Self { records };
+        if !revoke_unconfirmed(&mut store).is_empty() {
+            store
+                .persist()
+                .map_err(|_error| CredentialStoreError::InvalidStoredPairing)?;
+        }
+        Ok(store)
     }
 
     /// The number of stored pairings.
@@ -70,21 +83,54 @@ impl CredentialPairingStore {
         self.records.is_empty()
     }
 
-    /// The first usable (non-revoked) stored pairing, if any.
+    /// The first usable stored pairing, if any: one neither revoked nor
+    /// awaiting the peer's storage confirmation.
     ///
     /// A caller that reconnects to a stored pairing needs its `pair_id` and
     /// keys without having kept them from the pairing ceremony.
     #[must_use]
     pub fn usable_pairing(&self) -> Option<&PairingRecord> {
-        self.records
-            .iter()
-            .rfind(|record| record.disposition == PairingDisposition::Paired)
+        self.records.iter().rfind(|record| {
+            record.disposition == PairingDisposition::Paired && record.storage_confirmed
+        })
     }
 
     /// All stored pairing records.
     #[must_use]
     pub fn records(&self) -> &[PairingRecord] {
         &self.records
+    }
+
+    /// Records that the phone announced it forgot `pair_id` (RAPP v26.10.18
+    /// section 4.6 item 5): the keys are destroyed and the record stays as
+    /// the tombstone the user is told about.
+    ///
+    /// # Errors
+    ///
+    /// Fails when no such pairing is stored or the credential cannot be
+    /// written.
+    pub fn forget_after_revocation(&mut self, pair_id: PairId) -> Result<(), StoreError> {
+        self.update(pair_id, &mut |record| {
+            record.disposition = PairingDisposition::Revoked;
+            record.peer_initiated_termination = true;
+            record.local_private = Zeroizing::new(Vec::new());
+            record.peer_public = Vec::new();
+        })
+    }
+
+    /// Replaces the records held here with the credential's current set,
+    /// so a write applies to what is stored now and not to the copy this
+    /// value was loaded with: another store instance may have revoked a
+    /// pairing or deleted the set in the meantime.
+    ///
+    /// A credential that cannot be read leaves the records as they are; a
+    /// set that is gone leaves them empty.
+    fn refresh_from_credential(&mut self) {
+        match stored_records_now() {
+            Refresh::Replace(records) => self.records = records,
+            Refresh::Clear => self.records.clear(),
+            Refresh::Keep => {}
+        }
     }
 
     /// Writes the current record set through to the credential.
@@ -96,6 +142,7 @@ impl CredentialPairingStore {
 
 impl PairingStore for CredentialPairingStore {
     fn insert(&mut self, record: PairingRecord) -> Result<(), StoreError> {
+        self.refresh_from_credential();
         self.records.retain(|entry| entry.pair_id != record.pair_id);
         self.records.push(record);
         self.persist()
@@ -113,6 +160,7 @@ impl PairingStore for CredentialPairingStore {
         pair_id: PairId,
         change: &mut dyn FnMut(&mut PairingRecord),
     ) -> Result<(), StoreError> {
+        self.refresh_from_credential();
         let record = self
             .records
             .iter_mut()
@@ -131,6 +179,7 @@ impl PairingStore for CredentialPairingStore {
     }
 
     fn remove(&mut self, pair_id: PairId) -> Result<(), StoreError> {
+        self.refresh_from_credential();
         let before = self.records.len();
         self.records.retain(|entry| entry.pair_id != pair_id);
         if self.records.len() == before {
@@ -138,6 +187,38 @@ impl PairingStore for CredentialPairingStore {
         }
         self.persist()
     }
+}
+
+/// What the credential says the record set is right now.
+#[cfg_attr(
+    not(windows),
+    allow(
+        dead_code,
+        reason = "only the Windows credential can report a set to replace or clear"
+    )
+)]
+enum Refresh {
+    /// The credential holds these records.
+    Replace(Vec<PairingRecord>),
+    /// The credential set is gone.
+    Clear,
+    /// The credential could not be read, or there is none on this platform.
+    Keep,
+}
+
+#[cfg(windows)]
+fn stored_records_now() -> Refresh {
+    match read_pairing_set() {
+        Ok(Some(blob)) => decode_pairing_records(&blob).map_or(Refresh::Keep, Refresh::Replace),
+        Ok(None) => Refresh::Clear,
+        Err(_) => Refresh::Keep,
+    }
+}
+
+/// Off Windows there is no credential to read; the records stand.
+#[cfg(not(windows))]
+const fn stored_records_now() -> Refresh {
+    Refresh::Keep
 }
 
 /// The fixed credential target holding this user's whole pairing set.
@@ -260,7 +341,7 @@ fn write_pairing_set(blob: &[u8]) -> Result<(), CredentialStoreError> {
 
 /// Reads the serialized pairing set, if one has been stored.
 #[cfg(windows)]
-fn read_pairing_set() -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, CredentialStoreError> {
+fn read_pairing_set() -> Result<Option<Zeroizing<Vec<u8>>>, CredentialStoreError> {
     use core::ptr;
 
     use windows_sys::Win32::Foundation::{
@@ -294,7 +375,7 @@ fn read_pairing_set() -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, CredentialS
                 && let Ok(bytes) = std::fs::read(&path)
                 && !bytes.is_empty()
             {
-                return Ok(Some(zeroize::Zeroizing::new(bytes)));
+                return Ok(Some(Zeroizing::new(bytes)));
             }
         }
         return if error_code == ERROR_NOT_FOUND || error_code == ERROR_NO_SUCH_LOGON_SESSION {
@@ -313,7 +394,7 @@ fn read_pairing_set() -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, CredentialS
     let length = usize::try_from(credential.CredentialBlobSize)
         .map_err(|_error| CredentialStoreError::InvalidStoredPairing)?;
     if length == 0 {
-        return Ok(Some(zeroize::Zeroizing::new(Vec::new())));
+        return Ok(Some(Zeroizing::new(Vec::new())));
     }
     if credential.CredentialBlob.is_null() {
         return Err(CredentialStoreError::InvalidStoredPairing);
@@ -321,7 +402,7 @@ fn read_pairing_set() -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, CredentialS
     // SAFETY: Windows reports `CredentialBlobSize` readable bytes at the blob
     // pointer, and the non-null, non-zero-length case was checked above.
     let blob = unsafe { core::slice::from_raw_parts(credential.CredentialBlob, length) };
-    Ok(Some(zeroize::Zeroizing::new(blob.to_vec())))
+    Ok(Some(Zeroizing::new(blob.to_vec())))
 }
 
 /// Deletes the stored pairing set. Deleting an absent set succeeds.
@@ -364,7 +445,7 @@ const fn write_pairing_set(_blob: &[u8]) -> Result<(), CredentialStoreError> {
 }
 
 #[cfg(not(windows))]
-const fn read_pairing_set() -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, CredentialStoreError> {
+const fn read_pairing_set() -> Result<Option<Zeroizing<Vec<u8>>>, CredentialStoreError> {
     Err(CredentialStoreError::UnsupportedPlatform)
 }
 
@@ -395,6 +476,7 @@ mod tests {
             grants_hash: [4; 32],
             peer_display_name: "Phone".into(),
             peer_platform: "iOS".into(),
+            storage_confirmed: true,
             disposition: PairingDisposition::Paired,
             peer_initiated_termination: false,
             candidate_failures: 0,

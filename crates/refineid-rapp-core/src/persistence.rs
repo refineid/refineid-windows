@@ -23,11 +23,11 @@ use crate::store::{PairingDisposition, PairingRecord};
 const PAIRING_BLOB_MAGIC: &[u8] = b"RAPP-pair-record";
 
 /// The pairing-record encoding revision.
-const PAIRING_BLOB_VERSION: u8 = 6;
+const PAIRING_BLOB_VERSION: u8 = 7;
 
 /// The highest revision written for an earlier RAPP protocol version. Those
-/// pairings cannot open RAPP v26.10.10 sessions, so they are not loaded.
-const LAST_EARLIER_PROTOCOL_BLOB_VERSION: u8 = 5;
+/// pairings cannot open RAPP v26.10.18 sessions, so they are not loaded.
+const LAST_EARLIER_PROTOCOL_BLOB_VERSION: u8 = 6;
 
 /// Format tag identifying a whole stored pairing set.
 const PAIRING_SET_MAGIC: &[u8] = b"RAPP-pair-set";
@@ -117,6 +117,11 @@ pub fn encode_pairing_record(record: &PairingRecord) -> Zeroizing<Vec<u8>> {
     } else {
         BOOLEAN_FALSE
     });
+    out.push(if record.storage_confirmed {
+        BOOLEAN_TRUE
+    } else {
+        BOOLEAN_FALSE
+    });
     out.extend_from_slice(&record.candidate_failures.to_be_bytes());
     put_bytes(&mut out, &record.local_private);
     put_bytes(&mut out, &record.local_public);
@@ -157,6 +162,7 @@ pub fn decode_pairing_record(blob: &[u8]) -> Result<PairingRecord, PairingCodecE
     let grants_hash = reader.take_array()?;
     let disposition = disposition_from_tag(reader.take_u8()?)?;
     let peer_initiated_termination = boolean_from_tag(reader.take_u8()?)?;
+    let storage_confirmed = boolean_from_tag(reader.take_u8()?)?;
     let candidate_failures = u32::from_be_bytes(reader.take_array()?);
     let local_private = Zeroizing::new(reader.take_length_prefixed()?.to_vec());
     let local_public = reader.take_length_prefixed()?.to_vec();
@@ -185,6 +191,7 @@ pub fn decode_pairing_record(blob: &[u8]) -> Result<PairingRecord, PairingCodecE
         grants_hash,
         peer_display_name,
         peer_platform,
+        storage_confirmed,
         disposition,
         peer_initiated_termination,
         candidate_failures,
@@ -403,6 +410,7 @@ mod tests {
             grants_hash: [4; 32],
             peer_display_name: "Holder's Phone".into(),
             peer_platform: "iOS".into(),
+            storage_confirmed: true,
             disposition: PairingDisposition::Paired,
             peer_initiated_termination: false,
             candidate_failures: 2,
@@ -425,6 +433,7 @@ mod tests {
         assert_eq!(left.grants_hash, right.grants_hash);
         assert_eq!(left.peer_display_name, right.peer_display_name);
         assert_eq!(left.peer_platform, right.peer_platform);
+        assert_eq!(left.storage_confirmed, right.storage_confirmed);
         assert_eq!(left.disposition, right.disposition);
         assert_eq!(
             left.peer_initiated_termination,
@@ -442,6 +451,14 @@ mod tests {
         let record = sample();
         let blob = encode_pairing_record(&record);
         let decoded = decode_pairing_record(&blob).unwrap();
+        assert_same(&record, &decoded);
+    }
+
+    #[test]
+    fn round_trips_an_unconfirmed_record() {
+        let mut record = sample();
+        record.storage_confirmed = false;
+        let decoded = decode_pairing_record(&encode_pairing_record(&record)).unwrap();
         assert_same(&record, &decoded);
     }
 

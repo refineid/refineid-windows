@@ -1,7 +1,7 @@
 # RefineID Windows: Remote Transport & Discovery Architecture
 
 - **Document Version**: `26.10.3`
-- **Protocol Version**: `26.10.10`
+- **Protocol Version**: `26.10.18`
 - **Status**: Normative Architecture & Migration Plan
 - **Applies To**: `RefineID-Windows` (`RefineID-winui`, `refineid-minidriver`, `refineid-pkcs11`, `refineid-rapp-core`)
 - **Companion Specification**: [RAPP Transport and Discovery Hierarchy Specification](../../refineid-core/docs/protocols/rapp-transport-and-discovery-hierarchy.md)
@@ -128,6 +128,8 @@ In the legacy codebase:
    - When the user toggles "Enable Remote Phone Reader" off, `watcher.Stop()` is invoked immediately, stopping discovery and releasing all resources.
    - TXT records are handed to `refineid_rapp` unparsed: `DiscoveryRecord::parse` and `DiscoveryKey::matches_record` decide whether a `mode=session` record names a stored pairing, and `WithdrawnRecord::parse` with `WithdrawalKey::matches` decides whether a `mode=withdrawn` record announces that its custodian stopped serving (RAPP v26.10.10 §4.5).
    - A verified withdrawal, or an authenticated `session.close` with reason `service_withdrawn`, marks the pairing withdrawn: discovered phones are not dialed for it again until a `mode=session` record that names it, or one publishing no hints, shows its custodian serving. Configured endpoints (`REFINEID_RAPP_ENDPOINT`, `--connect`, the local mock custodian) are always dialed. A custodian that disappears without announcing it is simply not found at the next dial; the pairing is unchanged either way.
+   - A `mode=session` record whose `revoked` entries carry the pairing's revocation hint for its instance and discovery epoch (`RevocationKey::matches`, RAPP v26.10.18 §4.6), or an authenticated `session.close` with reason `pairing_revoked`, is a verified revocation: the pairing is forgotten here with its keys destroyed, nothing is dialed for it again, and the user is told that the phone forgot this computer. The computer's own forget action tells the phone first over one short-lived session (§4.6 item 1), then deletes the pairing.
+   - A requester holds an open session to the phone for as long as it offers the phone's certificate to browsers (§8.4): the session's `card.status` says whether a card can answer, and the offer is withdrawn when the session ends, the card leaves, or liveness fails.
 2. **Outbound Stream Connection**:
    - Establish outbound connection using standard `System.Net.Sockets.TcpClient`:
      ```csharp
@@ -157,7 +159,7 @@ In the legacy codebase:
    - When unchecked, the application generates zero network traffic and listens on zero sockets.
    - When checked, DNS-SD service browsing and BLE scanning activate to discover announced mobile readers.
 3. **One-Time Pairing UI**:
-   - When pairing a new phone, the desktop prompts for the 6-character Crockford Base32 code displayed on the phone (per RAPP v26.10.10 §3).
+   - When pairing a new phone, the desktop prompts for the 6-character Crockford Base32 code displayed on the phone (per RAPP v26.10.18 §3).
    - Once paired, the trust record is stored in Windows Credential Store (`refineid-windows-credential-store`).
 
 ---

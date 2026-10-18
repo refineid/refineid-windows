@@ -19,7 +19,7 @@ members = [
 ]
 
 [workspace.package]
-version = "26.10.11"
+version = "26.10.18"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["Petri Koistinen"]
