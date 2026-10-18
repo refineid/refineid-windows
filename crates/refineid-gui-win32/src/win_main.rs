@@ -53,7 +53,8 @@ use refineid_doc_sign::cades::SigningTime;
 use refineid_doc_sign::document::Format;
 use refineid_doc_sign::pades::{SignatureMetadata, StampLanguage};
 use refineid_doc_sign::service::{
-    DocumentRequest, SignOptions, SignReport, SignSlot, VisibleSignatureRequest, sign_with_slot,
+    DEFAULT_TIMESTAMP_AUTHORITY, DocumentRequest, SignOptions, SignReport, VisibleSignatureRequest,
+    sign_qualified,
 };
 use refineid_lib_core::identity::CommonName;
 use refineid_lib_core::pin::PinBytes;
@@ -121,7 +122,6 @@ const IDC_DBROWSE: u16 = 601;
 const IDC_DSIGN: u16 = 602;
 const IDC_DFILE: u16 = 603;
 const IDC_DFORMAT: u16 = 604;
-const IDC_DSLOT: u16 = 605;
 const IDC_DPIN: u16 = 606;
 const IDC_DREASON: u16 = 607;
 const IDC_DRESULT: u16 = 608;
@@ -131,7 +131,6 @@ const IDC_VVERIFY: u16 = 611;
 const IDC_VRESULT: u16 = 612;
 const IDC_DFILELBL: u16 = 613;
 const IDC_DFORMATLBL: u16 = 614;
-const IDC_DSLOTLBL: u16 = 615;
 const IDC_DPINLBL: u16 = 616;
 const IDC_DREASONLBL: u16 = 617;
 const IDC_VFILELBL: u16 = 618;
@@ -172,7 +171,6 @@ struct AppState {
     pin_result_ok: Option<bool>,
     doc_file: HWND,
     doc_format: HWND,
-    doc_slot: HWND,
     doc_pin: HWND,
     doc_reason: HWND,
     doc_result: HWND,
@@ -1024,37 +1022,10 @@ fn on_create(main: HWND) -> windows::core::Result<()> {
     doc_label(
         pages[3],
         instance,
-        "Signature",
-        250,
-        100,
-        60,
-        IDC_DSLOTLBL,
-        font,
-        &mut tints,
-    )?;
-    let doc_slot = child(
-        w!("COMBOBOX"),
-        "",
-        WS_CHILD | WS_VISIBLE | WINDOW_STYLE(CBS_DROPDOWNLIST as u32),
-        315,
-        98,
-        185,
-        120,
-        pages[3],
-        IDC_DSLOT,
-        instance,
-    )?;
-    set_font(doc_slot, font);
-    combo_add(doc_slot, "Qualified (PIN2)");
-    combo_add(doc_slot, "Authentication (PIN1)");
-    send(doc_slot, CB_SETCURSEL, 0, 0);
-    doc_label(
-        pages[3],
-        instance,
-        "PIN",
+        "Signing PIN (PIN 2)",
         16,
         132,
-        50,
+        120,
         IDC_DPINLBL,
         font,
         &mut tints,
@@ -1063,9 +1034,9 @@ fn on_create(main: HWND) -> windows::core::Result<()> {
         w!("EDIT"),
         "",
         WS_CHILD | WS_VISIBLE | WS_BORDER | WINDOW_STYLE(ES_PASSWORD as u32),
-        70,
+        140,
         130,
-        170,
+        100,
         24,
         pages[3],
         IDC_DPIN,
@@ -1385,7 +1356,6 @@ fn on_create(main: HWND) -> windows::core::Result<()> {
             pin_result_ok: None,
             doc_file,
             doc_format,
-            doc_slot,
             doc_pin,
             doc_reason,
             doc_result,
@@ -2168,14 +2138,13 @@ fn start_doc_sign() {
             (
                 state.doc_file,
                 state.doc_format,
-                state.doc_slot,
                 state.doc_pin,
                 state.doc_reason,
                 state.card_busy,
             )
         })
     });
-    let Some((file_edit, format_combo, slot_combo, pin_edit, reason_edit, busy)) = snapshot else {
+    let Some((file_edit, format_combo, pin_edit, reason_edit, busy)) = snapshot else {
         return;
     };
     if busy {
@@ -2190,11 +2159,6 @@ fn start_doc_sign() {
         Format::AsicECades
     } else {
         Format::Pades
-    };
-    let slot = if send(slot_combo, CB_GETCURSEL, 0, 0) == 1 {
-        SignSlot::Auth
-    } else {
-        SignSlot::Qualified
     };
     let input = PathBuf::from(path);
     if format == Format::Pades && !is_pdf(&input) {
@@ -2230,9 +2194,9 @@ fn start_doc_sign() {
         expected_serial: None,
         visible_signature: (format == Format::Pades)
             .then(|| VisibleSignatureRequest::Verification(user_interface_language())),
-        archive: false,
-        long_term: false,
-        timestamp_authorities: Vec::new(),
+        archive: true,
+        long_term: true,
+        timestamp_authorities: vec![DEFAULT_TIMESTAMP_AUTHORITY.to_owned()],
         timestamp_credentials: None,
     };
     let options = SignOptions {
@@ -2247,7 +2211,7 @@ fn start_doc_sign() {
     set_doc_result("Signing…");
     set_card_busy(true);
     std::thread::spawn(move || {
-        let text = match sign_with_slot(PcscBackend, slot, options) {
+        let text = match sign_qualified(PcscBackend, options) {
             Ok(report) => render_sign_report(&report),
             Err(error) => format!("Signing failed:\r\n{error}"),
         };
@@ -2550,12 +2514,8 @@ fn render_sign_report(report: &SignReport) -> String {
         .cert_subject_cn
         .as_ref()
         .map_or("unknown signer", CommonName::as_str);
-    let slot = match report.slot {
-        SignSlot::Qualified => "qualified",
-        SignSlot::Auth => "authentication",
-    };
     format!(
-        "Signed:\r\n{}\r\n{} bytes · {slot} signature · local verify: {}\r\nSigner: {signer}",
+        "Signed:\r\n{}\r\n{} bytes · qualified signature · local verify: {}\r\nSigner: {signer}",
         report.signature_path.display(),
         report.output_len,
         report.local_verify,
@@ -2969,55 +2929,9 @@ fn utf16_nul(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// The bits of a Windows language identifier that name the language,
-/// `PRIMARYLANGID` of winnt.h.
-const PRIMARY_LANGUAGE_MASK: u16 = 0x03ff;
-/// `LANG_FINNISH` of winnt.h.
-const LANGUAGE_FINNISH: u16 = 0x0b;
-/// `LANG_SWEDISH` of winnt.h.
-const LANGUAGE_SWEDISH: u16 = 0x1d;
-
 /// The language the user's Windows interface is shown in, as the stamp
 /// names it.
 fn user_interface_language() -> StampLanguage {
     // SAFETY: the call takes no arguments and returns a language identifier.
-    stamp_language_for(unsafe { GetUserDefaultUILanguage() })
-}
-
-/// The stamp language of a Windows language identifier, judged by its
-/// primary language whatever its region; English for any language the
-/// stamp does not carry.
-const fn stamp_language_for(language_id: u16) -> StampLanguage {
-    match language_id & PRIMARY_LANGUAGE_MASK {
-        LANGUAGE_FINNISH => StampLanguage::Finnish,
-        LANGUAGE_SWEDISH => StampLanguage::Swedish,
-        _ => StampLanguage::English,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::stamp_language_for;
-    use refineid_doc_sign::pades::StampLanguage;
-
-    /// Windows language identifiers of winnt.h: Finnish (Finland), Swedish
-    /// (Sweden), Swedish (Finland), English (United States), and one the
-    /// stamp does not carry, German (Germany).
-    const FINNISH_FINLAND: u16 = 0x040b;
-    const SWEDISH_SWEDEN: u16 = 0x041d;
-    const SWEDISH_FINLAND: u16 = 0x081d;
-    const ENGLISH_UNITED_STATES: u16 = 0x0409;
-    const GERMAN_GERMANY: u16 = 0x0407;
-
-    #[test]
-    fn the_stamp_language_follows_the_primary_language_of_the_identifier() {
-        assert_eq!(stamp_language_for(FINNISH_FINLAND), StampLanguage::Finnish);
-        assert_eq!(stamp_language_for(SWEDISH_SWEDEN), StampLanguage::Swedish);
-        assert_eq!(stamp_language_for(SWEDISH_FINLAND), StampLanguage::Swedish);
-        assert_eq!(
-            stamp_language_for(ENGLISH_UNITED_STATES),
-            StampLanguage::English
-        );
-        assert_eq!(stamp_language_for(GERMAN_GERMANY), StampLanguage::English);
-    }
+    StampLanguage::for_windows_language(unsafe { GetUserDefaultUILanguage() })
 }

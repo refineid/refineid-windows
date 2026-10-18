@@ -54,6 +54,7 @@ internal sealed partial class DocumentPage : Page
         this.TitleText.Text = signing ? "Sign" : "Verify";
         this.SignPanel.Visibility = signing ? Visibility.Visible : Visibility.Collapsed;
         this.VerifyButton.Visibility = signing ? Visibility.Collapsed : Visibility.Visible;
+        this.UpdateActions();
     }
 
     private async void ChooseFileButton_Click(object sender, RoutedEventArgs args)
@@ -92,6 +93,7 @@ internal sealed partial class DocumentPage : Page
         {
             this.FileBox.Text = file.Path;
             this.ClearOutcome();
+            this.UpdateActions();
         }
     }
 
@@ -126,7 +128,6 @@ internal sealed partial class DocumentPage : Page
 
         DocumentFormat format =
             this.FormatBox.SelectedIndex == 1 ? DocumentFormat.AsicE : DocumentFormat.Pades;
-        PinSlot slot = this.SlotBox.SelectedIndex == 1 ? PinSlot.Pin1 : PinSlot.Pin2;
         string pin = this.PinBox.Password;
         string reason = this.ReasonBox.Text;
         this.ClearOutcome();
@@ -134,7 +135,7 @@ internal sealed partial class DocumentPage : Page
         {
             this.ShowStatus(
                 InfoBarSeverity.Warning,
-                $"The PIN is {PinMinimumLength} to {PinMaximumLength} digits."
+                $"PIN 2 is {PinMinimumLength} to {PinMaximumLength} digits."
             );
             return;
         }
@@ -151,7 +152,7 @@ internal sealed partial class DocumentPage : Page
                 try
                 {
                     report = await Task.Run(() =>
-                            LocalCardService.SignDocument(path, format, slot, pin, reason)
+                            LocalCardService.SignDocument(path, format, pin, reason)
                         )
                         .ConfigureAwait(true);
                 }
@@ -161,7 +162,7 @@ internal sealed partial class DocumentPage : Page
                 }
 
                 this.ResultText.Text =
-                    $"{report.OutputPath}\n{report.OutputLength} bytes, {report.Slot} signature, local verify {report.LocalVerify}"
+                    $"{report.OutputPath}\n{report.OutputLength} bytes, qualified signature, local verify {report.LocalVerify}"
                     + (report.SignerCommonName is string signer ? $"\n{signer}" : string.Empty);
                 if (report.Verified)
                 {
@@ -249,6 +250,15 @@ internal sealed partial class DocumentPage : Page
         this.ActionRoot.IsHitTestVisible = !busy;
         this.BusyOverlay.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
         this.BusyOverlay.IsHitTestVisible = busy;
+        this.UpdateActions();
+    }
+
+    /// <summary>Sign and Verify act only on a chosen file, one operation at a time.</summary>
+    private void UpdateActions()
+    {
+        bool ready = !this.busy && this.FileBox.Text.Length > 0;
+        this.SignButton.IsEnabled = ready;
+        this.VerifyButton.IsEnabled = ready;
     }
 
     private void ShowStatus(InfoBarSeverity severity, string message)

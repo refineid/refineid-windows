@@ -73,21 +73,11 @@
                             <ComboBoxItem Content="PDF signature" />
                             <ComboBoxItem Content="ASiC-E container" />
                         </ComboBox>
-                        <ComboBox
-                            x:Name="SlotBox"
-                            AutomationProperties.AutomationId="SlotBox"
-                            AutomationProperties.Name="Signing key"
-                            Header="Key"
-                            SelectedIndex="0"
-                        >
-                            <ComboBoxItem Content="PIN2 - qualified signature" />
-                            <ComboBoxItem Content="PIN1 - authentication" />
-                        </ComboBox>
                         <PasswordBox
                             x:Name="PinBox"
                             AutomationProperties.AutomationId="PinBox"
-                            AutomationProperties.Name="PIN"
-                            Header="PIN"
+                            AutomationProperties.Name="Signing PIN (PIN 2)"
+                            Header="Signing PIN (PIN 2)"
                             MaxLength="12"
                             PasswordRevealMode="Hidden"
                         />
@@ -104,6 +94,7 @@
                             AutomationProperties.Name="Sign"
                             Click="SignButton_Click"
                             Content="Sign"
+                            IsEnabled="False"
                             Style="{StaticResource AccentButtonStyle}"
                         />
                     </StackPanel>
@@ -113,6 +104,7 @@
                         AutomationProperties.Name="Verify"
                         Click="VerifyButton_Click"
                         Content="Verify"
+                        IsEnabled="False"
                         Style="{StaticResource AccentButtonStyle}"
                         Visibility="Collapsed"
                     />

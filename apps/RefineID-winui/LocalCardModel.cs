@@ -59,9 +59,6 @@ internal sealed class DocumentSignReport
     [JsonPropertyName("output_len")]
     public long OutputLength { get; init; }
 
-    [JsonPropertyName("slot")]
-    public string Slot { get; init; } = string.Empty;
-
     [JsonPropertyName("signer_cn")]
     public string? SignerCommonName { get; init; }
 
