@@ -126,7 +126,7 @@ mod windows_main {
 
     fn usage() -> String {
         "usage: refineid-msi --architecture <x64|arm64> --minidriver <path> \
-         --output <path> --version <YY.M.D.B>"
+         --output <path> --version <YY.M.D.HHMM>"
             .to_owned()
     }
 

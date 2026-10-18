@@ -23,9 +23,12 @@ use refineid_stamp::Stamp;
 fn main() {
     let stamp = Stamp::from_build_environment();
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
+    // A CK_VERSION holds two bytes: the day of the stamp, and its time of
+    // day truncated to six-minute steps.
     let source = format!(
         "const TOKEN_FIRMWARE_VERSION: CkVersion = CkVersion {{ major: {}, minor: {} }};\n",
-        stamp.day, stamp.bucket
+        stamp.day,
+        stamp.time_byte()
     );
     fs::write(out.join("token-version.rs"), source).expect("write token version");
 }

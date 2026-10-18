@@ -12,8 +12,9 @@
 // implied. See the License for the specific language governing
 // permissions and limitations under the License.
 
-//! The build stamp: calendar version `YY.M.D.B`, where `B` is the
-//! ten-minute bucket of the UTC day (hour * 10 + minute / 10, 0 to 235).
+//! The build stamp: calendar version `YY.M.D.HHMM`, where `HHMM` is the
+//! UTC time of day of the stamp as one number, `hour * 100 + minute`, 0 to
+//! 2359.
 //!
 //! The build environment passes the stamp in `REFINEID_VERSION` so every
 //! artifact of one build carries the same instant; without it the stamp is
@@ -27,6 +28,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// The environment variable the build environment passes the stamp in.
 pub const ENV: &str = "REFINEID_VERSION";
 
+/// The calendar months a stamp may name.
+const MONTHS: std::ops::RangeInclusive<u8> = 1..=12;
+
+/// The days of a month a stamp may name.
+const DAYS: std::ops::RangeInclusive<u8> = 1..=31;
+
 /// One build instant as calendar version components.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stamp {
@@ -36,9 +43,20 @@ pub struct Stamp {
     pub month: u8,
     /// Day of the month, 1 to 31.
     pub day: u8,
-    /// Ten-minute bucket of the day, 0 to 235.
-    pub bucket: u8,
+    /// Hour of the UTC day, 0 to 23.
+    pub hour: u8,
+    /// Minute of the hour, 0 to 59.
+    pub minute: u8,
 }
+
+/// Minutes in an hour.
+const MINUTES_PER_HOUR: u16 = 60;
+/// Minutes in a day.
+const MINUTES_PER_DAY: u16 = 24 * MINUTES_PER_HOUR;
+/// Minutes in one step of the byte-sized time of day.
+const MINUTES_PER_TIME_BYTE_STEP: u16 = 6;
+/// The factor that places the hour before the minute in `HHMM`.
+const HOUR_PLACE: u16 = 100;
 
 impl Stamp {
     /// The stamp from `REFINEID_VERSION`, or the UTC clock when the
@@ -47,7 +65,7 @@ impl Stamp {
     ///
     /// # Panics
     ///
-    /// When `REFINEID_VERSION` is set but is not `YY.M.D.B`.
+    /// When `REFINEID_VERSION` is set but is not `YY.M.D.HHMM`.
     #[must_use]
     pub fn from_build_environment() -> Self {
         println!("cargo:rerun-if-env-changed={ENV}");
@@ -55,22 +73,55 @@ impl Stamp {
             |_| Self::now(),
             |text| {
                 Self::parse(&text)
-                    .unwrap_or_else(|| panic!("{ENV} must be YY.M.D.B, found {text:?}"))
+                    .unwrap_or_else(|| panic!("{ENV} must be YY.M.D.HHMM, found {text:?}"))
             },
         )
     }
 
-    /// Parses `YY.M.D.B`.
+    /// Parses `YY.M.D.HHMM`; the time may be written with or without its
+    /// leading zero.
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
-        let mut parts = text.trim().split('.').map(|part| part.parse::<u8>().ok());
-        let stamp = Self {
-            year: parts.next()??,
-            month: parts.next()??,
-            day: parts.next()??,
-            bucket: parts.next()??,
-        };
-        parts.next().is_none().then_some(stamp)
+        let mut parts = text.trim().split('.');
+        let year = parts.next()?.parse::<u8>().ok()?;
+        let month = parts.next()?.parse::<u8>().ok()?;
+        let day = parts.next()?.parse::<u8>().ok()?;
+        let time = parts.next()?.parse::<u16>().ok()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        let hour = u8::try_from(time / HOUR_PLACE).ok()?;
+        let minute = u8::try_from(time % HOUR_PLACE).ok()?;
+        (MONTHS.contains(&month)
+            && DAYS.contains(&day)
+            && u16::from(hour) < MINUTES_PER_DAY / MINUTES_PER_HOUR
+            && u16::from(minute) < MINUTES_PER_HOUR)
+            .then_some(Self {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+            })
+    }
+
+    /// The time of day as one number, `hour * 100 + minute`.
+    #[must_use]
+    pub fn time_of_day(&self) -> u16 {
+        u16::from(self.hour) * HOUR_PLACE + u16::from(self.minute)
+    }
+
+    /// The time of day in minutes since midnight, 0 to 1439.
+    #[must_use]
+    pub fn minute_of_day(&self) -> u16 {
+        u16::from(self.hour) * MINUTES_PER_HOUR + u16::from(self.minute)
+    }
+
+    /// The time of day truncated to a byte for a field that holds no more:
+    /// six-minute steps since midnight, 0 to 239.
+    #[must_use]
+    pub fn time_byte(&self) -> u8 {
+        u8::try_from(self.minute_of_day() / MINUTES_PER_TIME_BYTE_STEP).unwrap_or(u8::MAX)
     }
 
     /// The stamp of the UTC clock now.
@@ -91,22 +142,28 @@ impl Stamp {
         let days = i64::try_from(seconds / 86_400).expect("day count fits");
         let (year, month, day) = civil_from_days(days);
         let second_of_day = seconds % 86_400;
-        let bucket = (second_of_day / 3_600) * 10 + (second_of_day % 3_600) / 600;
+        let minute_of_day = second_of_day / u64::from(MINUTES_PER_HOUR);
         Self {
             year: u8::try_from(year - 2000).expect("year between 2000 and 2255"),
             month: u8::try_from(month).expect("month fits"),
             day: u8::try_from(day).expect("day fits"),
-            bucket: u8::try_from(bucket).expect("bucket below 236"),
+            hour: u8::try_from(minute_of_day / u64::from(MINUTES_PER_HOUR)).expect("hour fits"),
+            minute: u8::try_from(minute_of_day % u64::from(MINUTES_PER_HOUR)).expect("minute fits"),
         }
     }
 }
 
 impl fmt::Display for Stamp {
+    /// `YY.M.D.HHMM`, the time as one number without a leading zero, as
+    /// every version field that carries it reads a plain integer.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "{}.{}.{}.{}",
-            self.year, self.month, self.day, self.bucket
+            self.year,
+            self.month,
+            self.day,
+            self.time_of_day()
         )
     }
 }
@@ -142,28 +199,48 @@ mod tests {
         );
         assert_eq!(
             Stamp::from_unix_seconds(1_791_672_678).to_string(),
-            "26.10.10.225"
+            "26.10.10.2251"
         );
         assert_eq!(
             Stamp::from_unix_seconds(4_102_444_799).to_string(),
-            "99.12.31.235"
+            "99.12.31.2359"
         );
     }
 
     #[test]
-    fn parse_accepts_four_components_only() {
+    fn parse_accepts_four_components_with_a_time_of_day_only() {
+        let stamp = Stamp {
+            year: 26,
+            month: 10,
+            day: 10,
+            hour: 9,
+            minute: 5,
+        };
+        assert_eq!(Stamp::parse(" 26.10.10.905\n"), Some(stamp));
+        assert_eq!(Stamp::parse("26.10.10.0905"), Some(stamp));
         assert_eq!(
-            Stamp::parse(" 26.10.10.205\n"),
-            Some(Stamp {
-                year: 26,
-                month: 10,
-                day: 10,
-                bucket: 205
-            })
+            Stamp::parse("26.10.10.2359").map(|s| s.time_of_day()),
+            Some(2359)
         );
         assert_eq!(Stamp::parse("26.10.10"), None);
-        assert_eq!(Stamp::parse("26.10.10.205.1"), None);
-        assert_eq!(Stamp::parse("26.10.10.300"), None);
+        assert_eq!(Stamp::parse("26.10.10.905.1"), None);
+        assert_eq!(Stamp::parse("26.10.10.2400"), None);
+        assert_eq!(Stamp::parse("26.10.10.1260"), None);
+        assert_eq!(Stamp::parse("26.0.10.905"), None);
+        assert_eq!(Stamp::parse("26.13.10.905"), None);
+        assert_eq!(Stamp::parse("26.10.0.905"), None);
+        assert_eq!(Stamp::parse("26.10.32.905"), None);
         assert_eq!(Stamp::parse("1.0.0.0-beta"), None);
+    }
+
+    #[test]
+    fn the_time_byte_counts_six_minute_steps() {
+        let midnight = Stamp::parse("26.10.18.0").expect("parses");
+        let late = Stamp::parse("26.10.18.2359").expect("parses");
+        let noon = Stamp::parse("26.10.18.1200").expect("parses");
+        assert_eq!(midnight.time_byte(), 0);
+        assert_eq!(noon.time_byte(), 120);
+        assert_eq!(late.time_byte(), 239);
+        assert_eq!(late.minute_of_day(), 1439);
     }
 }
