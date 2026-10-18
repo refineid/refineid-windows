@@ -416,6 +416,9 @@ struct DocumentSignJson {
     output_len: usize,
     slot: &'static str,
     signer_cn: Option<String>,
+    /// Whether the written signature passed the local check; a skipped
+    /// check counts as passed, a failed one does not.
+    verified: bool,
     local_verify: String,
 }
 
@@ -429,6 +432,7 @@ impl From<SignReport> for DocumentSignJson {
                 SignSlot::Auth => "authentication",
             },
             signer_cn: report.cert_subject_cn.map(|cn| cn.as_str().to_owned()),
+            verified: !matches!(report.local_verify, LocalVerifyOutcome::Failed(_)),
             local_verify: match report.local_verify {
                 LocalVerifyOutcome::Ok => "ok".to_owned(),
                 LocalVerifyOutcome::Failed(detail) => format!("failed: {detail}"),
@@ -511,18 +515,9 @@ pub unsafe extern "C" fn refineid_settings_sign_document(
             can: None,
             document: Some(request),
         };
-        let report = sign_with_slot(PcscBackend, slot, options)
-            .map_err(|error| ApiFailure::new("sign_failed", error.to_string()))?;
-        if let LocalVerifyOutcome::Failed(detail) = &report.local_verify {
-            return Err(ApiFailure::new(
-                "local_verify_failed",
-                format!(
-                    "The signature written to {} did not verify: {detail}",
-                    report.signature_path.display()
-                ),
-            ));
-        }
-        Ok(DocumentSignJson::from(report))
+        sign_with_slot(PcscBackend, slot, options)
+            .map(DocumentSignJson::from)
+            .map_err(|error| ApiFailure::new("sign_failed", error.to_string()))
     })
 }
 
@@ -549,39 +544,47 @@ const fn sign_slot(slot: PinManageSlot) -> SignSlot {
 /// The last ordinal tried for a free output name.
 const MAX_OUTPUT_ORDINAL: u32 = 1_000;
 
-/// Output beside the input, under a name no file holds yet: `-signed.pdf`
-/// for a PDF signature, `.asice` appended for a container, `-signed.asice`
-/// for a container signed again, and `-signed-2`, `-signed-3` and so on
-/// while the name is taken.
+/// Output beside the input, under a name no file holds yet.
+///
+/// A PDF signature of `name.pdf` is `name-signed.pdf`; a container made
+/// from a file that is not one is `name.asice`; a container signed again
+/// is `name-signed.asice`. A `-signed` or `-signed-N` the input already
+/// carries is counted up, and a taken name moves on to `-2`, `-3` and so
+/// on after the `-signed` or the `.asice`.
 ///
 /// # Errors
-/// `invalid_path` when the input has no file name.
+/// `invalid_path` when the input has no file name or every name is taken.
 fn derive_output(input: &std::path::Path, format: Format) -> Result<PathBuf, ApiFailure> {
     let name = input
         .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
         .ok_or_else(|| ApiFailure::new("invalid_path", "The path names no file"))?;
-    let (stem, suffix) = if format == Format::Pades {
-        (
-            name.strip_suffix_ignore_case(".pdf").unwrap_or(name),
-            ".pdf",
-        )
+    let (base, suffix) = if format == Format::Pades {
+        let stem = name.strip_suffix_ignore_case(".pdf").unwrap_or(name);
+        (format!("{}-signed", strip_signed(stem)), ".pdf")
     } else if let Some(stem) = name.strip_suffix_ignore_case(".asice") {
-        (stem, ".asice")
+        (format!("{}-signed", strip_signed(stem)), ".asice")
     } else {
-        (name, ".asice")
+        (name.to_owned(), ".asice")
     };
-    let first = if format == Format::Pades || name.len() != stem.len() {
-        format!("{stem}-signed{suffix}")
-    } else {
-        format!("{name}{suffix}")
-    };
-    std::iter::once(first)
-        .chain((2..=MAX_OUTPUT_ORDINAL).map(|ordinal| format!("{stem}-signed-{ordinal}{suffix}")))
+    std::iter::once(format!("{base}{suffix}"))
+        .chain((2..=MAX_OUTPUT_ORDINAL).map(|ordinal| format!("{base}-{ordinal}{suffix}")))
         .map(|candidate| input.with_file_name(candidate))
         .find(|candidate| !candidate.exists())
         .ok_or_else(|| ApiFailure::new("invalid_path", "No free output name"))
+}
+
+/// The stem without a trailing `-signed` or `-signed-N`.
+fn strip_signed(stem: &str) -> &str {
+    if let Some(base) = stem.strip_suffix("-signed") {
+        return base;
+    }
+    stem.rsplit_once("-signed-")
+        .filter(|(_, ordinal)| {
+            !ordinal.is_empty() && ordinal.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        .map_or(stem, |(base, _)| base)
 }
 
 /// Case-insensitive suffix removal for file names.
@@ -1174,26 +1177,45 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("refineid-settings-ffi-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
-        let contract = directory.join("contract.pdf");
-        let notes = directory.join("notes.txt");
-        let container = directory.join("notes.txt.asice");
+        let pdf = |name: &str| derive_output(&directory.join(name), Format::Pades).unwrap();
+        let container =
+            |name: &str| derive_output(&directory.join(name), Format::AsicECades).unwrap();
+        let taken = |name: &str| std::fs::write(directory.join(name), b"taken").unwrap();
+
+        assert_eq!(pdf("contract.pdf"), directory.join("contract-signed.pdf"));
+        taken("contract-signed.pdf");
+        assert_eq!(pdf("contract.pdf"), directory.join("contract-signed-2.pdf"));
         assert_eq!(
-            derive_output(&contract, Format::Pades).unwrap(),
-            directory.join("contract-signed.pdf")
-        );
-        assert_eq!(
-            derive_output(&notes, Format::AsicECades).unwrap(),
-            container
-        );
-        assert_eq!(
-            derive_output(&container, Format::AsicECades).unwrap(),
-            directory.join("notes.txt-signed.asice")
-        );
-        std::fs::write(directory.join("contract-signed.pdf"), b"taken").unwrap();
-        assert_eq!(
-            derive_output(&contract, Format::Pades).unwrap(),
+            pdf("contract-signed.pdf"),
             directory.join("contract-signed-2.pdf")
         );
+        taken("contract-signed-2.pdf");
+        assert_eq!(
+            pdf("contract-signed-2.pdf"),
+            directory.join("contract-signed-3.pdf")
+        );
+
+        assert_eq!(container("notes.txt"), directory.join("notes.txt.asice"));
+        taken("notes.txt.asice");
+        assert_eq!(container("notes.txt"), directory.join("notes.txt-2.asice"));
+        assert_eq!(
+            container("notes.txt.asice"),
+            directory.join("notes.txt-signed.asice")
+        );
+        taken("notes.txt-signed.asice");
+        assert_eq!(
+            container("notes.txt.asice"),
+            directory.join("notes.txt-signed-2.asice")
+        );
+        assert_eq!(
+            container("notes.txt-signed.asice"),
+            directory.join("notes.txt-signed-2.asice")
+        );
+        assert_eq!(
+            container("notes.txt-signed-7.asice"),
+            directory.join("notes.txt-signed-2.asice")
+        );
+
         assert!(derive_output(Path::new(".."), Format::Pades).is_err());
         assert!(is_pdf(Path::new("CONTRACT.PDF")));
         assert!(!is_pdf(Path::new("notes.txt")));

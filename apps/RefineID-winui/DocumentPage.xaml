@@ -89,6 +89,7 @@
                             AutomationProperties.Name="PIN"
                             Header="PIN"
                             MaxLength="12"
+                            PasswordRevealMode="Hidden"
                         />
                         <TextBox
                             x:Name="ReasonBox"

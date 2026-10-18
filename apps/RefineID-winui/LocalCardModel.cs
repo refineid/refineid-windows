@@ -65,6 +65,9 @@ internal sealed class DocumentSignReport
     [JsonPropertyName("signer_cn")]
     public string? SignerCommonName { get; init; }
 
+    [JsonPropertyName("verified")]
+    public bool Verified { get; init; }
+
     [JsonPropertyName("local_verify")]
     public string LocalVerify { get; init; } = string.Empty;
 }

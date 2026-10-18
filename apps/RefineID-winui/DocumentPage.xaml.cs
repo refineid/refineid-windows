@@ -15,6 +15,7 @@
 namespace RefineID;
 
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -128,6 +129,7 @@ internal sealed partial class DocumentPage : Page
         PinSlot slot = this.SlotBox.SelectedIndex == 1 ? PinSlot.Pin1 : PinSlot.Pin2;
         string pin = this.PinBox.Password;
         string reason = this.ReasonBox.Text;
+        this.ClearOutcome();
         if (!IsPin(pin))
         {
             this.ShowStatus(
@@ -161,7 +163,17 @@ internal sealed partial class DocumentPage : Page
                 this.ResultText.Text =
                     $"{report.OutputPath}\n{report.OutputLength} bytes, {report.Slot} signature, local verify {report.LocalVerify}"
                     + (report.SignerCommonName is string signer ? $"\n{signer}" : string.Empty);
-                this.ShowStatus(InfoBarSeverity.Success, "Signed");
+                if (report.Verified)
+                {
+                    this.ShowStatus(InfoBarSeverity.Success, "Signed");
+                }
+                else
+                {
+                    this.ShowStatus(
+                        InfoBarSeverity.Error,
+                        $"{report.OutputPath}: the signature did not verify"
+                    );
+                }
             })
             .ConfigureAwait(true);
     }
@@ -184,6 +196,11 @@ internal sealed partial class DocumentPage : Page
         return false;
     }
 
+    [SuppressMessage(
+        "Design",
+        "CA1031:Do not catch general exception types",
+        Justification = "An exception that leaves an async void handler ends the process; the page shows it."
+    )]
     private async Task RunAsync(Func<Task> operation)
     {
         if (this.busy)
@@ -208,6 +225,11 @@ internal sealed partial class DocumentPage : Page
         catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException)
         {
             this.ShowStatus(InfoBarSeverity.Error, "The card service is not installed.");
+        }
+        // codeql[cs/catch-of-all-exceptions]
+        catch (Exception error)
+        {
+            this.ShowStatus(InfoBarSeverity.Error, error.Message);
         }
         finally
         {
