@@ -418,6 +418,51 @@ fn the_consent_view_is_reported_while_a_request_waits() {
 }
 
 #[test]
+fn progress_under_another_commitment_is_not_shown() {
+    let mut requester = test_requester();
+    let granted = vec![PROFILE_AUTHENTICATION.to_owned()];
+    let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
+    let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    let proxy = std::thread::spawn(move || {
+        let mut session = proxy_accept_session(&proxy_pairing, proxy_transport);
+        let TypedMessage::OperationRequest(request) = session.receive() else {
+            panic!("expected an operation request");
+        };
+        let reference = OperationReference {
+            operation_id: request.operation_id,
+            request_hash: request.request_hash().unwrap(),
+        };
+        session.send(&TypedMessage::OperationProgress(OperationProgressMessage {
+            reference: OperationReference {
+                operation_id: request.operation_id,
+                request_hash: refineid_rapp::RequestHash::from_array([0xee; 32]),
+            },
+            event: ProgressEvent::ConsentShown,
+        }));
+        session.send(&TypedMessage::OperationResult(
+            OperationResultMessage::failure(reference, ProxyFailure::UserDenied),
+        ));
+        let TypedMessage::OperationResultAck(ack_ref) = session.receive() else {
+            panic!("expected the denial to be acknowledged");
+        };
+        assert_eq!(ack_ref, reference);
+    });
+    let mut session = requester.connect(pair_id, requester_transport).unwrap();
+    let mut seen = Vec::new();
+    let outcome = requester
+        .execute_observed(
+            &mut session,
+            &authentication_operation(),
+            30_000,
+            &mut |event| seen.push(event),
+        )
+        .unwrap();
+    proxy.join().unwrap();
+    assert_eq!(outcome, OperationOutcome::Denied);
+    assert!(seen.is_empty());
+}
+
+#[test]
 fn forgetting_a_pairing_tells_the_custodian_first() {
     let mut requester = test_requester();
     let granted = vec![PROFILE_CARD_STATUS.to_owned()];

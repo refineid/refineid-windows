@@ -118,6 +118,21 @@ impl CredentialPairingStore {
         })
     }
 
+    /// Replaces the records held here with the credential's current set,
+    /// so a write applies to what is stored now and not to the copy this
+    /// value was loaded with: another store instance may have revoked a
+    /// pairing or deleted the set in the meantime.
+    ///
+    /// A credential that cannot be read leaves the records as they are; a
+    /// set that is gone leaves them empty.
+    fn refresh_from_credential(&mut self) {
+        match stored_records_now() {
+            Refresh::Replace(records) => self.records = records,
+            Refresh::Clear => self.records.clear(),
+            Refresh::Keep => {}
+        }
+    }
+
     /// Writes the current record set through to the credential.
     fn persist(&self) -> Result<(), StoreError> {
         let blob = encode_pairing_records(&self.records);
@@ -127,6 +142,7 @@ impl CredentialPairingStore {
 
 impl PairingStore for CredentialPairingStore {
     fn insert(&mut self, record: PairingRecord) -> Result<(), StoreError> {
+        self.refresh_from_credential();
         self.records.retain(|entry| entry.pair_id != record.pair_id);
         self.records.push(record);
         self.persist()
@@ -144,6 +160,7 @@ impl PairingStore for CredentialPairingStore {
         pair_id: PairId,
         change: &mut dyn FnMut(&mut PairingRecord),
     ) -> Result<(), StoreError> {
+        self.refresh_from_credential();
         let record = self
             .records
             .iter_mut()
@@ -162,6 +179,7 @@ impl PairingStore for CredentialPairingStore {
     }
 
     fn remove(&mut self, pair_id: PairId) -> Result<(), StoreError> {
+        self.refresh_from_credential();
         let before = self.records.len();
         self.records.retain(|entry| entry.pair_id != pair_id);
         if self.records.len() == before {
@@ -169,6 +187,38 @@ impl PairingStore for CredentialPairingStore {
         }
         self.persist()
     }
+}
+
+/// What the credential says the record set is right now.
+#[cfg_attr(
+    not(windows),
+    allow(
+        dead_code,
+        reason = "only the Windows credential can report a set to replace or clear"
+    )
+)]
+enum Refresh {
+    /// The credential holds these records.
+    Replace(Vec<PairingRecord>),
+    /// The credential set is gone.
+    Clear,
+    /// The credential could not be read, or there is none on this platform.
+    Keep,
+}
+
+#[cfg(windows)]
+fn stored_records_now() -> Refresh {
+    match read_pairing_set() {
+        Ok(Some(blob)) => decode_pairing_records(&blob).map_or(Refresh::Keep, Refresh::Replace),
+        Ok(None) => Refresh::Clear,
+        Err(_) => Refresh::Keep,
+    }
+}
+
+/// Off Windows there is no credential to read; the records stand.
+#[cfg(not(windows))]
+const fn stored_records_now() -> Refresh {
+    Refresh::Keep
 }
 
 /// The fixed credential target holding this user's whole pairing set.

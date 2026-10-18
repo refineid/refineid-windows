@@ -1108,7 +1108,12 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
                         )));
                     }
                     TypedMessage::OperationProgress(progress) => {
-                        if progress.reference.operation_id == operation_id {
+                        // Progress names the operation by both halves of its
+                        // reference; a report under another commitment is
+                        // not this operation's and is not shown.
+                        if progress.reference.operation_id == operation_id
+                            && progress.reference.request_hash == req_hash
+                        {
                             observe(progress.event);
                         }
                     }

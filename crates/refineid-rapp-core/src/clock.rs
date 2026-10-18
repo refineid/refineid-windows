@@ -11,8 +11,12 @@ const MILLISECONDS_PER_SECOND: u64 = 1_000;
 /// Milliseconds since an arbitrary origin on a clock that advances through
 /// sleep and hibernation.
 ///
-/// On Windows this is `GetTickCount64`, which counts milliseconds since boot
-/// including time spent asleep. Elsewhere it is the time since the process
+/// On Windows this is `GetTickCount64`: the milliseconds elapsed since the
+/// system was started, sleep and hibernation included. Microsoft's
+/// `GetTickCount64` reference points callers who want only the time spent
+/// in the working state to `QueryUnbiasedInterruptTime`, whose reference
+/// states that the unbiased count excludes sleep and hibernation; the tick
+/// count is the biased one. Elsewhere it is the time since the process
 /// started; those builds exist for host-side tests, not for deadlines that
 /// span a sleep.
 #[must_use]

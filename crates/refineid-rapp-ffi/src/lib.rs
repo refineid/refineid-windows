@@ -57,7 +57,7 @@ use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::message::CloseReason;
 use refineid_rapp_core::offer::normalize_pairing_code;
 use refineid_rapp_core::operations::{CardOperation, CardOperationResult};
-use refineid_rapp_core::store::{MemoryJournal, PairingStore};
+use refineid_rapp_core::store::{MemoryJournal, PairingDisposition, PairingRecord, PairingStore};
 use refineid_rapp_core::stream::{
     DialPurpose, DiscoveryMode, STREAM_CANDIDATE_ID, StreamError, browse, dial, dial_session,
 };
@@ -116,6 +116,9 @@ const PHONE_UNREACHABLE_STATUS: &str = "The phone is not reachable.";
 
 /// Shown once the phone announced it forgot this computer.
 const REVOKED_STATUS: &str = "The phone forgot this computer. Pair again.";
+
+/// Shown when the store holds no confirmed pairing for the watch to serve.
+const NO_PAIRING_STATUS: &str = "No phone is paired with this device.";
 
 /// The requester engine specialised to the device-only credential-store
 /// pairing store and the in-memory operation journal.
@@ -225,6 +228,9 @@ struct Shared {
     status: Option<String>,
     /// Whether the offering watch thread runs for this handle.
     watching: bool,
+    /// Whether an operation runs on this handle; the watch leaves the
+    /// phone alone while one does.
+    operation_in_flight: bool,
 }
 
 /// One pairing handle: its shared state and the background pairing thread.
@@ -283,21 +289,7 @@ fn tell_phones_they_are_forgotten() {
     let Ok(store) = CredentialPairingStore::load() else {
         return;
     };
-    let usable: Vec<(PairId, refineid_rapp::PairRecord)> = store
-        .records()
-        .iter()
-        .filter(|record| {
-            store
-                .usable_pairing()
-                .is_some_and(|usable| usable.pair_id == record.pair_id)
-        })
-        .filter_map(|record| {
-            record
-                .to_core_pair_record()
-                .ok()
-                .map(|pairing| (record.pair_id, pairing))
-        })
-        .collect();
+    let usable = forgettable_pairs(store.records());
     let mut requester = Requester::new(
         RequesterConfig {
             display_name: String::new(),
@@ -317,6 +309,23 @@ fn tell_phones_they_are_forgotten() {
         .ok();
         requester.forget_pairing(pair_id, transport);
     }
+}
+
+/// The pairings a forget action tells about: every one the phone confirmed
+/// and that still holds keys, not only the one a read would use.
+fn forgettable_pairs(records: &[PairingRecord]) -> Vec<(PairId, refineid_rapp::PairRecord)> {
+    records
+        .iter()
+        .filter(|record| {
+            record.disposition == PairingDisposition::Paired && record.storage_confirmed
+        })
+        .filter_map(|record| {
+            record
+                .to_core_pair_record()
+                .ok()
+                .map(|pairing| (record.pair_id, pairing))
+        })
+        .collect()
 }
 
 /// Open the pairing this device already holds, without a new ceremony.
@@ -537,6 +546,7 @@ fn begin_pairing(code: String, name: String) -> Result<BeginPairingDto, ApiFailu
         card_present: None,
         status: None,
         watching: false,
+        operation_in_flight: false,
     })?;
     // The thread reaches the shared state through the registry by handle id,
     // owning the pieces it moves and locking only briefly each time.
@@ -586,6 +596,7 @@ fn open_pairing(name: String) -> Result<BeginPairingDto, ApiFailure> {
         card_present: None,
         status: None,
         watching: false,
+        operation_in_flight: false,
     })?;
     Ok(BeginPairingDto { handle: handle_id })
 }
@@ -796,6 +807,7 @@ fn start_offering_watch(handle_id: u64) {
 /// the session ends, the card leaves, or the phone announces it forgot this
 /// computer.
 fn offering_watch(handle_id: u64) {
+    let _mark = WatchMark(handle_id);
     let mut offered = false;
     while !ended(handle_id) {
         let Ok(store) = CredentialPairingStore::load() else {
@@ -809,7 +821,7 @@ fn offering_watch(handle_id: u64) {
                 .ok()
                 .map(|pairing| (record.pair_id, pairing, record.auth_cert.clone()))
         }) else {
-            withdraw_offer(handle_id, &mut offered, REVOKED_STATUS);
+            withdraw_offer(handle_id, &mut offered, NO_PAIRING_STATUS);
             return;
         };
         let mut requester = Requester::new(
@@ -846,6 +858,12 @@ fn offering_watch(handle_id: u64) {
             continue;
         };
         while !ended(handle_id) {
+            // An operation in flight has the phone's attention; a ping it
+            // answers late must not read as the phone leaving.
+            if operation_in_flight(handle_id) {
+                pause(LIVENESS_INTERVAL_MS);
+                continue;
+            }
             if requester.check_liveness(&mut session).is_err() {
                 break;
             }
@@ -859,7 +877,7 @@ fn offering_watch(handle_id: u64) {
                     {
                         offered = true;
                     }
-                    registry_entry_apply(handle_id, |shared| shared.status = None);
+                    clear_watch_status(handle_id);
                 }
                 Some(false) => withdraw_offer(handle_id, &mut offered, CARD_ABSENT_STATUS),
                 None => {}
@@ -881,6 +899,38 @@ fn offering_watch(handle_id: u64) {
         }
     }
     withdraw_offer(handle_id, &mut offered, PHONE_UNREACHABLE_STATUS);
+}
+
+/// Marks the handle as watched for the thread's lifetime; dropping it on
+/// any exit lets the next read start a watch again.
+struct WatchMark(u64);
+
+impl Drop for WatchMark {
+    fn drop(&mut self) {
+        registry_entry_apply(self.0, |shared| shared.watching = false);
+    }
+}
+
+/// Whether `status` is a line the offering watch wrote, as opposed to one an
+/// operation wrote about its own progress.
+fn is_watch_status(status: &str) -> bool {
+    matches!(
+        status,
+        PHONE_UNREACHABLE_STATUS | CARD_ABSENT_STATUS | NO_PAIRING_STATUS
+    )
+}
+
+/// Removes the watch's own line and leaves an operation's line in place.
+fn clear_watch_status(handle_id: u64) {
+    registry_entry_apply(handle_id, |shared| {
+        if shared.status.as_deref().is_some_and(is_watch_status) {
+            shared.status = None;
+        }
+    });
+}
+
+fn operation_in_flight(handle_id: u64) -> bool {
+    registry_entry_apply(handle_id, |shared| shared.operation_in_flight).unwrap_or(false)
 }
 
 /// Withdraws the offer, if one stands, and tells the user why.
@@ -946,17 +996,23 @@ fn run_operation(
     >,
     operation: &CardOperation,
 ) -> Result<CardOperationResult, ApiFailure> {
-    let outcome = paired
-        .requester
-        .execute_observed(session, operation, OPERATION_EXPIRY_MS, &mut |event| {
-            if event == ProgressEvent::ConsentShown {
-                registry_entry_apply(handle_id, |shared| {
-                    shared.status = Some(CONSENT_SHOWN_STATUS.to_owned());
-                });
-            }
-        })
-        .map_err(|error| ApiFailure::new("operation_not_admitted", format!("{error:?}")))?;
-    registry_entry_apply(handle_id, |shared| shared.status = None);
+    registry_entry_apply(handle_id, |shared| shared.operation_in_flight = true);
+    let outcome =
+        paired
+            .requester
+            .execute_observed(session, operation, OPERATION_EXPIRY_MS, &mut |event| {
+                if event == ProgressEvent::ConsentShown {
+                    registry_entry_apply(handle_id, |shared| {
+                        shared.status = Some(CONSENT_SHOWN_STATUS.to_owned());
+                    });
+                }
+            });
+    registry_entry_apply(handle_id, |shared| {
+        shared.operation_in_flight = false;
+        shared.status = None;
+    });
+    let outcome =
+        outcome.map_err(|error| ApiFailure::new("operation_not_admitted", format!("{error:?}")))?;
     match outcome {
         OperationOutcome::Completed(result) => Ok(result),
         OperationOutcome::Denied => Err(ApiFailure::new(
@@ -1262,7 +1318,19 @@ fn serialize_envelope<T: Serialize>(envelope: &ApiEnvelope<'_, T>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Phase, state_dto};
+    use super::{
+        CARD_ABSENT_STATUS, CONSENT_SHOWN_STATUS, NO_PAIRING_STATUS, PHONE_UNREACHABLE_STATUS,
+        Phase, REVOKED_STATUS, is_watch_status, state_dto,
+    };
+
+    #[test]
+    fn the_watch_clears_only_its_own_lines() {
+        assert!(is_watch_status(PHONE_UNREACHABLE_STATUS));
+        assert!(is_watch_status(CARD_ABSENT_STATUS));
+        assert!(is_watch_status(NO_PAIRING_STATUS));
+        assert!(!is_watch_status(CONSENT_SHOWN_STATUS));
+        assert!(!is_watch_status(REVOKED_STATUS));
+    }
 
     #[test]
     fn state_labels_are_closed() {
