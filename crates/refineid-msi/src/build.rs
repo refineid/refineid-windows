@@ -68,10 +68,8 @@ impl Architecture {
     }
 }
 
-/// The project's `YY.M.D.B` calendar version.
-///
-/// `B` is a within-day ten-minute bucket, `hour * 10 + minute / 10`, so it
-/// ranges 0 to 235.
+/// The project's `YY.M.D.HHMM` calendar version: the UTC day and the time
+/// of day as one number, `hour * 100 + minute`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Version {
     /// Years since 2000.
@@ -80,22 +78,32 @@ pub struct Version {
     pub month: u8,
     /// Day of month, 1 to 31.
     pub day: u8,
-    /// Ten-minute bucket within the day, 0 to 235.
-    pub bucket: u16,
+    /// Hour of the day, 0 to 23.
+    pub hour: u8,
+    /// Minute of the hour, 0 to 59.
+    pub minute: u8,
 }
 
-/// A version string was not a usable `YY.M.D.B`.
+/// A version string was not a usable `YY.M.D.HHMM`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VersionParseError;
 
 impl fmt::Display for VersionParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(
-            "expected YY.M.D.B with month 1-12, day 1-31, and bucket 0-235 \
-             (hour * 10 + minute / 10)",
-        )
+        f.write_str("expected YY.M.D.HHMM with month 1-12, day 1-31, and a time of day 0-2359")
     }
 }
+
+/// Minutes in an hour.
+const MINUTES_PER_HOUR: u32 = 60;
+/// Minutes in a day.
+const MINUTES_PER_DAY: u32 = 24 * MINUTES_PER_HOUR;
+/// The factor that places the hour before the minute in `HHMM`.
+const HOUR_PLACE: u32 = 100;
+/// The slots a day is divided into for the build field, one per 86.4 s.
+const SLOTS_PER_DAY: u32 = 1000;
+/// The factor that places the day before the slot in the build field.
+const DAY_PLACE: u32 = 1000;
 
 impl std::error::Error for VersionParseError {}
 
@@ -107,52 +115,69 @@ impl Version {
     /// Returns an error if the text is not four numbers in range.
     pub fn parse(text: &str) -> Result<Self, VersionParseError> {
         let parts: Vec<&str> = text.trim().split('.').collect();
-        let [year, month, day, bucket] = parts.as_slice() else {
+        let [year, month, day, time] = parts.as_slice() else {
             return Err(VersionParseError);
         };
+        let time: u32 = time.parse().map_err(|_| VersionParseError)?;
+        let hour = u8::try_from(time / HOUR_PLACE).map_err(|_| VersionParseError)?;
+        let minute = u8::try_from(time % HOUR_PLACE).map_err(|_| VersionParseError)?;
         let version = Self {
             year: year.parse().map_err(|_| VersionParseError)?,
             month: month.parse().map_err(|_| VersionParseError)?,
             day: day.parse().map_err(|_| VersionParseError)?,
-            bucket: bucket.parse().map_err(|_| VersionParseError)?,
+            hour,
+            minute,
         };
         if !(1..=12).contains(&version.month)
             || !(1..=31).contains(&version.day)
-            || version.bucket > MAXIMUM_BUCKET
+            || u32::from(version.hour) >= MINUTES_PER_DAY / MINUTES_PER_HOUR
+            || u32::from(version.minute) >= MINUTES_PER_HOUR
         {
             return Err(VersionParseError);
         }
         Ok(version)
     }
 
+    /// The time of day as one number, `hour * 100 + minute`.
+    #[must_use]
+    pub fn time_of_day(self) -> u32 {
+        u32::from(self.hour) * HOUR_PLACE + u32::from(self.minute)
+    }
+
     /// Projects onto the three fields Windows Installer actually compares.
     ///
     /// `ProductVersion` has no fourth field, and a fourth is ignored during
-    /// upgrade detection, so the day and the bucket are folded into the
-    /// build field as `day * 1000 + bucket`. That keeps the printed form
-    /// readable, stays inside the 65535 limit at its largest value of
-    /// 31235, and preserves ordering: within a month the build field rises
+    /// upgrade detection, so the day and the time are folded into the build
+    /// field as `day * 1000 + slot`, where the slot is the minute of the day
+    /// scaled to 0 to 999. The largest value, 31999, stays inside the 65535
+    /// limit, and the order is kept: within a month the build field rises
     /// with the day and then the time, and across a month or year boundary
     /// the higher fields carry the comparison.
     #[must_use]
-    pub const fn product_version(self) -> ProductVersion {
+    pub fn product_version(self) -> ProductVersion {
+        let minute_of_day = u32::from(self.hour) * MINUTES_PER_HOUR + u32::from(self.minute);
+        let slot = minute_of_day * SLOTS_PER_DAY / MINUTES_PER_DAY;
+        // The slot is below 1000 and the day below 32, so the fold is below
+        // 32000 and fits the field; the bound is kept for a value that is
+        // never reached.
+        let build = u16::try_from(u32::from(self.day) * DAY_PLACE + slot).unwrap_or(u16::MAX);
         ProductVersion {
             major: self.year,
             minor: self.month,
-            build: self.day as u16 * 1000 + self.bucket,
+            build,
         }
     }
 }
-
-/// The largest ten-minute bucket in a day, at 23:50.
-const MAXIMUM_BUCKET: u16 = 235;
 
 impl fmt::Display for Version {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "{}.{}.{}.{}",
-            self.year, self.month, self.day, self.bucket
+            self.year,
+            self.month,
+            self.day,
+            self.time_of_day()
         )
     }
 }
@@ -164,7 +189,7 @@ pub struct ProductVersion {
     pub major: u8,
     /// Minor field.
     pub minor: u8,
-    /// Build field, carrying both the day and the bucket.
+    /// Build field, carrying both the day and the slot of the day.
     pub build: u16,
 }
 
@@ -417,7 +442,7 @@ pub fn build(package: &Package<'_>, output: &Path, scratch: &Path) -> Result<(),
         package.architecture.name()
     ));
     // The database carries the three-field projection, because that is what
-    // Windows Installer compares; the full YY.M.D.B stays in the derived
+    // Windows Installer compares; the full YY.M.D.HHMM stays in the derived
     // identifiers and the file name so a rebuilt package is still distinct.
     let version = package.version.product_version().to_string();
 
@@ -816,27 +841,33 @@ mod tests {
 
     #[test]
     fn parses_the_canonical_four_component_form() {
-        let version = Version::parse("26.8.7.153").expect("parses");
+        let version = Version::parse("26.8.7.1533").expect("parses");
         assert_eq!(
             version,
             Version {
                 year: 26,
                 month: 8,
                 day: 7,
-                bucket: 153,
+                hour: 15,
+                minute: 33,
             }
         );
-        assert_eq!(version.to_string(), "26.8.7.153");
+        assert_eq!(version.to_string(), "26.8.7.1533");
+        assert_eq!(
+            Version::parse("26.8.7.0905").expect("parses").to_string(),
+            "26.8.7.905"
+        );
     }
 
     #[test]
     fn rejects_out_of_range_components() {
         for text in [
-            "26.8.7",     // three components
-            "26.13.7.0",  // month
-            "26.8.32.0",  // day
-            "26.8.7.236", // bucket above 23:50
-            "26.8.7.0.1", // five components
+            "26.8.7",      // three components
+            "26.13.7.0",   // month
+            "26.8.32.0",   // day
+            "26.8.7.2400", // hour
+            "26.8.7.1260", // minute
+            "26.8.7.0.1",  // five components
             "twentysix.8.7.0",
         ] {
             assert!(Version::parse(text).is_err(), "{text} must be rejected");
@@ -844,30 +875,34 @@ mod tests {
     }
 
     #[test]
-    fn the_projection_folds_the_day_and_bucket() {
-        let version = Version::parse("26.8.7.153").expect("parses");
-        assert_eq!(version.product_version().to_string(), "26.8.7153");
+    fn the_projection_folds_the_day_and_the_slot_of_the_day() {
+        // 19:44 is minute 1184 of the day, slot 822 of 1000.
+        let version = Version::parse("26.10.18.1944").expect("parses");
+        assert_eq!(version.product_version().to_string(), "26.10.18822");
+        let midnight = Version::parse("26.10.18.0").expect("parses");
+        assert_eq!(midnight.product_version().build, 18_000);
     }
 
     #[test]
     fn the_projection_stays_inside_the_installer_limit() {
-        // The largest value the fold can produce: day 31 at 23:50. Windows
-        // Installer caps the build field at 65535, so this leaves headroom
-        // and the u16 arithmetic in the fold cannot wrap.
-        let latest = Version::parse("99.12.31.235").expect("parses");
-        assert_eq!(latest.product_version().build, 31_235);
+        // The largest value the fold can produce: day 31 at 23:59, slot
+        // 999. Windows Installer caps the build field at 65535.
+        let latest = Version::parse("99.12.31.2359").expect("parses");
+        assert_eq!(latest.product_version().build, 31_999);
     }
 
     #[test]
     fn the_projection_preserves_ordering() {
         let ordered = [
             "26.8.7.0",
-            "26.8.7.153",
-            "26.8.7.235",
+            "26.8.7.1",
+            "26.8.7.2",
+            "26.8.7.1533",
+            "26.8.7.2359",
             "26.8.8.0",
-            "26.8.31.235",
+            "26.8.31.2359",
             "26.9.1.0",
-            "26.12.31.235",
+            "26.12.31.2359",
             "27.1.1.0",
         ];
         let projected: Vec<_> = ordered

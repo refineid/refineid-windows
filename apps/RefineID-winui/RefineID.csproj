@@ -34,8 +34,9 @@
     <AnalysisLevel>latest-all</AnalysisLevel>
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
     <Deterministic>true</Deterministic>
-    <!-- The version is the UTC build instant as CalVer YY.M.D.B, B being
-         the ten-minute bucket of the day (hour * 10 + minute / 10, 0 to 235).
+    <!-- The version is the UTC build instant as CalVer YY.M.D.HHMM, HHMM
+         being the time of day as one number (hour * 100 + minute, 0 to
+         2359, no leading zero: a package version field is a plain integer).
          The instant is read once so every component comes from the same
          clock reading. All three managed version fields are stamped:
          <Version> alone only sets the informational version, while
@@ -50,8 +51,8 @@
     <RefineIdBuildYear>$([MSBuild]::Subtract($([System.DateTime]::FromBinary($(RefineIdBuildTicks)).Year), 2000))</RefineIdBuildYear>
     <RefineIdBuildMonth>$([System.DateTime]::FromBinary($(RefineIdBuildTicks)).Month)</RefineIdBuildMonth>
     <RefineIdBuildDay>$([System.DateTime]::FromBinary($(RefineIdBuildTicks)).Day)</RefineIdBuildDay>
-    <RefineIdBuildBucket>$([MSBuild]::Add($([MSBuild]::Multiply($([System.DateTime]::FromBinary($(RefineIdBuildTicks)).Hour), 10)), $([System.DateTime]::FromBinary($(RefineIdBuildTicks)).ToString("mm").Substring(0, 1))))</RefineIdBuildBucket>
-    <RefineIdVersion>$(RefineIdBuildYear).$(RefineIdBuildMonth).$(RefineIdBuildDay).$(RefineIdBuildBucket)</RefineIdVersion>
+    <RefineIdBuildTime>$([MSBuild]::Add($([MSBuild]::Multiply($([System.DateTime]::FromBinary($(RefineIdBuildTicks)).Hour), 100)), $([System.DateTime]::FromBinary($(RefineIdBuildTicks)).Minute)))</RefineIdBuildTime>
+    <RefineIdVersion>$(RefineIdBuildYear).$(RefineIdBuildMonth).$(RefineIdBuildDay).$(RefineIdBuildTime)</RefineIdVersion>
     <RefineIdPackageVersion Condition="'$(RefineIdStoreBuild)' != 'true'"
       >$(RefineIdVersion)</RefineIdPackageVersion>
     <RefineIdPackageVersion Condition="'$(RefineIdStoreBuild)' == 'true'"
@@ -138,7 +139,7 @@
   <!-- The package file and its test directory are named after the identity
        version the packaging targets read from the source manifest, which is
        the placeholder. Naming them from the stamp instead gives
-       RefineID_YY.M.D.B_<arch>.msix, the version the package carries. -->
+       RefineID_YY.M.D.HHMM_<arch>.msix, the version the package carries. -->
   <Target
     Name="StampAppxPackageFileName"
     DependsOnTargets="_ValidatePresenceOfAppxManifestItems"
