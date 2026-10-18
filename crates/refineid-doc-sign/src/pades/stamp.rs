@@ -38,6 +38,28 @@ pub enum StampLanguage {
     English,
 }
 
+/// The bits of a Windows language identifier that name the language,
+/// `PRIMARYLANGID` of winnt.h.
+const PRIMARY_LANGUAGE_MASK: u16 = 0x03ff;
+/// `LANG_FINNISH` of winnt.h.
+const LANGUAGE_FINNISH: u16 = 0x0b;
+/// `LANG_SWEDISH` of winnt.h.
+const LANGUAGE_SWEDISH: u16 = 0x1d;
+
+impl StampLanguage {
+    /// The stamp language of a Windows language identifier, judged by
+    /// its primary language whatever its region; English for any
+    /// language the stamp does not carry.
+    #[must_use]
+    pub const fn for_windows_language(language_id: u16) -> Self {
+        match language_id & PRIMARY_LANGUAGE_MASK {
+            LANGUAGE_FINNISH => Self::Finnish,
+            LANGUAGE_SWEDISH => Self::Swedish,
+            _ => Self::English,
+        }
+    }
+}
+
 /// The outer ring's radius, in points.
 pub(super) const RADIUS: f64 = 64.0;
 /// Stroke bleed outside the outer ring.
@@ -656,6 +678,38 @@ fn literal(character: char) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Windows language identifiers of winnt.h: Finnish (Finland), Swedish
+    /// (Sweden), Swedish (Finland), English (United States), and one the
+    /// stamp does not carry, German (Germany).
+    const FINNISH_FINLAND: u16 = 0x040b;
+    const SWEDISH_SWEDEN: u16 = 0x041d;
+    const SWEDISH_FINLAND: u16 = 0x081d;
+    const ENGLISH_UNITED_STATES: u16 = 0x0409;
+    const GERMAN_GERMANY: u16 = 0x0407;
+
+    #[test]
+    fn the_stamp_language_follows_the_primary_language_of_the_identifier() {
+        assert_eq!(
+            StampLanguage::for_windows_language(FINNISH_FINLAND),
+            StampLanguage::Finnish
+        );
+        assert_eq!(
+            StampLanguage::for_windows_language(SWEDISH_SWEDEN),
+            StampLanguage::Swedish
+        );
+        assert_eq!(
+            StampLanguage::for_windows_language(SWEDISH_FINLAND),
+            StampLanguage::Swedish
+        );
+        assert_eq!(
+            StampLanguage::for_windows_language(ENGLISH_UNITED_STATES),
+            StampLanguage::English
+        );
+        assert_eq!(
+            StampLanguage::for_windows_language(GERMAN_GERMANY),
+            StampLanguage::English
+        );
+    }
     use super::{
         A_DIAERESIS_LITERAL, ARC_BAND_CENTRE_RADIUS, BORDER_INNER_RADIUS, Bounds, CENTRE_FONT_SIZE,
         CENTRE_WIDTH_SHARE, ENGLISH_BAND, ENGLISH_WORDS, FINNISH_BAND, FINNISH_WORDS,

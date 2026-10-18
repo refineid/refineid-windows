@@ -26,7 +26,7 @@
 //!   EF.4332 cert. PIN2 has a 6-digit floor (FINEID S1 v4.2 §3.5).
 //!
 //! Both paths share the same option / report / error types and a
-//! shared internal driver (`sign_with_slot`) so the wire
+//! shared internal driver (`sign_qualified`) so the wire
 //! choreography stays in lockstep.
 
 use core::fmt;
@@ -165,88 +165,22 @@ impl fmt::Debug for TimestampCredentials {
     }
 }
 
-/// Which on-card key slot to sign with.
-///
-/// The choice picks PIN (1 vs 2), key reference byte (0x01 vs
-/// 0x02), and the cert slot (EF.4331 vs EF.4332) used for the
-/// local verify.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SignSlot {
-    /// **Auth key** -- TLS client-cert / SSH / agent identity.
-    /// PIN1-gated, key ref 0x01, EF.4331 cert.
-    Auth,
-    /// **Qualified-signature key** -- non-repudiation per eIDAS
-    /// QES. PIN2-gated, key ref 0x02, EF.4332 cert.
-    Qualified,
-}
+/// The key that signs documents: the qualified-signature key, gated by
+/// PIN 2, whose certificate is EF.4332 (FINEID S1 v4.2 §3.5).
+const SIGNING_KEY: KeyRef = KeyRef::Sign;
 
-impl SignSlot {
-    /// PKCS#15 key reference for this signing slot.
-    ///
-    /// FINEID S1 v4.2 §3.5 -- auth key uses `KeyRef::Auth`
-    /// (ref `0x01`), qualified-signature key uses
-    /// `KeyRef::Sign` (ref `0x02`). Used as the `MSE:SET DST`
-    /// data byte.
-    /// Operator-facing name of the slot, for diagnostics.
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Auth => "authentication",
-            Self::Qualified => "qualified-signature",
-        }
-    }
+/// The PIN that gates [`SIGNING_KEY`].
+const SIGNING_PIN: PinSlot = PinSlot::Pin2;
 
-    const fn key_ref(self) -> KeyRef {
-        match self {
-            Self::Auth => KeyRef::Auth,
-            Self::Qualified => KeyRef::Sign,
-        }
-    }
-    /// PIN slot that gates use of this signing key.
-    ///
-    /// FINEID S1 v4.2 §3.5 -- PIN1 -> auth key, PIN2 ->
-    /// qualified-signature key. Used so the verify-PIN step
-    /// before the signing APDU pulls the right slot's
-    /// counter.
-    const fn pin_slot(self) -> PinSlot {
-        match self {
-            Self::Auth => PinSlot::Pin1,
-            Self::Qualified => PinSlot::Pin2,
-        }
-    }
-    /// PKCS#15 certificate slot whose public key pairs with
-    /// this signing key for the verify-after-sign step
-    /// (Rule E7).
-    ///
-    /// EF.4331 for auth, EF.4332 for qualified. The cert is
-    /// read once at session start and reused by the local
-    /// verify before the signature is handed back.
-    const fn cert_slot(self) -> CertSlot {
-        match self {
-            Self::Auth => CertSlot::Authentication,
-            Self::Qualified => CertSlot::Signature,
-        }
-    }
-    /// Human label for the PIN slot, used in CLI prompts and
-    /// the `Display` impl. `"PIN1"` / `"PIN2"` -- matches the
-    /// labels printed on FINEID activation letters so the
-    /// cardholder sees the same wording in both places.
-    const fn pin_label(self) -> &'static str {
-        match self {
-            Self::Auth => "PIN1",
-            Self::Qualified => "PIN2",
-        }
-    }
-    /// Human label for the signing slot itself, used in the
-    /// report header (`"auth"` / `"qualified-signature"`).
-    /// Distinct from [`Self::pin_label`] because the PIN and
-    /// slot labels appear on different lines.
-    const fn slot_label(self) -> &'static str {
-        match self {
-            Self::Auth => "auth",
-            Self::Qualified => "qualified-signature",
-        }
-    }
-}
+/// The certificate whose public key pairs with [`SIGNING_KEY`], read
+/// once at session start and reused by the local verify.
+const SIGNING_CERT: CertSlot = CertSlot::Signature;
+
+/// The PIN's name as the activation letter prints it.
+const SIGNING_PIN_LABEL: &str = "PIN2";
+
+/// The key's name in reports and errors.
+const SIGNING_KEY_LABEL: &str = "qualified-signature";
 
 /// A document signature rather than a bare one.
 ///
@@ -414,9 +348,6 @@ pub struct SignReport {
     /// PC/SC reader name the sign APDU chain landed against.
     /// Tier 0 `String` from `ReaderId::as_str().to_owned()`.
     pub reader: String,
-    /// Which sign slot the operation targeted (auth key /
-    /// non-repudiation key).
-    pub slot: SignSlot,
     /// Length of the input file in bytes.
     pub input_len: u64,
     /// SHA-256 of the input.
@@ -528,7 +459,7 @@ pub enum SignErrorKind {
     /// The slot's certificate uses a key this crate can build a
     /// document signature with, but whose digest pairing is not one
     /// the formats name.
-    UnsupportedDocumentKey(SignSlot),
+    UnsupportedDocumentKey,
     /// The chain or revocation answers could not be collected.
     ///
     /// Raised rather than falling back to a shorter-lived signature: a
@@ -559,8 +490,6 @@ pub enum SignErrorKind {
     },
     /// VERIFY of the slot's PIN returned a non-Ok outcome.
     PinRejected {
-        /// Which sign slot the VERIFY targeted.
-        slot: SignSlot,
         /// Card-side outcome (`WrongPin{retries}`, `Locked`,
         /// `AuthenticationFailed`, ...).
         outcome: VerifyOutcome,
@@ -568,8 +497,6 @@ pub enum SignErrorKind {
     /// Local-policy rejection (PIN length / non-digit) before any
     /// APDU went out. Counter is unaffected.
     PinPolicy {
-        /// Which sign slot the would-be VERIFY targeted.
-        slot: SignSlot,
         /// Specific local-policy failure (e.g. `TooShort`,
         /// `NonDigit`).
         reason: PinPolicyReason,
@@ -594,23 +521,19 @@ pub enum SignErrorKind {
     InputTooLong(usize),
     /// The on-card cert is missing or unparseable.
     CertUnavailable {
-        /// Which sign slot the cert read targeted.
-        slot: SignSlot,
         /// Human-readable detail from the cert reader / parser.
         /// Tier 0 `String`; presentational.
         detail: String,
     },
     /// Cert was readable but its public key type is not supported
     /// (not RSA, not ECDSA P-384, or uses explicit EC params).
-    UnsupportedKeyType(SignSlot),
+    UnsupportedKeyType,
     /// Cert carries an EC key on a curve other than secp384r1.
     /// The Newer-scheme sign chain handles only secp384r1 + SHA-384
     /// (S4-1 v4.2 §4.2); the other supported curve OIDs land here
     /// rather than at the wire layer where the card would reject
     /// the algRef byte.
     UnsupportedCurve {
-        /// Which sign slot's cert carried the unsupported curve.
-        slot: SignSlot,
         /// Curve the cert was issued on.
         curve: EcCurve,
     },
@@ -643,10 +566,9 @@ impl fmt::Display for SignErrorKind {
             Self::DisplayedCard(detail) => write!(f, "displayed card: {detail}"),
             Self::Material(detail) => write!(f, "validation material: {detail}"),
             Self::Timestamp(detail) => write!(f, "timestamp: {detail}"),
-            Self::UnsupportedDocumentKey(slot) => write!(
+            Self::UnsupportedDocumentKey => write!(
                 f,
-                "the {} certificate's key type cannot produce a document signature",
-                slot.label()
+                "the {SIGNING_KEY_LABEL} certificate's key type cannot produce a document signature"
             ),
             Self::InputRead { path, source } => {
                 write!(f, "read input {}: {source}", path.display())
@@ -655,37 +577,31 @@ impl fmt::Display for SignErrorKind {
                 write!(f, "write signature {}: {source}", path.display())
             }
             Self::PinRejected {
-                slot,
                 outcome: VerifyOutcome::WrongPin { retries_left },
             } => {
                 write!(
                     f,
-                    "{} rejected (wrong PIN, {retries_left} retries left)",
-                    slot.pin_label()
+                    "{SIGNING_PIN_LABEL} rejected (wrong PIN, {retries_left} retries left)"
                 )
             }
             Self::PinRejected {
-                slot,
                 outcome: VerifyOutcome::Locked,
             } => {
                 write!(
                     f,
-                    "{} is blocked -- card needs a PUK unblock",
-                    slot.pin_label()
+                    "{SIGNING_PIN_LABEL} is blocked -- card needs a PUK unblock"
                 )
             }
             Self::PinRejected {
-                slot,
                 outcome: VerifyOutcome::Other(sw),
             } => {
-                write!(f, "{} verify: unexpected SW={sw:#06X}", slot.pin_label())
+                write!(f, "{SIGNING_PIN_LABEL} verify: unexpected SW={sw:#06X}")
             }
             Self::PinRejected {
                 outcome: VerifyOutcome::Ok,
-                ..
             } => write!(f, "internal: PinRejected(Ok) is not an error state"),
-            Self::PinPolicy { slot, reason } => {
-                write!(f, "{} rejected locally: {reason}", slot.pin_label())
+            Self::PinPolicy { reason } => {
+                write!(f, "{SIGNING_PIN_LABEL} rejected locally: {reason}")
             }
             Self::SignSw { stage, sw } => {
                 write!(f, "sign chain failed at {stage}: SW={sw:#06X}")
@@ -699,25 +615,22 @@ impl fmt::Display for SignErrorKind {
             Self::InputTooLong(n) => {
                 write!(f, "{n}-byte signing input exceeds the card command length")
             }
-            Self::CertUnavailable { slot, detail } => {
+            Self::CertUnavailable { detail } => {
                 write!(
                     f,
-                    "{} cert unavailable for local verify: {detail}",
-                    slot.slot_label()
+                    "{SIGNING_KEY_LABEL} cert unavailable for local verify: {detail}"
                 )
             }
-            Self::UnsupportedKeyType(slot) => {
+            Self::UnsupportedKeyType => {
                 write!(
                     f,
-                    "{} cert has an unsupported key type (not RSA, not ECDSA P-384, or explicit EC params)",
-                    slot.slot_label()
+                    "{SIGNING_KEY_LABEL} cert has an unsupported key type (not RSA, not ECDSA P-384, or explicit EC params)"
                 )
             }
-            Self::UnsupportedCurve { slot, curve } => {
+            Self::UnsupportedCurve { curve } => {
                 write!(
                     f,
-                    "{} cert is EC on {} ({}-bit); refineid currently only signs ECDSA on secp384r1",
-                    slot.slot_label(),
+                    "{SIGNING_KEY_LABEL} cert is EC on {} ({}-bit); refineid currently only signs ECDSA on secp384r1",
                     curve.label(),
                     curve.bits()
                 )
@@ -923,7 +836,6 @@ fn sign_pre_hashed_sha256_rsa_hash_in_command<T: CardTransport>(
 /// the typed error kind without doing any APDU.
 fn sign_dispatch_by_alg<T: CardTransport>(
     transport: &mut T,
-    slot: SignSlot,
     scheme: PinReferenceScheme,
     cert: &Certificate<'_>,
     cert_algorithm: PublicKeyAlgorithm,
@@ -933,7 +845,7 @@ fn sign_dispatch_by_alg<T: CardTransport>(
     match cert_algorithm {
         PublicKeyAlgorithm::Rsa { .. } => {
             let pubkey = extract_rsa_public_key(cert.spki.as_der())
-                .ok_or(SignErrorKind::UnsupportedKeyType(slot))?;
+                .ok_or(SignErrorKind::UnsupportedKeyType)?;
             // The organizational platform has no external-hash
             // PSO:HASH: the off-card digest rides in PSO:CDS's data
             // field there (organizational cards specification
@@ -941,14 +853,12 @@ fn sign_dispatch_by_alg<T: CardTransport>(
             let core_digest = CoreSha256::from_bytes(*input_sha256.as_bytes());
             let signature = match scheme {
                 PinReferenceScheme::Citizen => transport
-                    .sign_pre_hashed_sha256_rsa(slot.key_ref(), core_digest)
+                    .sign_pre_hashed_sha256_rsa(SIGNING_KEY, core_digest)
                     .map_err(sign_err_to_kind)?,
-                PinReferenceScheme::Organizational => sign_pre_hashed_sha256_rsa_hash_in_command(
-                    transport,
-                    slot.key_ref(),
-                    core_digest,
-                )
-                .map_err(sign_err_to_kind)?,
+                PinReferenceScheme::Organizational => {
+                    sign_pre_hashed_sha256_rsa_hash_in_command(transport, SIGNING_KEY, core_digest)
+                        .map_err(sign_err_to_kind)?
+                }
             };
             let verify = match pubkey.verify_pkcs1v15_sha256(input_bytes, &signature) {
                 Ok(()) => LocalVerifyOutcome::Ok,
@@ -961,13 +871,12 @@ fn sign_dispatch_by_alg<T: CardTransport>(
         PublicKeyAlgorithm::Ec(EcCurve::Secp384r1) => {
             let hash_sha384 = CoreSha384::of(input_bytes);
             let signature = transport
-                .sign_pre_hashed_sha384_ecdsa_p384(slot.key_ref(), hash_sha384)
+                .sign_pre_hashed_sha384_ecdsa_p384(SIGNING_KEY, hash_sha384)
                 .map_err(sign_err_to_kind)?;
             let pubkey =
                 cert.spki
                     .ec_public_key_point()
                     .ok_or_else(|| SignErrorKind::CertUnavailable {
-                        slot,
                         detail: "EC public-key point unavailable from cert SPKI".to_owned(),
                     })?;
             let verify = match pubkey.verify_p384_sha384_raw(signature.clone(), hash_sha384) {
@@ -978,9 +887,9 @@ fn sign_dispatch_by_alg<T: CardTransport>(
             };
             Ok((signature.into_bytes(), verify))
         }
-        PublicKeyAlgorithm::Ec(curve) => Err(SignErrorKind::UnsupportedCurve { slot, curve }),
+        PublicKeyAlgorithm::Ec(curve) => Err(SignErrorKind::UnsupportedCurve { curve }),
         PublicKeyAlgorithm::EcExplicit { .. } | PublicKeyAlgorithm::Other => {
-            Err(SignErrorKind::UnsupportedKeyType(slot))
+            Err(SignErrorKind::UnsupportedKeyType)
         }
     }
 }
@@ -1006,9 +915,8 @@ fn sign_dispatch_by_alg<T: CardTransport>(
 /// Every failure surfaces as [`SignErrorKind`]: reader / card /
 /// PIN failures, sign-chain SW failures, cert or TSA failures,
 /// and input / output I/O failures.
-pub fn sign_with_slot(
+pub fn sign_qualified(
     backend: PcscBackend,
-    slot: SignSlot,
     options: SignOptions,
 ) -> Result<SignReport, SignErrorKind> {
     if let Some(request) = options.document.as_ref() {
@@ -1058,7 +966,7 @@ pub fn sign_with_slot(
     // restriction (FINEID S4-1 v4.2 s8.1.7-9), which is what
     // licenses contactless signing at all.
     let chain = match transport.select_pkcs15_application() {
-        Ok(()) => sign_chain(&mut transport, slot, &options, &input_bytes, input_sha256)?,
+        Ok(()) => sign_chain(&mut transport, &options, &input_bytes, input_sha256)?,
         Err(Pkcs15Error::Sw(sw))
             if StatusWord::from_u16(sw) == StatusWord::SecurityNotSatisfied =>
         {
@@ -1091,14 +999,12 @@ pub fn sign_with_slot(
             let mut sm = SmTransport::new(transport, session);
             sm.select_pkcs15_application()
                 .map_err(|e| SignErrorKind::CertUnavailable {
-                    slot,
                     detail: format!("select pkcs15 app under SM: {e}"),
                 })?;
-            sign_chain(&mut sm, slot, &options, &input_bytes, input_sha256)?
+            sign_chain(&mut sm, &options, &input_bytes, input_sha256)?
         }
         Err(e) => {
             return Err(SignErrorKind::CertUnavailable {
-                slot,
                 detail: format!("select pkcs15 app: {e}"),
             });
         }
@@ -1127,7 +1033,6 @@ pub fn sign_with_slot(
 
     Ok(SignReport {
         reader: reader_id.as_str().to_owned(),
-        slot,
         input_len,
         input_sha256,
         signature_path: options.output,
@@ -1141,7 +1046,7 @@ pub fn sign_with_slot(
     })
 }
 
-/// Output of [`sign_chain`]: what `sign_with_slot` still needs
+/// Output of [`sign_chain`]: what `sign_qualified` still needs
 /// once the card-facing work is done.
 struct SignChainOutput {
     /// DER of the slot cert that produced the signature.
@@ -1170,15 +1075,14 @@ struct SignChainOutput {
 /// channel and inside the PACE [`SmTransport`] on contactless.
 fn sign_chain<T: CardTransport>(
     transport: &mut T,
-    slot: SignSlot,
     options: &SignOptions,
     input_bytes: &[u8],
     input_sha256: Sha256,
 ) -> Result<SignChainOutput, SignErrorKind> {
     let cert_der = transport
-        .read_certificate(slot.cert_slot())
+        .read_certificate(SIGNING_CERT)
         .or_else(|_| {
-            let alt = match slot.cert_slot() {
+            let alt = match SIGNING_CERT {
                 CertSlot::Authentication => CertSlot::AuthenticationAlt,
                 CertSlot::Signature => CertSlot::SignatureAlt,
                 other => other,
@@ -1186,12 +1090,10 @@ fn sign_chain<T: CardTransport>(
             transport.read_certificate(alt)
         })
         .map_err(|e| SignErrorKind::CertUnavailable {
-            slot,
             detail: format!("read: {e}"),
         })?;
     let cert_owned =
         OwnedCert::from_der(cert_der.as_bytes()).map_err(|e| SignErrorKind::CertUnavailable {
-            slot,
             detail: format!("parse: {e}"),
         })?;
     // Bind the view once: `view()` re-parses the DER on each call.
@@ -1208,7 +1110,7 @@ fn sign_chain<T: CardTransport>(
         None => None,
         Some(ref request) => {
             ensure_displayed_card(transport, request)?;
-            let parameters = document_signer(&cert, cert_algorithm, slot, request.signing_time)?;
+            let parameters = document_signer(&cert, cert_algorithm, request.signing_time)?;
             let objects = load_data_objects(options, request, input_bytes)?;
             let metadata = document_metadata(&cert, request)?;
             let plan = document::plan(request.format, objects, &parameters, &metadata)
@@ -1230,22 +1132,19 @@ fn sign_chain<T: CardTransport>(
     // counter-safe probes before the typed PIN is spent.
     let scheme = resolve_pin_reference_scheme(transport).map_err(|e| match e {
         AuthError::Transport(t) => SignErrorKind::Transport(format!("{t}")),
-        AuthError::PinPolicy(reason) => SignErrorKind::PinPolicy { slot, reason },
+        AuthError::PinPolicy(reason) => SignErrorKind::PinPolicy { reason },
     })?;
-    let outcome = verify_pin_with_scheme(transport, slot.pin_slot(), scheme, options.pin.clone())
+    let outcome = verify_pin_with_scheme(transport, SIGNING_PIN, scheme, options.pin.clone())
         .map_err(|e| match e {
-        AuthError::Transport(t) => SignErrorKind::Transport(format!("{t}")),
-        AuthError::PinPolicy(reason) => SignErrorKind::PinPolicy { slot, reason },
-    })?;
+            AuthError::Transport(t) => SignErrorKind::Transport(format!("{t}")),
+            AuthError::PinPolicy(reason) => SignErrorKind::PinPolicy { reason },
+        })?;
     let pin_retries_after = match outcome {
         VerifyOutcome::Ok => None,
         rejected @ (VerifyOutcome::WrongPin { .. }
         | VerifyOutcome::Locked
         | VerifyOutcome::Other(_)) => {
-            return Err(SignErrorKind::PinRejected {
-                slot,
-                outcome: rejected,
-            });
+            return Err(SignErrorKind::PinRejected { outcome: rejected });
         }
     };
 
@@ -1264,7 +1163,6 @@ fn sign_chain<T: CardTransport>(
     // and the right signature-length expectation for each.
     let (signature_bytes, local_verify) = sign_dispatch_by_alg(
         transport,
-        slot,
         scheme,
         &cert_owned.view(),
         cert_algorithm,
@@ -2007,7 +1905,6 @@ fn merge_unique(into: &mut Vec<Vec<u8>>, from: Vec<Vec<u8>>) {
 const fn document_signer<'a>(
     cert: &'a Certificate<'a>,
     cert_algorithm: PublicKeyAlgorithm,
-    slot: SignSlot,
     signing_time: SigningTime,
 ) -> Result<SignerParameters<'a>, SignErrorKind> {
     let (digest_algorithm, signature_algorithm) = match cert_algorithm {
@@ -2020,7 +1917,7 @@ const fn document_signer<'a>(
         PublicKeyAlgorithm::Ec(_)
         | PublicKeyAlgorithm::EcExplicit { .. }
         | PublicKeyAlgorithm::Other => {
-            return Err(SignErrorKind::UnsupportedDocumentKey(slot));
+            return Err(SignErrorKind::UnsupportedDocumentKey);
         }
     };
     Ok(SignerParameters {
@@ -2115,7 +2012,7 @@ fn pace_err_to_kind<TE: fmt::Display>(e: &pace::PaceError<TE>) -> SignErrorKind 
 
 /// Hoist [`SignError`] (lib-core) variants onto
 /// [`SignErrorKind`] (client). Kept as a single function so the
-/// RSA and ECDSA branches of `sign_with_slot` use the same
+/// RSA and ECDSA branches of `sign_qualified` use the same
 /// mapping.
 fn sign_err_to_kind<TE: fmt::Display>(e: SignError<TE>) -> SignErrorKind {
     match e {
@@ -2126,36 +2023,13 @@ fn sign_err_to_kind<TE: fmt::Display>(e: SignError<TE>) -> SignErrorKind {
     }
 }
 
-/// Auth-slot wrapper kept for the existing CLI subcommand.
-///
-/// # Errors
-/// See [`sign_with_slot`].
-pub fn sign_auth_first(
-    backend: PcscBackend,
-    options: SignOptions,
-) -> Result<SignReport, SignErrorKind> {
-    sign_with_slot(backend, SignSlot::Auth, options)
-}
-
-/// Qualified-signature wrapper. PIN2-gated.
-///
-/// # Errors
-/// See [`sign_with_slot`].
-pub fn sign_qualified_first(
-    backend: PcscBackend,
-    options: SignOptions,
-) -> Result<SignReport, SignErrorKind> {
-    sign_with_slot(backend, SignSlot::Qualified, options)
-}
-
 impl fmt::Display for SignReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "reader: {}", self.reader)?;
         writeln!(
             f,
-            "slot: {} (key ref {:#04X})",
-            self.slot.slot_label(),
-            self.slot.key_ref().as_u8()
+            "key: {SIGNING_KEY_LABEL} (key ref {:#04X})",
+            SIGNING_KEY.as_u8()
         )?;
         if let Some(cn) = &self.cert_subject_cn {
             writeln!(f, "cert subject CN: {cn}")?;
@@ -2181,12 +2055,11 @@ impl fmt::Display for SignReport {
             writeln!(f, "cert DER: {}", p.display())?;
         }
         if let Some(r) = self.pin_retries_after {
-            writeln!(f, "{} retries after verify: {r}", self.slot.pin_label())?;
+            writeln!(f, "{SIGNING_PIN_LABEL} retries after verify: {r}")?;
         }
         writeln!(
             f,
-            "local verify (against on-card {} cert pubkey): {}",
-            self.slot.slot_label(),
+            "local verify (against on-card {SIGNING_KEY_LABEL} cert pubkey): {}",
             self.local_verify,
         )?;
         Ok(())
@@ -2198,41 +2071,6 @@ mod tests {
     use super::*;
     use crate::test_util::{TestResult, check, check_true};
     use refineid_lib_core::apdu::status_word::PinRetries;
-
-    // ---- SignSlot: the FINEID slot -> {key ref, PIN, cert}
-    // mapping (S1 v4.2 §3.5). Getting any of these wrong signs
-    // with the wrong key or gates on the wrong PIN, so the table
-    // is pinned explicitly. ----
-
-    #[test]
-    fn auth_slot_maps_to_pin1_keyref01_ef4331() -> TestResult {
-        let s = SignSlot::Auth;
-        check(&s.key_ref().as_u8(), &0x01_u8, "auth key ref")?;
-        check_true(matches!(s.pin_slot(), PinSlot::Pin1), "auth pin slot")?;
-        check_true(
-            matches!(s.cert_slot(), CertSlot::Authentication),
-            "auth cert slot",
-        )?;
-        check(&s.pin_label(), &"PIN1", "auth pin label")?;
-        check(&s.slot_label(), &"auth", "auth slot label")
-    }
-
-    #[test]
-    fn qualified_slot_maps_to_pin2_keyref02_ef4332() -> TestResult {
-        let s = SignSlot::Qualified;
-        check(&s.key_ref().as_u8(), &0x02_u8, "qualified key ref")?;
-        check_true(matches!(s.pin_slot(), PinSlot::Pin2), "qualified pin slot")?;
-        check_true(
-            matches!(s.cert_slot(), CertSlot::Signature),
-            "qualified cert slot",
-        )?;
-        check(&s.pin_label(), &"PIN2", "qualified pin label")?;
-        check(
-            &s.slot_label(),
-            &"qualified-signature",
-            "qualified slot label",
-        )
-    }
 
     #[test]
     fn timestamp_credentials_are_encoded_and_redacted() -> TestResult {
@@ -2638,28 +2476,25 @@ mod tests {
     }
 
     #[test]
-    fn pin_rejected_display_renders_slot_and_outcome() -> TestResult {
+    fn pin_rejected_display_renders_the_pin_and_outcome() -> TestResult {
         let wrong = SignErrorKind::PinRejected {
-            slot: SignSlot::Auth,
             outcome: VerifyOutcome::WrongPin {
                 retries_left: pin_retries(2)?,
             },
         }
         .to_string();
-        check_true(wrong.contains("PIN1"), "wrong-pin slot label")?;
+        check_true(wrong.contains("PIN2"), "wrong-pin label")?;
         check_true(wrong.contains("wrong PIN"), "wrong-pin reason")?;
         check_true(wrong.contains("retries left"), "wrong-pin counter")?;
 
         let locked = SignErrorKind::PinRejected {
-            slot: SignSlot::Qualified,
             outcome: VerifyOutcome::Locked,
         }
         .to_string();
-        check_true(locked.contains("PIN2"), "locked slot label")?;
+        check_true(locked.contains("PIN2"), "locked label")?;
         check_true(locked.contains("blocked"), "locked reason")?;
 
         let other = SignErrorKind::PinRejected {
-            slot: SignSlot::Auth,
             outcome: VerifyOutcome::Other(0x6A88),
         }
         .to_string();
@@ -2668,7 +2503,6 @@ mod tests {
         // The internal "can't happen" arm still renders a line
         // rather than panicking.
         let internal = SignErrorKind::PinRejected {
-            slot: SignSlot::Auth,
             outcome: VerifyOutcome::Ok,
         }
         .to_string();
@@ -2679,11 +2513,10 @@ mod tests {
     fn sign_chain_and_crypto_error_display() -> TestResult {
         check_true(
             SignErrorKind::PinPolicy {
-                slot: SignSlot::Auth,
                 reason: PinPolicyReason::NonDigit { byte_offset: 2 },
             }
             .to_string()
-            .contains("PIN1 rejected locally"),
+            .contains("PIN2 rejected locally"),
             "pin policy",
         )?;
         check_true(
@@ -2703,22 +2536,20 @@ mod tests {
         )?;
         check_true(
             SignErrorKind::CertUnavailable {
-                slot: SignSlot::Auth,
                 detail: "read: timeout".to_owned(),
             }
             .to_string()
-            .contains("auth cert unavailable for local verify: read: timeout"),
+            .contains("qualified-signature cert unavailable for local verify: read: timeout"),
             "cert unavailable",
         )?;
         check_true(
-            SignErrorKind::UnsupportedKeyType(SignSlot::Qualified)
+            SignErrorKind::UnsupportedKeyType
                 .to_string()
                 .contains("qualified-signature cert has an unsupported key type"),
             "unsupported key type",
         )?;
         check_true(
             SignErrorKind::UnsupportedCurve {
-                slot: SignSlot::Auth,
                 curve: EcCurve::Secp256r1,
             }
             .to_string()
@@ -2786,7 +2617,6 @@ mod tests {
     fn sample_report(cn: Option<CommonName>) -> SignReport {
         SignReport {
             reader: "OMNIKEY 5422".to_owned(),
-            slot: SignSlot::Auth,
             input_len: 11,
             input_sha256: Sha256::of(b"hello world"),
             signature_path: PathBuf::from("/tmp/out.sig"),
@@ -2814,8 +2644,8 @@ mod tests {
         let s = sample_report(cn).to_string();
         check_true(s.contains("reader: OMNIKEY 5422"), "reader line")?;
         check_true(
-            s.contains("slot: auth (key ref 0x01)"),
-            "slot line with key ref",
+            s.contains("key: qualified-signature (key ref 0x02)"),
+            "key line with key ref",
         )?;
         check_true(s.contains("cert subject CN: DVV"), "subject cn line")?;
         check_true(s.contains("input length: 11 bytes"), "input length")?;
@@ -2830,7 +2660,7 @@ mod tests {
         )?;
         check_true(s.contains("cert DER: /tmp/out.crt"), "cert der line")?;
         check_true(
-            s.contains("local verify (against on-card auth cert pubkey): ok"),
+            s.contains("local verify (against on-card qualified-signature cert pubkey): ok"),
             "local verify line",
         )
     }

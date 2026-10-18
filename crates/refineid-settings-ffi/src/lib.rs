@@ -37,9 +37,10 @@ use refineid_card_manager_core::service::{self, CardSnapshot, ContactlessSnapsho
 use refineid_doc_sign::asic_verify::{DocumentVerifyReport, verify_document};
 use refineid_doc_sign::cades::SigningTime;
 use refineid_doc_sign::document::Format;
-use refineid_doc_sign::pades::SignatureMetadata;
+use refineid_doc_sign::pades::{SignatureMetadata, StampLanguage};
 use refineid_doc_sign::service::{
-    DocumentRequest, LocalVerifyOutcome, SignOptions, SignReport, SignSlot, sign_with_slot,
+    DEFAULT_TIMESTAMP_AUTHORITY, DocumentRequest, LocalVerifyOutcome, SignOptions, SignReport,
+    VisibleSignatureRequest, sign_qualified,
 };
 use refineid_doc_sign::verify::VerifyOptions;
 use refineid_lib_core::apdu::status_word::PinRetries;
@@ -414,7 +415,6 @@ pub unsafe extern "C" fn refineid_settings_verify_container(
 struct DocumentSignJson {
     output_path: PathBuf,
     output_len: usize,
-    slot: &'static str,
     signer_cn: Option<String>,
     /// Whether the written signature passed the local check; a skipped
     /// check counts as passed, a failed one does not.
@@ -427,10 +427,6 @@ impl From<SignReport> for DocumentSignJson {
         Self {
             output_path: report.signature_path,
             output_len: report.output_len,
-            slot: match report.slot {
-                SignSlot::Qualified => "qualified",
-                SignSlot::Auth => "authentication",
-            },
             signer_cn: report.cert_subject_cn.map(|cn| cn.as_str().to_owned()),
             verified: !matches!(report.local_verify, LocalVerifyOutcome::Failed(_)),
             local_verify: match report.local_verify {
@@ -442,12 +438,15 @@ impl From<SignReport> for DocumentSignJson {
     }
 }
 
-/// Sign a document with the card in the single attached reader.
+/// Sign a document with the qualified signature key of the card in the
+/// single attached reader, under PIN 2.
 ///
-/// `PAdES` goes into a copy of the PDF beside it, an `ASiC-E` container
-/// beside any file. `format` is [`FORMAT_PADES`] or [`FORMAT_ASICE`];
-/// `slot` is the PIN slot whose key signs, PIN 2 for the qualified
-/// signature and PIN 1 for the authentication key; `reason` may be empty.
+/// `PAdES` goes into a copy of the PDF beside it, carrying the round
+/// verification stamp in the language `language` names (a Windows
+/// language identifier), an `ASiC-E` container beside any file. The
+/// signature is timestamped by the default authority and carries its
+/// validation material and an archive timestamp. `format` is
+/// [`FORMAT_PADES`] or [`FORMAT_ASICE`]; `reason` may be empty.
 ///
 /// # Safety
 ///
@@ -459,7 +458,7 @@ pub unsafe extern "C" fn refineid_settings_sign_document(
     path: *const u8,
     path_length: usize,
     format: u8,
-    slot: u8,
+    language: u16,
     pin: *const u8,
     pin_length: usize,
     reason: *const u8,
@@ -469,7 +468,6 @@ pub unsafe extern "C" fn refineid_settings_sign_document(
         // SAFETY: The pointer and bound are validated before the read.
         let path = unsafe { copy_utf8(path, path_length, MAX_PATH_BYTES, "path") }?;
         let format = parse_format(format)?;
-        let slot = sign_slot(parse_slot(slot)?);
         // SAFETY: The secret is copied into PinBytes, whose constructor
         // zeroizes its temporary Vec on both success and failure.
         let pin = unsafe { copy_pin(pin, pin_length, "PIN") }?;
@@ -487,25 +485,7 @@ pub unsafe extern "C" fn refineid_settings_sign_document(
             ));
         }
         let output = derive_output(&input, format)?;
-        let request = DocumentRequest {
-            format,
-            additional_inputs: Vec::new(),
-            signing_time: SigningTime::now(),
-            metadata: SignatureMetadata {
-                reason,
-                location: None,
-                contact: None,
-                name: None,
-                signing_time: None,
-                visible_signature: None,
-            },
-            expected_serial: None,
-            visible_signature: None,
-            archive: false,
-            long_term: false,
-            timestamp_authorities: Vec::new(),
-            timestamp_credentials: None,
-        };
+        let request = document_request(format, reason, language);
         let options = SignOptions {
             input,
             output,
@@ -515,7 +495,7 @@ pub unsafe extern "C" fn refineid_settings_sign_document(
             can: None,
             document: Some(request),
         };
-        sign_with_slot(PcscBackend, slot, options)
+        sign_qualified(PcscBackend, options)
             .map(DocumentSignJson::from)
             .map_err(|error| ApiFailure::new("sign_failed", error.to_string()))
     })
@@ -530,14 +510,6 @@ fn parse_format(format: u8) -> Result<Format, ApiFailure> {
             "invalid_format",
             format!("format {other} is not a document format"),
         )),
-    }
-}
-
-/// The signing key a PIN slot guards.
-const fn sign_slot(slot: PinManageSlot) -> SignSlot {
-    match slot {
-        PinManageSlot::Pin1 => SignSlot::Auth,
-        PinManageSlot::Pin2 => SignSlot::Qualified,
     }
 }
 
@@ -599,6 +571,33 @@ impl StripSuffixIgnoreCase for str {
             .then(|| &self[cut..])
             .filter(|tail| tail.eq_ignore_ascii_case(suffix))
             .map(|_| &self[..cut])
+    }
+}
+
+/// The document signature the app asks for: timestamped by the default
+/// authority, with validation material and an archive timestamp, and
+/// for `PAdES` the verification stamp in the user's interface language.
+fn document_request(format: Format, reason: Option<String>, language: u16) -> DocumentRequest {
+    DocumentRequest {
+        format,
+        additional_inputs: Vec::new(),
+        signing_time: SigningTime::now(),
+        metadata: SignatureMetadata {
+            reason,
+            location: None,
+            contact: None,
+            name: None,
+            signing_time: None,
+            visible_signature: None,
+        },
+        expected_serial: None,
+        visible_signature: (format == Format::Pades).then(|| {
+            VisibleSignatureRequest::Verification(StampLanguage::for_windows_language(language))
+        }),
+        archive: true,
+        long_term: true,
+        timestamp_authorities: vec![DEFAULT_TIMESTAMP_AUTHORITY.to_owned()],
+        timestamp_credentials: None,
     }
 }
 
@@ -1146,13 +1145,41 @@ fn serialize_envelope<T: Serialize>(envelope: &ApiEnvelope<'_, T>) -> String {
 )]
 mod tests {
     use super::{
-        FORMAT_ASICE, FORMAT_PADES, PIN1_SLOT, PIN2_SLOT, derive_output, is_pdf, parse_format,
-        parse_slot, sign_slot,
+        FORMAT_ASICE, FORMAT_PADES, PIN1_SLOT, PIN2_SLOT, derive_output, document_request, is_pdf,
+        parse_format, parse_slot,
     };
     use refineid_card_manager_core::card_pin::PinManageSlot;
     use refineid_doc_sign::document::Format;
-    use refineid_doc_sign::service::SignSlot;
+    use refineid_doc_sign::pades::StampLanguage;
+    use refineid_doc_sign::service::{DEFAULT_TIMESTAMP_AUTHORITY, VisibleSignatureRequest};
     use std::path::Path;
+
+    /// The Windows language identifier of Finnish (Finland), winnt.h.
+    const FINNISH_FINLAND: u16 = 0x040b;
+
+    #[test]
+    fn the_request_is_timestamped_archived_and_stamped() {
+        let pdf = document_request(Format::Pades, None, FINNISH_FINLAND);
+        assert_eq!(
+            pdf.timestamp_authorities,
+            vec![DEFAULT_TIMESTAMP_AUTHORITY.to_owned()]
+        );
+        assert!(pdf.archive);
+        assert!(pdf.long_term);
+        assert!(matches!(
+            pdf.visible_signature,
+            Some(VisibleSignatureRequest::Verification(
+                StampLanguage::Finnish
+            ))
+        ));
+        let container = document_request(Format::AsicECades, Some("review".to_owned()), 0);
+        assert!(container.visible_signature.is_none());
+        assert_eq!(container.metadata.reason.as_deref(), Some("review"));
+        assert_eq!(
+            container.timestamp_authorities,
+            vec![DEFAULT_TIMESTAMP_AUTHORITY.to_owned()]
+        );
+    }
 
     #[test]
     fn slot_values_are_closed() {
@@ -1163,13 +1190,11 @@ mod tests {
     }
 
     #[test]
-    fn format_values_are_closed_and_a_slot_names_its_key() {
+    fn format_values_are_closed() {
         assert_eq!(parse_format(FORMAT_PADES).ok(), Some(Format::Pades));
         assert_eq!(parse_format(FORMAT_ASICE).ok(), Some(Format::AsicECades));
         assert!(parse_format(0).is_err());
         assert!(parse_format(3).is_err());
-        assert_eq!(sign_slot(PinManageSlot::Pin1), SignSlot::Auth);
-        assert_eq!(sign_slot(PinManageSlot::Pin2), SignSlot::Qualified);
     }
 
     #[test]

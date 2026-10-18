@@ -105,12 +105,15 @@ internal static partial class LocalCardService
         [In] byte[] path,
         nuint pathLength,
         byte format,
-        byte slot,
+        ushort language,
         [In] byte[] pin,
         nuint pinLength,
         [In] byte[] reason,
         nuint reasonLength
     );
+
+    [LibraryImport("kernel32.dll")]
+    private static partial ushort GetUserDefaultUILanguage();
 
     [LibraryImport(Library, EntryPoint = "refineid_settings_string_free")]
     private static partial void StringFree(nint value);
@@ -127,13 +130,12 @@ internal static partial class LocalCardService
         );
     }
 
-    /// <summary>Signs a document with the card in the attached reader.</summary>
+    /// <summary>Signs a document with the qualified signature key of the card in the attached reader, under PIN 2; a PDF carries the verification stamp in the user's interface language.</summary>
     /// <exception cref="NativeRappException">The card or the service refused.</exception>
     /// <exception cref="JsonException">The service reply was malformed.</exception>
     internal static DocumentSignReport SignDocument(
         string path,
         DocumentFormat format,
-        PinSlot slot,
         string pin,
         string reason
     )
@@ -149,7 +151,7 @@ internal static partial class LocalCardService
                         pathBytes,
                         (nuint)pathBytes.Length,
                         (byte)format,
-                        (byte)slot,
+                        GetUserDefaultUILanguage(),
                         pinBytes,
                         (nuint)pinBytes.Length,
                         reasonBytes,
