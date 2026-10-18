@@ -1174,6 +1174,8 @@ mod tests {
         ));
         let container = document_request(Format::AsicECades, Some("review".to_owned()), 0);
         assert!(container.visible_signature.is_none());
+        assert!(container.archive);
+        assert!(container.long_term);
         assert_eq!(container.metadata.reason.as_deref(), Some("review"));
         assert_eq!(
             container.timestamp_authorities,
