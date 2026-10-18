@@ -121,8 +121,9 @@ mod tests {
             normalize_pairing_code("7K X4-M9").as_deref(),
             Some("7KX4M9")
         );
-        assert_eq!(normalize_pairing_code("ilo123"), None);
-        assert_eq!(normalize_pairing_code("7KX4MO"), None);
+        for excluded in ["7KX4MI", "7KX4Mi", "7KX4ML", "7KX4Ml", "7KX4MO", "7KX4Mo"] {
+            assert_eq!(normalize_pairing_code(excluded), None, "{excluded}");
+        }
         assert_eq!(normalize_pairing_code("7KX4MU"), None);
         assert_eq!(normalize_pairing_code("7KX4M"), None);
         assert_eq!(normalize_pairing_code("7KX4M99"), None);
