@@ -929,6 +929,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "refineid-rapp-ble"
+version = "26.10.20"
+dependencies = [
+ "refineid-rapp",
+ "refineid-rapp-core",
+ "windows",
+]
+
+[[package]]
 name = "refineid-rapp-cli"
 version = "26.10.20"
 dependencies = [
@@ -937,6 +946,7 @@ dependencies = [
  "p384",
  "refineid-lib-core",
  "refineid-rapp",
+ "refineid-rapp-ble",
  "refineid-rapp-core",
  "refineid-windows-credential-store",
  "zeroize",

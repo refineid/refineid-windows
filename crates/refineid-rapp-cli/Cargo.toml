@@ -17,6 +17,7 @@ hex.workspace = true
 p384 = { version = "0.14", default-features = false, features = ["ecdsa"] }
 refineid-rapp.workspace = true
 refineid-rapp-core.workspace = true
+refineid-rapp-ble.workspace = true
 refineid-windows-credential-store.workspace = true
 zeroize.workspace = true
 

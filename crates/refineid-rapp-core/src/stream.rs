@@ -357,9 +357,49 @@ pub enum DialPurpose<'a> {
     Session(&'a RoutingKey),
 }
 
+/// One routing preamble encoded for the transport profile of the connection
+/// it opens (section 2.2.1): the first frame the requester sends.
+///
+/// The only constructor is [`DialPurpose::preamble`], so a value is proof
+/// that its bytes are a preamble of the named profile within
+/// [`MAX_ROUTING_PREAMBLE_FRAME`]. The bytes are transit: they go to the
+/// connection's `send_frame` once, and nothing reads them back.
+pub struct PreambleFrame {
+    profile: TransportProfile,
+    bytes: Vec<u8>,
+}
+
+impl PreambleFrame {
+    /// The transport profile the preamble was encoded for.
+    #[must_use]
+    pub const fn profile(&self) -> TransportProfile {
+        self.profile
+    }
+
+    /// The encoded preamble, for the connection's first `send_frame`.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl core::fmt::Debug for PreambleFrame {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("PreambleFrame")
+            .field("profile", &self.profile)
+            .finish_non_exhaustive()
+    }
+}
+
 impl DialPurpose<'_> {
-    fn preamble(self) -> Result<Vec<u8>, StreamError> {
-        let profile = TransportProfile::Stream;
+    /// The routing preamble for this purpose on `profile` (section 2.2.1).
+    /// A session preamble carries a fresh nonce on every call.
+    ///
+    /// # Errors
+    ///
+    /// Fails when no random nonce can be drawn or the preamble does not encode.
+    pub fn preamble(self, profile: TransportProfile) -> Result<PreambleFrame, StreamError> {
         let preamble = match self {
             Self::Pairing => RoutingPreamble::Pairing,
             Self::Session(key) => RoutingPreamble::Session(
@@ -369,7 +409,10 @@ impl DialPurpose<'_> {
                 .map_err(|_| StreamError::Random)?,
             ),
         };
-        Ok(preamble.encode(profile)?)
+        Ok(PreambleFrame {
+            profile,
+            bytes: preamble.encode(profile)?,
+        })
     }
 }
 
@@ -397,11 +440,11 @@ pub fn dial(
         let Ok(socket) = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) else {
             continue;
         };
-        let preamble = purpose.preamble()?;
+        let preamble = purpose.preamble(TransportProfile::Stream)?;
         let mut transport = TcpFrameTransport::new(socket, candidate_id, receive_deadline)
             .map_err(|_| StreamError::Accept)?;
         transport
-            .send_frame(&preamble)
+            .send_frame(preamble.as_bytes())
             .map_err(StreamError::Preamble)?;
         return Ok(transport);
     }
