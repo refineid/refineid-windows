@@ -155,12 +155,20 @@ Each step is observed, not assumed, and recorded here with the date
 when it has been:
 
 1. The negotiated ATT MTU between this adapter and the iPhone, and how
-   long after connection `MaxPduSizeChanged` fires (W-R-11).
+   long after connection `MaxPduSizeChanged` fires (W-R-11). Observed
+   2026-10-21: an ATT MTU of 527 bytes, a fragment capacity of 506 bytes,
+   in two connections; the delay before `MaxPduSizeChanged` is not yet
+   measured.
 2. Which process loads the KSP for a client certificate in Edge and in
    Chrome, with its token's integrity level and AppContainer state
    (W-R-4a).
 3. Pairing over BLE with the six-character code, with no Windows
-   pairing dialog (R-54).
+   pairing dialog (R-54). Observed 2026-10-21: two pairings with the
+   iPhone's development harness completed `CPace`, `Noise_XXpsk3`, the grant
+   exchange and the storage confirmation over BLE alone; Windows showed no
+   pairing dialog and listed no bonded device afterwards. The phone
+   advertised under a different address in the second run, as the
+   rotating private address of RAPP §4.1 predicts (core R-53).
 4. A session routed by its preamble, `card.status` reporting the wired
    reader's card, and `read_identity` returning the certificates.
 5. The link and session surviving the iPhone's screen lock for the
