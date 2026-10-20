@@ -36,6 +36,26 @@ Visual Studio Installer for:
 
 Open a new terminal afterwards so the updated `PATH` applies.
 
+### Line endings
+
+The repository stores text with LF line endings, and the tracked
+`.gitattributes` (`* text=auto eol=lf`) keeps every checkout LF. It takes
+precedence over the `core.autocrlf=true` that the Git for Windows installer
+sets in its system configuration by default, so no local Git setting is
+needed, and none should be changed to work around it. Without it a Windows
+checkout gets CRLF and CSharpier rejects every C# file.
+
+A checkout made before `.gitattributes` existed keeps its CRLF files until
+they are written again; `git ls-files --eol` shows them as `w/crlf`. Commit or
+stash any work first, since this replaces every tracked file from the index,
+then run in Git Bash:
+
+```sh
+git ls-files -z | xargs -0 rm -f
+git checkout -- .
+git ls-files --eol | grep -c w/crlf   # 0
+```
+
 The requirements it satisfies:
 
 - **Rust** through `rustup`. The channel, components, and targets are pinned
