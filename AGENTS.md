@@ -101,8 +101,7 @@
 ## Independent review
 
 - Before a pull request merges, review its diff independently with the `agy`
-  CLI and Gemini models: `gemini-3.8-flash-high` always, plus
-  `gemini-3.1-pro-high` for protocol, cryptography or state-machine changes.
+  CLI and the `gemini-3.8-flash-high` model.
 - Run `agy` headless in its sandbox and plan mode, from an empty directory,
   with the diff pasted into the prompt and no tool use. Frame the request as
   a code review from the project's author.
