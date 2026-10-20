@@ -1,6 +1,6 @@
 //! Who is at the other end of the pipe (Windows STPA W-R-3, W-R-4).
 //!
-//! The token user, the logon session and the image of a process are read
+//! The token user, the Windows session and the image of a process are read
 //! from Windows, not from anything the process says about itself.
 
 use std::ffi::OsString;
@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::{
-    GetLengthSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    GetLengthSid, GetTokenInformation, IsValidSid, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::System::SystemInformation::{ComputerNameDnsHostname, GetComputerNameExW};
@@ -67,7 +67,7 @@ impl UserSid {
 pub struct ProcessIdentity {
     /// The user its token runs as.
     pub user: UserSid,
-    /// The logon session it runs in.
+    /// The Windows session it runs in.
     pub session: u32,
     /// The path of its image.
     pub image: PathBuf,
@@ -107,12 +107,15 @@ impl ProcessIdentity {
         Self::of(unsafe { GetCurrentProcessId() })
     }
 
-    /// Whether `other` runs as the same user in the same logon session.
+    /// Whether `other` runs as the same user in the same Windows session.
     #[must_use]
     pub fn same_user_and_session(&self, other: &Self) -> bool {
         self.user == other.user && self.session == other.session
     }
 }
+
+/// The size of a SID with no subauthority: revision, count and authority.
+const MIN_SID_BYTES: usize = 8;
 
 /// The longest computer name read, in UTF-16 units.
 const COMPUTER_NAME_UNITS: usize = 256;
@@ -167,20 +170,27 @@ fn token_user(token: &Handle) -> Result<UserSid, PipeError> {
     }
     // SAFETY: GetTokenInformation filled a TOKEN_USER at the buffer start.
     let sid = unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid };
-    if sid.is_null() {
+    // The SID must lie after the TOKEN_USER and inside the buffer before
+    // anything reads it.
+    let first = buffer.as_ptr() as usize + size_of::<TOKEN_USER>();
+    let end = buffer.as_ptr() as usize + TOKEN_USER_BYTES;
+    let address = sid as usize;
+    if sid.is_null() || address < first || address + MIN_SID_BYTES > end {
         return Err(PipeError::Identity(0));
     }
-    // SAFETY: `sid` points at a valid SID inside the buffer.
+    // SAFETY: at least a SID header lies inside the buffer, as checked.
+    if unsafe { IsValidSid(sid) } == 0 {
+        return Err(PipeError::Identity(0));
+    }
+    // SAFETY: `sid` is a valid SID whose header is inside the buffer.
     let length = unsafe { GetLengthSid(sid) } as usize;
-    let start = sid.cast::<u8>().cast_const();
-    let buffer_start = buffer.as_ptr().cast::<u8>();
-    let offset = (start as usize).wrapping_sub(buffer_start as usize);
-    if offset
+    if address
         .checked_add(length)
-        .is_none_or(|end| end > TOKEN_USER_BYTES)
+        .is_none_or(|sid_end| sid_end > end)
     {
         return Err(PipeError::Identity(0));
     }
+    let start = sid.cast::<u8>().cast_const();
     // SAFETY: the SID lies inside the buffer, as just checked.
     Ok(UserSid(
         unsafe { core::slice::from_raw_parts(start, length) }.to_vec(),

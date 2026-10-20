@@ -149,10 +149,15 @@ fn key_from_record(record: &PairingRecord) -> Option<OpenKey> {
     })
 }
 
-/// Every stored pairing this provider can sign for, in store order.
+/// The key of the store's usable pairing, the one the agent serves; an
+/// older pairing the agent would refuse is not offered.
 fn usable_keys() -> Vec<OpenKey> {
     match ProtectedPairingStore::load() {
-        Ok(store) => store.records().iter().filter_map(key_from_record).collect(),
+        Ok(store) => store
+            .usable_pairing()
+            .and_then(key_from_record)
+            .into_iter()
+            .collect(),
         Err(error) => {
             Log::dbg(&format!("KSP: pairing store unavailable: {error}"));
             Vec::new()

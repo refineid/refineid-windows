@@ -92,8 +92,9 @@ public static class KspProbe
     {
         IntPtr module = LoadLibraryW(dll);
         if (module == IntPtr.Zero) throw new Exception("LoadLibrary failed: " + Marshal.GetLastWin32Error());
-        var getInterface = (GetInterface)Marshal.GetDelegateForFunctionPointer(
-            GetProcAddress(module, "GetKeyStorageInterface"), typeof(GetInterface));
+        IntPtr entry = GetProcAddress(module, "GetKeyStorageInterface");
+        if (entry == IntPtr.Zero) throw new Exception("the DLL exports no GetKeyStorageInterface");
+        var getInterface = (GetInterface)Marshal.GetDelegateForFunctionPointer(entry, typeof(GetInterface));
         IntPtr table;
         int status = getInterface(providerName, out table, 0);
         if (status != 0) throw new Exception("GetKeyStorageInterface: 0x" + status.ToString("X8"));

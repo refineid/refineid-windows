@@ -14,14 +14,6 @@
 //! signal strength of the phone it reaches, never a name or an identity
 //! code.
 
-#![cfg_attr(
-    not(windows),
-    expect(
-        clippy::missing_const_for_fn,
-        reason = "the agent runs on Windows only; elsewhere main only says so"
-    )
-)]
-
 #[cfg(windows)]
 mod session;
 

@@ -113,9 +113,11 @@ pub fn run() -> ExitCode {
                 if jobs.send(job).is_err() {
                     SignAnswer::Failed
                 } else {
-                    answered
-                        .recv_timeout(SIGNATURE_DEADLINE)
-                        .unwrap_or(SignAnswer::Cancelled)
+                    match answered.recv_timeout(SIGNATURE_DEADLINE) {
+                        Ok(answer) => answer,
+                        Err(RecvTimeoutError::Timeout) => SignAnswer::Cancelled,
+                        Err(RecvTimeoutError::Disconnected) => SignAnswer::Failed,
+                    }
                 }
             }
             Err(error) => {
@@ -158,7 +160,11 @@ fn load_pairing(started: Instant, offered: &mut Option<PairId>) -> Option<Pairin
     let record = store.usable_pairing()?.clone();
     let key = RoutingKey::derive(&record.to_core_pair_record().ok()?).ok()?;
     // W-R-8: the certificate is offered whenever the pairing is usable and
-    // its certificate known, before a session is open.
+    // its certificate known, before a session is open; one offered for
+    // another pairing is withdrawn first.
+    if offered.is_some_and(|pair_id| pair_id != record.pair_id) {
+        withdraw_certificates(started, offered);
+    }
     if let Some(certificate) = &record.auth_cert
         && *offered != Some(record.pair_id)
     {
@@ -212,6 +218,10 @@ fn serve_phone(started: Instant, inbox: &Receiver<Job>) {
     let mut pending: Option<Job> = None;
     loop {
         let Some(mut pairing) = load_pairing(started, &mut offered) else {
+            // W-R-8: no usable pairing, so nothing stays offered.
+            if offered.is_some() {
+                withdraw_certificates(started, &mut offered);
+            }
             if let Some(job) = pending.take() {
                 job.answer(SignAnswer::Failed);
             }
@@ -244,7 +254,8 @@ fn serve_phone(started: Instant, inbox: &Receiver<Job>) {
         let mut session = match reached {
             Ok(session) => session,
             Err(error) => {
-                if let Some(job) = pending.take() {
+                // Every request that arrived during the search waited for it.
+                for job in pending.take().into_iter().chain(inbox.try_iter()) {
                     log(
                         started,
                         &format!("no phone for the waiting request: {error}"),
@@ -264,7 +275,11 @@ fn serve_phone(started: Instant, inbox: &Receiver<Job>) {
             learn_certificate(started, &mut pairing, &mut session, &mut offered);
         }
         if let Some(job) = pending.take() {
-            sign(started, &mut pairing, &mut session, job);
+            if Requester::<ProtectedPairingStore, MemoryJournal>::session_end(&session).is_some() {
+                job.answer(SignAnswer::NoPhone);
+            } else {
+                sign(started, &mut pairing, &mut session, job);
+            }
         }
         loop {
             match inbox.recv_timeout(LIVENESS_INTERVAL) {

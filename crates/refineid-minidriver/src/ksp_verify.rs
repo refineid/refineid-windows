@@ -99,7 +99,7 @@ pub fn verifies(
         };
         status >= 0
     };
-    if !key.is_null() {
+    if imported && !key.is_null() {
         // SAFETY: the key was imported here and is destroyed once.
         unsafe { BCryptDestroyKey(key) };
     }

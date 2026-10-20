@@ -22,7 +22,7 @@ use windows_sys::Win32::System::Threading::CreateMutexW;
 
 use crate::identity::ProcessIdentity;
 use crate::wire::{MAX_MESSAGE, SignAnswer, SignRequest};
-use crate::{AGENT_MUTEX_NAME, PipeError, pipe_name, wide};
+use crate::{AGENT_MUTEX_PREFIX, PipeError, pipe_name, wide};
 
 /// One pipe instance: clients are served one after another.
 const MAX_INSTANCES: u32 = 1;
@@ -37,12 +37,13 @@ const DEFAULT_WAIT_MS: u32 = 5_000;
 pub struct AgentLock(HANDLE);
 
 impl AgentLock {
-    /// Takes the session-local agent mutex.
+    /// Takes this user's session-local agent mutex.
     ///
     /// # Errors
     /// [`PipeError::AgentRunning`] when another agent holds it.
     pub fn acquire() -> Result<Self, PipeError> {
-        let name = wide(AGENT_MUTEX_NAME);
+        let sid = ProcessIdentity::current()?.user.to_sddl()?;
+        let name = wide(&format!("{AGENT_MUTEX_PREFIX}{sid}"));
         // SAFETY: a named mutex with default security and initial ownership.
         let handle = unsafe { CreateMutexW(core::ptr::null(), 1, name.as_ptr()) };
         // SAFETY: no arguments; read right after the call it describes.
@@ -95,6 +96,7 @@ impl PipeServer {
     pub fn bind(_lock: &AgentLock) -> Result<Self, PipeError> {
         let identity = ProcessIdentity::current()?;
         let sid = identity.user.to_sddl()?;
+        let session = identity.session;
         // Protected DACL: generic all for the user, nothing inherited, and
         // nobody else.
         let sddl = wide(&format!("D:P(A;;GA;;;{sid})"));
@@ -118,7 +120,7 @@ impl PipeServer {
             lpSecurityDescriptor: descriptor,
             bInheritHandle: 0,
         };
-        let name = wide(&pipe_name(&sid));
+        let name = wide(&pipe_name(&sid, session));
         // SAFETY: every pointer is valid for the call; the descriptor
         // outlives it.
         let pipe = unsafe {
@@ -256,7 +258,9 @@ impl Client<'_> {
             return Err(PipeError::last(PipeError::Pipe));
         }
         // SAFETY: waits until the client has read the answer.
-        unsafe { FlushFileBuffers(self.server.pipe) };
+        if unsafe { FlushFileBuffers(self.server.pipe) } == 0 {
+            return Err(PipeError::last(PipeError::Pipe));
+        }
         Ok(())
     }
 }

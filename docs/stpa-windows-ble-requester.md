@@ -186,6 +186,12 @@ when it has been:
    length of a login (core 16.1).
 6. A login at kortti.tunnistautuminen.suomi.fi in Edge, with the
    signature verified by the KSP before it reached CNG (W-R-5), and the
-   algorithm the server asked for recorded (core R-48).
+   algorithm the server asked for recorded (core R-48). Observed
+   2026-10-21: with the iPhone's Wi-Fi and cellular data off and Bluetooth
+   its only link, the holder logged in to suomi.fi with the certificate
+   card in Edge, and to card.refineid.fi; each signature was one ECDSA
+   signature of 96 bytes (P-384) the phone returned within a second once PIN 1
+   was cached, verified by the KSP before Edge received it. The digest
+   algorithm the server asked for is not yet recorded.
 7. A login after the iPhone was locked with the link held (R-50), and
    the message shown when the link was dropped on purpose (R-51).

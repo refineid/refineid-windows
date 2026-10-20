@@ -2,7 +2,7 @@
 //!
 //! The provider sends one request and waits at most the caller's deadline
 //! for the answer. It talks only to a server Windows reports as running as
-//! this user in this logon session; a pipe served by anyone else counts as
+//! this user in this Windows session; a pipe served by anyone else counts as
 //! no agent at all. The connection asks for identification-level
 //! impersonation only, so the server can learn who calls and act as no one.
 
@@ -42,7 +42,7 @@ pub fn request_signature(
 ) -> Result<SignAnswer, PipeError> {
     let ends = Instant::now() + deadline;
     let identity = ProcessIdentity::current()?;
-    let name = wide(&pipe_name(&identity.user.to_sddl()?));
+    let name = wide(&pipe_name(&identity.user.to_sddl()?, identity.session));
     let pipe = open(&name, ends)?;
     let mut server_pid = 0u32;
     // SAFETY: `pipe` is open; `server_pid` receives the server's id.
@@ -88,7 +88,13 @@ fn open(name: &[u16], ends: Instant) -> Result<Pipe, PipeError> {
             )
         };
         if handle != INVALID_HANDLE_VALUE {
-            return Ok(Pipe(handle));
+            let pipe = Pipe(handle);
+            // A pipe that opened only after the deadline is too late to use.
+            return if Instant::now() < ends {
+                Ok(pipe)
+            } else {
+                Err(PipeError::TimedOut)
+            };
         }
         // SAFETY: no arguments.
         match unsafe { GetLastError() } {

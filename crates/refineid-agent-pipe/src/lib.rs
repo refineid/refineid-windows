@@ -7,7 +7,7 @@
 //! and reads one [`wire::SignAnswer`]. The agent creates the pipe as the
 //! first instance of its name, grants the current user alone, refuses remote
 //! clients, and serves a client only when Windows reports it running as the
-//! same user in the same logon session. The provider in turn talks only to a
+//! same user in the same Windows session. The provider in turn talks only to a
 //! server Windows reports the same way.
 //!
 //! [`wire`] is the safe message codec and builds on any host. The Windows
@@ -31,13 +31,14 @@ pub mod identity;
 #[cfg(windows)]
 pub mod server;
 
-/// The pipe name prefix; the user's SID completes it, so each user's agent
-/// has its own name.
+/// The pipe name prefix; the user's SID and Windows session complete it,
+/// so each user's agent in each session has its own name.
 pub const PIPE_NAME_PREFIX: &str = r"\\.\pipe\RefineID.Agent.";
 
-/// The name of the session-local mutex only one agent per user holds
-/// (W-R-15).
-pub const AGENT_MUTEX_NAME: &str = r"Local\RefineID.Agent";
+/// The prefix of the mutex only one agent per user and Windows session
+/// holds (W-R-15); the user's SID completes it, in the session-local
+/// namespace.
+pub const AGENT_MUTEX_PREFIX: &str = r"Local\RefineID.Agent.";
 
 /// How long an operation lives on the phone: the holder approves within it
 /// (RAPP section 8.2 item 1).
@@ -72,7 +73,6 @@ pub fn program_label(image: &Path) -> String {
         "brave.exe" => Some("Brave"),
         "opera.exe" => Some("Opera"),
         "vivaldi.exe" => Some("Vivaldi"),
-        "lsass.exe" => Some("Windows"),
         _ => None,
     };
     match known {
@@ -93,10 +93,11 @@ pub fn requester_context(program: &str, computer: &str) -> String {
     }
 }
 
-/// The pipe name of the user whose SID is `user_sid`.
+/// The pipe name of the user whose SID is `user_sid` in Windows session
+/// `session`: one per user and session, as the identity checks require.
 #[must_use]
-pub fn pipe_name(user_sid: &str) -> String {
-    format!("{PIPE_NAME_PREFIX}{user_sid}")
+pub fn pipe_name(user_sid: &str, session: u32) -> String {
+    format!("{PIPE_NAME_PREFIX}{user_sid}.{session}")
 }
 
 /// Why the pipe could not be used. A Windows error carries its code.

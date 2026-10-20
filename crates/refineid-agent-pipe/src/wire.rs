@@ -1,5 +1,5 @@
 //! The messages on the agent's pipe: one signature request from the key
-//! storage provider, one answer from the agent (Windows STPA W-R-1).
+//! storage provider, one answer from the agent (Windows STPA W-R-1, W-R-6).
 //!
 //! A request names the pairing, the key profile, the signature algorithm
 //! and the digest; it names neither the site nor the calling program, which
@@ -18,8 +18,9 @@ pub const MAX_MESSAGE: usize = 1024;
 
 /// The size of a pairing identifier on the wire.
 const PAIR_ID_LEN: usize = refineid_rapp::PAIR_ID_SIZE;
-/// The longest signature an answer carries: RSA 4096.
-const MAX_SIGNATURE: usize = 512;
+/// The longest signature an answer carries: RSA 3072, the largest key
+/// profile.
+const MAX_SIGNATURE: usize = 384;
 
 const KIND_SIGN: u8 = 1;
 
@@ -66,6 +67,8 @@ pub enum WireError {
     Digest,
     /// The signature is empty or longer than any key signs.
     Signature,
+    /// The algorithm is not one the key profile signs with.
+    Mismatch,
 }
 
 impl core::fmt::Display for WireError {
@@ -79,6 +82,7 @@ impl core::fmt::Display for WireError {
             Self::Algorithm => "the signature algorithm is unknown",
             Self::Digest => "the digest length does not match the algorithm",
             Self::Signature => "the signature length is out of range",
+            Self::Mismatch => "the algorithm does not suit the key profile",
         };
         formatter.write_str(what)
     }
@@ -88,8 +92,9 @@ impl core::error::Error for WireError {}
 
 /// One signature the key storage provider asks the agent for.
 ///
-/// A value is proof that the digest is exactly as long as the algorithm
-/// signs: the fields are private and both constructors check it.
+/// A value is proof that the algorithm suits the key profile and the digest
+/// is exactly as long as the algorithm signs: the fields are private and both
+/// constructors check it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SignRequest {
     pair_id: PairId,
@@ -110,6 +115,9 @@ impl SignRequest {
         algorithm: SignatureAlgorithm,
         digest: &[u8],
     ) -> Result<Self, WireError> {
+        if !suits(key_profile, algorithm) {
+            return Err(WireError::Mismatch);
+        }
         if digest.len() != algorithm.digest_length() {
             return Err(WireError::Digest);
         }
@@ -207,9 +215,16 @@ pub enum SignAnswer {
 }
 
 impl SignAnswer {
-    /// The answer as it crosses the pipe.
+    /// The answer as it crosses the pipe. A signature that is empty or
+    /// longer than any key signs is sent as [`SignAnswer::Failed`], since
+    /// the receiver would refuse it.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
+        if let Self::Signature(signature) = self
+            && (signature.is_empty() || signature.len() > MAX_SIGNATURE)
+        {
+            return Self::Failed.encode();
+        }
         let kind = match self {
             Self::Signature(_) => ANSWER_SIGNATURE,
             Self::Denied => ANSWER_DENIED,
@@ -223,8 +238,7 @@ impl SignAnswer {
         };
         let mut bytes = vec![WIRE_VERSION, kind];
         if let Self::Signature(signature) = self {
-            // A signature is at most `MAX_SIGNATURE` bytes when it is sent;
-            // a longer one is refused by the receiver.
+            // At most `MAX_SIGNATURE` bytes, as checked above.
             let length = u16::try_from(signature.len()).unwrap_or(u16::MAX);
             bytes.extend_from_slice(&length.to_le_bytes());
             bytes.extend_from_slice(signature);
@@ -301,6 +315,21 @@ impl<'a> Reader<'a> {
         } else {
             Err(WireError::Length)
         }
+    }
+}
+
+/// Whether `algorithm` is one the key of `profile` signs with.
+const fn suits(profile: KeyProfile, algorithm: SignatureAlgorithm) -> bool {
+    let ecdsa = matches!(
+        algorithm,
+        SignatureAlgorithm::EcdsaSha224
+            | SignatureAlgorithm::EcdsaSha256
+            | SignatureAlgorithm::EcdsaSha384
+            | SignatureAlgorithm::EcdsaSha512
+    );
+    match profile {
+        KeyProfile::EcdsaP256 | KeyProfile::EcdsaP384 => ecdsa,
+        KeyProfile::Rsa2048 | KeyProfile::Rsa3072 => !ecdsa,
     }
 }
 
@@ -463,14 +492,41 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_or_oversized_signature_is_refused() {
+    fn an_empty_or_oversized_signature_is_sent_as_a_failure() {
         assert_eq!(
             SignAnswer::decode(&SignAnswer::Signature(Vec::new()).encode()),
-            Err(WireError::Signature)
+            Ok(SignAnswer::Failed)
         );
         assert_eq!(
             SignAnswer::decode(&SignAnswer::Signature(vec![1; MAX_SIGNATURE + 1]).encode()),
-            Err(WireError::Signature)
+            Ok(SignAnswer::Failed)
+        );
+        let mut oversized = vec![WIRE_VERSION, ANSWER_SIGNATURE];
+        let length = u16::try_from(MAX_SIGNATURE + 1).expect("fits");
+        oversized.extend_from_slice(&length.to_le_bytes());
+        oversized.extend(vec![1; MAX_SIGNATURE + 1]);
+        assert_eq!(SignAnswer::decode(&oversized), Err(WireError::Signature));
+    }
+
+    #[test]
+    fn an_algorithm_the_profile_does_not_sign_with_is_refused() {
+        assert_eq!(
+            SignRequest::new(
+                pair(),
+                KeyProfile::EcdsaP256,
+                SignatureAlgorithm::RsaPkcs1Sha256,
+                &[0; 32]
+            ),
+            Err(WireError::Mismatch)
+        );
+        assert_eq!(
+            SignRequest::new(
+                pair(),
+                KeyProfile::Rsa2048,
+                SignatureAlgorithm::EcdsaSha256,
+                &[0; 32]
+            ),
+            Err(WireError::Mismatch)
         );
     }
 
