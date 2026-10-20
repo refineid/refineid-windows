@@ -6,8 +6,40 @@ the [README](../README.md).
 
 ## Windows
 
-- **Rust** through `rustup`. The channel, components, and targets are pinned by
-  `rust-toolchain.toml`; the first `cargo` invocation installs them.
+Set up a Windows 11 development machine with one command from the repository
+root, in a normal (non-elevated) PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-dev-tools.ps1
+```
+
+Visual Studio and the SDKs are always kept at their latest release: the script
+installs what is missing and updates what is already installed, so rerun it
+whenever you start on a machine that has been idle. It uses `winget` and the
+Visual Studio Installer for:
+
+- Git (with Git Bash, which runs the `.githooks` and
+  `scripts/agent-housekeeping.sh`) and the GitHub CLI;
+- the latest Visual Studio Build Tools (2026 or later) with the C++ build
+  tools workload, the MSVC x64 and ARM64 tools, and the Windows 11 SDK it
+  recommends (including `signtool.exe`). An existing Visual Studio 2026 or
+  later instance, Community or Build Tools, is updated and extended instead of
+  installing a second one;
+- `rustup`, updated to its latest release, and the toolchain pinned by
+  `rust-toolchain.toml`;
+- the latest .NET SDK of the major the WinUI apps target
+  (`TargetFramework` in `apps/RefineID-winui/RefineID.csproj`) and the
+  repository's .NET local tools (`csharpier`);
+- `core.hooksPath` set to `.githooks`.
+
+Open a new terminal afterwards so the updated `PATH` applies.
+
+The requirements it satisfies:
+
+- **Rust** through `rustup`. The channel, components, and targets are pinned
+  only by `rust-toolchain.toml`; update the release there and nowhere else.
+  `rustup toolchain install` in the repository, or the first `cargo`
+  invocation, installs them.
 - **.NET 10 SDK** for the WinUI apps. The apps obtain their Windows App SDK
   build tooling from NuGet (`Microsoft.Windows.SDK.BuildTools.WinApp`), so the
   C# build does not need a full Visual Studio install.

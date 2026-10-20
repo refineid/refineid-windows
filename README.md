@@ -96,15 +96,24 @@ is placed in Windows Credential Manager.
 Requirements:
 
 - Windows 11;
-- Rust 1.98.1 through `rustup`;
-- .NET SDK 10 for the WinUI apps;
-- Visual Studio 2026 (Community or Build Tools) with the *Desktop development
-  with C++* workload, including the MSVC build tools for the host architecture.
+- the latest stable Rust through `rustup`; the exact release is pinned in
+  `rust-toolchain.toml`;
+- the latest .NET 10 SDK for the WinUI apps;
+- the latest Visual Studio (2026 or later, Community or Build Tools) with the
+  *Desktop development with C++* workload, including the MSVC build tools for
+  x64 and ARM64 and the latest Windows 11 SDK.
 
-See [docs/toolchain.md](docs/toolchain.md) for the architecture-specific tool
-and [docs/store-and-driver-distribution.md](docs/store-and-driver-distribution.md)
+Install all of them, or update them to their latest releases, with:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-dev-tools.ps1
+```
+
+See [docs/toolchain.md](docs/toolchain.md) for what the script installs, the
+architecture-specific tool requirements, and cross-building the Windows target
+from macOS or Linux, and
+[docs/store-and-driver-distribution.md](docs/store-and-driver-distribution.md)
 for how the Store MSIX and the pkg.refineid.fi driver installer split up.
-requirements and for cross-building the Windows target from macOS or Linux.
 
 Build both supported architectures:
 
