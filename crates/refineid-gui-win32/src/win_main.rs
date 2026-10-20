@@ -66,7 +66,7 @@ use refineid_rapp_core::offer::normalize_pairing_code;
 use refineid_rapp_core::store::{MemoryJournal, PairingStore as _};
 use refineid_rapp_core::stream::DialPurpose;
 use refineid_rapp_core::transport::FrameTransport;
-use refineid_windows_credential_store::CredentialPairingStore;
+use refineid_windows_credential_store::ProtectedPairingStore;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -2327,7 +2327,7 @@ fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<S
             display_name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows PC".to_owned()),
             platform: "Windows".into(),
         },
-        CredentialPairingStore::load()
+        ProtectedPairingStore::load()
             .map_err(|error| format!("Cannot open pairing store: {error}"))?,
         MemoryJournal::new(),
     );
@@ -2364,7 +2364,7 @@ fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<S
 /// terminal: success, a mistyped code, or a refusal; `None` reposts
 /// a failure that leaves the next phone to be tried.
 fn attempt_pair(
-    requester: &mut Requester<CredentialPairingStore, MemoryJournal>,
+    requester: &mut Requester<ProtectedPairingStore, MemoryJournal>,
     code: &str,
     transport: impl FrameTransport,
     main_raw: usize,
@@ -2414,7 +2414,7 @@ fn confirm_pairing_dialog(
 
 /// Success text naming the freshly stored pairing.
 fn paired_summary(
-    requester: &Requester<CredentialPairingStore, MemoryJournal>,
+    requester: &Requester<ProtectedPairingStore, MemoryJournal>,
     pair_id: PairId,
 ) -> Result<String, String> {
     let record = requester
@@ -2442,7 +2442,7 @@ fn set_remote_status(text: &str) {
     }
 }
 
-/// Refill the paired-devices list from the credential vault. The
+/// Refill the paired-devices list from the protected pairing store. The
 /// usable pairing carries a `*` marker, mirroring the CLI.
 fn refresh_remote_devices() {
     let target = STATE.with(|cell| cell.borrow().as_ref().map(|state| state.remote_devices));
@@ -2450,7 +2450,7 @@ fn refresh_remote_devices() {
         return;
     };
     send(list, LB_RESETCONTENT, 0, 0);
-    match CredentialPairingStore::load() {
+    match ProtectedPairingStore::load() {
         Ok(store) => {
             let current = store.usable_pairing().map(|usable| usable.pair_id);
             for (index, record) in store.records().iter().enumerate() {
@@ -2486,7 +2486,7 @@ fn remove_remote_device() {
     let Ok(index) = usize::try_from(selected) else {
         return;
     };
-    let mut store = match CredentialPairingStore::load() {
+    let mut store = match ProtectedPairingStore::load() {
         Ok(store) => store,
         Err(error) => {
             set_remote_status(&format!("Pairing store unavailable: {error}"));

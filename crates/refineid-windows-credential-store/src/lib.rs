@@ -24,7 +24,7 @@
     windows,
     expect(
         unsafe_code,
-        reason = "CredReadW, CredWriteW, CredDeleteW, CredFree, and the certificate store calls are the small Windows FFI boundary"
+        reason = "CredReadW, CredWriteW, CredDeleteW, CredFree, CryptProtectData, CryptUnprotectData, LocalFree, and the certificate store calls are the small Windows FFI boundary"
     )
 )]
 
@@ -45,7 +45,7 @@ pub use certstore::{
 };
 #[cfg(windows)]
 pub use certstore::{install_browser_certificate, remove_browser_certificates};
-pub use pairing::{CredentialPairingStore, delete_pairing_set};
+pub use pairing::{ProtectedPairingStore, delete_pairing_set};
 
 /// Maximum PC/SC ATR size accepted by the shared credential namespace.
 ///
@@ -83,8 +83,31 @@ pub enum CredentialStoreError {
         /// `GetLastError` value returned by the failing API.
         code: u32,
     },
+    /// DPAPI refused to protect or unprotect the pairing set.
+    Protection {
+        /// `GetLastError` value returned by the failing API.
+        code: u32,
+    },
+    /// The user's local application data directory is not known.
+    ProfileUnavailable,
+    /// An unprotected copy of this user's pairing set exists and could not
+    /// be deleted.
+    UnprotectedCopyRemains,
+    /// The protected pairing set file could not be written, read, or removed.
+    File {
+        /// What the file system reported.
+        kind: std::io::ErrorKind,
+    },
     /// This build is not running on Windows.
     UnsupportedPlatform,
+}
+
+impl CredentialStoreError {
+    /// The file-system failure behind a pairing set operation.
+    #[cfg(windows)]
+    fn file(error: &std::io::Error) -> Self {
+        Self::File { kind: error.kind() }
+    }
 }
 
 impl fmt::Display for CredentialStoreError {
@@ -110,6 +133,16 @@ impl fmt::Display for CredentialStoreError {
                     "Windows certificate store failed with code {code}"
                 )
             }
+            Self::Protection { code } => {
+                write!(formatter, "DPAPI failed with code {code}")
+            }
+            Self::ProfileUnavailable => {
+                formatter.write_str("the user's local application data directory is unknown")
+            }
+            Self::UnprotectedCopyRemains => {
+                formatter.write_str("an unprotected copy of the pairing set could not be deleted")
+            }
+            Self::File { kind } => write!(formatter, "pairing set file: {kind}"),
             Self::UnsupportedPlatform => {
                 formatter.write_str("Windows Credential Manager is unavailable")
             }

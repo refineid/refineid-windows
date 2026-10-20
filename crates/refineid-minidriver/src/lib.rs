@@ -146,7 +146,7 @@ use refineid_rapp_core::operations::{
     CardOperation, CardOperationResult, CertificateKind, KeyProfile, SignatureAlgorithm,
 };
 #[cfg(windows)]
-use refineid_windows_credential_store::{CredentialPairingStore, read_can};
+use refineid_windows_credential_store::{ProtectedPairingStore, read_can};
 #[cfg(windows)]
 use transport::{
     CardSessionTransport, RemoteCardTransport, SCARD_ATTR_CURRENT_PROTOCOL_TYPE, ScardProtocol,
@@ -253,11 +253,11 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
 
     let (transport, auth_cert_der, signature_cert_der) = if is_remote_card(&atr) {
         Log::dbg("CardAcquireContext: remote card detected via ATR");
-        let store = match CredentialPairingStore::load() {
+        let store = match ProtectedPairingStore::load() {
             Ok(s) => s,
             Err(e) => {
                 Log::dbg(&format!(
-                    "CardAcquireContext: failed to load CredentialPairingStore: {e:?}"
+                    "CardAcquireContext: failed to load ProtectedPairingStore: {e:?}"
                 ));
                 return SCARD_F_INTERNAL_ERROR;
             }

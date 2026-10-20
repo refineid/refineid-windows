@@ -48,7 +48,7 @@ use refineid_rapp_core::operations::{
 };
 use refineid_rapp_core::store::{PairingDisposition, PairingRecord};
 use refineid_windows_credential_store::{
-    CredentialPairingStore, KEY_STORAGE_PROVIDER, browser_key_name, browser_key_pair_id,
+    KEY_STORAGE_PROVIDER, ProtectedPairingStore, browser_key_name, browser_key_pair_id,
 };
 use windows_sys::Win32::Foundation::{
     HANDLE, NTE_BAD_FLAGS, NTE_BAD_KEYSET, NTE_BUFFER_TOO_SMALL, NTE_FAIL, NTE_INVALID_HANDLE,
@@ -152,7 +152,7 @@ fn key_from_record(record: &PairingRecord) -> Option<OpenKey> {
 
 /// Every stored pairing this provider can sign for, in store order.
 fn usable_keys() -> Vec<OpenKey> {
-    match CredentialPairingStore::load() {
+    match ProtectedPairingStore::load() {
         Ok(store) => store.records().iter().filter_map(key_from_record).collect(),
         Err(error) => {
             Log::dbg(&format!("KSP: pairing store unavailable: {error}"));

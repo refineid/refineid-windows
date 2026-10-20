@@ -244,6 +244,9 @@ pub enum StoreError {
     Unknown,
     /// The backing store refused the write.
     WriteRefused,
+    /// The backing store could not be read, so no change was made: a write
+    /// made without the stored records would overwrite them.
+    Unreadable,
 }
 
 /// Durable storage for pairing records.

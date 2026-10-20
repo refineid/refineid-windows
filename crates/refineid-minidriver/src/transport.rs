@@ -40,7 +40,7 @@ use refineid_rapp_core::operations::{CardOperation, CardOperationResult};
 use refineid_rapp_core::store::{MemoryJournal, MemoryPairingStore, PairingRecord, PairingStore};
 use refineid_rapp_core::stream::StreamError;
 use refineid_rapp_core::transport::TcpFrameTransport;
-use refineid_windows_credential_store::CredentialPairingStore;
+use refineid_windows_credential_store::ProtectedPairingStore;
 
 use crate::ffi::SCARDHANDLE;
 
@@ -313,7 +313,7 @@ impl RemoteCardTransport {
                 // A verified revocation (RAPP v26.10.18 section 4.6 item 5):
                 // the pairing is forgotten here and the user told to pair
                 // again.
-                if let Ok(mut store) = CredentialPairingStore::load() {
+                if let Ok(mut store) = ProtectedPairingStore::load() {
                     let _ = store.forget_after_revocation(self.pair_id);
                 }
                 "the phone forgot this computer; pair again".to_owned()
