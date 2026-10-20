@@ -20,7 +20,7 @@
   `docs/toolchain.md`). It installs the toolchain and keeps Visual Studio and
   every SDK at the latest release. The Rust release is pinned only in
   `rust-toolchain.toml`; never repeat it in prose.
-- Always run formatting (`cargo fmt`, `csharpier`), clippy (`-D warnings` on both host and Windows targets), and unit tests before committing (`.githooks/pre-commit` enforces this). Keep `Cargo.lock` Git dependencies synchronized with upstream (`.githooks/pre-push` enforces this). Never bypass verification with `--no-verify`. Hardware claims additionally require a real reader and card.
+- Always run formatting (`cargo fmt`, `csharpier`), clippy (`-D warnings` on both host and Windows targets), and unit tests before committing (`.githooks/pre-commit` enforces this). `Cargo.lock` must match the manifests (`.githooks/pre-push` enforces this); it may pin an older refineid-core commit, and moving to a newer core is its own pull request. Never bypass verification with `--no-verify`. Hardware claims additionally require a real reader and card.
 - One task, one worktree (`~/src/wt/refineid-windows-<topic>`) on one
   `agent/<topic>` branch, one pull request per branch. Run
   `scripts/agent-housekeeping.sh` when starting and keep the house clean. Merge

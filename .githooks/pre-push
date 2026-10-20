@@ -1,8 +1,10 @@
 #!/bin/sh
 # RefineID Windows push gate.
 #
-# Rejects a push if git dependencies in Cargo.lock are stale compared
-# to upstream refineid-core.
+# Rejects a push whose Cargo.lock does not match the manifests or pins a
+# revision that cannot be fetched. It guards consistency, not freshness: a
+# lockfile that pins an older refineid-core commit pushes, and moving to a
+# newer core is a deliberate change made in its own pull request.
 #
 # Enable local hooks once per clone with:
 #
@@ -10,14 +12,12 @@
 
 set -eu
 
-echo "pre-push: checking git dependencies in Cargo.lock"
+echo "pre-push: checking that Cargo.lock matches the manifests"
 
-OUTPUT=$(cargo update -p refineid-remote --dry-run 2>&1)
-
-if echo "$OUTPUT" | grep -q "Updating refineid-"; then
-    echo "pre-push: error: Cargo.lock has stale git dependencies from refineid-core."
-    echo "pre-push: run 'cargo update -p refineid-remote' and commit the updated Cargo.lock."
+if ! cargo fetch --locked --quiet; then
+    echo "pre-push: error: Cargo.lock does not match the manifests, or a pinned revision cannot be fetched."
+    echo "pre-push: update the lockfile for the dependency the manifests changed, review the diff, and commit it."
     exit 1
 fi
 
-echo "pre-push: ok (git dependencies are up to date)"
+echo "pre-push: ok (Cargo.lock matches the manifests)"
