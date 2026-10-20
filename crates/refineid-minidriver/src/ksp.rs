@@ -80,13 +80,12 @@ const MAX_WIDE_UNITS: usize = NCRYPT_MAX_KEY_NAME_LENGTH as usize;
 /// The CNG algorithm identifiers this provider signs with.
 const ALGORITHMS: [&str; 3] = ["ECDSA_P256", "ECDSA_P384", "RSA"];
 
-/// One key the caller has opened: the pairing to dial and the public half
-/// to describe it with.
+/// One key the caller has opened: the pairing whose phone signs and the
+/// public half to describe and verify it with.
 #[derive(Clone)]
 struct OpenKey {
     name: String,
     pair_id: PairId,
-    record: PairingRecord,
     certificate: Vec<u8>,
     kind: KeyKind,
 }
@@ -114,7 +113,7 @@ fn is_provider(handle: NCRYPT_PROV_HANDLE) -> bool {
     matches!(handles().get(&handle), Some(Handle::Provider))
 }
 
-/// A copy of the opened key, so no lock is held while the phone is dialed.
+/// A copy of the opened key, so no lock is held while the agent signs.
 fn opened_key(handle: NCRYPT_KEY_HANDLE) -> Option<OpenKey> {
     match handles().get(&handle) {
         Some(Handle::Key(key)) => Some((**key).clone()),
@@ -134,8 +133,10 @@ fn key_kind(certificate: &[u8]) -> Option<KeyKind> {
     }
 }
 
+/// The key of a pairing whose storage both sides confirmed, like the
+/// store's own usable pairing.
 fn key_from_record(record: &PairingRecord) -> Option<OpenKey> {
-    if record.disposition != PairingDisposition::Paired {
+    if record.disposition != PairingDisposition::Paired || !record.storage_confirmed {
         return None;
     }
     let certificate = record.auth_cert.clone()?;
@@ -143,7 +144,6 @@ fn key_from_record(record: &PairingRecord) -> Option<OpenKey> {
     Some(OpenKey {
         name: browser_key_name(record.pair_id),
         pair_id: record.pair_id,
-        record: record.clone(),
         certificate,
         kind,
     })
