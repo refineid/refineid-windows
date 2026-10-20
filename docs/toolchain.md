@@ -30,9 +30,32 @@ Visual Studio Installer for:
 - the latest .NET SDK of the major the WinUI apps target
   (`TargetFramework` in `apps/RefineID-winui/RefineID.csproj`) and the
   repository's .NET local tools (`csharpier`);
+- the Python Install Manager and, through it, the latest stable Python 3
+  (`pymanager install --update --yes 3`);
 - `core.hooksPath` set to `.githooks`.
 
 Open a new terminal afterwards so the updated `PATH` applies.
+
+### Line endings
+
+The repository stores text with LF line endings, and the tracked
+`.gitattributes` (`* text=auto eol=lf`) keeps every checkout LF. It takes
+precedence over the `core.autocrlf=true` that the Git for Windows installer
+sets in its system configuration by default, so no local Git setting is
+needed, and none should be changed to work around it. Without it a Windows
+checkout gets CRLF and CSharpier rejects every C# file.
+
+A checkout made before `.gitattributes` existed keeps its CRLF files until
+they are written again; `git ls-files --eol` shows them as `w/crlf`. Commit or
+stash any work first, since this replaces every tracked file from the index,
+close editors and build servers that hold files open, then run in Git Bash:
+
+```sh
+cd "$(git rev-parse --show-toplevel)"
+git ls-files -z | xargs -0 rm -f
+git checkout -- .
+git ls-files --eol | grep -c w/crlf   # 0
+```
 
 The requirements it satisfies:
 
@@ -43,6 +66,15 @@ The requirements it satisfies:
 - **.NET 10 SDK** for the WinUI apps. The apps obtain their Windows App SDK
   build tooling from NuGet (`Microsoft.Windows.SDK.BuildTools.WinApp`), so the
   C# build does not need a full Visual Studio install.
+- **Python 3**, the latest stable release, through the
+  [Python Install Manager](https://docs.python.org/3/using/windows.html),
+  python.org's recommended installer; the per-version installer and the
+  legacy `py` launcher are deprecated since 3.14, and no per-version
+  installer is produced for 3.16 or later. It provides the `python3` command that
+  `scripts/test-browser-edge.py` and the refineid-core gate scripts call; a
+  per-version installer provides only `python`, and `python3` then resolves
+  to the Microsoft Store placeholder. Remove the legacy Python Launcher if an
+  older installer left one, since its `py.exe` shadows the manager's.
 - **Visual Studio 2026** (Community or Build Tools) with the *Desktop
   development with C++* workload. The Rust components link with the MSVC
   linker, which this workload provides together with the Windows 11 SDK.

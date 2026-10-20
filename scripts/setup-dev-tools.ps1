@@ -16,8 +16,9 @@
 # updates every installed part to its latest release: Git, GitHub CLI, the
 # latest Visual Studio Build Tools with the MSVC x64 and ARM64 tools and the
 # Windows 11 SDK, rustup with the toolchain pinned by rust-toolchain.toml, the
-# latest .NET SDK of the major the WinUI apps target, the repository's .NET
-# local tools, and the Git hooks. Rerun it at any time to update. Run it from a
+# latest .NET SDK of the major the WinUI apps target, the latest Python 3
+# through the Python Install Manager, the repository's .NET local tools, and
+# the Git hooks. Rerun it at any time to update. Run it from a
 # normal (non-elevated) PowerShell; winget and the Visual Studio Installer ask
 # for elevation for the machine-wide installers.
 
@@ -201,6 +202,14 @@ Sync-WingetPackage "Microsoft.DotNet.SDK.$dotnetSdkMajor" (Test-DotnetSdk)
 if (-not (Test-DotnetSdk)) {
     throw ".NET $dotnetSdkMajor SDK is still missing after installation."
 }
+
+# The Python Install Manager provides the python3 command that
+# scripts/test-browser-edge.py and the refineid-core gate scripts call; tag 3
+# selects the latest stable Python 3 release.
+Sync-WingetPackage 'Python.PythonInstallManager' (Test-Command pymanager)
+Write-Host 'Installing or updating the latest Python 3...'
+Invoke-Checked 'pymanager install' { pymanager install --update --yes 3 }
+Invoke-Checked 'python3 --version' { python3 --version }
 
 Push-Location $repositoryRoot
 try {
