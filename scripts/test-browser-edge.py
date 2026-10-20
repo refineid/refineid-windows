@@ -1,240 +1,194 @@
 #!/usr/bin/env python3
-"""Automated Edge browser testing for card authentication on Windows.
+# Copyright 2026 Petri Koistinen. Licensed under the Apache License, Version 2.0.
+"""Log in to card-authenticating sites in Microsoft Edge, end to end.
 
-Uses Microsoft Edge WebDriver (msedgedriver) to exercise mTLS client
-certificate authentication against https://card.refineid.fi and Finnish
-public identification portals.
+Usage:
+  python3 scripts/test-browser-edge.py [--url URL [--expect-title TEXT]] ...
+                                       [--timeout SECONDS] [--screenshot-dir DIR]
 
-Configures AutoSelectCertificateForUrls so Edge automatically selects the
-matching client certificate without requiring manual dialog clicks.
+Drives the installed Edge through Playwright (channel "msedge") with a fresh
+profile, so no client-certificate decision from an earlier run is reused.
+For the run only, the AutoSelectCertificateForUrls policy selects the
+card's certificate for each target origin; the previous policy values are
+put back on exit. The sites are visited in order in one browser session,
+so Windows asks for the card's PIN once, and the user enters it in the
+Windows Security dialog: the script never handles a PIN.
+
+Each --url is followed by the part of the title the site gives the page an
+authenticated card reaches; a site that answers 401 or 403 did not let the
+card in. The page text is never printed, since a logged-in page shows the
+cardholder's name and identity number. Screenshots, which show them too,
+are saved only to a directory the caller names.
+
+Requirements: Python 3 with the playwright package, the RefineID card
+module installed, and a card in a reader.
+
+Exit status: 0 every site logged in, 2 a site answered without a login,
+1 any other failure.
 """
 
+from __future__ import annotations
+
 import argparse
-import glob
 import json
-import os
 import sys
+import tempfile
 import time
+import winreg
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import urlsplit
 
-from selenium import webdriver
-from selenium.webdriver.edge.options import Options
-from selenium.webdriver.edge.service import Service
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import Page, sync_playwright
 
+EXIT_LOGGED_IN = 0
+EXIT_FAILED = 1
+EXIT_NOT_LOGGED_IN = 2
 
-def find_msedgedriver() -> str | None:
-    """Finds msedgedriver.exe on the system."""
-    # Check WinGet package location
-    user_profile = os.environ.get("USERPROFILE", "")
-    winget_pattern = os.path.join(
-        user_profile,
-        "AppData",
-        "Local",
-        "Microsoft",
-        "WinGet",
-        "Packages",
-        "*EdgeDriver*",
-        "msedgedriver.exe",
-    )
-    matches = glob.glob(winget_pattern)
-    if matches:
-        return matches[0]
+DEFAULT_URL = "https://card.refineid.fi"
+#: The title card.refineid.fi gives the page it serves to an authenticated card.
+DEFAULT_EXPECTED_TITLE = "Card-authenticated guestbook"
+DEFAULT_TIMEOUT_SECONDS = 90
+POLL_SECONDS = 0.5
+MILLISECONDS_PER_SECOND = 1000
 
-    # Check common locations
-    candidates = [
-        r"C:\Windows\System32\msedgedriver.exe",
-        os.path.join(user_profile, "msedgedriver.exe"),
-    ]
-    for c in candidates:
-        if os.path.isfile(c):
-            return c
+#: HTTP statuses a site answers when the handshake carried no usable card.
+REFUSED_STATUSES = frozenset({401, 403})
 
-    # Check PATH
-    for path_dir in os.environ.get("PATH", "").split(os.pathsep):
-        candidate = os.path.join(path_dir, "msedgedriver.exe")
-        if os.path.isfile(candidate):
-            return candidate
-
-    return None
+POLICY_KEY = r"SOFTWARE\Policies\Microsoft\Edge\AutoSelectCertificateForUrls"
 
 
-def run_test(
-    url: str,
-    driver_path: str | None = None,
-    headless: bool = True,
-    screenshot_path: str = "edge_login_result.png",
-    timeout: int = 15,
-) -> dict:
-    if not driver_path:
-        driver_path = find_msedgedriver()
+@dataclass(frozen=True)
+class Target:
+    """One site to log in to and the title that shows it let the card in."""
 
-    if not driver_path or not os.path.isfile(driver_path):
-        raise RuntimeError(
-            f"msedgedriver.exe not found. Install via: winget install Microsoft.EdgeDriver, "
-            f"or specify --driver <path>."
-        )
+    url: str
+    expected_title: str
 
-    print(f"Using Edge WebDriver: {driver_path}")
-    print(f"Target URL: {url}")
-    print(f"Headless mode: {headless}")
+    @property
+    def origin(self) -> str:
+        parts = urlsplit(self.url)
+        return f"{parts.scheme}://{parts.netloc}"
 
-    options = Options()
-    if headless:
-        options.add_argument("--headless=new")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1280,1024")
-    options.add_argument("--ignore-certificate-errors")
 
-    # Configure auto-selection of client certificates matching target
-    auto_select_rule = json.dumps({"pattern": url, "filter": {}})
-    options.add_argument(f"--auto-select-certificate-for-urls=[{auto_select_rule}]")
-    options.add_argument("--enable-logging")
-    options.add_argument("--v=1")
-    options.add_experimental_option(
-        "prefs",
-        {
-            "client_certificate": {
-                "auto_select_certificate_for_urls": [auto_select_rule]
-            }
-        },
-    )
+class TemporaryCertificatePolicy:
+    """Sets AutoSelectCertificateForUrls for the target origins and restores
+    the values that were there before."""
 
-    options.page_load_strategy = "none"
+    def __init__(self, origins: list[str]) -> None:
+        self.rules = [
+            json.dumps({"pattern": origin, "filter": {}}, separators=(",", ":"))
+            for origin in dict.fromkeys(origins)
+        ]
+        self.previous: dict[str, tuple[object, int]] = {}
 
-    service = Service(executable_path=driver_path)
-    driver = webdriver.Edge(service=service, options=options)
+    def __enter__(self) -> TemporaryCertificatePolicy:
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, POLICY_KEY, 0, winreg.KEY_ALL_ACCESS) as key:
+            for index, rule in enumerate(self.rules, start=1):
+                name = str(index)
+                try:
+                    self.previous[name] = winreg.QueryValueEx(key, name)
+                except FileNotFoundError:
+                    pass
+                winreg.SetValueEx(key, name, 0, winreg.REG_SZ, rule)
+        return self
 
+    def __exit__(self, *_exception: object) -> None:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, POLICY_KEY, 0, winreg.KEY_ALL_ACCESS) as key:
+            for index in range(1, len(self.rules) + 1):
+                name = str(index)
+                if name in self.previous:
+                    value, kind = self.previous[name]
+                    winreg.SetValueEx(key, name, 0, kind, value)
+                else:
+                    winreg.DeleteValue(key, name)
+
+
+def log_in(page: Page, target: Target, timeout_seconds: int) -> str:
+    """Visits `target` and reports whether it let the card in."""
+    statuses: list[int] = []
+
+    def record(response) -> None:
+        if response.request.is_navigation_request() and response.frame == page.main_frame:
+            statuses.append(response.status)
+
+    page.on("response", record)
     try:
-        start_time = time.time()
-        print(f"Navigating to {url}...")
-        driver.get(url)
-
-        title = ""
-        current_url = url
-        page_text = ""
-        success_markers = [
-            "Card holder",
-            "Client Certificate",
-            "Autentikoitu",
-            "Authenticated",
-            "Varmenne",
-        ]
-        unauth_markers = [
-            "Card login did not complete",
-            "Client certificate missing",
-            "403 Forbidden",
-        ]
-
-        for i in range(timeout):
-            time.sleep(1)
+        page.goto(target.url, wait_until="commit", timeout=timeout_seconds * MILLISECONDS_PER_SECOND)
+    except PlaywrightError as error:
+        page.remove_listener("response", record)
+        return f"failed: {error.message.splitlines()[0]}"
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        while time.monotonic() < deadline:
+            if statuses and statuses[-1] in REFUSED_STATUSES:
+                return f"not logged in: HTTP {statuses[-1]}"
             try:
-                title = driver.title
-                current_url = driver.current_url
-                body = driver.find_element("tag name", "body")
-                if body:
-                    page_text = body.text
-                    if any(m.lower() in page_text.lower() for m in success_markers + unauth_markers):
-                        print(f"Page response detected after {i+1}s")
-                        break
-            except Exception:
+                if target.expected_title in page.title():
+                    return f"logged in: {target.expected_title!r}"
+            except PlaywrightError:
                 pass
-
-        elapsed = time.time() - start_time
-
-        # Ensure directory exists for screenshot
-        screenshot_dir = os.path.dirname(screenshot_path)
-        if screenshot_dir:
-            os.makedirs(screenshot_dir, exist_ok=True)
-        driver.save_screenshot(screenshot_path)
-        print(f"Screenshot saved to: {screenshot_path}")
-
-        # Check for card authentication status
-        auth_success = any(m.lower() in page_text.lower() for m in success_markers)
-        auth_incomplete = any(m.lower() in page_text.lower() for m in unauth_markers)
-
-        result = {
-            "url": current_url,
-            "title": title,
-            "elapsed_seconds": round(elapsed, 2),
-            "authenticated": auth_success,
-            "incomplete": auth_incomplete,
-            "screenshot": screenshot_path,
-            "snippet": page_text[:300].replace("\n", " "),
-        }
-
-        print("\n--- Test Results ---")
-        print(f"Title: {title}")
-        print(f"Final URL: {current_url}")
-        print(f"Elapsed: {result['elapsed_seconds']}s")
-        print(f"Authenticated: {auth_success}")
-        print(f"Incomplete/No-Cert: {auth_incomplete}")
-        print(f"Snippet: {result['snippet']}")
-
-        return result
-
+            time.sleep(POLL_SECONDS)
+        return f"failed: no outcome within {timeout_seconds} s"
     finally:
-        driver.quit()
+        page.remove_listener("response", record)
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Run Edge WebDriver card authentication test on Windows"
-    )
-    parser.add_argument(
-        "--url",
-        default="https://card.refineid.fi",
-        help="Target URL (default: https://card.refineid.fi)",
-    )
-    parser.add_argument(
-        "--driver",
-        default=None,
-        help="Path to msedgedriver.exe",
-    )
-    parser.add_argument(
-        "--no-headless",
-        action="store_true",
-        help="Run Edge with a visible UI window",
-    )
-    parser.add_argument(
-        "--screenshot",
-        default="edge_login_result.png",
-        help="Path where screenshot should be saved",
-    )
-    parser.add_argument(
-        "--timeout",
-        type=int,
-        default=15,
-        help="Page load timeout in seconds (default: 15)",
-    )
-
-    args = parser.parse_args()
-    log_file = r"C:\Users\pk\edge_test.log"
-    try:
-        result = run_test(
-            url=args.url,
-            driver_path=args.driver,
-            headless=not args.no_headless,
-            screenshot_path=args.screenshot,
-            timeout=args.timeout,
-        )
+def run(targets: list[Target], timeout_seconds: int, screenshot_dir: Path | None) -> int:
+    outcomes: list[str] = []
+    with (
+        TemporaryCertificatePolicy([target.origin for target in targets]),
+        tempfile.TemporaryDirectory() as profile,
+        sync_playwright() as playwright,
+    ):
+        browser = playwright.chromium.launch_persistent_context(profile, channel="msedge", headless=False)
         try:
-            with open(log_file, "w", encoding="utf-8") as f:
-                f.write(json.dumps(result, indent=2))
-        except Exception:
-            pass
-        sys.exit(0 if result.get("authenticated") else 2)
-    except Exception as e:
-        import traceback
-        err_msg = f"Error running Edge browser test: {e}\n{traceback.format_exc()}"
-        print(err_msg, file=sys.stderr)
-        try:
-            with open(log_file, "w", encoding="utf-8") as f:
-                f.write(err_msg)
-        except Exception:
-            pass
-        sys.exit(1)
+            page = browser.new_page()
+            print("enter the card PIN in the Windows Security dialog when Windows asks for it")
+            for index, target in enumerate(targets, start=1):
+                outcome = log_in(page, target, timeout_seconds)
+                outcomes.append(outcome)
+                print(f"{target.origin}: {outcome}")
+                if screenshot_dir:
+                    screenshot_dir.mkdir(parents=True, exist_ok=True)
+                    path = screenshot_dir / f"edge-login-{index}.png"
+                    page.screenshot(path=str(path))
+                    print(f"  screenshot saved to {path}")
+        finally:
+            browser.close()
+    if all(outcome.startswith("logged in") for outcome in outcomes):
+        return EXIT_LOGGED_IN
+    if any(outcome.startswith("not logged in") for outcome in outcomes):
+        return EXIT_NOT_LOGGED_IN
+    return EXIT_FAILED
+
+
+def parse_targets(arguments: list[str]) -> tuple[list[Target], argparse.Namespace]:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--url", action="append", default=[], help="a site to log in to")
+    parser.add_argument(
+        "--expect-title",
+        action="append",
+        default=[],
+        help="part of the title the preceding --url gives an authenticated card's page",
+    )
+    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
+    parser.add_argument(
+        "--screenshot-dir", type=Path, default=None, help="save screenshots here (they show personal data)"
+    )
+    options = parser.parse_args(arguments)
+    urls = options.url or [DEFAULT_URL]
+    titles = options.expect_title or ([DEFAULT_EXPECTED_TITLE] if not options.url else [])
+    if len(titles) != len(urls):
+        parser.error("give one --expect-title for every --url")
+    return [Target(url, title) for url, title in zip(urls, titles, strict=True)], options
+
+
+def main() -> int:
+    targets, options = parse_targets(sys.argv[1:])
+    return run(targets, options.timeout, options.screenshot_dir)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
