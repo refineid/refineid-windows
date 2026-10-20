@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/refineid-agent",
     "crates/refineid-agent-pipe",
     "crates/refineid-card-manager-core",
     "crates/refineid-doc-sign",

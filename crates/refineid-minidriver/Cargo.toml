@@ -20,6 +20,7 @@ name = "refineid_minidriver"
 # Dependencies are gated to windows so a non-windows build declares
 # none (satisfies `unused_crate_dependencies`).
 [target.'cfg(windows)'.dependencies]
+refineid-agent-pipe.workspace = true
 refineid-lib-core.workspace = true
 refineid-rapp-core.workspace = true
 refineid-windows-credential-store.workspace = true

@@ -41,19 +41,20 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use refineid_agent_pipe::client::request_signature;
+use refineid_agent_pipe::wire::{SignAnswer, SignRequest};
+use refineid_agent_pipe::{PipeError, SIGNATURE_DEADLINE};
 use refineid_lib_core::x509::{EcCurve, OwnedCert, PublicKeyAlgorithm, extract_rsa_public_key};
 use refineid_rapp_core::ids::PairId;
-use refineid_rapp_core::operations::{
-    CardOperation, CardOperationResult, KeyProfile, SignatureAlgorithm,
-};
+use refineid_rapp_core::operations::{KeyProfile, SignatureAlgorithm};
 use refineid_rapp_core::store::{PairingDisposition, PairingRecord};
 use refineid_windows_credential_store::{
     KEY_STORAGE_PROVIDER, ProtectedPairingStore, browser_key_name, browser_key_pair_id,
 };
 use windows_sys::Win32::Foundation::{
-    HANDLE, NTE_BAD_FLAGS, NTE_BAD_KEYSET, NTE_BUFFER_TOO_SMALL, NTE_FAIL, NTE_INVALID_HANDLE,
-    NTE_INVALID_PARAMETER, NTE_NO_MEMORY, NTE_NO_MORE_ITEMS, NTE_NOT_SUPPORTED, NTE_USER_CANCELLED,
-    S_OK,
+    HANDLE, NTE_BAD_FLAGS, NTE_BAD_KEYSET, NTE_BAD_SIGNATURE, NTE_BUFFER_TOO_SMALL,
+    NTE_DEVICE_NOT_READY, NTE_FAIL, NTE_INVALID_HANDLE, NTE_INVALID_PARAMETER, NTE_NO_MEMORY,
+    NTE_NO_MORE_ITEMS, NTE_NOT_SUPPORTED, NTE_USER_CANCELLED, S_OK,
 };
 use windows_sys::Win32::Security::Cryptography::{
     BCRYPT_INTERFACE_VERSION, BCRYPT_PKCS1_PADDING_INFO, BCRYPT_PSS_PADDING_INFO, BCryptBufferDesc,
@@ -67,10 +68,8 @@ use windows_sys::Win32::System::Memory::{GetProcessHeap, HEAP_ZERO_MEMORY, HeapA
 use windows_sys::core::{HRESULT, PCWSTR};
 
 use crate::cardmod::{Log, remote_ecdsa_to_p1363};
-use crate::ksp_codec::{
-    Digest, KeyKind, ecc_public_blob, requester_label, rsa_public_blob, rsa_signature_to_width,
-};
-use crate::transport::{REMOTE_SYNTHETIC_ATR, RemoteCardTransport};
+use crate::ksp_codec::{Digest, KeyKind, ecc_public_blob, rsa_public_blob, rsa_signature_to_width};
+use crate::ksp_verify::verifies;
 
 /// `NCRYPT_VERSION_PROPERTY` value: 1.0.
 const PROVIDER_VERSION: u32 = 0x0001_0000;
@@ -174,27 +173,6 @@ fn public_blob(key: &OpenKey) -> Option<Vec<u8>> {
             rsa_public_blob(rsa.modulus.as_bytes(), rsa.exponent.as_bytes())
         }
     }
-}
-
-/// What the phone shows as the asking party. A relying-party origin set by
-/// a test harness wins; otherwise the calling program is named, since CNG
-/// never tells a provider which site a browser is signing for.
-fn browser_origin() -> String {
-    std::env::var("REFINEID_RP_ORIGIN")
-        .ok()
-        .or_else(|| std::env::var("REFINEID_ORIGIN").ok())
-        .map(|origin| origin.trim().to_owned())
-        .filter(|origin| !origin.is_empty() && origin.len() <= 256)
-        .unwrap_or_else(|| {
-            let executable = std::env::current_exe()
-                .ok()
-                .and_then(|path| {
-                    path.file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                })
-                .unwrap_or_default();
-            requester_label(&executable)
-        })
 }
 
 fn wide_units(text: &str) -> Vec<u16> {
@@ -743,29 +721,27 @@ unsafe extern "system" fn SignHash(
         KeyKind::Rsa { bits } if bits <= 2048 => KeyProfile::Rsa2048,
         KeyKind::Rsa { .. } => KeyProfile::Rsa3072,
     };
-    let operation = CardOperation::BrowserAuthenticate {
-        origin: browser_origin(),
-        key_profile,
-        algorithm,
-        digest: hash.to_vec(),
+    let Ok(request) = SignRequest::new(key.pair_id, key_profile, algorithm, hash) else {
+        return NTE_INVALID_PARAMETER;
     };
     Log::dbg(&format!("KSP: SignHash: {}", key.kind.algorithm_name()));
-    let transport =
-        RemoteCardTransport::new(REMOTE_SYNTHETIC_ATR.to_vec(), key.pair_id, key.record);
-    let result = match transport.execute_operation(&operation) {
-        Ok(result) => result,
-        Err(error) => {
-            Log::dbg(&format!("KSP: SignHash: remote operation failed: {error}"));
-            return if error.contains("denied") {
-                NTE_USER_CANCELLED
-            } else {
-                NTE_FAIL
-            };
+    // W-R-1: the provider opens no transport; the user's agent holds the
+    // phone's session and signs.
+    let signature = match request_signature(&request, SIGNATURE_DEADLINE) {
+        Ok(SignAnswer::Signature(signature)) => signature,
+        Ok(SignAnswer::Denied | SignAnswer::Cancelled) => return NTE_USER_CANCELLED,
+        Ok(SignAnswer::NoPhone) | Err(PipeError::NoAgent) => {
+            Log::dbg("KSP: SignHash: no agent or no phone");
+            return NTE_DEVICE_NOT_READY;
         }
-    };
-    let CardOperationResult::Signature(signature) = result else {
-        Log::dbg("KSP: SignHash: remote operation returned no signature");
-        return NTE_FAIL;
+        Ok(answer) => {
+            Log::dbg(&format!("KSP: SignHash: the agent answered {answer:?}"));
+            return NTE_FAIL;
+        }
+        Err(error) => {
+            Log::dbg(&format!("KSP: SignHash: agent pipe: {error}"));
+            return NTE_FAIL;
+        }
     };
     let encoded = match key.kind {
         KeyKind::EcP256 | KeyKind::EcP384 => {
@@ -777,6 +753,12 @@ unsafe extern "system" fn SignHash(
         Log::dbg("KSP: SignHash: remote signature has an unexpected length");
         return NTE_FAIL;
     };
+    // W-R-5: only a signature that verifies against the opened certificate
+    // reaches the caller.
+    if !verifies(&key.certificate, algorithm, hash, &encoded) {
+        Log::dbg("KSP: SignHash: the signature does not verify against the certificate");
+        return NTE_BAD_SIGNATURE;
+    }
     // SAFETY: the output triple is the caller's.
     unsafe { write_output(pbSignature, cbSignature, pcbResult, &encoded) }
 }

@@ -93,6 +93,8 @@ mod ffi;
 mod ksp;
 #[cfg(windows)]
 mod ksp_register;
+#[cfg(windows)]
+mod ksp_verify;
 // Pure byte codecs: compiled on the host too so `cargo test` covers them.
 #[cfg(any(windows, test))]
 mod ksp_codec;

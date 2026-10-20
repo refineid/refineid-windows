@@ -19,6 +19,9 @@
     allow(unsafe_code, reason = "the Windows pipe and token boundary")
 )]
 
+use std::path::Path;
+use std::time::Duration;
+
 pub mod wire;
 
 #[cfg(windows)]
@@ -35,6 +38,60 @@ pub const PIPE_NAME_PREFIX: &str = r"\\.\pipe\RefineID.Agent.";
 /// The name of the session-local mutex only one agent per user holds
 /// (W-R-15).
 pub const AGENT_MUTEX_NAME: &str = r"Local\RefineID.Agent";
+
+/// How long an operation lives on the phone: the holder approves within it
+/// (RAPP section 8.2 item 1).
+pub const OPERATION_LIFETIME: Duration = Duration::from_secs(60);
+/// How long the agent looks for the phone when a signature arrives with no
+/// session open.
+pub const REACH_WINDOW: Duration = Duration::from_secs(15);
+/// What a result takes to cross the Bluetooth link and the pipe after the
+/// phone produced it.
+pub const TRANSFER_MARGIN: Duration = Duration::from_secs(10);
+/// The one remote-signature deadline (W-R-12): the provider waits this long
+/// for the agent's answer, which covers finding the phone, the holder's
+/// approval and the transfer back.
+pub const SIGNATURE_DEADLINE: Duration = Duration::from_secs(
+    REACH_WINDOW.as_secs() + OPERATION_LIFETIME.as_secs() + TRANSFER_MARGIN.as_secs(),
+);
+
+/// The label the phone shows for a program.
+///
+/// A product name for the browsers people use, otherwise the image's file
+/// name. The phone shows what asks, not where the request goes, because
+/// CNG does not tell a key storage provider the site.
+#[must_use]
+pub fn program_label(image: &Path) -> String {
+    let file = image
+        .file_name()
+        .map(|name| name.to_string_lossy().trim().to_owned())
+        .unwrap_or_default();
+    let known = match file.to_ascii_lowercase().as_str() {
+        "msedge.exe" => Some("Microsoft Edge"),
+        "chrome.exe" => Some("Google Chrome"),
+        "brave.exe" => Some("Brave"),
+        "opera.exe" => Some("Opera"),
+        "vivaldi.exe" => Some("Vivaldi"),
+        "lsass.exe" => Some("Windows"),
+        _ => None,
+    };
+    match known {
+        Some(name) => name.to_owned(),
+        None if file.is_empty() => "A Windows program".to_owned(),
+        None => file,
+    }
+}
+
+/// What the phone shows as the asking party (W-R-10): the program, and the
+/// computer it runs on, labelled as such.
+#[must_use]
+pub fn requester_context(program: &str, computer: &str) -> String {
+    if computer.is_empty() {
+        program.to_owned()
+    } else {
+        format!("{program} on {computer}")
+    }
+}
 
 /// The pipe name of the user whose SID is `user_sid`.
 #[must_use]
