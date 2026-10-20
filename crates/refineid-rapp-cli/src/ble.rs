@@ -1,30 +1,45 @@
-//! The BLE commands: `ble-scan` lists RAPP advertisers, and `ble-pair`
-//! pairs with the phone showing a code over `"fi.refineid.rapp.ble.v1"`.
+//! The BLE commands over `"fi.refineid.rapp.ble.v1"`: `ble-scan` lists RAPP
+//! advertisers, `ble-pair` pairs with the phone showing a code and stores
+//! the pairing, and `ble-session` opens a session with the stored pairing's
+//! phone and reads its card.
 //!
-//! `ble-pair` keeps the pairing in memory for the life of the process: the
-//! durable pairing store still writes the static key outside protected
-//! storage (issue #35), so no BLE pairing is written there.
+//! Nothing personal is printed: a read identity is reported as read, not
+//! shown, and certificates by their size.
 
 use std::collections::BTreeSet;
+use std::io::Write as _;
 use std::time::{Duration, Instant};
 
+use refineid_rapp::RoutingKey;
 use refineid_rapp_ble::gatt::BleLink;
 use refineid_rapp_ble::link::{AdvertiserAddress, ProximityGate};
 use refineid_rapp_ble::scan::{ScannedAdvertiser, scan};
-use refineid_rapp_core::engine::{PairingError, PeerIntroduction, Requester, RequesterConfig};
+use refineid_rapp_core::engine::{
+    OperationOutcome, PairingError, PeerIntroduction, Requester, RequesterConfig,
+};
+use refineid_rapp_core::message::CloseReason;
 use refineid_rapp_core::offer::normalize_pairing_code;
-use refineid_rapp_core::store::{MemoryJournal, MemoryPairingStore, PairingStore};
+use refineid_rapp_core::operations::{
+    CardOperation, CardOperationExt, CardOperationResult, CertificateKind,
+};
+use refineid_rapp_core::store::{MemoryJournal, PairingStore};
 use refineid_rapp_core::stream::DialPurpose;
+use refineid_windows_credential_store::ProtectedPairingStore;
 
 /// One scan for advertisers before each round of dials.
 const SCAN_WINDOW: Duration = Duration::from_secs(4);
 /// How long `ble-scan` listens unless told otherwise.
 const DEFAULT_SCAN_SECONDS: u64 = 10;
-/// Frame receive deadline on an open link.
-const RECEIVE_DEADLINE: Duration = Duration::from_secs(30);
+/// Frame receive deadline on an open link; an operation the holder approves
+/// on the phone answers within it.
+const RECEIVE_DEADLINE: Duration = Duration::from_secs(60);
 /// How long the requester keeps trying the code; the custodian's offer
 /// lives this long (section 3.3).
 const PAIRING_WINDOW: Duration = Duration::from_millis(refineid_rapp::OFFER_TTL_MS);
+/// How long `ble-session` looks for the stored pairing's phone.
+const SESSION_WINDOW: Duration = Duration::from_secs(60);
+/// Operation lifetime sent on the wire (section 8.2 item 1).
+const OPERATION_EXPIRY_MS: u64 = 60_000;
 
 struct BleOptions {
     code: Option<String>,
@@ -92,6 +107,32 @@ fn describe(advertiser: &ScannedAdvertiser) -> String {
     )
 }
 
+fn requester(name: &str) -> Result<Requester<ProtectedPairingStore, MemoryJournal>, String> {
+    let store = ProtectedPairingStore::load()
+        .map_err(|error| format!("the pairing store cannot be loaded: {error}"))?;
+    Ok(Requester::new(
+        RequesterConfig {
+            display_name: name.to_owned(),
+            platform: "Windows".into(),
+        },
+        store,
+        MemoryJournal::new(),
+    ))
+}
+
+/// The admitted advertisers of one scan, strongest first, that `refused`
+/// does not already name (core STPA R-53).
+fn admitted(
+    gate: ProximityGate,
+    refused: &BTreeSet<AdvertiserAddress>,
+) -> Result<Vec<ScannedAdvertiser>, String> {
+    let advertisers = scan(SCAN_WINDOW, gate).map_err(|error| error.to_string())?;
+    Ok(advertisers
+        .into_iter()
+        .filter(|advertiser| advertiser.admitted && !refused.contains(&advertiser.address))
+        .collect())
+}
+
 /// `ble-scan`: lists every RAPP advertiser in range with its filtered
 /// signal strength.
 pub fn ble_scan(arguments: &[String]) -> Result<(), String> {
@@ -116,18 +157,11 @@ pub fn ble_scan(arguments: &[String]) -> Result<(), String> {
 }
 
 /// `ble-pair`: pairs with the phone showing `--code`, trying each admitted
-/// advertiser once per scan, strongest first (core STPA R-53).
+/// advertiser once per scan, strongest first, and stores the pairing.
 pub fn ble_pair(arguments: &[String]) -> Result<(), String> {
     let options = parse(arguments)?;
     let code = options.code.as_deref().ok_or("--code is required")?;
-    let mut requester = Requester::new(
-        RequesterConfig {
-            display_name: options.name.clone(),
-            platform: "Windows".into(),
-        },
-        MemoryPairingStore::new(),
-        MemoryJournal::new(),
-    );
+    let mut requester = requester(&options.name)?;
     let auto_confirm = options.auto_confirm;
     let confirm = move |peer: &PeerIntroduction, requested: &[String]| {
         println!(
@@ -148,19 +182,15 @@ pub fn ble_pair(arguments: &[String]) -> Result<(), String> {
         if Instant::now() >= deadline {
             return Err("no phone accepted the code; show a new code and try again".into());
         }
-        let advertisers = scan(SCAN_WINDOW, options.gate).map_err(|error| error.to_string())?;
-        let admitted: Vec<&ScannedAdvertiser> = advertisers
-            .iter()
-            .filter(|advertiser| advertiser.admitted && !refused.contains(&advertiser.address))
-            .collect();
-        if admitted.is_empty() {
+        let candidates = admitted(options.gate, &refused)?;
+        if candidates.is_empty() {
             println!(
                 "no RAPP advertiser within the proximity gate; keep the phone close and RefineID open"
             );
             continue;
         }
-        for advertiser in admitted {
-            println!("connecting to {}", describe(advertiser));
+        for advertiser in candidates {
+            println!("connecting to {}", describe(&advertiser));
             let link =
                 match BleLink::open(advertiser.address, DialPurpose::Pairing, RECEIVE_DEADLINE) {
                     Ok(link) => link,
@@ -208,6 +238,122 @@ pub fn ble_pair(arguments: &[String]) -> Result<(), String> {
         record.peer_platform,
         record.granted_profiles.join(", ")
     );
-    println!("the pairing lives in this process only and ends with it");
+    println!("the pairing is stored, protected to this Windows user");
     Ok(())
+}
+
+/// `ble-session`: opens a session with the stored pairing's phone over BLE
+/// and reads its card: status, identity, and the authentication
+/// certificate.
+pub fn ble_session(arguments: &[String]) -> Result<(), String> {
+    let options = parse(arguments)?;
+    let mut requester = requester(&options.name)?;
+    let (pair_id, key) = {
+        let record = requester
+            .store()
+            .usable_pairing()
+            .ok_or("no usable pairing is stored; pair with ble-pair first")?;
+        let core = record
+            .to_core_pair_record()
+            .map_err(|error| format!("stored pairing unusable: {error:?}"))?;
+        let key = RoutingKey::derive(&core)
+            .map_err(|error| format!("stored pairing cannot route: {error:?}"))?;
+        (record.pair_id, key)
+    };
+
+    let deadline = Instant::now() + SESSION_WINDOW;
+    let mut refused: BTreeSet<AdvertiserAddress> = BTreeSet::new();
+    let mut session = 'search: loop {
+        if Instant::now() >= deadline {
+            return Err(
+                "the paired phone was not reached; over Bluetooth it is found only while \
+                 RefineID is open on it"
+                    .into(),
+            );
+        }
+        for advertiser in admitted(options.gate, &refused)? {
+            println!("routing a session to {}", describe(&advertiser));
+            let link = match BleLink::open(
+                advertiser.address,
+                DialPurpose::Session(&key),
+                RECEIVE_DEADLINE,
+            ) {
+                Ok(link) => link,
+                Err(error) => {
+                    println!("  {error}");
+                    refused.insert(advertiser.address);
+                    continue;
+                }
+            };
+            match requester.connect(pair_id, link) {
+                Ok(session) => break 'search session,
+                Err(error) => {
+                    println!("  no session: {error:?}");
+                    refused.insert(advertiser.address);
+                }
+            }
+        }
+    };
+    println!("session open over Bluetooth");
+
+    let operations = [
+        CardOperation::InspectCard,
+        CardOperation::ReadIdentity,
+        CardOperation::ReadCertificate {
+            kind: CertificateKind::Authentication,
+        },
+    ];
+    for operation in &operations {
+        print!("{} ... ", operation.action());
+        let _ = std::io::stdout().flush();
+        match requester.execute(&mut session, operation, OPERATION_EXPIRY_MS) {
+            Ok(outcome) => println!("{}", summary(&outcome)),
+            Err(error) => {
+                println!("not admitted: {error:?}");
+                break;
+            }
+        }
+    }
+    requester.disconnect(&mut session, CloseReason::UserDisconnect);
+    println!("session closed");
+    Ok(())
+}
+
+/// What an operation did, without anything personal.
+fn summary(outcome: &OperationOutcome) -> String {
+    match outcome {
+        OperationOutcome::Completed(result) => match result {
+            CardOperationResult::Inspection(inspection) => format!(
+                "ok: PIN 1 tries left {}, PIN 2 tries left {}, PUK tries left {}",
+                tries(inspection.pin1_attempts),
+                tries(inspection.pin2_attempts),
+                tries(inspection.puk_attempts)
+            ),
+            CardOperationResult::Identity(_) => "ok: identity read (not shown)".to_owned(),
+            CardOperationResult::Certificate(der) => {
+                format!("ok: certificate, {} bytes DER", der.len())
+            }
+            CardOperationResult::Signature(bytes) => {
+                format!("ok: signature, {} bytes", bytes.len())
+            }
+            CardOperationResult::Signatures(signatures) => {
+                format!("ok: {} signatures", signatures.len())
+            }
+        },
+        OperationOutcome::Denied => "denied on the phone".to_owned(),
+        OperationOutcome::Cancelled => "cancelled or expired".to_owned(),
+        OperationOutcome::Rejected(reason) => {
+            format!("rejected: {}", reason.as_deref().unwrap_or("unnamed"))
+        }
+        OperationOutcome::CredentialRejected => {
+            "credential rejected; the pairing is revoked on both devices".to_owned()
+        }
+        OperationOutcome::Ambiguous => {
+            "ambiguous: it may or may not have executed, and will not be retried".to_owned()
+        }
+    }
+}
+
+fn tries(count: Option<u8>) -> String {
+    count.map_or_else(|| "unknown".to_owned(), |count| count.to_string())
 }

@@ -78,6 +78,8 @@ fn main() {
         Some("ble-scan") => ble::ble_scan(&arguments[1..]),
         #[cfg(windows)]
         Some("ble-pair") => ble::ble_pair(&arguments[1..]),
+        #[cfg(windows)]
+        Some("ble-session") => ble::ble_session(&arguments[1..]),
         _ => {
             eprintln!("usage:");
             eprintln!("  refineid-rapp pair-demo --code <code> [--connect <host:port>] \\");
@@ -102,6 +104,7 @@ fn main() {
             eprintln!("  refineid-rapp ble-scan [--seconds <n>] [--gate <dBm>]");
             eprintln!("  refineid-rapp ble-pair --code <code> [--name <label>] [--gate <dBm>] \\");
             eprintln!("      [--auto-confirm]");
+            eprintln!("  refineid-rapp ble-session [--gate <dBm>]");
             std::process::exit(2);
         }
     };
