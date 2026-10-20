@@ -28,3 +28,6 @@
 
 WHATSUP.md
 
+
+# Python bytecode caches
+__pycache__/
