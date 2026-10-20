@@ -31,7 +31,7 @@ Visual Studio Installer for:
   (`TargetFramework` in `apps/RefineID-winui/RefineID.csproj`) and the
   repository's .NET local tools (`csharpier`);
 - the Python Install Manager and, through it, the latest stable Python 3
-  (`pymanager install --update 3`);
+  (`pymanager install --update --yes 3`);
 - `core.hooksPath` set to `.githooks`.
 
 Open a new terminal afterwards so the updated `PATH` applies.
