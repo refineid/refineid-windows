@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use refineid_rapp::RoutingKey;
 use refineid_rapp_ble::gatt::BleLink;
 use refineid_rapp_ble::link::{AdvertiserAddress, ProximityGate};
+use refineid_rapp_ble::reach::{Attempt, reach_session};
 use refineid_rapp_ble::scan::{ScannedAdvertiser, scan};
 use refineid_rapp_core::engine::{
     OperationOutcome, PairingError, PeerIntroduction, Requester, RequesterConfig,
@@ -26,13 +27,17 @@ use refineid_rapp_core::store::{MemoryJournal, PairingStore};
 use refineid_rapp_core::stream::DialPurpose;
 use refineid_windows_credential_store::ProtectedPairingStore;
 
-/// One scan for advertisers before each round of dials.
+/// One scan for advertisers before each round of pairing dials.
 const SCAN_WINDOW: Duration = Duration::from_secs(4);
 /// How long `ble-scan` listens unless told otherwise.
 const DEFAULT_SCAN_SECONDS: u64 = 10;
-/// Frame receive deadline on an open link; an operation the holder approves
-/// on the phone answers within it.
-const RECEIVE_DEADLINE: Duration = Duration::from_secs(60);
+/// Frame receive deadline on an open link. It outlasts an operation's
+/// lifetime, so an approval given just before the operation expires still
+/// arrives.
+const RECEIVE_DEADLINE: Duration =
+    Duration::from_millis(OPERATION_EXPIRY_MS + RESULT_TRANSFER_MARGIN_MS);
+/// What a result takes to cross the link after the phone produced it.
+const RESULT_TRANSFER_MARGIN_MS: u64 = 10_000;
 /// How long the requester keeps trying the code; the custodian's offer
 /// lives this long (section 3.3).
 const PAIRING_WINDOW: Duration = Duration::from_millis(refineid_rapp::OFFER_TTL_MS);
@@ -195,8 +200,8 @@ pub fn ble_pair(arguments: &[String]) -> Result<(), String> {
                 match BleLink::open(advertiser.address, DialPurpose::Pairing, RECEIVE_DEADLINE) {
                     Ok(link) => link,
                     Err(error) => {
+                        // The link may open on the next scan.
                         println!("  {error}");
-                        refused.insert(advertiser.address);
                         continue;
                     }
                 };
@@ -217,7 +222,9 @@ pub fn ble_pair(arguments: &[String]) -> Result<(), String> {
             match requester.pair_with_offer(code, offer, link, confirm) {
                 Ok(pair_id) => break 'search pair_id,
                 Err(PairingError::CodeMismatch) => {
-                    return Err("the phone refused the code; check it and try again".into());
+                    // Another phone near by shows another code.
+                    println!("  this phone's offer does not match the code");
+                    refused.insert(advertiser.address);
                 }
                 Err(PairingError::DeniedLocally) => return Err("pairing declined".into()),
                 Err(error) => {
@@ -261,39 +268,22 @@ pub fn ble_session(arguments: &[String]) -> Result<(), String> {
         (record.pair_id, key)
     };
 
-    let deadline = Instant::now() + SESSION_WINDOW;
-    let mut refused: BTreeSet<AdvertiserAddress> = BTreeSet::new();
-    let mut session = 'search: loop {
-        if Instant::now() >= deadline {
-            return Err(
-                "the paired phone was not reached; over Bluetooth it is found only while \
-                 RefineID is open on it"
-                    .into(),
-            );
-        }
-        for advertiser in admitted(options.gate, &refused)? {
-            println!("routing a session to {}", describe(&advertiser));
-            let link = match BleLink::open(
-                advertiser.address,
-                DialPurpose::Session(&key),
-                RECEIVE_DEADLINE,
-            ) {
-                Ok(link) => link,
-                Err(error) => {
-                    println!("  {error}");
-                    refused.insert(advertiser.address);
-                    continue;
-                }
-            };
-            match requester.connect(pair_id, link) {
-                Ok(session) => break 'search session,
-                Err(error) => {
-                    println!("  no session: {error:?}");
-                    refused.insert(advertiser.address);
-                }
+    let mut session = reach_session(
+        &mut requester,
+        pair_id,
+        &key,
+        options.gate,
+        SESSION_WINDOW,
+        RECEIVE_DEADLINE,
+        |attempt| match attempt {
+            Attempt::Routing(advertiser) => {
+                println!("routing a session to {}", describe(advertiser));
             }
-        }
-    };
+            Attempt::LinkFailed(error) => println!("  {error}"),
+            Attempt::Refused(error) => println!("  no session: {error:?}"),
+        },
+    )
+    .map_err(|error| error.to_string())?;
     println!("session open over Bluetooth");
 
     let operations = [
@@ -303,20 +293,25 @@ pub fn ble_session(arguments: &[String]) -> Result<(), String> {
             kind: CertificateKind::Authentication,
         },
     ];
+    let mut refusal = None;
     for operation in &operations {
         print!("{} ... ", operation.action());
         let _ = std::io::stdout().flush();
         match requester.execute(&mut session, operation, OPERATION_EXPIRY_MS) {
             Ok(outcome) => println!("{}", summary(&outcome)),
             Err(error) => {
-                println!("not admitted: {error:?}");
+                println!("not admitted");
+                refusal = Some(format!(
+                    "{} was not admitted: {error:?}",
+                    operation.action()
+                ));
                 break;
             }
         }
     }
     requester.disconnect(&mut session, CloseReason::UserDisconnect);
     println!("session closed");
-    Ok(())
+    refusal.map_or(Ok(()), Err)
 }
 
 /// What an operation did, without anything personal.

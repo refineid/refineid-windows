@@ -161,7 +161,11 @@ when it has been:
    measured.
 2. Which process loads the KSP for a client certificate in Edge and in
    Chrome, with its token's integrity level and AppContainer state
-   (W-R-4a).
+   (W-R-4a). Observed 2026-10-21 for Edge: the browser process
+   (`msedge.exe` without `--type`) loads the provider when the site asks
+   for a client certificate, at medium integrity (`0x2000`), not in an
+   AppContainer; the pipe's DACL for the user's SID admits it, and no
+   capability SID is granted. Chrome is not yet observed.
 3. Pairing over BLE with the six-character code, with no Windows
    pairing dialog (R-54). Observed 2026-10-21: two pairings with the
    iPhone's development harness completed `CPace`, `Noise_XXpsk3`, the grant
@@ -171,10 +175,23 @@ when it has been:
    rotating private address of RAPP §4.1 predicts (core R-53).
 4. A session routed by its preamble, `card.status` reporting the wired
    reader's card, and `read_identity` returning the certificates.
+   Observed 2026-10-21: sessions routed to a fresh address each time
+   returned the card's status, its identity and the 1066-byte
+   authentication certificate. The agent then offered that certificate in
+   `CurrentUser\My`, Edge chose it for card.refineid.fi and called the
+   provider, and a provider built from this tree sent the signature
+   request through the agent to the phone, which asked the holder for
+   PIN 1.
 5. The link and session surviving the iPhone's screen lock for the
    length of a login (core 16.1).
 6. A login at kortti.tunnistautuminen.suomi.fi in Edge, with the
    signature verified by the KSP before it reached CNG (W-R-5), and the
-   algorithm the server asked for recorded (core R-48).
+   algorithm the server asked for recorded (core R-48). Observed
+   2026-10-21: with the iPhone's Wi-Fi and cellular data off and Bluetooth
+   its only link, the holder logged in to suomi.fi with the certificate
+   card in Edge, and to card.refineid.fi; each signature was one ECDSA
+   signature of 96 bytes (P-384) the phone returned within a second once PIN 1
+   was cached, verified by the KSP before Edge received it. The digest
+   algorithm the server asked for is not yet recorded.
 7. A login after the iPhone was locked with the link held (R-50), and
    the message shown when the link was dropped on purpose (R-51).

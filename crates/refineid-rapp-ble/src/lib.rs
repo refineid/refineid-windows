@@ -12,7 +12,8 @@
 //! Every value the radio hands over crosses one border constructor in
 //! [`link`] before anything relies on it: the advertiser address, the
 //! signal strength, the negotiated MTU and the fragment capacity it allows.
-//! The Windows Runtime link itself is in [`gatt`] and the scan in [`scan`].
+//! The Windows Runtime link itself is in [`gatt`], the scan in [`scan`],
+//! and the search for a stored pairing's phone in [`reach`].
 //!
 //! RAPP authenticates on the application layer alone (section 13.2): the
 //! requester never asks Windows to pair or bond with the phone and never
@@ -22,5 +23,7 @@ pub mod link;
 
 #[cfg(windows)]
 pub mod gatt;
+#[cfg(windows)]
+pub mod reach;
 #[cfg(windows)]
 pub mod scan;

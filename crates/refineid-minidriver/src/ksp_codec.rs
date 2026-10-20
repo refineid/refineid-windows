@@ -187,43 +187,9 @@ pub(crate) fn rsa_signature_to_width(signature: &[u8], width: usize) -> Option<V
     Some(padded)
 }
 
-/// The label the phone shows for a signature requested by the program at
-/// `executable`: a product name for the browsers people use, otherwise the
-/// file name itself. The phone shows what asks, not where the request goes,
-/// because CNG does not tell the provider the site.
-pub(crate) fn requester_label(executable: &str) -> String {
-    let file = executable
-        .rsplit(['\\', '/'])
-        .next()
-        .unwrap_or(executable)
-        .trim();
-    let known = match file.to_ascii_lowercase().as_str() {
-        "msedge.exe" => Some("Microsoft Edge"),
-        "chrome.exe" => Some("Google Chrome"),
-        "brave.exe" => Some("Brave"),
-        "opera.exe" => Some("Opera"),
-        "vivaldi.exe" => Some("Vivaldi"),
-        "lsass.exe" => Some("Windows"),
-        _ => None,
-    };
-    let name = known.map_or_else(
-        || {
-            if file.is_empty() {
-                "A Windows program".to_owned()
-            } else {
-                file.to_owned()
-            }
-        },
-        str::to_owned,
-    );
-    format!("{name} on Windows")
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        Digest, KeyKind, ecc_public_blob, requester_label, rsa_public_blob, rsa_signature_to_width,
-    };
+    use super::{Digest, KeyKind, ecc_public_blob, rsa_public_blob, rsa_signature_to_width};
 
     #[test]
     fn an_ecc_blob_carries_the_magic_and_the_coordinates() {
@@ -291,19 +257,5 @@ mod tests {
         assert_eq!(Digest::from_cng_algorithm("SHA256"), Some(Digest::Sha256));
         assert_eq!(Digest::from_cng_algorithm("SHA1"), None);
         assert_eq!(Digest::Sha512.length(), 64);
-    }
-
-    #[test]
-    fn the_requester_label_names_browsers_and_falls_back_to_the_file() {
-        assert_eq!(
-            requester_label(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
-            "Microsoft Edge on Windows"
-        );
-        assert_eq!(requester_label("chrome.exe"), "Google Chrome on Windows");
-        assert_eq!(
-            requester_label(r"C:\tools\certutil.exe"),
-            "certutil.exe on Windows"
-        );
-        assert_eq!(requester_label(""), "A Windows program on Windows");
     }
 }

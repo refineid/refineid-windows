@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/refineid-agent",
+    "crates/refineid-agent-pipe",
     "crates/refineid-card-manager-core",
     "crates/refineid-doc-sign",
     "crates/refineid-windows-driver-probe",
@@ -28,6 +30,7 @@ repository = "https://github.com/refineid/refineid-windows"
 
 
 [workspace.dependencies]
+refineid-agent-pipe = { path = "crates/refineid-agent-pipe", version = "26" }
 refineid-lib-core = { path = "crates/refineid-lib-core", version = "26" }
 refineid-lib-pcsc = { path = "crates/refineid-lib-pcsc", version = "26" }
 refineid-card-manager-core = { path = "crates/refineid-card-manager-core", version = "26" }

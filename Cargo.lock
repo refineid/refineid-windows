@@ -804,6 +804,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "refineid-agent"
+version = "26.10.20"
+dependencies = [
+ "refineid-agent-pipe",
+ "refineid-rapp",
+ "refineid-rapp-ble",
+ "refineid-rapp-core",
+ "refineid-windows-credential-store",
+]
+
+[[package]]
+name = "refineid-agent-pipe"
+version = "26.10.20"
+dependencies = [
+ "refineid-rapp",
+ "refineid-rapp-core",
+ "windows-sys",
+]
+
+[[package]]
 name = "refineid-card-manager-core"
 version = "26.10.20"
 dependencies = [
@@ -887,6 +907,7 @@ dependencies = [
 name = "refineid-minidriver"
 version = "26.10.20"
 dependencies = [
+ "refineid-agent-pipe",
  "refineid-lib-core",
  "refineid-rapp-core",
  "refineid-windows-credential-store",
