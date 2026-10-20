@@ -198,6 +198,17 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -File scripts/test-card-sign.ps1
 ```
 
+Log in to card-authenticating sites in Edge, with the card in a reader. The
+script drives Edge with a fresh profile and selects the card's certificate
+for each site for the run only; enter PIN 1 in the Windows Security dialog
+when Windows asks for it. It needs Python 3 with the `playwright` package:
+
+```powershell
+python3 -m pip install playwright
+python3 scripts/test-browser-edge.py --url https://card.refineid.fi `
+  --expect-title "Card-authenticated guestbook"
+```
+
 Remove the development installation:
 
 ```powershell

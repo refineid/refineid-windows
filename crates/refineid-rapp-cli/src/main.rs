@@ -9,7 +9,7 @@
 //!
 //! `refineid-rapp reconnect` proves the durable path the minidriver will use:
 //! it loads a pairing the settings app already stored in the Windows
-//! credential vault and dials sessions against it, with no fresh pairing
+//! protected pairing store and dials sessions against it, with no fresh pairing
 //! ceremony. Both share one session loop.
 //!
 //! This is a development tool. It prints operation results to the terminal
@@ -37,7 +37,7 @@ use refineid_rapp_core::store::{MemoryJournal, MemoryPairingStore, PairingStore}
 use refineid_rapp_core::stream::{
     DialPurpose, DiscoveryMode, STREAM_CANDIDATE_ID, browse, dial, dial_session,
 };
-use refineid_windows_credential_store::CredentialPairingStore;
+use refineid_windows_credential_store::ProtectedPairingStore;
 
 /// Frame receive deadline on a dialed connection.
 const RECEIVE_DEADLINE: Duration = Duration::from_mins(3);
@@ -179,8 +179,8 @@ fn parse_options(arguments: &[String]) -> Result<DemoOptions, String> {
 fn pair_demo(arguments: &[String]) -> Result<(), String> {
     let options = parse_options(arguments)?;
     if options.durable {
-        let store = CredentialPairingStore::load()
-            .map_err(|error| format!("cannot load CredentialPairingStore: {error}"))?;
+        let store = ProtectedPairingStore::load()
+            .map_err(|error| format!("cannot load ProtectedPairingStore: {error}"))?;
         run_pair_demo(&options, store)
     } else {
         run_pair_demo(&options, MemoryPairingStore::new())
@@ -281,13 +281,13 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
 }
 
 /// Reconnects to a pairing the settings app already stored in the Windows
-/// credential vault and serves sessions against it -- the durable path the
+/// protected pairing store and serves sessions against it -- the durable path the
 /// minidriver will use. No pairing ceremony runs; the requester finds the
 /// phone by its session advertisement.
 fn reconnect(arguments: &[String]) -> Result<(), String> {
     let options = parse_options(arguments)?;
 
-    let store = CredentialPairingStore::load()
+    let store = ProtectedPairingStore::load()
         .map_err(|error| format!("cannot read the stored pairing: {error}"))?;
     if store.is_empty() {
         return Err("no pairing is stored; pair first in the settings app".into());
@@ -657,8 +657,8 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
         run_mock_proxy(options)
     });
 
-    let store = CredentialPairingStore::load()
-        .map_err(|e| format!("cannot load CredentialPairingStore: {e}"))?;
+    let store = ProtectedPairingStore::load()
+        .map_err(|e| format!("cannot load ProtectedPairingStore: {e}"))?;
 
     let mut requester = Requester::new(
         RequesterConfig {
@@ -736,8 +736,8 @@ fn remove_pairing(arguments: &[String]) -> Result<(), String> {
     let mut arr = [0u8; 16];
     arr.copy_from_slice(&raw);
     let pair_id = PairId::from_array(arr);
-    let mut store = CredentialPairingStore::load()
-        .map_err(|e| format!("cannot load CredentialPairingStore: {e}"))?;
+    let mut store = ProtectedPairingStore::load()
+        .map_err(|e| format!("cannot load ProtectedPairingStore: {e}"))?;
     store
         .remove(pair_id)
         .map_err(|e| format!("failed to remove pairing: {e:?}"))?;
@@ -746,8 +746,8 @@ fn remove_pairing(arguments: &[String]) -> Result<(), String> {
 }
 
 fn list_pairing() -> Result<(), String> {
-    let store = CredentialPairingStore::load()
-        .map_err(|e| format!("cannot load CredentialPairingStore: {e}"))?;
+    let store = ProtectedPairingStore::load()
+        .map_err(|e| format!("cannot load ProtectedPairingStore: {e}"))?;
     if store.is_empty() {
         println!("No pairings stored in Windows Credential Store.");
         return Ok(());
@@ -785,8 +785,8 @@ fn export_cert(arguments: &[String]) -> Result<(), String> {
         .first()
         .cloned()
         .unwrap_or_else(|| "auth_cert.der".to_owned());
-    let store = CredentialPairingStore::load()
-        .map_err(|e| format!("cannot load CredentialPairingStore: {e}"))?;
+    let store = ProtectedPairingStore::load()
+        .map_err(|e| format!("cannot load ProtectedPairingStore: {e}"))?;
     let record = store.usable_pairing().ok_or("no usable pairing found")?;
     let auth_der = record
         .auth_cert
@@ -805,8 +805,8 @@ fn export_pairing(arguments: &[String]) -> Result<(), String> {
         .first()
         .cloned()
         .unwrap_or_else(|| "pairing.blob".to_owned());
-    let store = CredentialPairingStore::load()
-        .map_err(|e| format!("cannot load CredentialPairingStore: {e}"))?;
+    let store = ProtectedPairingStore::load()
+        .map_err(|e| format!("cannot load ProtectedPairingStore: {e}"))?;
     let records: Vec<_> = store.usable_pairing().into_iter().cloned().collect();
     if records.is_empty() {
         return Err("no usable pairing found".to_owned());
@@ -824,8 +824,8 @@ fn import_pairing(arguments: &[String]) -> Result<(), String> {
     let bytes = std::fs::read(in_path).map_err(|e| format!("cannot read {in_path}: {e}"))?;
     let records = decode_pairing_records(&bytes)
         .map_err(|e| format!("cannot decode pairing records from {in_path}: {e:?}"))?;
-    let mut store = CredentialPairingStore::load()
-        .map_err(|e| format!("cannot load CredentialPairingStore: {e}"))?;
+    let mut store = ProtectedPairingStore::load()
+        .map_err(|e| format!("cannot load ProtectedPairingStore: {e}"))?;
     let count = records.len();
     for record in records {
         store

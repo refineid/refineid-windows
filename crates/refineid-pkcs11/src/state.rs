@@ -349,8 +349,8 @@ impl ModuleState {
     /// Discover paired remote RAPP mobile readers (iPhone/Android) from the local vault.
     #[cfg(windows)]
     fn refresh_remote_slots(&mut self) {
-        use refineid_windows_credential_store::CredentialPairingStore;
-        let Ok(store) = CredentialPairingStore::load() else {
+        use refineid_windows_credential_store::ProtectedPairingStore;
+        let Ok(store) = ProtectedPairingStore::load() else {
             return;
         };
         let pairs: Vec<_> = store.usable_pairing().into_iter().collect();
@@ -598,8 +598,8 @@ impl ModuleState {
         if let Some(hex_id) = reader_name.strip_prefix("rapp:") {
             #[cfg(windows)]
             {
-                use refineid_windows_credential_store::CredentialPairingStore;
-                let store = CredentialPairingStore::load().map_err(|_| CKR_DEVICE_ERROR)?;
+                use refineid_windows_credential_store::ProtectedPairingStore;
+                let store = ProtectedPairingStore::load().map_err(|_| CKR_DEVICE_ERROR)?;
                 let pair = store
                     .records()
                     .iter()

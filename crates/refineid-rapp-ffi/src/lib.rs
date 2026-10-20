@@ -61,7 +61,7 @@ use refineid_rapp_core::store::{MemoryJournal, PairingDisposition, PairingRecord
 use refineid_rapp_core::stream::{
     DialPurpose, DiscoveryMode, STREAM_CANDIDATE_ID, StreamError, browse, dial, dial_session,
 };
-use refineid_windows_credential_store::{CredentialPairingStore, delete_pairing_set};
+use refineid_windows_credential_store::{ProtectedPairingStore, delete_pairing_set};
 #[cfg(windows)]
 use refineid_windows_credential_store::{install_browser_certificate, remove_browser_certificates};
 use serde::Serialize;
@@ -122,7 +122,7 @@ const NO_PAIRING_STATUS: &str = "No phone is paired with this device.";
 
 /// The requester engine specialised to the device-only credential-store
 /// pairing store and the in-memory operation journal.
-type StreamRequester = Requester<CredentialPairingStore, MemoryJournal>;
+type StreamRequester = Requester<ProtectedPairingStore, MemoryJournal>;
 
 #[derive(Debug)]
 struct ApiFailure {
@@ -286,7 +286,7 @@ pub extern "C" fn refineid_rapp_forget_pairings() -> *mut c_char {
 /// section 4.6 item 1). A phone that is not on the network learns nothing
 /// and is forgotten regardless.
 fn tell_phones_they_are_forgotten() {
-    let Ok(store) = CredentialPairingStore::load() else {
+    let Ok(store) = ProtectedPairingStore::load() else {
         return;
     };
     let usable = forgettable_pairs(store.records());
@@ -527,7 +527,7 @@ pub extern "C" fn refineid_rapp_end_pairing(handle: u64) -> *mut c_char {
 }
 
 fn begin_pairing(code: String, name: String) -> Result<BeginPairingDto, ApiFailure> {
-    let pairing_store = CredentialPairingStore::load()
+    let pairing_store = ProtectedPairingStore::load()
         .map_err(|error| ApiFailure::new("pairing_store_unavailable", format!("{error}")))?;
     let requester = Requester::new(
         RequesterConfig {
@@ -562,7 +562,7 @@ fn begin_pairing(code: String, name: String) -> Result<BeginPairingDto, ApiFailu
 }
 
 fn open_pairing(name: String) -> Result<BeginPairingDto, ApiFailure> {
-    let pairing_store = CredentialPairingStore::load()
+    let pairing_store = ProtectedPairingStore::load()
         .map_err(|error| ApiFailure::new("pairing_store_unavailable", format!("{error}")))?;
     let record = pairing_store
         .usable_pairing()
@@ -810,7 +810,7 @@ fn offering_watch(handle_id: u64) {
     let _mark = WatchMark(handle_id);
     let mut offered = false;
     while !ended(handle_id) {
-        let Ok(store) = CredentialPairingStore::load() else {
+        let Ok(store) = ProtectedPairingStore::load() else {
             withdraw_offer(handle_id, &mut offered, PHONE_UNREACHABLE_STATUS);
             pause(WATCH_RETRY_MS);
             continue;
