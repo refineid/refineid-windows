@@ -48,9 +48,10 @@ checkout gets CRLF and CSharpier rejects every C# file.
 A checkout made before `.gitattributes` existed keeps its CRLF files until
 they are written again; `git ls-files --eol` shows them as `w/crlf`. Commit or
 stash any work first, since this replaces every tracked file from the index,
-then run in Git Bash:
+close editors and build servers that hold files open, then run in Git Bash:
 
 ```sh
+cd "$(git rev-parse --show-toplevel)"
 git ls-files -z | xargs -0 rm -f
 git checkout -- .
 git ls-files --eol | grep -c w/crlf   # 0
