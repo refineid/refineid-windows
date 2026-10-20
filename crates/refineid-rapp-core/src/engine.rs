@@ -344,9 +344,12 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         mut transport: Transport,
         confirm: impl FnOnce(&PeerIntroduction, &[String]) -> Option<Vec<String>>,
     ) -> Result<PairId, PairingError> {
-        let normalized = crate::offer::normalize_pairing_code(code)
+        if crate::offer::normalize_pairing_code(code)
             .map(Zeroizing::new)
-            .ok_or(PairingError::InvalidCode)?;
+            .is_none()
+        {
+            return Err(PairingError::InvalidCode);
+        }
         let offer = crate::offer::read_bootstrap(&mut transport).map_err(|error| match error {
             crate::offer::BootstrapError::Transport(error) => PairingError::Transport(error),
             crate::offer::BootstrapError::UnregisteredTransport => {
@@ -354,6 +357,31 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
             }
             crate::offer::BootstrapError::Offer(error) => PairingError::Offer(error),
         })?;
+        self.pair_with_offer(code, offer, transport, confirm)
+    }
+
+    /// Pairs with the custodian showing `code` over a transport whose offer
+    /// bootstrap is not its first frame (RAPP v26.10.18 section 4.2 step 1:
+    /// on BLE, a read of the Bootstrap Characteristic).
+    ///
+    /// The transport is already past its `"pairing"` routing preamble, and
+    /// `offer` was decoded at the caller's border with the connection's
+    /// transport profile. [`Self::pair_with_code`] reads the offer and then
+    /// runs this.
+    ///
+    /// # Errors
+    /// As [`Self::pair_with_code`]; [`PairingError::UnregisteredTransport`]
+    /// also when the offer does not list the transport the connection runs.
+    pub fn pair_with_offer<Transport: FrameTransport>(
+        &mut self,
+        code: &str,
+        offer: PairingOffer,
+        mut transport: Transport,
+        confirm: impl FnOnce(&PeerIntroduction, &[String]) -> Option<Vec<String>>,
+    ) -> Result<PairId, PairingError> {
+        let normalized = crate::offer::normalize_pairing_code(code)
+            .map(Zeroizing::new)
+            .ok_or(PairingError::InvalidCode)?;
         let profile = refineid_rapp::TransportProfile::parse(transport.profile())
             .ok_or(PairingError::UnregisteredTransport)?;
         let candidate_id = offer

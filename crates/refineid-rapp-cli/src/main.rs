@@ -15,6 +15,9 @@
 //! This is a development tool. It prints operation results to the terminal
 //! and must not be distributed to end users.
 
+#[cfg(windows)]
+mod ble;
+
 use std::io::Write as _;
 use std::time::{Duration, Instant};
 
@@ -71,6 +74,12 @@ fn main() {
         Some("export-cert") => export_cert(&arguments[1..]),
         Some("export-pairing") => export_pairing(&arguments[1..]),
         Some("import-pairing") => import_pairing(&arguments[1..]),
+        #[cfg(windows)]
+        Some("ble-scan") => ble::ble_scan(&arguments[1..]),
+        #[cfg(windows)]
+        Some("ble-pair") => ble::ble_pair(&arguments[1..]),
+        #[cfg(windows)]
+        Some("ble-session") => ble::ble_session(&arguments[1..]),
         _ => {
             eprintln!("usage:");
             eprintln!("  refineid-rapp pair-demo --code <code> [--connect <host:port>] \\");
@@ -92,6 +101,10 @@ fn main() {
             eprintln!("  refineid-rapp export-cert [<path>]");
             eprintln!("  refineid-rapp export-pairing [<path>]");
             eprintln!("  refineid-rapp import-pairing <path>");
+            eprintln!("  refineid-rapp ble-scan [--seconds <n>] [--gate <dBm>]");
+            eprintln!("  refineid-rapp ble-pair --code <code> [--name <label>] [--gate <dBm>] \\");
+            eprintln!("      [--auto-confirm]");
+            eprintln!("  refineid-rapp ble-session [--gate <dBm>]");
             std::process::exit(2);
         }
     };

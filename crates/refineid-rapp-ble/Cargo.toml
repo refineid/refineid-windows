@@ -1,0 +1,29 @@
+[package]
+name = "refineid-rapp-ble"
+description = "The RAPP Bluetooth Low Energy transport profile fi.refineid.rapp.ble.v1 for the Windows requester: the GATT central over WinRT"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+refineid-rapp.workspace = true
+refineid-rapp-core.workspace = true
+
+# WinRT Bluetooth. Each asynchronous operation blocks its thread in `join()`,
+# which the `std` feature provides; the dependency is Windows-only, so the
+# feature never reaches a host that cannot build `windows-future`.
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "std",
+    "Devices_Bluetooth",
+    "Devices_Bluetooth_Advertisement",
+    "Devices_Bluetooth_GenericAttributeProfile",
+    "Foundation",
+    "Foundation_Collections",
+    "Storage_Streams",
+] }
+
+[lints]
+workspace = true
