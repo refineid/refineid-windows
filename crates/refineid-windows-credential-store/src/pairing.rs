@@ -19,21 +19,23 @@
 //! serialized by [`refineid_rapp_core::persistence`], protected with
 //! `CryptProtectData` to the current user under a purpose entropy, and
 //! written as one file in the user's local application data, through a
-//! temporary file and a rename, so an insert, update, or removal replaces
-//! the set at once. Only this Windows user, on this computer, can unprotect
-//! it. A Credential Manager credential cannot hold the set: a record carries
-//! its cached certificates, and a generic credential holds at most
-//! `CRED_MAX_CREDENTIAL_BLOB_SIZE` (2560) bytes.
+//! temporary file of its own and a rename, so an insert, update, or removal
+//! replaces the set at once. Only this Windows user, on this computer, can
+//! unprotect it. A Credential Manager credential cannot hold the set: a
+//! record carries its cached certificates, and a generic credential holds at
+//! most `CRED_MAX_CREDENTIAL_BLOB_SIZE` (2560) bytes.
 //!
-//! The keys never leave `Zeroizing`, are wiped from every intermediate
+//! The keys stay in `Zeroizing` buffers, are wiped from every intermediate
 //! buffer, and are never logged. The store deletes, unread, every
 //! unprotected copy of the set it finds: plaintext files in the user's and
 //! the machine's application data, and the generic credential.
 //!
 //! [`ProtectedPairingStore`] keeps the decoded records in memory so it can
 //! satisfy the borrowing [`PairingStore`] contract, and writes the set through
-//! on every change. It is the durable replacement for the engine's in-memory
-//! store.
+//! on every change, after re-reading it: a change is never written over a set
+//! that could not be read.
+
+use std::path::{Path, PathBuf};
 
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::persistence::{decode_pairing_records, encode_pairing_records};
@@ -52,11 +54,12 @@ use crate::CredentialStoreError;
 #[derive(Debug)]
 pub struct ProtectedPairingStore {
     records: Vec<PairingRecord>,
+    directory: PathBuf,
 }
 
 impl ProtectedPairingStore {
-    /// Loads the stored pairing set, or an empty store when none exists yet,
-    /// after deleting every unprotected copy of a set.
+    /// Loads this user's stored pairing set, or an empty store when none
+    /// exists yet, after deleting every unprotected copy of a set.
     ///
     /// A record whose peer never confirmed its storage was written inside a
     /// pairing this computer did not complete; it is revoked here, at the
@@ -64,20 +67,26 @@ impl ProtectedPairingStore {
     ///
     /// # Errors
     ///
-    /// Fails when the protected set cannot be read or unprotected, the
-    /// stored blob is malformed, or this build is not running on Windows.
+    /// Fails when an unprotected copy in this user's profile cannot be
+    /// deleted, the protected set cannot be read or unprotected, the stored
+    /// blob is malformed, or this build is not running on Windows.
     pub fn load() -> Result<Self, CredentialStoreError> {
-        remove_unprotected_copies();
-        let records = match read_pairing_set()? {
+        Self::load_from(profile_directory()?)
+    }
+
+    /// Loads the pairing set kept in `directory`.
+    fn load_from(directory: PathBuf) -> Result<Self, CredentialStoreError> {
+        remove_unprotected_copies(&directory)?;
+        let records = match read_pairing_set(&directory)? {
             Some(blob) => decode_pairing_records(&blob)
                 .map_err(|_error| CredentialStoreError::InvalidStoredPairing)?,
             None => Vec::new(),
         };
-        let mut store = Self { records };
+        let mut store = Self { records, directory };
+        // Each revocation is written as it is made; one that could not be
+        // written stands in memory and is written here.
         if !revoke_unconfirmed(&mut store).is_empty() {
-            store
-                .persist()
-                .map_err(|_error| CredentialStoreError::InvalidStoredPairing)?;
+            store.persist()?;
         }
         Ok(store)
     }
@@ -94,8 +103,8 @@ impl ProtectedPairingStore {
         self.records.is_empty()
     }
 
-    /// The first usable stored pairing, if any: one neither revoked nor
-    /// awaiting the peer's storage confirmation.
+    /// The most recently stored usable pairing, if any: one neither revoked
+    /// nor awaiting the peer's storage confirmation.
     ///
     /// A caller that reconnects to a stored pairing needs its `pair_id` and
     /// keys without having kept them from the pairing ceremony.
@@ -118,7 +127,8 @@ impl ProtectedPairingStore {
     ///
     /// # Errors
     ///
-    /// Fails when no such pairing is stored or the set cannot be written.
+    /// Fails when no such pairing is stored, the stored set cannot be read,
+    /// or the set cannot be written.
     pub fn forget_after_revocation(&mut self, pair_id: PairId) -> Result<(), StoreError> {
         self.update(pair_id, &mut |record| {
             record.disposition = PairingDisposition::Revoked;
@@ -129,33 +139,52 @@ impl ProtectedPairingStore {
     }
 
     /// Replaces the records held here with the stored set as it is now, so
-    /// a write applies to what is stored and not to the copy this value was
+    /// a change applies to what is stored and not to the copy this value was
     /// loaded with: another store instance may have revoked a pairing or
-    /// deleted the set in the meantime.
+    /// deleted the set in the meantime. A set that is gone leaves the
+    /// records empty.
     ///
-    /// A set that cannot be read leaves the records as they are; a set that
-    /// is gone leaves them empty.
-    fn refresh_from_storage(&mut self) {
-        match stored_records_now() {
-            Refresh::Replace(records) => self.records = records,
-            Refresh::Clear => self.records.clear(),
-            Refresh::Keep => {}
+    /// A set that cannot be read stops the change: written over, it would
+    /// be lost.
+    fn refresh_from_storage(&mut self) -> Result<(), StoreError> {
+        match read_pairing_set(&self.directory) {
+            Ok(Some(blob)) => {
+                self.records =
+                    decode_pairing_records(&blob).map_err(|_error| StoreError::Unreadable)?;
+                Ok(())
+            }
+            Ok(None) => {
+                self.records.clear();
+                Ok(())
+            }
+            Err(_error) => Err(StoreError::Unreadable),
         }
     }
 
     /// Writes the current record set through to the protected file.
-    fn persist(&self) -> Result<(), StoreError> {
+    fn persist(&self) -> Result<(), CredentialStoreError> {
         let blob = encode_pairing_records(&self.records);
-        write_pairing_set(&blob).map_err(|_error| StoreError::WriteRefused)
+        write_pairing_set(&self.directory, &blob)
+    }
+
+    /// Re-reads the stored set, applies `change`, and writes it.
+    fn change(
+        &mut self,
+        change: impl FnOnce(&mut Vec<PairingRecord>) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        self.refresh_from_storage()?;
+        change(&mut self.records)?;
+        self.persist().map_err(|_error| StoreError::WriteRefused)
     }
 }
 
 impl PairingStore for ProtectedPairingStore {
     fn insert(&mut self, record: PairingRecord) -> Result<(), StoreError> {
-        self.refresh_from_storage();
-        self.records.retain(|entry| entry.pair_id != record.pair_id);
-        self.records.push(record);
-        self.persist()
+        self.change(|records| {
+            records.retain(|entry| entry.pair_id != record.pair_id);
+            records.push(record);
+            Ok(())
+        })
     }
 
     fn get(&self, pair_id: PairId) -> Result<&PairingRecord, StoreError> {
@@ -170,14 +199,14 @@ impl PairingStore for ProtectedPairingStore {
         pair_id: PairId,
         change: &mut dyn FnMut(&mut PairingRecord),
     ) -> Result<(), StoreError> {
-        self.refresh_from_storage();
-        let record = self
-            .records
-            .iter_mut()
-            .find(|entry| entry.pair_id == pair_id)
-            .ok_or(StoreError::Unknown)?;
-        change(record);
-        self.persist()
+        self.change(|records| {
+            let record = records
+                .iter_mut()
+                .find(|entry| entry.pair_id == pair_id)
+                .ok_or(StoreError::Unknown)?;
+            change(record);
+            Ok(())
+        })
     }
 
     fn pair_ids(&self) -> Vec<PairId> {
@@ -189,58 +218,25 @@ impl PairingStore for ProtectedPairingStore {
     }
 
     fn remove(&mut self, pair_id: PairId) -> Result<(), StoreError> {
-        self.refresh_from_storage();
-        let before = self.records.len();
-        self.records.retain(|entry| entry.pair_id != pair_id);
-        if self.records.len() == before {
-            return Err(StoreError::Unknown);
-        }
-        self.persist()
+        self.change(|records| {
+            let before = records.len();
+            records.retain(|entry| entry.pair_id != pair_id);
+            if records.len() == before {
+                return Err(StoreError::Unknown);
+            }
+            Ok(())
+        })
     }
-}
-
-/// What the stored set says the records are right now.
-#[cfg_attr(
-    not(windows),
-    allow(
-        dead_code,
-        reason = "only the Windows store can report a set to replace or clear"
-    )
-)]
-enum Refresh {
-    /// The stored set holds these records.
-    Replace(Vec<PairingRecord>),
-    /// The stored set is gone.
-    Clear,
-    /// The set could not be read, or there is none on this platform.
-    Keep,
-}
-
-#[cfg(windows)]
-fn stored_records_now() -> Refresh {
-    match read_pairing_set() {
-        Ok(Some(blob)) => decode_pairing_records(&blob).map_or(Refresh::Keep, Refresh::Replace),
-        Ok(None) => Refresh::Clear,
-        Err(_) => Refresh::Keep,
-    }
-}
-
-/// Off Windows there is no set to read; the records stand.
-#[cfg(not(windows))]
-const fn stored_records_now() -> Refresh {
-    Refresh::Keep
 }
 
 /// The directory under the user's local application data that holds the set.
-#[cfg(windows)]
 const PROFILE_DIRECTORY: &str = "RefineID";
 /// The protected pairing set.
 #[cfg(windows)]
 const PAIRING_SET_FILE: &str = "pairing-set.dpapi";
-/// The protected set being written, renamed over [`PAIRING_SET_FILE`] once
-/// it is complete on disk.
+/// The suffix of the temporary file a write fills before the rename.
 #[cfg(windows)]
-const PAIRING_SET_PARTIAL_FILE: &str = "pairing-set.dpapi.partial";
+const PARTIAL_SUFFIX: &str = "partial";
 /// The purpose the set is protected for: a DPAPI blob protected for anything
 /// else does not unprotect as a pairing set.
 #[cfg(windows)]
@@ -253,40 +249,50 @@ const UNPROTECTED_COPY_FILE: &str = "pairing_set.blob";
 const UNPROTECTED_CREDENTIAL_TARGET: &str = "RefineID_RAPP_Pairing_Set";
 
 /// The user's local application data directory for `RefineID`.
-#[cfg(windows)]
-fn profile_directory() -> Result<std::path::PathBuf, CredentialStoreError> {
+fn profile_directory() -> Result<PathBuf, CredentialStoreError> {
     std::env::var_os("LOCALAPPDATA")
-        .map(|local| std::path::PathBuf::from(local).join(PROFILE_DIRECTORY))
+        .map(|local| PathBuf::from(local).join(PROFILE_DIRECTORY))
         .ok_or(CredentialStoreError::ProfileUnavailable)
 }
 
 /// Deletes every unprotected copy of a pairing set, without reading it.
 ///
-/// Deletion is all that is wanted of them; one that cannot be deleted (a
-/// machine-wide copy another account created) is left for that account's
-/// own load, and nothing here ever reads it.
+/// A copy in `directory` or the generic credential, both this user's, must
+/// go: one that cannot be deleted fails the load. A machine-wide copy in
+/// `%ProgramData%` that cannot be deleted belongs to another account, which
+/// deletes it at its own load; this user has no right to.
 #[cfg(windows)]
-fn remove_unprotected_copies() {
+fn remove_unprotected_copies(directory: &Path) -> Result<(), CredentialStoreError> {
+    use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, GetLastError};
     use windows_sys::Win32::Security::Credentials::{CRED_TYPE_GENERIC, CredDeleteW};
 
-    if let Ok(directory) = profile_directory() {
-        let _ = std::fs::remove_file(directory.join(UNPROTECTED_COPY_FILE));
+    match std::fs::remove_file(directory.join(UNPROTECTED_COPY_FILE)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_error) => return Err(CredentialStoreError::UnprotectedCopyRemains),
     }
     if let Some(program_data) = std::env::var_os("ProgramData") {
-        let _ = std::fs::remove_file(
-            std::path::PathBuf::from(program_data)
+        let _another_accounts_copy_is_not_ours_to_delete = std::fs::remove_file(
+            PathBuf::from(program_data)
                 .join(PROFILE_DIRECTORY)
                 .join(UNPROTECTED_COPY_FILE),
         );
     }
     let target = wide(UNPROTECTED_CREDENTIAL_TARGET);
     // SAFETY: `target` is a NUL-terminated UTF-16 string that outlives the
-    // call; a missing credential is the expected outcome and is ignored.
-    let _ = unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) };
+    // call.
+    let deleted = unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) };
+    // SAFETY: read immediately after the failing call.
+    if deleted == 0 && unsafe { GetLastError() } != ERROR_NOT_FOUND {
+        return Err(CredentialStoreError::UnprotectedCopyRemains);
+    }
+    Ok(())
 }
 
 #[cfg(not(windows))]
-const fn remove_unprotected_copies() {}
+const fn remove_unprotected_copies(_directory: &Path) -> Result<(), CredentialStoreError> {
+    Err(CredentialStoreError::UnsupportedPlatform)
+}
 
 #[cfg(windows)]
 fn wide(text: &str) -> Vec<u16> {
@@ -343,7 +349,12 @@ impl Drop for DpapiOutput {
     }
 }
 
-/// The `CRYPT_INTEGER_BLOB` view of `bytes` DPAPI reads as input.
+/// The `CRYPT_INTEGER_BLOB` view of `bytes` DPAPI reads as input: a null
+/// pointer for an empty buffer, as Windows expects.
+///
+/// The structure's pointer is mutable by declaration only; `CryptProtectData`
+/// and `CryptUnprotectData` read their input and entropy and never write
+/// them, so the cast from a shared slice writes through nothing.
 #[cfg(windows)]
 fn input_blob(
     bytes: &[u8],
@@ -352,7 +363,11 @@ fn input_blob(
         windows_sys::Win32::Security::Cryptography::CRYPT_INTEGER_BLOB {
             cbData: u32::try_from(bytes.len())
                 .map_err(|_error| CredentialStoreError::InvalidStoredPairing)?,
-            pbData: bytes.as_ptr().cast_mut(),
+            pbData: if bytes.is_empty() {
+                core::ptr::null_mut()
+            } else {
+                bytes.as_ptr().cast_mut()
+            },
         },
     )
 }
@@ -419,16 +434,29 @@ fn unprotect(protected: &[u8]) -> Result<Zeroizing<Vec<u8>>, CredentialStoreErro
     Ok(Zeroizing::new(output.bytes()?.to_vec()))
 }
 
+/// A temporary file name no other write uses: two stores writing at once
+/// each fill their own file, and the later rename wins whole.
+#[cfg(windows)]
+fn partial_file_name() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+    let write = WRITES.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "{PAIRING_SET_FILE}.{}.{write}.{PARTIAL_SUFFIX}",
+        std::process::id()
+    )
+}
+
 /// Protects the serialized pairing set and replaces the stored file with it.
 #[cfg(windows)]
-fn write_pairing_set(blob: &[u8]) -> Result<(), CredentialStoreError> {
+fn write_pairing_set(directory: &Path, blob: &[u8]) -> Result<(), CredentialStoreError> {
     use std::io::Write as _;
 
     let protected = protect(blob)?;
-    let directory = profile_directory()?;
-    std::fs::create_dir_all(&directory).map_err(|error| CredentialStoreError::file(&error))?;
-    let partial = directory.join(PAIRING_SET_PARTIAL_FILE);
-    let written = std::fs::File::create(&partial).and_then(|mut file| {
+    std::fs::create_dir_all(directory).map_err(|error| CredentialStoreError::file(&error))?;
+    let partial = directory.join(partial_file_name());
+    let written = std::fs::File::create_new(&partial).and_then(|mut file| {
         file.write_all(&protected)?;
         file.sync_all()
     });
@@ -442,31 +470,45 @@ fn write_pairing_set(blob: &[u8]) -> Result<(), CredentialStoreError> {
     })
 }
 
+#[cfg(not(windows))]
+const fn write_pairing_set(_directory: &Path, _blob: &[u8]) -> Result<(), CredentialStoreError> {
+    Err(CredentialStoreError::UnsupportedPlatform)
+}
+
 /// Reads and unprotects the serialized pairing set, if one has been stored.
 #[cfg(windows)]
-fn read_pairing_set() -> Result<Option<Zeroizing<Vec<u8>>>, CredentialStoreError> {
-    let path = profile_directory()?.join(PAIRING_SET_FILE);
-    let protected = match std::fs::read(&path) {
+fn read_pairing_set(directory: &Path) -> Result<Option<Zeroizing<Vec<u8>>>, CredentialStoreError> {
+    let protected = match std::fs::read(directory.join(PAIRING_SET_FILE)) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(CredentialStoreError::file(&error)),
     };
-    unprotect(&protected)
-        .map(Some)
-        .map_err(|_error| CredentialStoreError::InvalidStoredPairing)
+    unprotect(&protected).map(Some)
 }
 
-/// Deletes the stored pairing set and every unprotected copy. Deleting an
-/// absent set succeeds.
+#[cfg(not(windows))]
+const fn read_pairing_set(
+    _directory: &Path,
+) -> Result<Option<Zeroizing<Vec<u8>>>, CredentialStoreError> {
+    Err(CredentialStoreError::UnsupportedPlatform)
+}
+
+/// Deletes this user's stored pairing set and every unprotected copy.
+/// Deleting an absent set succeeds.
 ///
 /// # Errors
 ///
-/// Fails when the protected file exists and cannot be removed, or when this
-/// build is not running on Windows.
-#[cfg(windows)]
+/// Fails when the protected file or an unprotected copy of this user's
+/// exists and cannot be removed, or when this build is not running on
+/// Windows.
 pub fn delete_pairing_set() -> Result<(), CredentialStoreError> {
-    remove_unprotected_copies();
-    match std::fs::remove_file(profile_directory()?.join(PAIRING_SET_FILE)) {
+    delete_pairing_set_in(&profile_directory()?)
+}
+
+#[cfg(windows)]
+fn delete_pairing_set_in(directory: &Path) -> Result<(), CredentialStoreError> {
+    remove_unprotected_copies(directory)?;
+    match std::fs::remove_file(directory.join(PAIRING_SET_FILE)) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(CredentialStoreError::file(&error)),
@@ -474,33 +516,19 @@ pub fn delete_pairing_set() -> Result<(), CredentialStoreError> {
 }
 
 #[cfg(not(windows))]
-const fn write_pairing_set(_blob: &[u8]) -> Result<(), CredentialStoreError> {
-    Err(CredentialStoreError::UnsupportedPlatform)
-}
-
-#[cfg(not(windows))]
-const fn read_pairing_set() -> Result<Option<Zeroizing<Vec<u8>>>, CredentialStoreError> {
-    Err(CredentialStoreError::UnsupportedPlatform)
-}
-
-#[cfg(not(windows))]
-/// Non-Windows builds expose the same API for workspace type checking.
-///
-/// # Errors
-/// Always fails: DPAPI is unavailable off Windows.
-pub const fn delete_pairing_set() -> Result<(), CredentialStoreError> {
+const fn delete_pairing_set_in(_directory: &Path) -> Result<(), CredentialStoreError> {
     Err(CredentialStoreError::UnsupportedPlatform)
 }
 
 #[cfg(all(test, windows))]
 mod tests {
     use refineid_rapp_core::ids::PairId;
-    use refineid_rapp_core::store::{PairingDisposition, PairingRecord, PairingStore};
+    use refineid_rapp_core::store::{PairingDisposition, PairingRecord, PairingStore, StoreError};
     use zeroize::Zeroizing;
 
     use super::{
-        PAIRING_SET_FILE, ProtectedPairingStore, delete_pairing_set, profile_directory, protect,
-        unprotect,
+        PAIRING_SET_FILE, ProtectedPairingStore, UNPROTECTED_COPY_FILE, delete_pairing_set_in,
+        input_blob, protect, unprotect,
     };
 
     const KEY_BYTES: usize = 32;
@@ -509,11 +537,33 @@ mod tests {
     /// The length of a DER certificate as large as the cards carry, so the
     /// set exceeds what one generic credential could hold.
     const LARGE_CERTIFICATE_BYTES: usize = 1_900;
+    const PRIVATE_KEY_FILL: u8 = 1;
+
+    /// A directory of its own for one test, removed when the test ends.
+    struct TestDirectory(std::path::PathBuf);
+
+    impl TestDirectory {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "refineid-pairing-store-test-{name}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("test directory");
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     fn record(pair_id: PairId) -> PairingRecord {
         PairingRecord {
             pair_id,
-            local_private: Zeroizing::new(vec![1; KEY_BYTES]),
+            local_private: Zeroizing::new(vec![PRIVATE_KEY_FILL; KEY_BYTES]),
             local_public: vec![2; KEY_BYTES],
             peer_public: vec![3; KEY_BYTES],
             granted_profiles: vec!["fi.refineid.authentication.v1".into()],
@@ -537,6 +587,7 @@ mod tests {
         let protected = protect(plain).expect("protect");
         assert!(
             !protected
+                .as_slice()
                 .windows(plain.len())
                 .any(|window| window == plain.as_slice())
         );
@@ -549,41 +600,67 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "writes and removes this user's pairing set file"]
+    fn an_empty_input_is_passed_as_a_null_pointer() {
+        let blob = input_blob(&[]).expect("blob");
+        assert_eq!(blob.cbData, 0);
+        assert!(blob.pbData.is_null());
+    }
+
+    #[test]
     fn a_set_larger_than_a_credential_survives_a_reload_protected() {
-        struct Cleanup;
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ignored = delete_pairing_set();
-            }
-        }
-
-        delete_pairing_set().expect("clear before test");
-        let _cleanup = Cleanup;
-
+        let directory = TestDirectory::new("reload");
         let pair_id = PairId::from_array([7; PAIR_ID_BYTES]);
-        let mut store = ProtectedPairingStore::load().expect("load empty store");
+        let mut store = ProtectedPairingStore::load_from(directory.0.clone()).expect("load");
         assert!(store.is_empty());
         store.insert(record(pair_id)).expect("insert");
 
-        let on_disk = std::fs::read(profile_directory().expect("profile").join(PAIRING_SET_FILE))
-            .expect("file written");
+        let on_disk = std::fs::read(directory.0.join(PAIRING_SET_FILE)).expect("file written");
         assert!(
             !on_disk
+                .as_slice()
                 .windows(KEY_BYTES)
-                .any(|window| window.iter().all(|&byte| byte == 1))
+                .any(|window| window.iter().all(|&byte| byte == PRIVATE_KEY_FILL))
         );
 
-        let reloaded = ProtectedPairingStore::load().expect("reload store");
+        let mut reloaded = ProtectedPairingStore::load_from(directory.0.clone()).expect("reload");
         assert_eq!(reloaded.len(), 1);
-        assert_eq!(
-            reloaded.get(pair_id).expect("stored record").pair_id,
-            pair_id
+        assert_eq!(reloaded.get(pair_id).expect("stored").pair_id, pair_id);
+        reloaded.remove(pair_id).expect("remove");
+        assert!(
+            ProtectedPairingStore::load_from(directory.0.clone())
+                .expect("reload after remove")
+                .is_empty()
         );
+        delete_pairing_set_in(&directory.0).expect("delete");
+        assert!(!directory.0.join(PAIRING_SET_FILE).exists());
+    }
 
-        let mut store = reloaded;
-        store.remove(pair_id).expect("remove");
-        let empty = ProtectedPairingStore::load().expect("reload after remove");
-        assert!(empty.is_empty());
+    #[test]
+    fn a_change_is_never_written_over_a_set_that_cannot_be_read() {
+        let directory = TestDirectory::new("unreadable");
+        let first = PairId::from_array([7; PAIR_ID_BYTES]);
+        let second = PairId::from_array([8; PAIR_ID_BYTES]);
+        let mut store = ProtectedPairingStore::load_from(directory.0.clone()).expect("load");
+        store.insert(record(first)).expect("insert");
+        let stored = directory.0.join(PAIRING_SET_FILE);
+        let before = std::fs::read(&stored).expect("stored");
+        std::fs::write(&stored, b"not a DPAPI blob").expect("corrupt");
+
+        assert_eq!(store.insert(record(second)), Err(StoreError::Unreadable));
+        assert_eq!(
+            std::fs::read(&stored).expect("still there"),
+            b"not a DPAPI blob"
+        );
+        std::fs::write(&stored, before).expect("restore");
+    }
+
+    #[test]
+    fn an_unprotected_copy_in_the_profile_is_deleted_unread() {
+        let directory = TestDirectory::new("copy");
+        let copy = directory.0.join(UNPROTECTED_COPY_FILE);
+        std::fs::write(&copy, b"plaintext set").expect("copy");
+        let store = ProtectedPairingStore::load_from(directory.0.clone()).expect("load");
+        assert!(store.is_empty());
+        assert!(!copy.exists());
     }
 }

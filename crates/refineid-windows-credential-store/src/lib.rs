@@ -90,6 +90,9 @@ pub enum CredentialStoreError {
     },
     /// The user's local application data directory is not known.
     ProfileUnavailable,
+    /// An unprotected copy of this user's pairing set exists and could not
+    /// be deleted.
+    UnprotectedCopyRemains,
     /// The protected pairing set file could not be written, read, or removed.
     File {
         /// What the file system reported.
@@ -135,6 +138,9 @@ impl fmt::Display for CredentialStoreError {
             }
             Self::ProfileUnavailable => {
                 formatter.write_str("the user's local application data directory is unknown")
+            }
+            Self::UnprotectedCopyRemains => {
+                formatter.write_str("an unprotected copy of the pairing set could not be deleted")
             }
             Self::File { kind } => write!(formatter, "pairing set file: {kind}"),
             Self::UnsupportedPlatform => {
