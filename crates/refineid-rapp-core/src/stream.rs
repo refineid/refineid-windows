@@ -409,10 +409,11 @@ impl DialPurpose<'_> {
                 .map_err(|_| StreamError::Random)?,
             ),
         };
-        Ok(PreambleFrame {
-            profile,
-            bytes: preamble.encode(profile)?,
-        })
+        let bytes = preamble.encode(profile)?;
+        if bytes.len() > MAX_ROUTING_PREAMBLE_FRAME {
+            return Err(StreamError::Oversized);
+        }
+        Ok(PreambleFrame { profile, bytes })
     }
 }
 

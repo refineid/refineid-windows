@@ -7,7 +7,7 @@
 //! preamble to find out (section 2.2.1).
 
 use std::collections::BTreeMap;
-use std::sync::mpsc::channel;
+use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
 use windows::Devices::Bluetooth::Advertisement::{
@@ -18,6 +18,19 @@ use windows::Foundation::TypedEventHandler;
 
 use crate::gatt::SERVICE_UUID;
 use crate::link::{AdvertiserAddress, ProximityGate, ProximityReading, Rssi};
+
+/// How often a scan waiting for advertisements checks whether the radio
+/// aborted it, so a radio switched off ends the scan within this time.
+const ABORT_CHECK_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Whether the watcher was aborted; a status it cannot report counts as
+/// aborted, since nothing more will arrive from it.
+fn watcher_aborted(watcher: &BluetoothLEAdvertisementWatcher) -> bool {
+    !matches!(
+        watcher.Status(),
+        Ok(status) if status != BluetoothLEAdvertisementWatcherStatus::Aborted
+    )
+}
 
 /// One advertiser of the RAPP service seen during a scan.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,12 +101,15 @@ pub fn scan(window: Duration, gate: ProximityGate) -> Result<Vec<ScannedAdvertis
     let mut samples: BTreeMap<AdvertiserAddress, Vec<Rssi>> = BTreeMap::new();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
+        if remaining.is_zero() || watcher_aborted(&watcher) {
             break;
         }
-        let Ok((raw_address, raw_rssi)) = received.recv_timeout(remaining) else {
-            break;
-        };
+        let (raw_address, raw_rssi) =
+            match received.recv_timeout(remaining.min(ABORT_CHECK_INTERVAL)) {
+                Ok(advertisement) => advertisement,
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => break,
+            };
         let (Ok(address), Ok(rssi)) = (
             AdvertiserAddress::from_bluetooth_address(raw_address),
             Rssi::from_dbm(raw_rssi),
@@ -102,12 +118,16 @@ pub fn scan(window: Duration, gate: ProximityGate) -> Result<Vec<ScannedAdvertis
         };
         samples.entry(address).or_default().push(rssi);
     }
-    let aborted = watcher.Status()? == BluetoothLEAdvertisementWatcherStatus::Aborted;
-    watcher.Stop()?;
-    watcher.RemoveReceived(token)?;
+    let aborted = watcher_aborted(&watcher);
+    // An aborted watcher may refuse `Stop`; the scan is over either way,
+    // and the handler is unhooked regardless.
+    let stopped = watcher.Stop();
+    let unhooked = watcher.RemoveReceived(token);
     if aborted {
         return Err(ScanError::RadioUnavailable);
     }
+    stopped?;
+    unhooked?;
 
     let mut advertisers: Vec<ScannedAdvertiser> = samples
         .into_iter()

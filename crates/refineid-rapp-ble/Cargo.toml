@@ -11,7 +11,7 @@ repository.workspace = true
 refineid-rapp.workspace = true
 refineid-rapp-core.workspace = true
 
-# WinRT Bluetooth. The asynchronous operations are awaited with `join()`,
+# WinRT Bluetooth. Each asynchronous operation blocks its thread in `join()`,
 # which the `std` feature provides; the dependency is Windows-only, so the
 # feature never reaches a host that cannot build `windows-future`.
 [target.'cfg(windows)'.dependencies]

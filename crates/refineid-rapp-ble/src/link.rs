@@ -78,7 +78,14 @@ impl fmt::Display for LinkValueError {
     }
 }
 
-impl core::error::Error for LinkValueError {}
+impl core::error::Error for LinkValueError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Capacity(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 /// The Bluetooth device address an advertisement came from.
 ///
@@ -290,7 +297,7 @@ mod tests {
     const WITHIN_HYSTERESIS_DBM: i16 = -58;
     const BEYOND_HYSTERESIS_DBM: i16 = -59;
     const WINDOWS_TYPICAL_MTU: u16 = 527;
-    const CLASSIC_DEFAULT_MTU: u16 = 23;
+    const LE_DEFAULT_ATT_MTU: u16 = 23;
     const LARGEST_FRAGMENT_PAYLOAD: usize = 506;
     /// Bytes the ATT PDU header takes from the MTU (Bluetooth Core v5.4,
     /// Vol 3, Part F, §3.4.7.1: opcode and attribute handle).
@@ -382,9 +389,9 @@ mod tests {
     #[test]
     fn an_mtu_below_the_profile_minimum_is_refused_with_its_value() {
         assert_eq!(
-            AttMtu::from_negotiated(CLASSIC_DEFAULT_MTU),
+            AttMtu::from_negotiated(LE_DEFAULT_ATT_MTU),
             Err(LinkValueError::MtuBelowMinimum {
-                negotiated: CLASSIC_DEFAULT_MTU
+                negotiated: LE_DEFAULT_ATT_MTU
             })
         );
         let minimum = u16::try_from(BLE_MINIMUM_ATT_MTU).expect("fits");

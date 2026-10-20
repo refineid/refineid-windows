@@ -154,8 +154,7 @@ impl Reassembly {
 
 /// One connection to one custodian over GATT.
 pub struct BleLink {
-    device: BluetoothLEDevice,
-    session: GattSession,
+    connection: Connection,
     channel: GattCharacteristic,
     bootstrap: GattCharacteristic,
     capacity: SarCapacity,
@@ -176,6 +175,23 @@ impl core::fmt::Debug for BleLink {
     }
 }
 
+/// A device and its GATT session held open; dropping it releases the
+/// connection, so every refusal while a link is being opened lets it go.
+struct Connection {
+    device: BluetoothLEDevice,
+    session: GattSession,
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        // The connection is going away; a failure to release it changes
+        // nothing the caller could act on.
+        let _ = self.session.SetMaintainConnection(false);
+        let _ = self.session.Close();
+        let _ = self.device.Close();
+    }
+}
+
 impl BleLink {
     /// Connects to `address` and sends the routing preamble for `purpose`.
     ///
@@ -190,24 +206,27 @@ impl BleLink {
             .join()
             .map_err(|_| BleLinkError::Unreachable)?;
         let session = GattSession::FromDeviceIdAsync(&device.BluetoothDeviceId()?)?.join()?;
-        session.SetMaintainConnection(true)?;
+        let connection = Connection { device, session };
+        connection.session.SetMaintainConnection(true)?;
         let (mtu_sender, mtu_changes) = channel();
-        let mtu_token = session.MaxPduSizeChanged(
-            &TypedEventHandler::<GattSession, IInspectable>::new(move |sender, _| {
-                if let Some(session) = sender.as_ref() {
-                    let _ = mtu_sender.send(session.MaxPduSize()?);
-                }
-                Ok(())
-            }),
-        )?;
+        let mtu_token =
+            connection.session.MaxPduSizeChanged(
+                &TypedEventHandler::<GattSession, IInspectable>::new(move |sender, _| {
+                    if let Some(session) = sender.as_ref() {
+                        let _ = mtu_sender.send(session.MaxPduSize()?);
+                    }
+                    Ok(())
+                }),
+            )?;
 
-        let opened =
-            Self::discover(&device).and_then(|(service, channel_characteristic, bootstrap)| {
-                let mtu = wait_for_mtu(&session, &mtu_changes)?;
+        let opened = Self::discover(&connection.device).and_then(
+            |(service, channel_characteristic, bootstrap)| {
+                let mtu = wait_for_mtu(&connection.session, &mtu_changes)?;
                 drop(service);
                 Ok((channel_characteristic, bootstrap, mtu))
-            });
-        session.RemoveMaxPduSizeChanged(mtu_token)?;
+            },
+        );
+        connection.session.RemoveMaxPduSizeChanged(mtu_token)?;
         let (channel_characteristic, bootstrap, mtu) = opened?;
         let capacity = SarCapacity::of(mtu).map_err(BleLinkError::Link)?;
 
@@ -223,16 +242,23 @@ impl BleLink {
         let subscribed = channel_characteristic
             .WriteClientCharacteristicConfigurationDescriptorWithResultAsync(
                 GattClientCharacteristicConfigurationDescriptorValue::Indicate,
-            )?
-            .join()?;
-        if subscribed.Status()? != GattCommunicationStatus::Success {
-            channel_characteristic.RemoveValueChanged(value_changed)?;
-            return Err(BleLinkError::SubscriptionRefused);
+            )
+            .and_then(|operation| operation.join())
+            .and_then(|result| result.Status());
+        if !matches!(subscribed, Ok(GattCommunicationStatus::Success)) {
+            // The subscription is refused; the handler goes with it, and a
+            // failure to unhook changes nothing the caller could act on.
+            let _ = channel_characteristic.RemoveValueChanged(value_changed);
+            return Err(match subscribed {
+                Err(error) => error.into(),
+                Ok(_) => BleLinkError::SubscriptionRefused,
+            });
         }
 
+        // From here the link owns the connection and the handler, and its
+        // drop releases both.
         let mut link = Self {
-            device,
-            session,
+            connection,
             channel: channel_characteristic,
             bootstrap,
             capacity,
@@ -399,13 +425,16 @@ impl refineid_rapp::FrameTransport for BleLink {
 
     fn receive(&mut self) -> Result<Option<BinaryFrame>, Self::Error> {
         let bytes = self.receive_frame()?;
+        // `receive_frame` already refused anything over the frame limit, so
+        // a frame the border refuses here is a broken channel.
         BinaryFrame::reconstruct(bytes)
             .map(Some)
-            .map_err(|_| TransportError::OversizedFrame)
+            .map_err(|_| TransportError::Failed)
     }
 
     fn close(&mut self) -> Result<(), Self::Error> {
-        self.session
+        self.connection
+            .session
             .SetMaintainConnection(false)
             .map_err(|_| TransportError::Failed)
     }
@@ -413,12 +442,9 @@ impl refineid_rapp::FrameTransport for BleLink {
 
 impl Drop for BleLink {
     fn drop(&mut self) {
-        // The link is going away; a failure to unhook or close changes
-        // nothing the caller could act on.
+        // The link is going away; a failure to unhook changes nothing the
+        // caller could act on. The connection releases itself after this.
         let _ = self.channel.RemoveValueChanged(self.value_changed);
-        let _ = self.session.SetMaintainConnection(false);
-        let _ = self.session.Close();
-        let _ = self.device.Close();
     }
 }
 
@@ -491,7 +517,7 @@ fn characteristic(
         .GetCharacteristicsForUuidWithCacheModeAsync(uuid, BluetoothCacheMode::Uncached)?
         .join()?;
     if found.Status()? != GattCommunicationStatus::Success {
-        return Err(BleLinkError::CharacteristicMissing(which));
+        return Err(BleLinkError::Unreachable);
     }
     let characteristics = found.Characteristics()?;
     if characteristics.Size()? == 0 {

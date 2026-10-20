@@ -344,7 +344,10 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         mut transport: Transport,
         confirm: impl FnOnce(&PeerIntroduction, &[String]) -> Option<Vec<String>>,
     ) -> Result<PairId, PairingError> {
-        if crate::offer::normalize_pairing_code(code).is_none() {
+        if crate::offer::normalize_pairing_code(code)
+            .map(Zeroizing::new)
+            .is_none()
+        {
             return Err(PairingError::InvalidCode);
         }
         let offer = crate::offer::read_bootstrap(&mut transport).map_err(|error| match error {
@@ -363,8 +366,8 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
     ///
     /// The transport is already past its `"pairing"` routing preamble, and
     /// `offer` was decoded at the caller's border with the connection's
-    /// transport profile. Everything after the offer is
-    /// [`Self::pair_with_code`].
+    /// transport profile. [`Self::pair_with_code`] reads the offer and then
+    /// runs this.
     ///
     /// # Errors
     /// As [`Self::pair_with_code`]; [`PairingError::UnregisteredTransport`]
