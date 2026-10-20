@@ -1345,7 +1345,7 @@ impl RemoteCardTransport {
                 // the pairing is forgotten here and the user told to pair
                 // again.
                 if let Ok(mut store) =
-                    refineid_windows_credential_store::CredentialPairingStore::load()
+                    refineid_windows_credential_store::ProtectedPairingStore::load()
                 {
                     let _ = store.forget_after_revocation(self.pair_id);
                 }
@@ -1410,8 +1410,8 @@ fn remote_card_sign(
         use refineid_rapp_core::operations::{
             CardOperation, CardOperationResult, KeyProfile, SignatureAlgorithm,
         };
-        use refineid_windows_credential_store::CredentialPairingStore;
-        let store = CredentialPairingStore::load().map_err(|_| CKR_DEVICE_ERROR)?;
+        use refineid_windows_credential_store::ProtectedPairingStore;
+        let store = ProtectedPairingStore::load().map_err(|_| CKR_DEVICE_ERROR)?;
         let pair = store
             .records()
             .iter()
