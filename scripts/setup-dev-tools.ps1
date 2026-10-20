@@ -40,6 +40,7 @@ $dotnetSdkMajor = 10 # follows TargetFramework in apps/RefineID-winui/RefineID.c
 
 $wingetUpdateNotApplicable = -1978335189 # APPINSTALLER_CLI_ERROR_UPDATE_NOT_APPLICABLE
 $wingetPackageAlreadyInstalled = -1978335135 # APPINSTALLER_CLI_ERROR_PACKAGE_ALREADY_INSTALLED
+$wingetRebootRequiredToFinish = -1978334967 # APPINSTALLER_CLI_ERROR_INSTALL_REBOOT_REQUIRED_TO_FINISH
 $installerRestartRequired = 3010
 
 $programFilesX86 = [Environment]::GetFolderPath('ProgramFilesX86')
@@ -90,7 +91,9 @@ function Sync-WingetPackage([string]$Id, [bool]$Present, [string[]]$InstallArgum
     } else {
         Write-Host "Installing $Id..."
         $exitCode = Invoke-Winget 'install' $Id $InstallArguments
-        if ($exitCode -ne 0 -and $exitCode -ne $wingetPackageAlreadyInstalled) {
+        if ($exitCode -eq $wingetRebootRequiredToFinish) {
+            Write-Warning "$Id is installed; restart Windows to finish the installation."
+        } elseif ($exitCode -ne 0 -and $exitCode -ne $wingetPackageAlreadyInstalled) {
             throw "winget install $Id failed with exit code $exitCode."
         }
     }
@@ -118,7 +121,9 @@ function Invoke-VisualStudioInstaller([string[]]$Arguments) {
         if ($argument -match '\s') { "`"$argument`"" } else { $argument }
     }
     $process = Start-Process -FilePath $visualStudioSetup -ArgumentList $quoted -Wait -PassThru -Verb RunAs
-    if ($process.ExitCode -ne 0 -and $process.ExitCode -ne $installerRestartRequired) {
+    if ($process.ExitCode -eq $installerRestartRequired) {
+        Write-Warning "Visual Studio Installer $($Arguments[0]) succeeded; restart Windows before building."
+    } elseif ($process.ExitCode -ne 0) {
         throw "Visual Studio Installer $($Arguments[0]) failed with exit code $($process.ExitCode)."
     }
 }
@@ -136,8 +141,10 @@ function Sync-VisualStudio {
     } else {
         Write-Host "Updating Visual Studio at $instance to the latest release..."
         Invoke-VisualStudioInstaller @('update', '--installPath', $instance, '--passive', '--norestart')
-        if (-not (Get-VisualStudioInstance $visualStudioComponents)) {
-            Write-Host 'Adding the MSVC x64 and ARM64 tools...'
+        # --includeRecommended on modify also adds the workload's recommended
+        # Windows 11 SDK when an existing instance lacks it.
+        if (-not (Get-VisualStudioInstance $visualStudioComponents) -or -not (Test-WindowsSdk)) {
+            Write-Host 'Adding the MSVC x64 and ARM64 tools and the Windows 11 SDK...'
             Invoke-VisualStudioInstaller (@('modify', '--installPath', $instance) + $componentArguments +
                 @('--includeRecommended', '--passive', '--norestart'))
         }
@@ -146,6 +153,17 @@ function Sync-VisualStudio {
     if (-not (Get-VisualStudioInstance $visualStudioComponents)) {
         throw 'Visual Studio with the MSVC x64 and ARM64 tools is still missing after installation.'
     }
+    if (-not (Test-WindowsSdk)) {
+        throw 'The Windows SDK libraries the MSVC linker needs are still missing after installation.'
+    }
+}
+
+# The MSVC linker resolves the Windows import libraries from the Windows SDK.
+function Test-WindowsSdk {
+    $libraries = Join-Path $programFilesX86 'Windows Kits\10\Lib'
+    $kernel32 = Get-ChildItem -Path $libraries -Filter kernel32.lib -Recurse -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    return [bool]$kernel32
 }
 
 function Test-DotnetSdk {
