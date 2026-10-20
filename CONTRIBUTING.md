@@ -40,9 +40,11 @@ The hooks enforce standards locally:
   catch defects before committing: `cargo fmt`, `dotnet csharpier check`,
   `cargo clippy` (both native host and `x86_64-pc-windows-msvc` for
   Windows-specific crates), and core unit tests (`cargo test -p refineid-lib-core`).
-- **Pre-push (`.githooks/pre-push`)**: verifies that Git dependencies in `Cargo.lock`
-  (such as `refineid-core`) are synchronized with the latest upstream revisions
-  before pushing. Run `cargo update -p refineid-remote` when stale.
+- **Pre-push (`.githooks/pre-push`)**: verifies that `Cargo.lock` matches the
+  manifests and that every pinned revision is in Cargo's local cache or can be
+  fetched from its remote (`cargo fetch --locked`).
+  It does not require the newest `refineid-core`: moving to a newer core is a
+  deliberate change in its own pull request, built and reviewed like any other.
 - **Commit message (`.githooks/commit-msg`)**: enforces that commit messages do not
   contain forbidden trailers (such as AI attribution).
 
