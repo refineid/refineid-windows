@@ -101,10 +101,15 @@ fn main() {
             eprintln!("  refineid-rapp export-cert [<path>]");
             eprintln!("  refineid-rapp export-pairing [<path>]");
             eprintln!("  refineid-rapp import-pairing <path>");
-            eprintln!("  refineid-rapp ble-scan [--seconds <n>] [--gate <dBm>]");
-            eprintln!("  refineid-rapp ble-pair --code <code> [--name <label>] [--gate <dBm>] \\");
-            eprintln!("      [--auto-confirm]");
-            eprintln!("  refineid-rapp ble-session [--gate <dBm>]");
+            #[cfg(windows)]
+            {
+                eprintln!("  refineid-rapp ble-scan [--seconds <n>] [--gate <dBm>]");
+                eprintln!(
+                    "  refineid-rapp ble-pair --code <code> [--name <label>] [--gate <dBm>] \\"
+                );
+                eprintln!("      [--auto-confirm]");
+                eprintln!("  refineid-rapp ble-session [--gate <dBm>]");
+            }
             std::process::exit(2);
         }
     };
