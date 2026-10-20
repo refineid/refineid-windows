@@ -1,10 +1,11 @@
 #!/bin/sh
 # RefineID Windows push gate.
 #
-# Rejects a push whose Cargo.lock does not match the manifests or pins a
-# revision that cannot be fetched. It guards consistency, not freshness: a
-# lockfile that pins an older refineid-core commit pushes, and moving to a
-# newer core is a deliberate change made in its own pull request.
+# Rejects a push whose Cargo.lock does not match the manifests, or pins a
+# revision that is neither in Cargo's local cache nor fetchable from its
+# remote. It guards consistency, not freshness: a lockfile that pins an
+# older refineid-core commit pushes, and moving to a newer core is a
+# deliberate change made in its own pull request.
 #
 # Enable local hooks once per clone with:
 #
@@ -15,8 +16,9 @@ set -eu
 echo "pre-push: checking that Cargo.lock matches the manifests"
 
 if ! cargo fetch --locked --quiet; then
-    echo "pre-push: error: Cargo.lock does not match the manifests, or a pinned revision cannot be fetched."
-    echo "pre-push: update the lockfile for the dependency the manifests changed, review the diff, and commit it."
+    echo "pre-push: error: Cargo.lock does not match the manifests, or a pinned revision could not be fetched." >&2
+    echo "pre-push: if the manifests changed, update the lockfile for that dependency, review the diff, and commit it;" >&2
+    echo "pre-push: if a remote was unreachable, retry once it is." >&2
     exit 1
 fi
 
