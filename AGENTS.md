@@ -21,15 +21,21 @@
   every SDK at the latest release. The Rust release is pinned only in
   `rust-toolchain.toml`; never repeat it in prose.
 - Always run formatting (`cargo fmt`, `csharpier`), clippy (`-D warnings` on both host and Windows targets), and unit tests before committing (`.githooks/pre-commit` enforces this). `Cargo.lock` must match the manifests (`.githooks/pre-push` enforces this); it may pin an older refineid-core commit, and moving to a newer core is its own pull request. Never bypass verification with `--no-verify`. Hardware claims additionally require a real reader and card.
-- One task, one worktree (`~/src/wt/refineid-windows-<topic>`) on one
-  `agent/<topic>` branch, one pull request per branch. Run
-  `scripts/agent-housekeeping.sh` when starting and keep the house clean. Merge
+- Reading does not require a worktree; writing does. The main checkout is
+  never edited directly. Before writing code or modifying files for any task,
+  create a dedicated git worktree strictly under `../wt/`
+  (`../wt/refineid-windows-<topic>`) on a `<topic>` branch. Never work
+  directly on `main` or modify files in the main checkout.
+- All worktrees MUST live strictly under `../wt/`, never loose beside
+  repositories or in parent directories.
+- Never put a git worktree under `/tmp`. It is cleared on reboot and takes the
+  branch's only checkout with it.
+- One task, one worktree, one branch (`<topic>`), one pull request per branch.
+  Run `scripts/agent-housekeeping.sh` when starting and keep the house clean. Merge
   the pull request after mandatory local gates pass and review is complete, then
   remove the worktree and branch and fast-forward `main`. The scheduled/manual
   Windows portability workflow does not gate pull requests. Full workflow:
   `docs/process/agent-worktrees.md`.
-- Never put a git worktree under `/tmp` or directly in `~/src/`; all worktrees
-  must live under `~/src/wt/`.
 - Do not publish unsigned or test-signed binaries as production releases.
 
 ## Source comments

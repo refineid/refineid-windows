@@ -12,16 +12,17 @@ colliding and keeps the main checkout pristine for integration.
 
 ## Topology and naming
 
-- The main checkout is never edited directly. It integrates and releases.
-- Each task gets a worktree under `~/src/wt/`, never under `/tmp` or directly in `~/src/`:
-  `~/src/wt/refineid-windows-<topic>` on branch `agent/<topic>`.
+- Reading does not require a worktree; writing does. The main checkout is
+  never edited directly. It integrates and releases.
+- Each task gets a worktree under `../wt/`, never under `/tmp` or loose beside repositories:
+  `../wt/refineid-windows-<topic>` on branch `<topic>`.
 - One branch carries one pull request. Never stack unrelated work onto a
   branch that already has an open pull request.
 
 ## Starting a task
 
 1. Update local main: `git checkout main && git pull --ff-only`.
-2. Create the worktree: `git worktree add ~/src/wt/refineid-windows-<topic> -b agent/<topic>`.
+2. Create the worktree: `git worktree add ../wt/refineid-windows-<topic> -b <topic>`.
 3. Activate the quality gate hooks in the worktree: `git config core.hooksPath .githooks`.
 4. Never copy Authenticode or test-signing credentials (`*.p12`, `*.pfx`,
    `artifacts/`): worktrees build unsigned development binaries only,
