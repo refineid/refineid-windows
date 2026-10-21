@@ -32,16 +32,35 @@ public partial class App : Application
     public App()
     {
         this.UnhandledException += (sender, e) =>
-        {
-            Debug.WriteLine(
-                $"Message: {e.Message}\nException: {e.Exception}\nTrace: {e.Exception?.StackTrace}\nInner: {e.Exception?.InnerException}"
-            );
-        };
+            RecordCrash($"Message: {e.Message}\nException: {e.Exception}");
         AppDomain.CurrentDomain.UnhandledException += (sender, e) =>
-        {
-            Debug.WriteLine($"Domain Exception: {e.ExceptionObject}");
-        };
+            RecordCrash($"Domain Exception: {e.ExceptionObject}");
         this.InitializeComponent();
+    }
+
+    /// <summary>
+    /// Appends an exception that is about to end the process to
+    /// <c>%LOCALAPPDATA%\RefineID\app-crash.log</c> (inside the package's
+    /// redirected local cache when packaged), so a release build that
+    /// crashes leaves its cause behind.
+    /// </summary>
+    private static void RecordCrash(string report)
+    {
+        Debug.WriteLine(report);
+        try
+        {
+            string folder = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "RefineID"
+            );
+            _ = Directory.CreateDirectory(folder);
+            File.AppendAllText(
+                Path.Combine(folder, "app-crash.log"),
+                $"{DateTimeOffset.UtcNow:O}\n{report}\n\n"
+            );
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
     }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)

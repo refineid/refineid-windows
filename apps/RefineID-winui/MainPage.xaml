@@ -115,37 +115,19 @@
                                 IsTextSelectionEnabled="True"
                                 Visibility="Collapsed"
                             />
-                            <!--  The row's actions sit behind the "More
-                                   options" button, as Windows Settings does
-                                   for a device or a known network. A
-                                   confirmation dialog stands in front of
-                                   forgetting.  -->
+                            <!--  Forgetting is one visible action on the
+                                   row while a pairing exists. A confirmation
+                                   dialog stands in front of it.  -->
                             <Button
-                                x:Name="IdentityMenuButton"
-                                Padding="8"
+                                x:Name="ForgetIdentityButton"
                                 VerticalAlignment="Center"
-                                AutomationProperties.AutomationId="IdentityMenuButton"
-                                AutomationProperties.Name="More options"
-                                Background="Transparent"
-                                BorderThickness="0"
-                                ToolTipService.ToolTip="More options"
+                                AutomationProperties.AutomationId="ForgetIdentityButton"
+                                AutomationProperties.Name="Forget identity"
+                                Click="ForgetIdentity_Click"
+                                Content="Forget"
+                                ToolTipService.ToolTip="Remove the pairing with the phone from this device"
                                 Visibility="Collapsed"
-                            >
-                                <FontIcon FontSize="16" Glyph="&#xE712;" />
-                                <Button.Flyout>
-                                    <MenuFlyout Placement="BottomEdgeAlignedRight">
-                                        <MenuFlyoutItem
-                                            AutomationProperties.AutomationId="ForgetIdentityItem"
-                                            Click="ForgetIdentity_Click"
-                                            Text="Forget"
-                                        >
-                                            <MenuFlyoutItem.Icon>
-                                                <FontIcon Glyph="&#xE74D;" />
-                                            </MenuFlyoutItem.Icon>
-                                        </MenuFlyoutItem>
-                                    </MenuFlyout>
-                                </Button.Flyout>
-                            </Button>
+                            />
                         </StackPanel>
                     </controls:SettingsCard>
                 </StackPanel>
