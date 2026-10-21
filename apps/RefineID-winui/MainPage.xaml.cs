@@ -162,7 +162,7 @@ internal sealed partial class MainPage : Page
         // The pairing exists, so forgetting it is an action even before a
         // read has succeeded.
         this.hasPairing = true;
-        this.IdentityMenuButton.Visibility = Visibility.Visible;
+        this.ForgetIdentityButton.Visibility = Visibility.Visible;
         await this.ReadPairedCardAsync(handle, quiet).ConfigureAwait(true);
     }
 
@@ -177,7 +177,7 @@ internal sealed partial class MainPage : Page
         if (dialog.PairedHandle is ulong pairedHandle)
         {
             this.hasPairing = true;
-            this.IdentityMenuButton.Visibility = Visibility.Visible;
+            this.ForgetIdentityButton.Visibility = Visibility.Visible;
             await this.ReadPairedCardAsync(pairedHandle, quiet: false).ConfigureAwait(true);
         }
         else if (dialog.Failure is string failure)
@@ -220,8 +220,22 @@ internal sealed partial class MainPage : Page
         }
     }
 
-    private async void ForgetIdentity_Click(object sender, RoutedEventArgs args) =>
-        await this.ConfirmForgetIdentityAsync().ConfigureAwait(true);
+    /// <summary>
+    /// The button is disabled while its dialog is up: a second click would
+    /// open a second ContentDialog, which WinUI refuses with an exception.
+    /// </summary>
+    private async void ForgetIdentity_Click(object sender, RoutedEventArgs args)
+    {
+        this.ForgetIdentityButton.IsEnabled = false;
+        try
+        {
+            await this.ConfirmForgetIdentityAsync().ConfigureAwait(true);
+        }
+        finally
+        {
+            this.ForgetIdentityButton.IsEnabled = true;
+        }
+    }
 
     private async Task ConfirmForgetIdentityAsync()
     {
@@ -240,29 +254,39 @@ internal sealed partial class MainPage : Page
 
         if (await dialog.ShowAsync() == ContentDialogResult.Primary)
         {
-            this.ForgetIdentity();
+            await this.ForgetIdentityAsync().ConfigureAwait(true);
         }
     }
 
-    private void ForgetIdentity()
+    /// <summary>
+    /// Drops the stored pair keys from the device-only credential. The
+    /// native call first tells the phone over a short network session, so it
+    /// runs off the UI thread behind the busy overlay.
+    /// </summary>
+    private async Task ForgetIdentityAsync()
     {
-        this.remoteHolder = null;
-        this.hasPairing = false;
-        this.HolderText.Text = string.Empty;
-        this.HolderText.Visibility = Visibility.Collapsed;
-        this.IdentityMenuButton.Visibility = Visibility.Collapsed;
-        this.ConnectRemoteReaderButton.Visibility = Visibility.Visible;
-
-        // Clearing the row is not enough now that a pairing is durable: drop
-        // the stored pair keys from the device-only credential too.
+        this.SetBusy(true);
         try
         {
-            NativeRappService.ForgetPairings();
+            await Task.Run(NativeRappService.ForgetPairings).ConfigureAwait(true);
             this.StatusInfoBar.IsOpen = false;
+            this.remoteHolder = null;
+            this.hasPairing = false;
+            this.HolderText.Text = string.Empty;
+            this.HolderText.Visibility = Visibility.Collapsed;
+            this.ForgetIdentityButton.Visibility = Visibility.Collapsed;
+            this.ConnectRemoteReaderButton.Visibility = Visibility.Visible;
+            // The focused button is gone; keyboard focus moves to its successor.
+            _ = this.ConnectRemoteReaderButton.Focus(FocusState.Programmatic);
         }
         catch (NativeRappException error)
         {
             this.ShowError(error.Message);
+            return;
+        }
+        finally
+        {
+            this.SetBusy(false);
         }
 
         this.CheckLocalCard();
@@ -395,14 +419,14 @@ internal sealed partial class MainPage : Page
             this.HolderText.Text = snapshot.Person;
             this.HolderText.Visibility = Visibility.Visible;
             this.ConnectRemoteReaderButton.Visibility = Visibility.Collapsed;
-            this.IdentityMenuButton.Visibility = Visibility.Collapsed;
+            this.ForgetIdentityButton.Visibility = Visibility.Collapsed;
         }
         else if (this.remoteHolder is null)
         {
             this.HolderText.Text = string.Empty;
             this.HolderText.Visibility = Visibility.Collapsed;
             this.ConnectRemoteReaderButton.Visibility = Visibility.Visible;
-            this.IdentityMenuButton.Visibility = this.PairingMenuVisibility();
+            this.ForgetIdentityButton.Visibility = this.ForgetVisibility();
         }
     }
 
@@ -413,7 +437,7 @@ internal sealed partial class MainPage : Page
             this.HolderText.Text = string.Empty;
             this.HolderText.Visibility = Visibility.Collapsed;
             this.ConnectRemoteReaderButton.Visibility = Visibility.Visible;
-            this.IdentityMenuButton.Visibility = this.PairingMenuVisibility();
+            this.ForgetIdentityButton.Visibility = this.ForgetVisibility();
             this.SignCard.IsEnabled = false;
         }
         else
@@ -421,13 +445,13 @@ internal sealed partial class MainPage : Page
             this.HolderText.Text = this.remoteHolder;
             this.HolderText.Visibility = Visibility.Visible;
             this.ConnectRemoteReaderButton.Visibility = Visibility.Collapsed;
-            this.IdentityMenuButton.Visibility = Visibility.Visible;
+            this.ForgetIdentityButton.Visibility = Visibility.Visible;
             this.SignCard.IsEnabled = true;
         }
     }
 
-    /// <summary>The menu stays while a pairing exists, read or not.</summary>
-    private Visibility PairingMenuVisibility() =>
+    /// <summary>The forget button stays while a pairing exists, read or not.</summary>
+    private Visibility ForgetVisibility() =>
         this.hasPairing ? Visibility.Visible : Visibility.Collapsed;
 
     private void SetBusy(bool busy)
