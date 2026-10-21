@@ -152,7 +152,9 @@ impl Version {
     /// scaled to 0 to 999. The largest value, 31999, stays inside the 65535
     /// limit, and the order is kept: within a month the build field rises
     /// with the day and then the time, and across a month or year boundary
-    /// the higher fields carry the comparison.
+    /// the higher fields carry the comparison. A slot is 1.44 minutes, so
+    /// two builds of the same day get distinct versions when they are at
+    /// least two minutes apart; adjacent minutes may share a slot.
     #[must_use]
     pub fn product_version(self) -> ProductVersion {
         let minute_of_day = u32::from(self.hour) * MINUTES_PER_HOUR + u32::from(self.minute);
@@ -820,7 +822,7 @@ fn write_sequences(database: &Database) -> Result<(), BuildError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RegistryData, Version, encode_registry, short_name};
+    use super::{MINUTES_PER_DAY, RegistryData, Version, encode_registry, short_name};
 
     #[test]
     fn binary_registry_data_uses_the_hexadecimal_prefix() {
@@ -903,8 +905,8 @@ mod tests {
     fn the_projection_preserves_ordering() {
         let ordered = [
             "26.8.7.0",
-            "26.8.7.1",
             "26.8.7.2",
+            "26.8.7.4",
             "26.8.7.1533",
             "26.8.7.2359",
             "26.8.8.0",
@@ -925,6 +927,26 @@ mod tests {
                 pair[1]
             );
         }
+    }
+
+    #[test]
+    fn builds_two_minutes_apart_get_distinct_versions() {
+        // A slot is 1.44 minutes: two minutes always cross a slot boundary,
+        // while adjacent minutes may share one.
+        let at = |minute: u32| {
+            Version::parse(&format!("26.8.7.{}", (minute / 60) * 100 + minute % 60))
+                .expect("parses")
+                .product_version()
+        };
+        for minute in 0..MINUTES_PER_DAY {
+            if minute + 1 < MINUTES_PER_DAY {
+                assert!(at(minute) <= at(minute + 1), "minute {minute} is ordered");
+            }
+            if minute + 2 < MINUTES_PER_DAY {
+                assert!(at(minute) < at(minute + 2), "minute {minute} is two apart");
+            }
+        }
+        assert_eq!(at(0), at(1), "adjacent minutes may share a slot");
     }
 
     #[test]
