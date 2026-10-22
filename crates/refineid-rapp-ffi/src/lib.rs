@@ -103,15 +103,8 @@ const MAX_GRANTED_BYTES: usize = 4_096;
 /// Pause before the watch dials the phone again after losing it.
 const WATCH_RETRY_MS: u64 = 15_000;
 
-/// How far ahead the watch judges the offer between sessions: it looks
-/// again only after a browse and its pause, and an offer must not outlive
-/// the grace of section 8.4 item 3.
-const WATCH_HORIZON_MS: u64 = BROWSE_WINDOW_MS + WATCH_RETRY_MS;
-
-/// How far ahead the watch judges the offer while it holds a session: it
-/// looks again after every receive tick, so the offer is judged as it
-/// stands now.
-const IN_SESSION_HORIZON_MS: u64 = 0;
+/// How often a pausing watch looks whether its handle ended.
+const WATCH_TICK_MS: u64 = 1_000;
 
 /// How often the offering session reads the pairing store again, so a
 /// pairing forgotten meanwhile is closed with its `pairing_revoked` close.
@@ -854,7 +847,7 @@ fn offering_watch(handle_id: u64) {
     while !ended(handle_id) {
         let Ok(store) = ProtectedPairingStore::load() else {
             withdraw_offer(handle_id, &mut offer, PHONE_UNREACHABLE_STATUS);
-            pause(WATCH_RETRY_MS);
+            wait_watching(handle_id, WATCH_RETRY_MS);
             continue;
         };
         let Some(pair_id) = store.usable_pairing().map(PairingRecord::pair_id) else {
@@ -862,13 +855,13 @@ fn offering_watch(handle_id: u64) {
             return;
         };
         let mut requester = background_requester(store);
-        sync_offer(&requester, pair_id, &mut offer, WATCH_HORIZON_MS);
+        sync_offer(&requester, pair_id, &mut offer);
         let transport = serving_keys(&requester, pair_id)
             .ok_or(StreamError::Unreachable)
             .and_then(|keys| dial_session(keys, &[], &[], browse_window()));
         let Ok(transport) = transport else {
             set_watch_status(handle_id, PHONE_UNREACHABLE_STATUS);
-            pause(WATCH_RETRY_MS);
+            wait_watching(handle_id, retry_pause_ms(&requester, pair_id, &offer));
             continue;
         };
         let mut session = match requester.connect(pair_id, transport) {
@@ -880,7 +873,7 @@ fn offering_watch(handle_id: u64) {
             }
             Err(_) => {
                 set_watch_status(handle_id, PHONE_UNREACHABLE_STATUS);
-                pause(WATCH_RETRY_MS);
+                wait_watching(handle_id, retry_pause_ms(&requester, pair_id, &offer));
                 continue;
             }
         };
@@ -892,11 +885,37 @@ fn offering_watch(handle_id: u64) {
             return;
         }
         set_watch_status(handle_id, PHONE_UNREACHABLE_STATUS);
-        if !ended(handle_id) {
-            pause(WATCH_RETRY_MS);
-        }
+        wait_watching(handle_id, retry_pause_ms(&requester, pair_id, &offer));
     }
     withdraw_offer(handle_id, &mut offer, PHONE_UNREACHABLE_STATUS);
+}
+
+/// Pauses the watch for `milliseconds`, ending early once its handle ends,
+/// so the offer is withdrawn within a tick of it.
+fn wait_watching(handle_id: u64, milliseconds: u64) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(milliseconds);
+    while !ended(handle_id) {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        std::thread::sleep(left.min(std::time::Duration::from_millis(WATCH_TICK_MS)));
+    }
+}
+
+/// The retry pause, cut short at the moment the standing offer lapses, so
+/// its withdrawal lands when the grace ends and never before (section 8.4
+/// item 3).
+fn retry_pause_ms(requester: &StreamRequester, pair_id: PairId, offer: &Offer) -> u64 {
+    if offer.offered.is_none() {
+        return WATCH_RETRY_MS;
+    }
+    requester
+        .store()
+        .card_sighting(pair_id)
+        .map_or(WATCH_RETRY_MS, |sighting| {
+            WATCH_RETRY_MS.min(sighting.offer_lapses_at_ms().saturating_sub(unix_time_ms()))
+        })
 }
 
 /// What the offering session has offered to browsers.
@@ -916,12 +935,11 @@ struct Offered {
 }
 
 /// Brings the browsers' offer in line with the certificate the pairing's
-/// identity is offered on (section 8.4 item 3) as it will stand
-/// `horizon_ms` from now; another card's certificate is withdrawn before
-/// this one is installed, as installing adds a certificate beside it.
-fn sync_offer(requester: &StreamRequester, pair_id: PairId, offer: &mut Offer, horizon_ms: u64) {
-    let judged_at = unix_time_ms().saturating_add(horizon_ms);
-    let Some(certificate) = offered_certificate(requester.store(), pair_id, judged_at) else {
+/// identity is offered on now (section 8.4 item 3); another card's
+/// certificate is withdrawn before this one is installed, as installing adds
+/// a certificate beside it.
+fn sync_offer(requester: &StreamRequester, pair_id: PairId, offer: &mut Offer) {
+    let Some(certificate) = offered_certificate(requester.store(), pair_id, unix_time_ms()) else {
         if offer.offered.take().is_some() {
             forget_browser_certificates();
         }
@@ -960,7 +978,7 @@ fn hold_offering_session(
                 offer.checked = Some(fingerprint);
                 // The session recorded the card it hears, so another card's
                 // offer goes before this one's certificate is read.
-                sync_offer(requester, pair_id, offer, IN_SESSION_HORIZON_MS);
+                sync_offer(requester, pair_id, offer);
                 if caches_confirmed_certificate(requester, session, fingerprint) {
                     clear_watch_status(handle_id);
                 } else {
@@ -978,7 +996,7 @@ fn hold_offering_session(
             store_checked = std::time::Instant::now();
             close_if_forgotten(requester, session);
         }
-        sync_offer(requester, pair_id, offer, IN_SESSION_HORIZON_MS);
+        sync_offer(requester, pair_id, offer);
     }
 }
 
@@ -1117,10 +1135,6 @@ fn set_watch_status(handle_id: u64, status: &str) {
     registry_entry_apply(handle_id, |shared| {
         shared.status = Some(status.to_owned());
     });
-}
-
-fn pause(milliseconds: u64) {
-    std::thread::sleep(std::time::Duration::from_millis(milliseconds));
 }
 
 /// Keeps the authentication certificate on the pairing record, where the

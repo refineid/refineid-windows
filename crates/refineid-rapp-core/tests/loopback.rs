@@ -34,6 +34,7 @@ use refineid_rapp_core::engine::{
     OperationOutcome, PairingError, Requester, RequesterConfig, SessionEnd, SessionError,
 };
 use refineid_rapp_core::ids::PairId;
+use refineid_rapp_core::presence::CardSighting;
 use refineid_rapp_core::store::{MemoryPairingStore, PairingState, PairingStore};
 use refineid_rapp_core::stream::{STREAM_CANDIDATE_ID, STREAM_PROFILE};
 use refineid_rapp_core::transport::{FrameTransport, MemoryTransport, TransportError};
@@ -70,6 +71,8 @@ const OTHER_OPERATION: OperationId = OperationId::from_array(*b"other operation!
 const OPERATION_LIFETIME_MS: u64 = 30_000;
 /// Keep-alive rounds a requester waits for a scripted custodian's message.
 const KEEP_ALIVE_ROUNDS: usize = 10;
+/// The wall-clock time an earlier session heard the card present.
+const EARLIER_SIGHTING_AT_MS: u64 = 1_700_000_000_000;
 
 /// The requester engine type under test.
 type TestRequester = Requester<MemoryPairingStore>;
@@ -381,10 +384,15 @@ fn the_card_status_is_noted_on_the_session() {
 }
 
 #[test]
-fn a_card_reported_absent_is_never_recorded_as_seen() {
+fn a_card_reported_absent_leaves_the_last_sighting_as_it_was() {
     let mut requester = test_requester();
     let granted = [ProfileName::CardStatus];
     let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
+    let earlier = CardSighting::new(card_fingerprint(), EARLIER_SIGHTING_AT_MS);
+    requester
+        .store_mut()
+        .record_card_sighting(pair_id, earlier)
+        .unwrap();
     let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
     let proxy = std::thread::spawn(move || {
         proxy_accept_session_with_card(&proxy_pairing, proxy_transport, CardStatusMessage::Absent)
@@ -395,7 +403,9 @@ fn a_card_reported_absent_is_never_recorded_as_seen() {
     }
     let _proxy_session = proxy.join().unwrap();
     assert_eq!(session.card_status(), Some(CardStatusMessage::Absent));
-    assert_eq!(requester.store().card_sighting(pair_id), None);
+    // Absence is never recorded: the offer ages out over the grace from the
+    // last time the card was heard (section 8.4 item 3).
+    assert_eq!(requester.store().card_sighting(pair_id), Some(earlier));
 }
 
 #[test]

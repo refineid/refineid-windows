@@ -47,92 +47,93 @@ impl CardSighting {
     }
 
     /// Whether the offer of `certificate` stands at `now_ms`: this sighting
-    /// names the certificate's card and is younger than the grace (section
-    /// 8.4 item 3). A sighting dated after `now_ms`, by a wall clock set back
-    /// since, does not stand.
+    /// names the certificate's card and was heard within the grace (section
+    /// 8.4 item 3).
+    ///
+    /// A sighting dated after `now_ms`, by a wall clock set back since,
+    /// counts as heard now while it lies less than the grace ahead; one
+    /// further ahead does not stand, so a large step back of the clock never
+    /// stretches the offer beyond the grace the custodian's word allows.
     #[must_use]
     pub fn stands_for(&self, certificate: &OwnedCert, now_ms: u64) -> bool {
+        let age = now_ms.saturating_sub(self.at_ms);
+        let ahead = self.at_ms.saturating_sub(now_ms);
         CertificateFingerprint::of_certificate(certificate.as_der()) == self.fingerprint
-            && now_ms
-                .checked_sub(self.at_ms)
-                .is_some_and(|age| age < IDENTITY_OFFER_GRACE_MS)
+            && age < IDENTITY_OFFER_GRACE_MS
+            && ahead < IDENTITY_OFFER_GRACE_MS
+    }
+
+    /// The wall-clock moment the offer this sighting bounds lapses unless a
+    /// session hears the card again (section 8.4 item 3).
+    #[must_use]
+    pub const fn offer_lapses_at_ms(&self) -> u64 {
+        self.at_ms.saturating_add(IDENTITY_OFFER_GRACE_MS)
     }
 }
 
-/// The leading bytes of an encoded sighting set; a set that does not start
-/// with them is not one.
-const SIGHTINGS_MAGIC: &[u8] = b"fi.refineid.windows.card-sightings";
+/// The leading bytes of an encoded sighting; bytes that do not start with
+/// them are not one.
+const SIGHTING_MAGIC: &[u8] = b"fi.refineid.windows.card-sighting";
 
 /// Bytes of a sighting's wall-clock time, big-endian.
 const TIME_BYTES: usize = size_of::<u64>();
 
-/// Bytes of one encoded entry: the pair identifier, the card's fingerprint
-/// and the time it was heard present.
-const ENTRY_BYTES: usize = PAIR_ID_SIZE + CERTIFICATE_FINGERPRINT_SIZE + TIME_BYTES;
+/// Bytes of one encoded sighting after the magic: the pair identifier, the
+/// card's fingerprint and the time it was heard present.
+const SIGHTING_BYTES: usize = PAIR_ID_SIZE + CERTIFICATE_FINGERPRINT_SIZE + TIME_BYTES;
 
-/// A sighting set that does not decode.
+/// A sighting that does not decode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SightingsCodecError;
+pub struct SightingCodecError;
 
-impl core::fmt::Display for SightingsCodecError {
+impl core::fmt::Display for SightingCodecError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter.write_str("the card sighting set does not decode")
+        formatter.write_str("the card sighting does not decode")
     }
 }
 
-impl core::error::Error for SightingsCodecError {}
+impl core::error::Error for SightingCodecError {}
 
-/// Encodes the last sighting of each pairing. Nothing in it is secret: a
-/// pair identifier, the fingerprint of a public certificate and a time.
+/// Encodes one pairing's last sighting. Nothing in it is secret: a pair
+/// identifier, the fingerprint of a public certificate and a time.
 #[must_use]
-pub fn encode_sightings(sightings: &[(PairId, CardSighting)]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(SIGHTINGS_MAGIC.len() + sightings.len() * ENTRY_BYTES);
-    out.extend_from_slice(SIGHTINGS_MAGIC);
-    for (pair_id, sighting) in sightings {
-        out.extend_from_slice(pair_id.as_bytes());
-        out.extend_from_slice(sighting.fingerprint.as_bytes());
-        out.extend_from_slice(&sighting.at_ms.to_be_bytes());
-    }
+pub fn encode_sighting(pair_id: PairId, sighting: CardSighting) -> Vec<u8> {
+    let mut out = Vec::with_capacity(SIGHTING_MAGIC.len() + SIGHTING_BYTES);
+    out.extend_from_slice(SIGHTING_MAGIC);
+    out.extend_from_slice(pair_id.as_bytes());
+    out.extend_from_slice(sighting.fingerprint.as_bytes());
+    out.extend_from_slice(&sighting.at_ms.to_be_bytes());
     out
 }
 
-/// Decodes a sighting set written by [`encode_sightings`].
+/// Decodes a sighting written by [`encode_sighting`].
 ///
 /// # Errors
 ///
-/// [`SightingsCodecError`] when the bytes are not such a set.
-pub fn decode_sightings(bytes: &[u8]) -> Result<Vec<(PairId, CardSighting)>, SightingsCodecError> {
-    let entries = bytes
-        .strip_prefix(SIGHTINGS_MAGIC)
-        .ok_or(SightingsCodecError)?;
-    let (whole, rest) = entries.as_chunks::<ENTRY_BYTES>();
-    if !rest.is_empty() {
-        return Err(SightingsCodecError);
-    }
-    whole
-        .iter()
-        .map(|entry| {
-            let (pair_id, after) = entry.split_at(PAIR_ID_SIZE);
-            let (fingerprint, time) = after.split_at(CERTIFICATE_FINGERPRINT_SIZE);
-            let at_ms = u64::from_be_bytes(time.try_into().map_err(|_| SightingsCodecError)?);
-            Ok((
-                PairId::reconstruct(pair_id).map_err(|_| SightingsCodecError)?,
-                CardSighting::new(
-                    CertificateFingerprint::reconstruct(fingerprint)
-                        .map_err(|_| SightingsCodecError)?,
-                    at_ms,
-                ),
-            ))
-        })
-        .collect()
+/// [`SightingCodecError`] when the bytes are not one.
+pub fn decode_sighting(bytes: &[u8]) -> Result<(PairId, CardSighting), SightingCodecError> {
+    let entry: &[u8; SIGHTING_BYTES] = bytes
+        .strip_prefix(SIGHTING_MAGIC)
+        .and_then(|entry| entry.try_into().ok())
+        .ok_or(SightingCodecError)?;
+    let (pair_id, after) = entry.split_at(PAIR_ID_SIZE);
+    let (fingerprint, time) = after.split_at(CERTIFICATE_FINGERPRINT_SIZE);
+    let at_ms = u64::from_be_bytes(time.try_into().map_err(|_| SightingCodecError)?);
+    Ok((
+        PairId::reconstruct(pair_id).map_err(|_| SightingCodecError)?,
+        CardSighting::new(
+            CertificateFingerprint::reconstruct(fingerprint).map_err(|_| SightingCodecError)?,
+            at_ms,
+        ),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use refineid_rapp::{CertificateFingerprint, IDENTITY_OFFER_GRACE_MS};
 
-    use super::{CardSighting, SIGHTINGS_MAGIC, decode_sightings, encode_sightings};
-    use crate::store::fixtures::{FIRST_PAIR, SECOND_PAIR, certificate};
+    use super::{CardSighting, decode_sighting, encode_sighting};
+    use crate::store::fixtures::{FIRST_PAIR, certificate};
 
     /// The wall-clock time the card is heard present in these tests.
     const HEARD_AT_MS: u64 = 1_700_000_000_000;
@@ -153,6 +154,10 @@ mod tests {
         assert!(sighting.stands_for(&certificate(), HEARD_AT_MS));
         assert!(sighting.stands_for(&certificate(), HEARD_AT_MS + IDENTITY_OFFER_GRACE_MS - 1));
         assert!(!sighting.stands_for(&certificate(), HEARD_AT_MS + IDENTITY_OFFER_GRACE_MS));
+        assert_eq!(
+            sighting.offer_lapses_at_ms(),
+            HEARD_AT_MS + IDENTITY_OFFER_GRACE_MS
+        );
     }
 
     #[test]
@@ -162,26 +167,29 @@ mod tests {
     }
 
     #[test]
-    fn a_sighting_from_after_now_does_not_stand() {
-        assert!(!heard().stands_for(&certificate(), HEARD_AT_MS - 1));
+    fn a_clock_set_back_within_the_grace_keeps_the_offer() {
+        assert!(heard().stands_for(&certificate(), HEARD_AT_MS - 1));
+        assert!(heard().stands_for(&certificate(), HEARD_AT_MS - IDENTITY_OFFER_GRACE_MS + 1));
     }
 
     #[test]
-    fn a_sighting_set_round_trips() {
-        let set = vec![
-            (FIRST_PAIR, heard()),
-            (SECOND_PAIR, CardSighting::new(OTHER_CARD, HEARD_AT_MS)),
-        ];
-        assert_eq!(decode_sightings(&encode_sightings(&set)), Ok(set));
-        assert_eq!(decode_sightings(&encode_sightings(&[])), Ok(Vec::new()));
+    fn a_clock_set_back_beyond_the_grace_does_not_stretch_the_offer() {
+        assert!(!heard().stands_for(&certificate(), HEARD_AT_MS - IDENTITY_OFFER_GRACE_MS));
     }
 
     #[test]
-    fn a_foreign_or_cut_set_does_not_decode() {
-        assert!(decode_sightings(b"not a sighting set").is_err());
-        let encoded = encode_sightings(&[(FIRST_PAIR, heard())]);
+    fn a_sighting_round_trips() {
+        assert_eq!(
+            decode_sighting(&encode_sighting(FIRST_PAIR, heard())),
+            Ok((FIRST_PAIR, heard()))
+        );
+    }
+
+    #[test]
+    fn a_foreign_or_cut_sighting_does_not_decode() {
+        assert!(decode_sighting(b"not a sighting").is_err());
+        let encoded = encode_sighting(FIRST_PAIR, heard());
         let cut = encoded.get(..encoded.len() - 1).unwrap_or_default();
-        assert!(decode_sightings(cut).is_err());
-        assert!(decode_sightings(SIGHTINGS_MAGIC).is_ok_and(|set| set.is_empty()));
+        assert!(decode_sighting(cut).is_err());
     }
 }

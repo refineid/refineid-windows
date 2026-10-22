@@ -187,21 +187,21 @@ impl PinSafetyCache {
     /// serial and PIN 1 state. Another card's serial destroys it (the card
     /// was replaced), and so does a state that is neither verified nor a
     /// pristine retry counter: the card refused a PIN since, possibly this
-    /// one on an attempt whose answer was lost, or tells nothing.
+    /// one on an attempt whose answer was lost, or tells nothing. With
+    /// nothing held, nothing is invalidated: a checkout in flight elsewhere
+    /// still restores.
     pub fn checkout_pin1(
         &mut self,
         live_serial: &TokenSerial,
         live_status: PinStatus,
     ) -> Option<CheckedOutPin1> {
-        let usable = self
-            .held_pin1
-            .as_ref()
-            .is_some_and(|entry| entry.serial == *live_serial && permits_held_pin1(live_status));
-        if !usable {
-            self.clear_positive();
-            return None;
+        let entry = self.held_pin1.take()?;
+        if entry.serial == *live_serial && permits_held_pin1(live_status) {
+            return Some(CheckedOutPin1 { entry });
         }
-        self.held_pin1.take().map(|entry| CheckedOutPin1 { entry })
+        drop(entry);
+        self.clear_positive();
+        None
     }
 
     /// Whether a PIN 1 is held. This does not expose the secret or authorize
@@ -490,6 +490,16 @@ mod tests {
             .expect("one-shot entry permits one checkout");
         checkout.restore_after_success(&mut cache);
         assert!(cache.checkout_pin1(&card, PinStatus::Verified).is_none());
+    }
+
+    #[test]
+    fn a_checkout_finding_nothing_held_leaves_one_in_flight_to_restore() {
+        let card = serial("CARD-A-FULL-SERIAL");
+        let mut cache = holding(&card);
+        let in_flight = cache.checkout_pin1(&card, pristine()).expect("held");
+        assert!(cache.checkout_pin1(&card, pristine()).is_none());
+        in_flight.restore_after_success(&mut cache);
+        assert!(cache.has_positive_pin1());
     }
 
     #[test]

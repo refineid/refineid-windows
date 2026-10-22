@@ -1148,31 +1148,9 @@ fn card_sign_with_origin_source(
         .checkout_pin1(&serial, pin1_status)
         .ok_or(CKR_USER_NOT_LOGGED_IN)?;
 
-    let is_verified = pin1_status == PinStatus::Verified;
-    let outcome = if is_verified {
-        // Citing FINEID S1 v4.2 §3.5: card is already in verified state and session holds authenticated PIN1
-        match sign_with_card(&mut card, mechanism, input) {
-            Ok(signature) => {
-                let mut cache = pin_cache.lock().map_err(|_poisoned| CKR_DEVICE_ERROR)?;
-                checkout.restore_after_success(&mut cache);
-                return Ok(signature);
-            }
-            Err(CKR_DEVICE_ERROR) => {
-                // Security not satisfied or session reset: fall back to VERIFY PIN1
-                card.verify_pin(PinSlot::Pin1, checkout.pin().clone())
-            }
-            Err(e) => {
-                // The PIN was not presented; the card's answer decides
-                // nothing about it.
-                let mut cache = pin_cache.lock().map_err(|_poisoned| CKR_DEVICE_ERROR)?;
-                checkout.restore_after_unanswered(&mut cache);
-                return Err(e);
-            }
-        }
-    } else {
-        card.verify_pin(PinSlot::Pin1, checkout.pin().clone())
-    };
-
+    // The held PIN 1 is presented to the card for every operation; the
+    // card's verified state is never taken as lasting (credential custody).
+    let outcome = card.verify_pin(PinSlot::Pin1, checkout.pin().clone());
     match outcome {
         Ok(VerifyOutcome::Ok) => {
             let mut cache = pin_cache.lock().map_err(|_poisoned| CKR_DEVICE_ERROR)?;

@@ -46,10 +46,25 @@ const NOTICE_REACH_WINDOW: Duration = Duration::from_secs(5);
 const STORE_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 /// The operation lifetime sent on the wire, in milliseconds.
 const OPERATION_LIFETIME_MS: u64 = OPERATION_LIFETIME.as_secs() * 1_000;
-/// How far ahead the agent judges the offer between sessions: it looks
-/// again only after a search and its pause, and an offer must not outlive
-/// the grace of RAPP v26.10.22 section 8.4 item 3.
-const BETWEEN_SESSIONS_HORIZON: Duration = REACH_WINDOW.saturating_add(SEARCH_PAUSE);
+/// How long a fresh session waits for the phone's first card report before
+/// a waiting request runs (RAPP v26.10.22 section 8.4 item 1): the phone
+/// sends it right after `session.ready`.
+const FIRST_CARD_REPORT_WAIT: Duration = Duration::from_secs(5);
+
+/// A signature request waiting for the phone, and since when.
+struct Waiting {
+    job: Job,
+    since: Instant,
+}
+
+impl Waiting {
+    fn from_now(job: Job) -> Self {
+        Self {
+            job,
+            since: Instant::now(),
+        }
+    }
+}
 
 /// The certificate the agent has offered to browsers: which pairing's, and
 /// which card's.
@@ -190,13 +205,7 @@ fn load_pairing(started: Instant, offered: &mut Option<Offered>) -> Option<Pairi
     let record = requester.store().usable_pairing()?;
     let pair_id = record.pair_id();
     let key = RoutingKey::derive(record.pair_record()?).ok()?;
-    sync_offer(
-        started,
-        &requester,
-        pair_id,
-        offered,
-        BETWEEN_SESSIONS_HORIZON,
-    );
+    sync_offer(started, &requester, pair_id, offered);
     Some(Pairing {
         requester,
         pair_id,
@@ -229,22 +238,19 @@ fn deliver_revocation_notices(started: Instant, requester: &mut AgentRequester) 
 }
 
 /// W-R-8: brings the browsers' offer in line with the certificate the
-/// pairing's identity is offered on (RAPP v26.10.22 section 8.4 item 3) as
-/// it will stand `horizon` from now. The offer stands before and between
-/// sessions on a certificate whose card a session heard present within the
-/// grace, and goes at once when the pairing is forgotten or revoked or a
-/// session hears another card; another card's certificate is withdrawn
-/// before this one is installed, as installing adds a certificate beside it.
+/// pairing's identity is offered on now (RAPP v26.10.22 section 8.4 item
+/// 3). The offer stands before and between sessions on a certificate whose
+/// card a session heard present within the grace, and goes at once when the
+/// pairing is forgotten or revoked or a session hears another card; another
+/// card's certificate is withdrawn before this one is installed, as
+/// installing adds a certificate beside it.
 fn sync_offer(
     started: Instant,
     requester: &AgentRequester,
     pair_id: PairId,
     offered: &mut Option<Offered>,
-    horizon: Duration,
 ) {
-    let horizon_ms = u64::try_from(horizon.as_millis()).unwrap_or(u64::MAX);
-    let judged_at = unix_time_ms().saturating_add(horizon_ms);
-    let Some(certificate) = offered_certificate(requester.store(), pair_id, judged_at) else {
+    let Some(certificate) = offered_certificate(requester.store(), pair_id, unix_time_ms()) else {
         if offered.is_some() {
             withdraw_certificates(started, offered);
         }
@@ -272,6 +278,29 @@ fn sync_offer(
     }
 }
 
+/// How long the standing offer has until it lapses, when one is offered: no
+/// step between sessions may last longer, so the withdrawal lands when the
+/// grace ends and never before (RAPP v26.10.22 section 8.4 item 3).
+fn until_offer_lapses(
+    requester: &AgentRequester,
+    pair_id: PairId,
+    offered: Option<Offered>,
+) -> Option<Duration> {
+    offered?;
+    let lapses_at = requester
+        .store()
+        .card_sighting(pair_id)?
+        .offer_lapses_at_ms();
+    Some(Duration::from_millis(
+        lapses_at.saturating_sub(unix_time_ms()),
+    ))
+}
+
+/// At most `step`, and no longer than the standing offer has left.
+fn bounded_by_offer(step: Duration, until_lapse: Option<Duration>) -> Duration {
+    until_lapse.map_or(step, |left| step.min(left))
+}
+
 fn withdraw_certificates(started: Instant, offered: &mut Option<Offered>) {
     match remove_browser_certificates() {
         Ok(count) => log(started, &format!("withdrew {count} offered certificates")),
@@ -285,15 +314,15 @@ fn serve_phone(started: Instant, inbox: &Receiver<Job>) {
     // W-R-8: certificates offered by an earlier run are purged first.
     let mut offered = None;
     withdraw_certificates(started, &mut offered);
-    let mut pending: Option<Job> = None;
+    let mut pending: Option<Waiting> = None;
     loop {
         let Some(mut pairing) = load_pairing(started, &mut offered) else {
             // W-R-8: no usable pairing, so nothing stays offered.
             if offered.is_some() {
                 withdraw_certificates(started, &mut offered);
             }
-            if let Some(job) = pending.take() {
-                job.answer(SignAnswer::Failed);
+            if let Some(waiting) = pending.take() {
+                waiting.job.answer(SignAnswer::Failed);
             }
             match inbox.recv_timeout(STORE_PAUSE) {
                 Ok(job) => job.answer(SignAnswer::Failed),
@@ -302,11 +331,17 @@ fn serve_phone(started: Instant, inbox: &Receiver<Job>) {
             }
             continue;
         };
+        // A waiting request searches for what is left of its window; no
+        // search outlasts the standing offer, which is judged again after.
+        let until_lapse = until_offer_lapses(&pairing.requester, pairing.pair_id, offered);
+        let search = pending.as_ref().map_or(REACH_WINDOW, |waiting| {
+            REACH_WINDOW.saturating_sub(waiting.since.elapsed())
+        });
         let reached = reach_session(
             &mut pairing.requester,
             pairing.pair_id,
             &pairing.key,
-            REACH_WINDOW,
+            bounded_by_offer(search, until_lapse),
             |attempt| match attempt {
                 Attempt::Routing(advertiser) => log(
                     started,
@@ -322,38 +357,46 @@ fn serve_phone(started: Instant, inbox: &Receiver<Job>) {
         let mut session = match reached {
             Ok(session) => session,
             Err(error) => {
-                if matches!(
-                    error,
-                    ReachError::Pairing(SessionError::ClosedByPeer(CloseReason::PairingRevoked))
+                match after_failed_search(
+                    started,
+                    &error,
+                    &pairing,
+                    &mut offered,
+                    &mut pending,
+                    inbox,
                 ) {
-                    log(started, "the phone forgot this computer");
-                    withdraw_certificates(started, &mut offered);
+                    AfterSearch::Again => continue,
+                    AfterSearch::Stop => return,
                 }
-                // Every request that arrived during the search waited for it.
-                for job in pending.take().into_iter().chain(inbox.try_iter()) {
-                    log(
-                        started,
-                        &format!("no phone for the waiting request: {error}"),
-                    );
-                    job.answer(SignAnswer::NoPhone);
-                }
-                match inbox.recv_timeout(SEARCH_PAUSE) {
-                    Ok(job) => pending = Some(job),
-                    Err(RecvTimeoutError::Timeout) => {}
-                    Err(RecvTimeoutError::Disconnected) => return,
-                }
-                continue;
             }
         };
         log(started, "session open over Bluetooth");
-        if let Some(job) = pending.take() {
+        // A waiting request runs only once the phone has said which card it
+        // holds and the offer follows it (RAPP v26.10.22 section 8.4).
+        await_card_report(&mut pairing, &mut session);
+        let mut card_checked = None;
+        follow_card(
+            started,
+            &mut pairing,
+            &mut session,
+            &mut offered,
+            &mut card_checked,
+        );
+        if let Some(waiting) = pending.take() {
             if session.end().is_some() {
-                job.answer(SignAnswer::NoPhone);
+                waiting.job.answer(SignAnswer::NoPhone);
             } else {
-                sign(started, &mut pairing, &mut session, job);
+                sign(started, &mut pairing, &mut session, waiting.job);
             }
         }
-        if !hold_session(started, &mut pairing, &mut session, &mut offered, inbox) {
+        if !hold_session(
+            started,
+            &mut pairing,
+            &mut session,
+            &mut offered,
+            inbox,
+            card_checked,
+        ) {
             return;
         }
         let end = session.end();
@@ -362,6 +405,112 @@ fn serve_phone(started: Instant, inbox: &Receiver<Job>) {
             withdraw_certificates(started, &mut offered);
         }
     }
+}
+
+/// What a failed search leaves the agent to do.
+enum AfterSearch {
+    /// Search for the phone again.
+    Again,
+    /// The pipe is gone; the agent stops.
+    Stop,
+}
+
+/// After a search that found no session: a waiting request searches on for
+/// what is left of its window, or is answered with every request queued
+/// behind it; then the agent pauses, never past the moment the standing
+/// offer lapses (RAPP v26.10.22 section 8.4 item 3).
+fn after_failed_search(
+    started: Instant,
+    error: &ReachError,
+    pairing: &Pairing,
+    offered: &mut Option<Offered>,
+    pending: &mut Option<Waiting>,
+    inbox: &Receiver<Job>,
+) -> AfterSearch {
+    if matches!(
+        error,
+        ReachError::Pairing(SessionError::ClosedByPeer(CloseReason::PairingRevoked))
+    ) {
+        log(started, "the phone forgot this computer");
+        withdraw_certificates(started, offered);
+    }
+    if pending.is_none() {
+        *pending = inbox.try_recv().ok().map(Waiting::from_now);
+    }
+    let search_over = !matches!(error, ReachError::NotReached);
+    match pending.take() {
+        Some(waiting) if !search_over && waiting.since.elapsed() < REACH_WINDOW => {
+            *pending = Some(waiting);
+            return AfterSearch::Again;
+        }
+        Some(waiting) => {
+            // Every request that arrived during the search waited for it.
+            for job in core::iter::once(waiting.job).chain(inbox.try_iter()) {
+                log(
+                    started,
+                    &format!("no phone for the waiting request: {error}"),
+                );
+                job.answer(SignAnswer::NoPhone);
+            }
+        }
+        None => {}
+    }
+    let until_lapse = until_offer_lapses(&pairing.requester, pairing.pair_id, *offered);
+    match inbox.recv_timeout(bounded_by_offer(SEARCH_PAUSE, until_lapse)) {
+        Ok(job) => *pending = Some(Waiting::from_now(job)),
+        Err(RecvTimeoutError::Timeout) => {}
+        Err(RecvTimeoutError::Disconnected) => return AfterSearch::Stop,
+    }
+    AfterSearch::Again
+}
+
+/// Keeps a fresh session alive until the phone's first card report
+/// arrives, the session ends, or [`FIRST_CARD_REPORT_WAIT`] passes.
+fn await_card_report(pairing: &mut Pairing, session: &mut Session<BleLink>) {
+    let waiting = Instant::now();
+    while session.end().is_none()
+        && session.card_status().is_none()
+        && waiting.elapsed() < FIRST_CARD_REPORT_WAIT
+    {
+        // An ended session is noticed by the loop.
+        let _ = pairing.requester.keep_alive(session);
+    }
+}
+
+/// Follows the card the session reports (RAPP v26.10.22 section 8.4): a
+/// card whose certificate is not the cached one has the earlier offer
+/// withdrawn at once and its certificate read on the session, and the
+/// offer is then brought in line with what the session heard.
+fn follow_card(
+    started: Instant,
+    pairing: &mut Pairing,
+    session: &mut Session<BleLink>,
+    offered: &mut Option<Offered>,
+    card_checked: &mut Option<CertificateFingerprint>,
+) {
+    if let Some(CardStatusMessage::Present(fingerprint)) = session.card_status()
+        && *card_checked != Some(fingerprint)
+    {
+        *card_checked = Some(fingerprint);
+        let known = pairing
+            .requester
+            .store()
+            .get(pairing.pair_id)
+            .ok()
+            .and_then(PairingRecord::authentication_certificate)
+            .map(|certificate| CertificateFingerprint::of_certificate(certificate.as_der()));
+        if known != Some(fingerprint) {
+            // The session recorded the card it hears, so the earlier card's
+            // offer goes before this one's certificate is read.
+            log(
+                started,
+                "the phone serves a card whose certificate is not cached",
+            );
+            sync_offer(started, &pairing.requester, pairing.pair_id, offered);
+            learn_certificate(started, pairing, session);
+        }
+    }
+    sync_offer(started, &pairing.requester, pairing.pair_id, offered);
 }
 
 /// Holds an open session: runs every job that arrives, keeps the session
@@ -377,9 +526,9 @@ fn hold_session(
     session: &mut Session<BleLink>,
     offered: &mut Option<Offered>,
     inbox: &Receiver<Job>,
+    mut card_checked: Option<CertificateFingerprint>,
 ) -> bool {
     let mut store_checked = Instant::now();
-    let mut card_checked: Option<CertificateFingerprint> = None;
     while session.end().is_none() {
         match inbox.try_recv() {
             Ok(job) => {
@@ -404,45 +553,11 @@ fn hold_session(
                 return false;
             }
         }
-        if let Some(CardStatusMessage::Present(fingerprint)) = session.card_status()
-            && card_checked != Some(fingerprint)
-        {
-            card_checked = Some(fingerprint);
-            let known = pairing
-                .requester
-                .store()
-                .get(pairing.pair_id)
-                .ok()
-                .and_then(PairingRecord::authentication_certificate)
-                .map(|certificate| CertificateFingerprint::of_certificate(certificate.as_der()));
-            if known != Some(fingerprint) {
-                // The session recorded the card it hears, so the earlier
-                // card's offer goes before this one's certificate is read.
-                log(
-                    started,
-                    "the phone serves a card whose certificate is not cached",
-                );
-                sync_offer(
-                    started,
-                    &pairing.requester,
-                    pairing.pair_id,
-                    offered,
-                    Duration::ZERO,
-                );
-                learn_certificate(started, pairing, session);
-            }
-        }
         if store_checked.elapsed() >= STORE_CHECK_INTERVAL {
             store_checked = Instant::now();
             close_if_forgotten(started, pairing, session, offered);
         }
-        sync_offer(
-            started,
-            &pairing.requester,
-            pairing.pair_id,
-            offered,
-            Duration::ZERO,
-        );
+        follow_card(started, pairing, session, offered, &mut card_checked);
     }
     true
 }
