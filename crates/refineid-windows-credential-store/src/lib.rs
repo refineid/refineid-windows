@@ -78,6 +78,8 @@ pub enum CredentialStoreError {
     InvalidStoredCan,
     /// A stored pairing-set blob was malformed.
     InvalidStoredPairing,
+    /// A pairing record could not be encoded for storage.
+    PairingNotEncodable,
     /// Windows rejected a certificate store operation.
     CertificateStore {
         /// `GetLastError` value returned by the failing API.
@@ -127,6 +129,9 @@ impl fmt::Display for CredentialStoreError {
                 formatter.write_str("stored contactless credential is malformed")
             }
             Self::InvalidStoredPairing => formatter.write_str("stored pairing set is malformed"),
+            Self::PairingNotEncodable => {
+                formatter.write_str("a pairing record could not be encoded for storage")
+            }
             Self::CertificateStore { code } => {
                 write!(
                     formatter,

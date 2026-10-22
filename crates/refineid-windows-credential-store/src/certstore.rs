@@ -28,6 +28,8 @@ use refineid_rapp_core::ids::PairId;
 
 #[cfg(windows)]
 use crate::CredentialStoreError;
+#[cfg(windows)]
+use refineid_lib_core::x509::OwnedCert;
 
 /// Name under which the minidriver DLL registers its CNG key storage
 /// provider. The driver MSI writes the same name into the CNG provider
@@ -139,7 +141,7 @@ impl Drop for PersonalStore {
 /// describe to Windows.
 #[cfg(windows)]
 pub fn install_browser_certificate(
-    der: &[u8],
+    certificate: &OwnedCert,
     pair_id: PairId,
 ) -> Result<(), CredentialStoreError> {
     use windows_sys::Win32::Foundation::GetLastError;
@@ -149,6 +151,7 @@ pub fn install_browser_certificate(
         CertFreeCertificateContext, CertSetCertificateContextProperty, X509_ASN_ENCODING,
     };
 
+    let der = certificate.as_der();
     let length = u32::try_from(der.len())
         .map_err(|_error| CredentialStoreError::CertificateStore { code: 0 })?;
     let store = PersonalStore::open()?;

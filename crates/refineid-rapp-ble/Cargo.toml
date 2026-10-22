@@ -1,6 +1,6 @@
 [package]
 name = "refineid-rapp-ble"
-description = "The RAPP Bluetooth Low Energy transport profile fi.refineid.rapp.ble.v1 for the Windows requester: the GATT central over WinRT"
+description = "The RAPP Bluetooth Low Energy transport profile fi.refineid.rapp.ble for the Windows requester: the GATT central over WinRT"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

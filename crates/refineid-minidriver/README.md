@@ -127,7 +127,7 @@ sign through `SignHash`, which runs `BrowserAuthenticate` over RAPP. No reader
 or driver is involved; see
 [browser-architecture-and-rapp.md](../../docs/browser-architecture-and-rapp.md)
 section 6. The provider answers `NTE_BAD_KEYSET` for a key whose pairing is
-gone or has no cached certificate, `NTE_USER_CANCELLED` when the holder
+gone, serves nothing (forgotten or revoked), or has no cached certificate, `NTE_USER_CANCELLED` when the holder
 declines on the phone, and `NTE_NOT_SUPPORTED` for everything but opening,
 describing and signing.
 

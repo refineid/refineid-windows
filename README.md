@@ -219,21 +219,20 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 ## Remote authorization (RAPP)
 
 `crates/refineid-rapp-core` implements the requester role of the Remote
-Authorization Proxy Protocol, review draft 26.8.17.233, vendored verbatim
-under `docs/protocol/`. RAPP lets this Windows machine use an identity
-card held by the holder's phone: pairing starts from a high-entropy QR
-offer, every channel is a mutually authenticated Noise session, each
-operation is typed and explicitly approved on the phone, and no CAN,
-PIN, or private key ever reaches the requester. The crate carries the
-deterministic CBOR wire form, both handshakes, the full message schema,
-the transcribed state-machine tables the engine is checked against, and
-a loopback conformance suite. The crate also implements
-the `fi.refineid.stream.v1` transport profile: the listener, the routing
-preamble, and the offer candidate parameters, replayed against the vendored
-conformance corpus. `refineid-rapp-cli` is the development requester that
-proves the live path against a phone proxy. The phone-side proxies live in
-their own platform repositories; the bridge from the minidriver to a
-RAPP-backed remote card is future work here.
+Authorization Proxy Protocol, RAPP v26.10.21 (specified in refineid-core
+`docs/protocols/rapp-v26.10.21.md`), through the `refineid_rapp` engine.
+RAPP lets this Windows machine use an identity card held by the holder's
+phone: pairing takes the six-character code the phone shows (`CPace`,
+then `Noise_XXpsk3`), every session is a mutually authenticated
+`Noise_KK` channel that the phone opens with `session.ready` and its card
+status, each operation lives inside its session and is approved on the
+phone when it uses a key, and no CAN, PIN, or private key ever reaches
+the requester. Forgetting a pairing tells the phone with a
+`pairing_revoked` close, on an open session at once or as the first
+message of the next one. The crate carries the stream transport
+`fi.refineid.stream`; `refineid-rapp-ble` carries `fi.refineid.rapp.ble`.
+`refineid-rapp-cli` is the development requester and mock custodian. The
+phone-side custodians live in their own platform repositories.
 
 ## Accessibility and UI Automation (UIA)
 

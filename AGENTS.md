@@ -14,7 +14,7 @@
   the Windows Card Module or PC/SC boundary.
 - Every Windows ABI pointer access must validate nullability and length before
   dereferencing.
-- Use named constants instead of naked protocol or status values.
+- No Magic Codes - define everything (see [Types and numbers](#types-and-numbers)).
 - Verify claims from Microsoft, DVV, ICAO, eIDAS, or another primary source.
 - On Windows, run `scripts/setup-dev-tools.ps1` before building (see
   `docs/toolchain.md`). It installs the toolchain and keeps Visual Studio and
@@ -94,6 +94,61 @@
 - Link newly filed or reused issues in the task handoff. If issue creation is
   unavailable, preserve a sanitized finding locally and report that it was
   not filed; never silently discard it.
+
+## Types and numbers
+
+Two rules from refineid-core bind this repository too: refinement types
+and no magic numbers. Define everything.
+
+Refinement types:
+
+- Read
+  [refinement-types.md](https://github.com/refineid/refineid-core/blob/main/docs/architecture/refinement-types.md)
+  and its case study before designing or reviewing a type.
+- A type is a predicate: input from the wire, the card, the platform or
+  storage crosses one border, with one constructor that checks every
+  specification predicate once, and downstream code trusts the result.
+- Every byte is meaning, transit or citation. Nothing raw sits beside a
+  typed value, and no byte-like parameter stands where a nominal type
+  belongs.
+- The policy's review questions are the checklist for writing and review.
+
+No magic numbers:
+
+- No anonymous numeric literal in production code or ordinary tests. Every
+  protocol code, status word, tag, size, offset, limit, timeout and count
+  is a named constant or derives from one. Writing a hexadecimal value in
+  decimal does not name its meaning.
+- No hand-typed hexadecimal arrays, not even in tests. A wire buffer or an
+  expected fixture is assembled from the same named constants the
+  serializer uses; a synthetic test payload is an ASCII string.
+- A raw wire value lives only in the initializer of a truthful named
+  constant, or in one named constant holding an opaque, externally
+  specified block, such as a known-answer vector, a registered identifier
+  or an object identifier, with a citation to its source.
+
+## STPA in design
+
+Every design includes a short System-Theoretic Process Analysis (STPA),
+sized to the change. [stpa-rapp.md](https://github.com/refineid/refineid-core/blob/main/docs/security/stpa-rapp.md) is the worked example and the
+record for RAPP and its applications.
+
+- Ground the analysis in the losses (L-n) and hazards (H-n) the record
+  already names. Add a loss only when a real stakeholder could suffer it
+  and no recorded loss covers it, and a hazard only for a real system
+  state that leads to a loss.
+- Do not invent imaginary losses, hazards or threats to fill the method.
+  A few real ones beat a long list.
+- Describe the control structure the change touches: the controllers,
+  their control actions, and the feedback each gets. Look first for
+  missing, late or misleading feedback; a controller acting on a stale
+  process model is the usual cause of an unsafe control action.
+- List the unsafe control actions (UCA-n) the affected controllers could
+  issue or fail to issue, the hazards each leads to, and the controller
+  constraints (CC-n) the design enforces against them.
+- A small change records its analysis in the pull request, and a change
+  with no control action or feedback to analyse says so in one line. A
+  change to the control structure updates the STPA record that covers it.
 
 ## No backwards compatibility
 

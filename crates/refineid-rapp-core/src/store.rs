@@ -1,239 +1,291 @@
-//! Durable pairing records and the operation journal.
+//! Durable pairing records.
 //!
-//! A pairing record is the atomic result of pairing: pair keys, `pair_id`,
-//! granted profiles, `grants_hash`, labels, the storage confirmation, and
-//! the fail-stop marker. A record is stored before the peer confirms its own
-//! storage (RAPP v26.10.18 section 4.3 item 4) and opens nothing until that
-//! confirmation is recorded; one found unconfirmed at load was written in a
-//! confirmation window this endpoint did not complete, and is revoked. The
-//! journal records each operation from the moment its request is written
-//! (section 8): an unanswered consequential request is in flight and ends
-//! ambiguous, and terminal states are permanent.
+//! A pairing record is the atomic result of pairing (RAPP v26.10.21 section
+//! 4.3): the engine's own [`PairRecord`], which holds the pair keys,
+//! `pair_id`, the granted profiles, `grants_hash`, whether the peer
+//! confirmed its storage, and when the user forgot the pairing, together
+//! with the labels the peer introduced itself with and the certificates
+//! the phone's card answered with. A record is stored before the peer
+//! confirms its own storage (section 4.3 item 4) and serves nothing until
+//! that confirmation is recorded; one found unconfirmed at load was written
+//! in a confirmation window this endpoint did not complete, and is removed
+//! with its keys.
 //!
-//! Both stores are traits so the Windows build can put pair keys behind the
-//! platform credential store and the journal on disk, while tests use the
-//! in-memory forms shipped here. Neither store ever contains a credential
-//! value, a card identifier, or message plaintext.
+//! A record its user forgot while no session was open keeps its keys for
+//! the `pairing_revoked` close alone: it serves nothing, the next session
+//! sends that close as its first message, and the keys are destroyed once
+//! it is sent or 30 days after the forget (section 4.6 items 2 and 3). A
+//! revoked record keeps no keys and no certificates; it stays only so the
+//! user is told, until the user forgets it too.
+//!
+//! The store is a trait so the Windows build can put pair keys behind the
+//! platform credential store, while tests use the in-memory form shipped
+//! here. A record is neither `Clone` nor printable with its keys: the keys
+//! live in the engine's record, which is neither.
 
-use zeroize::Zeroizing;
+use refineid_lib_core::x509::OwnedCert;
+use refineid_rapp::{ActivePairing, PairRecord, PairingError, ProfileName};
 
-use crate::ids::{OperationId, PairId};
-pub use refineid_rapp::OperationState;
+use crate::engine::PeerIntroduction;
+use crate::ids::PairId;
 
-/// The fail-stop disposition of a stored pairing (Section 14.2).
+/// The keys of a stored pairing.
+enum Keys {
+    /// The engine's record: keys, grants, storage confirmation, forget time.
+    Held(PairRecord),
+    /// The keys are destroyed.
+    Revoked {
+        /// The pairing that was revoked.
+        pair_id: PairId,
+        /// Whether the peer revoked it with its `pairing_revoked` close.
+        by_peer: bool,
+    },
+}
+
+/// Where a stored pairing stands (RAPP v26.10.21 sections 4.3 and 4.6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PairingDisposition {
-    /// The pairing is usable.
-    Paired,
-    /// The pairing was terminated — by local action, authenticated peer
-    /// notice, an authenticated protocol violation, or credential rejection.
-    /// Keys are destroyed; the record is the tombstone.
-    Revoked,
+pub enum PairingState {
+    /// Stored, and the peer has not confirmed its own storage: serves
+    /// nothing.
+    Unconfirmed,
+    /// Serves sessions and operations.
+    Serving,
+    /// Forgotten here while no session was open: serves nothing, and keeps
+    /// its keys only for the `pairing_revoked` close of its next session.
+    /// The engine's record holds when.
+    Forgotten,
+    /// Revoked: the keys are destroyed.
+    Revoked {
+        /// Whether the peer revoked it with its `pairing_revoked` close.
+        by_peer: bool,
+    },
 }
 
 /// One stored peer relationship.
-#[derive(Clone)]
 pub struct PairingRecord {
-    /// The derived pair identifier.
-    pub pair_id: PairId,
-    /// The local pair-specific private key; emptied on revocation.
-    pub local_private: Zeroizing<Vec<u8>>,
-    /// The local pair-specific public key.
-    pub local_public: Vec<u8>,
-    /// The peer's pair-specific public key; emptied on revocation.
-    pub peer_public: Vec<u8>,
-    /// The granted credential profiles.
-    pub granted_profiles: Vec<String>,
-    /// The grants hash bound into every session prologue.
-    pub grants_hash: [u8; 32],
-    /// The peer's display label. A label, not an identity.
-    pub peer_display_name: String,
-    /// The peer's platform label.
-    pub peer_platform: String,
-    /// Whether the peer confirmed that it stored its record (RAPP v26.10.18
-    /// section 4.3 item 4). Only a confirmed record opens sessions.
-    pub storage_confirmed: bool,
-    /// The fail-stop disposition.
-    pub disposition: PairingDisposition,
-    /// Whether the peer initiated the revocation.
-    pub peer_initiated_termination: bool,
-    /// Consecutive failed session-candidate authentications, for the
-    /// re-pairing hint of Section 14.6.
-    pub candidate_failures: u32,
-    /// Cached DER bytes of the authentication certificate, if populated.
-    pub auth_cert: Option<Vec<u8>>,
-    /// Cached DER bytes of the signature certificate, if populated.
-    pub signature_cert: Option<Vec<u8>>,
-    /// Cached DER bytes of the root CA certificate, if populated.
-    pub root_ca: Option<Vec<u8>>,
-    /// Cached DER bytes of the intermediate CA certificate, if populated.
-    pub intermediate_ca: Option<Vec<u8>>,
+    keys: Keys,
+    peer: PeerIntroduction,
+    certificates: Certificates,
+}
+
+/// The certificates a pairing's card answered with, and the chain a
+/// development custodian is installed with.
+struct Certificates {
+    authentication: Option<OwnedCert>,
+    signature: Option<OwnedCert>,
+    root: Option<OwnedCert>,
+    intermediate: Option<OwnedCert>,
+}
+
+impl Certificates {
+    /// No certificate known yet.
+    const NONE: Self = Self {
+        authentication: None,
+        signature: None,
+        root: None,
+        intermediate: None,
+    };
 }
 
 impl core::fmt::Debug for PairingRecord {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
             .debug_struct("PairingRecord")
-            .field("pair_id", &self.pair_id)
-            .field("storage_confirmed", &self.storage_confirmed)
-            .field("disposition", &self.disposition)
+            .field("pair_id", &self.pair_id())
+            .field("state", &self.state())
             .finish_non_exhaustive()
     }
 }
 
-/// Default display name when peer display name is unspecified.
-pub const DEFAULT_PEER_DISPLAY_NAME: &str = "Peer";
-/// Default platform when peer platform is unspecified.
-pub const DEFAULT_PEER_PLATFORM: &str = "Unknown";
-
 impl PairingRecord {
-    /// Convert to canonical core [`refineid_rapp::PairRecord`].
-    ///
-    /// # Errors
-    /// Returns [`refineid_rapp::PairRecordError`] if keys or profiles are invalid.
-    pub fn to_core_pair_record(
-        &self,
-    ) -> Result<refineid_rapp::PairRecord, refineid_rapp::PairRecordError> {
-        let local_private: [u8; 32] = self
-            .local_private
-            .as_slice()
-            .try_into()
-            .map_err(|_| refineid_rapp::PairRecordError::InvalidStaticKey)?;
-        let local_public: [u8; 32] = self
-            .local_public
-            .as_slice()
-            .try_into()
-            .map_err(|_| refineid_rapp::PairRecordError::InvalidStaticKey)?;
-        let peer_public: [u8; 32] = self
-            .peer_public
-            .as_slice()
-            .try_into()
-            .map_err(|_| refineid_rapp::PairRecordError::InvalidStaticKey)?;
-        let mut profiles: Vec<refineid_rapp::ProfileName> = Vec::new();
-        for p in &self.granted_profiles {
-            let parsed = refineid_rapp::ProfileName::parse(p)
-                .ok_or(refineid_rapp::PairRecordError::NoNegotiatedProfiles)?;
-            profiles.push(parsed);
-        }
-        if profiles.is_empty() {
-            return Err(refineid_rapp::PairRecordError::NoNegotiatedProfiles);
-        }
-        let grants_hash = refineid_rapp::GrantsHash::from_array(self.grants_hash);
-        refineid_rapp::PairRecord::new(
-            self.pair_id,
-            refineid_rapp::EndpointRole::Requester,
-            local_private,
-            local_public,
-            peer_public,
-            grants_hash,
-            profiles,
-            0,
-        )
-    }
-
-    /// Construct from canonical core [`refineid_rapp::PairRecord`].
+    /// The record of a pairing the engine just stored, with the labels its
+    /// peer introduced itself with and no certificates yet.
     #[must_use]
-    pub fn from_core_pair_record(
-        core: &refineid_rapp::PairRecord,
-        peer_display_name: String,
-        peer_platform: String,
-    ) -> Self {
+    pub const fn new(record: PairRecord, peer: PeerIntroduction) -> Self {
         Self {
-            pair_id: core.pair_id(),
-            local_private: Zeroizing::new(core.local_static_private().to_vec()),
-            local_public: core.local_static_public().to_vec(),
-            peer_public: core.remote_static_public().to_vec(),
-            granted_profiles: core
-                .profiles()
-                .iter()
-                .map(|p| p.as_str().to_owned())
-                .collect(),
-            grants_hash: *core.grants_hash().as_bytes(),
-            peer_display_name,
-            peer_platform,
-            storage_confirmed: core.is_storage_confirmed(),
-            disposition: PairingDisposition::Paired,
-            peer_initiated_termination: false,
-            candidate_failures: 0,
-            auth_cert: None,
-            signature_cert: None,
-            root_ca: None,
-            intermediate_ca: None,
-        }
-    }
-}
-
-/// Adapter bridging [`PairingStore`] to canonical core [`refineid_rapp::PairStore`].
-#[derive(Debug)]
-pub struct CorePairStoreAdapter<'a, S: PairingStore> {
-    /// Backing pairing store.
-    pub inner: &'a mut S,
-}
-
-impl<'a, S: PairingStore> CorePairStoreAdapter<'a, S> {
-    /// Creates a new adapter over the given pairing store.
-    pub const fn new(inner: &'a mut S) -> Self {
-        Self { inner }
-    }
-}
-
-impl<S: PairingStore> refineid_rapp::PairStore for CorePairStoreAdapter<'_, S> {
-    type Error = StoreError;
-
-    fn load(&mut self, pair_id: PairId) -> Result<Option<refineid_rapp::PairRecord>, Self::Error> {
-        match self.inner.get(pair_id) {
-            Ok(rec) => {
-                if rec.disposition == PairingDisposition::Paired && rec.storage_confirmed {
-                    rec.to_core_pair_record()
-                        .map(Some)
-                        .map_err(|_| StoreError::Unknown)
-                } else {
-                    Ok(None)
-                }
-            }
-            Err(StoreError::Unknown) => Ok(None),
-            Err(e) => Err(e),
+            keys: Keys::Held(record),
+            peer,
+            certificates: Certificates::NONE,
         }
     }
 
-    fn insert(
-        &mut self,
-        record: refineid_rapp::PairRecord,
-    ) -> Result<(), refineid_rapp::PairStoreError<Self::Error>> {
-        let (display_name, platform) = self.inner.get(record.pair_id()).map_or_else(
-            |_| {
-                (
-                    DEFAULT_PEER_DISPLAY_NAME.to_owned(),
-                    DEFAULT_PEER_PLATFORM.to_owned(),
-                )
+    /// A revoked record as storage holds it.
+    pub(crate) const fn revoked(pair_id: PairId, by_peer: bool, peer: PeerIntroduction) -> Self {
+        Self {
+            keys: Keys::Revoked { pair_id, by_peer },
+            peer,
+            certificates: Certificates::NONE,
+        }
+    }
+
+    /// The pair identifier.
+    #[must_use]
+    pub const fn pair_id(&self) -> PairId {
+        match &self.keys {
+            Keys::Held(record) => record.pair_id(),
+            Keys::Revoked { pair_id, .. } => *pair_id,
+        }
+    }
+
+    /// Where the pairing stands.
+    #[must_use]
+    pub const fn state(&self) -> PairingState {
+        match &self.keys {
+            Keys::Revoked { by_peer, .. } => PairingState::Revoked { by_peer: *by_peer },
+            Keys::Held(record) => match record.forgotten_at_ms() {
+                Some(_) => PairingState::Forgotten,
+                None if record.is_storage_confirmed() => PairingState::Serving,
+                None => PairingState::Unconfirmed,
             },
-            |r| (r.peer_display_name.clone(), r.peer_platform.clone()),
-        );
-        let pairing_record = PairingRecord::from_core_pair_record(&record, display_name, platform);
-        self.inner
-            .insert(pairing_record)
-            .map_err(refineid_rapp::PairStoreError::Backend)
-    }
-
-    fn revoke(
-        &mut self,
-        tombstone: refineid_rapp::PairTombstone,
-    ) -> Result<(), refineid_rapp::PairStoreError<Self::Error>> {
-        self.inner
-            .update(tombstone.pair_id, &mut |r| {
-                r.disposition = PairingDisposition::Revoked;
-                r.local_private = Zeroizing::new(Vec::new());
-                r.peer_public = Vec::new();
-            })
-            .map_err(refineid_rapp::PairStoreError::Backend)
-    }
-
-    fn is_revoked(&mut self, pair_id: PairId) -> Result<bool, Self::Error> {
-        match self.inner.get(pair_id) {
-            Ok(rec) => Ok(rec.disposition == PairingDisposition::Revoked),
-            Err(StoreError::Unknown) => Ok(false),
-            Err(e) => Err(e),
         }
+    }
+
+    /// Whether the pairing serves sessions and operations: it holds its
+    /// keys, the peer confirmed its storage, and its user has not forgotten
+    /// it.
+    #[must_use]
+    pub const fn serves(&self) -> bool {
+        matches!(self.state(), PairingState::Serving)
+    }
+
+    /// Whether the pairing was forgotten here and still owes the peer its
+    /// `pairing_revoked` close (section 4.6 item 2). Only a pairing the peer
+    /// confirmed is told.
+    #[must_use]
+    pub const fn owes_revocation_notice(&self) -> bool {
+        match &self.keys {
+            Keys::Held(record) => {
+                record.is_storage_confirmed() && record.forgotten_at_ms().is_some()
+            }
+            Keys::Revoked { .. } => false,
+        }
+    }
+
+    /// The engine's record of a pairing that serves.
+    #[must_use]
+    pub const fn serving_record(&self) -> Option<&PairRecord> {
+        match &self.keys {
+            Keys::Held(record)
+                if record.is_storage_confirmed() && record.forgotten_at_ms().is_none() =>
+            {
+                Some(record)
+            }
+            Keys::Held(_) | Keys::Revoked { .. } => None,
+        }
+    }
+
+    /// The engine's record, while the keys are held.
+    #[must_use]
+    pub const fn pair_record(&self) -> Option<&PairRecord> {
+        match &self.keys {
+            Keys::Held(record) => Some(record),
+            Keys::Revoked { .. } => None,
+        }
+    }
+
+    /// The profiles the pairing granted; none once revoked.
+    #[must_use]
+    pub fn granted_profiles(&self) -> &[ProfileName] {
+        self.pair_record().map_or(&[], PairRecord::profiles)
+    }
+
+    /// The labels the peer introduced itself with.
+    #[must_use]
+    pub const fn peer(&self) -> &PeerIntroduction {
+        &self.peer
+    }
+
+    /// The card's authentication certificate as the phone last answered it.
+    #[must_use]
+    pub const fn authentication_certificate(&self) -> Option<&OwnedCert> {
+        self.certificates.authentication.as_ref()
+    }
+
+    /// The card's signature certificate as the phone last answered it.
+    #[must_use]
+    pub const fn signature_certificate(&self) -> Option<&OwnedCert> {
+        self.certificates.signature.as_ref()
+    }
+
+    /// The root certificate a development custodian's chain is installed
+    /// with.
+    #[must_use]
+    pub const fn root_certificate(&self) -> Option<&OwnedCert> {
+        self.certificates.root.as_ref()
+    }
+
+    /// The intermediate certificate a development custodian's chain is
+    /// installed with.
+    #[must_use]
+    pub const fn intermediate_certificate(&self) -> Option<&OwnedCert> {
+        self.certificates.intermediate.as_ref()
+    }
+
+    /// Keeps the card's authentication certificate.
+    pub fn remember_authentication_certificate(&mut self, certificate: OwnedCert) {
+        self.certificates.authentication = Some(certificate);
+    }
+
+    /// Keeps the card's signature certificate.
+    pub fn remember_signature_certificate(&mut self, certificate: OwnedCert) {
+        self.certificates.signature = Some(certificate);
+    }
+
+    /// Keeps a development custodian's root certificate.
+    pub fn remember_root_certificate(&mut self, certificate: OwnedCert) {
+        self.certificates.root = Some(certificate);
+    }
+
+    /// Keeps a development custodian's intermediate certificate.
+    pub fn remember_intermediate_certificate(&mut self, certificate: OwnedCert) {
+        self.certificates.intermediate = Some(certificate);
+    }
+
+    /// Records the peer's storage confirmation: the engine's record becomes
+    /// confirmed (section 4.3 item 4). A record of another pairing, or one
+    /// whose keys are gone, stays unconfirmed or loses its keys.
+    pub(crate) fn confirm_storage(&mut self, active: ActivePairing) -> Result<(), PairingError> {
+        let placeholder = Keys::Revoked {
+            pair_id: self.pair_id(),
+            by_peer: false,
+        };
+        match core::mem::replace(&mut self.keys, placeholder) {
+            Keys::Held(record) => {
+                self.keys = Keys::Held(active.confirm(record)?);
+                Ok(())
+            }
+            revoked @ Keys::Revoked { .. } => {
+                self.keys = revoked;
+                Err(PairingError::StorageUnconfirmed)
+            }
+        }
+    }
+
+    /// The user forgets the pairing at `at_ms` while no session is open:
+    /// it serves nothing and keeps its keys for the close (section 4.6 item
+    /// 2). A pairing already forgotten keeps its first time.
+    fn forget(&mut self, at_ms: u64) {
+        let pair_id = self.pair_id();
+        let placeholder = Keys::Revoked {
+            pair_id,
+            by_peer: false,
+        };
+        self.keys = match core::mem::replace(&mut self.keys, placeholder) {
+            Keys::Held(record) if record.forgotten_at_ms().is_none() => {
+                Keys::Held(record.forgotten(at_ms))
+            }
+            keys => keys,
+        };
+    }
+
+    /// Destroys the keys and the certificates; the labels stay so the user
+    /// is told (section 4.6 items 3 and 4).
+    fn revoke(&mut self, by_peer: bool) {
+        self.keys = Keys::Revoked {
+            pair_id: self.pair_id(),
+            by_peer,
+        };
+        self.certificates = Certificates::NONE;
     }
 }
 
@@ -251,7 +303,7 @@ pub enum StoreError {
 
 /// Durable storage for pairing records.
 pub trait PairingStore {
-    /// Stores a new record atomically.
+    /// Stores a new record atomically, in place of one with its identifier.
     ///
     /// # Errors
     ///
@@ -276,7 +328,7 @@ pub trait PairingStore {
         change: &mut dyn FnMut(&mut PairingRecord),
     ) -> Result<(), StoreError>;
 
-    /// Removes one record entirely (the user's forget action).
+    /// Removes one record entirely.
     ///
     /// # Errors
     ///
@@ -287,29 +339,92 @@ pub trait PairingStore {
     fn pair_ids(&self) -> Vec<PairId>;
 }
 
-/// Revokes every stored pairing whose peer never confirmed its storage.
+/// Revokes a pairing: its keys are destroyed and the record stays so the
+/// user is told, as one the peer revoked when `by_peer` (section 4.6 items
+/// 3 and 4).
+///
+/// # Errors
+///
+/// Fails when no record exists or the write is refused.
+pub fn revoke_pairing<S: PairingStore + ?Sized>(
+    store: &mut S,
+    pair_id: PairId,
+    by_peer: bool,
+) -> Result<(), StoreError> {
+    store.update(pair_id, &mut |record| record.revoke(by_peer))
+}
+
+/// The user's forget action on a pairing with no open session (section
+/// 4.6).
+///
+/// A confirmed pairing keeps its keys for the `pairing_revoked` close and
+/// serves nothing from `now_ms` on. A pairing the peer never confirmed is
+/// removed with its keys and nobody is told. A revoked record is cleared,
+/// and one already forgotten stays as it is.
+///
+/// # Errors
+///
+/// Fails when no record exists or the write is refused.
+pub fn forget_pairing<S: PairingStore + ?Sized>(
+    store: &mut S,
+    pair_id: PairId,
+    now_ms: u64,
+) -> Result<(), StoreError> {
+    match store.get(pair_id)?.state() {
+        PairingState::Unconfirmed | PairingState::Revoked { .. } => store.remove(pair_id),
+        PairingState::Forgotten => Ok(()),
+        PairingState::Serving => store.update(pair_id, &mut |record| record.forget(now_ms)),
+    }
+}
+
+/// Removes every stored pairing whose peer never confirmed its storage,
+/// keys included.
 ///
 /// Such a record was written inside a confirmation window this endpoint
-/// did not complete (RAPP v26.10.18 section 4.3 item 4). Keys are destroyed
-/// and the tombstone stays. Returns the revoked pair identifiers.
-pub fn revoke_unconfirmed<S: PairingStore>(store: &mut S) -> Vec<PairId> {
+/// did not complete (RAPP v26.10.21 section 4.3 item 4); its keys are
+/// destroyed and nobody is told (section 4.6 item 3). Returns the removed
+/// pair identifiers.
+pub fn remove_unconfirmed<S: PairingStore + ?Sized>(store: &mut S) -> Vec<PairId> {
     let unconfirmed: Vec<PairId> = store
         .pair_ids()
         .into_iter()
         .filter(|pair_id| {
-            store.get(*pair_id).is_ok_and(|record| {
-                record.disposition == PairingDisposition::Paired && !record.storage_confirmed
-            })
+            store
+                .get(*pair_id)
+                .is_ok_and(|record| record.state() == PairingState::Unconfirmed)
         })
         .collect();
     for pair_id in &unconfirmed {
-        let _ = store.update(*pair_id, &mut |record| {
-            record.disposition = PairingDisposition::Revoked;
-            record.local_private = Zeroizing::new(Vec::new());
-            record.peer_public = Vec::new();
-        });
+        let _ = store.remove(*pair_id);
     }
     unconfirmed
+}
+
+/// Revokes, untold, every forgotten pairing whose notice window has passed
+/// at `now_ms`.
+///
+/// Its `pairing_revoked` close was not delivered within 30 days of the
+/// forget (RAPP v26.10.21 section 4.6 item 3). Returns the revoked pair
+/// identifiers.
+pub fn expire_revocation_notices<S: PairingStore + ?Sized>(
+    store: &mut S,
+    now_ms: u64,
+) -> Vec<PairId> {
+    let expired: Vec<PairId> = store
+        .pair_ids()
+        .into_iter()
+        .filter(|pair_id| {
+            store.get(*pair_id).is_ok_and(|record| {
+                record
+                    .pair_record()
+                    .is_some_and(|keys| keys.revocation_notice_expired(now_ms))
+            })
+        })
+        .collect();
+    for pair_id in &expired {
+        let _ = revoke_pairing(store, *pair_id, false);
+    }
+    expired
 }
 
 /// An in-memory pairing store for tests and composition.
@@ -328,7 +443,8 @@ impl MemoryPairingStore {
 
 impl PairingStore for MemoryPairingStore {
     fn insert(&mut self, record: PairingRecord) -> Result<(), StoreError> {
-        self.records.retain(|entry| entry.pair_id != record.pair_id);
+        let pair_id = record.pair_id();
+        self.records.retain(|entry| entry.pair_id() != pair_id);
         self.records.push(record);
         Ok(())
     }
@@ -336,7 +452,7 @@ impl PairingStore for MemoryPairingStore {
     fn get(&self, pair_id: PairId) -> Result<&PairingRecord, StoreError> {
         self.records
             .iter()
-            .find(|entry| entry.pair_id == pair_id)
+            .find(|entry| entry.pair_id() == pair_id)
             .ok_or(StoreError::Unknown)
     }
 
@@ -348,7 +464,7 @@ impl PairingStore for MemoryPairingStore {
         let record = self
             .records
             .iter_mut()
-            .find(|entry| entry.pair_id == pair_id)
+            .find(|entry| entry.pair_id() == pair_id)
             .ok_or(StoreError::Unknown)?;
         change(record);
         Ok(())
@@ -356,7 +472,7 @@ impl PairingStore for MemoryPairingStore {
 
     fn remove(&mut self, pair_id: PairId) -> Result<(), StoreError> {
         let before = self.records.len();
-        self.records.retain(|entry| entry.pair_id != pair_id);
+        self.records.retain(|entry| entry.pair_id() != pair_id);
         if self.records.len() == before {
             return Err(StoreError::Unknown);
         }
@@ -367,90 +483,100 @@ impl PairingStore for MemoryPairingStore {
         self.records
             .iter()
             .rev()
-            .map(|entry| entry.pair_id)
+            .map(PairingRecord::pair_id)
             .collect()
     }
 }
 
-/// One journaled operation on the requester.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct JournalEntry {
-    /// The operation identifier.
-    pub operation_id: OperationId,
-    /// The pairing the operation ran under.
-    pub pair_id: PairId,
-    /// The request hash of the journaled request.
-    pub request_hash: [u8; 32],
-    /// The credential profile name.
-    pub profile: String,
-    /// The profile action name.
-    pub action: String,
-    /// The current requester-projection state.
-    pub state: OperationState,
-    /// Whether automatic retry is permanently forbidden (`INV-06`).
-    pub retry_prohibited: bool,
-    /// The custodian's state from a section 8.3 status answer,
-    /// stored as an annotation that transitions nothing.
-    pub reconciled_proxy_state: Option<String>,
-}
+/// Records built from synthetic keys for this crate's tests.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test fixtures are constructed to be infallible"
+)]
+pub(crate) mod fixtures {
+    use refineid_lib_core::x509::OwnedCert;
+    use refineid_rapp::noise::x25519_public_key;
+    use refineid_rapp::{
+        EndpointRole, PairRecord, ProfileName, WireValue, X25519_KEY_SIZE,
+        decode_deterministic_cbor, encode_deterministic_cbor,
+    };
 
-/// The requester's durable operation journal.
-pub trait OperationJournal {
-    /// Creates or replaces the entry for one operation.
-    ///
-    /// The write must be durable before the call returns: the request is
-    /// journaled before `operation.request` is sent.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the backing store refuses the write.
-    fn record(&mut self, entry: JournalEntry) -> Result<(), StoreError>;
+    use super::PairingRecord;
+    use crate::engine::PeerIntroduction;
+    use crate::ids::PairId;
 
-    /// Reads the entry for one operation.
-    ///
-    /// # Errors
-    ///
-    /// Fails when no entry exists.
-    fn get(&self, operation_id: OperationId) -> Result<&JournalEntry, StoreError>;
+    /// A synthetic requester static private key.
+    const REQUESTER_PRIVATE: [u8; X25519_KEY_SIZE] = *b"synthetic requester private key.";
+    /// A synthetic custodian static private key.
+    const CUSTODIAN_PRIVATE: [u8; X25519_KEY_SIZE] = *b"synthetic custodian private key.";
+    /// The certificate of the CLI's mock custodian, a self-issued test
+    /// certificate checked in as `refineid-rapp-cli/src/mock_cert.der`.
+    pub const MOCK_CERTIFICATE_DER: &[u8] =
+        include_bytes!("../../refineid-rapp-cli/src/mock_cert.der");
+    /// The pairing creation time the fixtures record.
+    const CREATED_AT_MS: u64 = 1_700_000_000_000;
 
-    /// The non-terminal entries needing section 8.3 reconciliation.
-    fn open_entries(&self) -> Vec<&JournalEntry>;
-}
+    /// A synthetic pair identifier.
+    pub const FIRST_PAIR: PairId = PairId::from_array(*b"synthetic pair 1");
+    /// Another synthetic pair identifier.
+    pub const SECOND_PAIR: PairId = PairId::from_array(*b"synthetic pair 2");
 
-/// An in-memory journal for tests and composition.
-#[derive(Debug, Default)]
-pub struct MemoryJournal {
-    entries: Vec<JournalEntry>,
-}
-
-impl MemoryJournal {
-    /// Creates an empty journal.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl OperationJournal for MemoryJournal {
-    fn record(&mut self, entry: JournalEntry) -> Result<(), StoreError> {
-        self.entries
-            .retain(|existing| existing.operation_id != entry.operation_id);
-        self.entries.push(entry);
-        Ok(())
+    /// The labels the fixtures' phone introduces itself with.
+    pub fn phone() -> PeerIntroduction {
+        PeerIntroduction {
+            display_name: "Phone".to_owned(),
+            platform: "iOS".to_owned(),
+        }
     }
 
-    fn get(&self, operation_id: OperationId) -> Result<&JournalEntry, StoreError> {
-        self.entries
-            .iter()
-            .find(|entry| entry.operation_id == operation_id)
-            .ok_or(StoreError::Unknown)
+    /// The engine's record of a confirmed requester pairing granting
+    /// `profiles`.
+    pub fn pair_record(pair_id: PairId, profiles: Vec<ProfileName>) -> PairRecord {
+        let grants_hash = refineid_rapp::compute_grants_hash(&profiles).unwrap();
+        PairRecord::new(
+            pair_id,
+            EndpointRole::Requester,
+            REQUESTER_PRIVATE,
+            x25519_public_key(&REQUESTER_PRIVATE),
+            x25519_public_key(&CUSTODIAN_PRIVATE),
+            grants_hash,
+            profiles,
+            CREATED_AT_MS,
+        )
+        .unwrap()
     }
 
-    fn open_entries(&self) -> Vec<&JournalEntry> {
-        self.entries
-            .iter()
-            .filter(|entry| !entry.state.is_terminal())
-            .collect()
+    /// A confirmed pairing granting card status.
+    pub fn record(pair_id: PairId) -> PairingRecord {
+        PairingRecord::new(pair_record(pair_id, vec![ProfileName::CardStatus]), phone())
+    }
+
+    /// A pairing granting card status whose peer has not confirmed its
+    /// storage, as storage holds one: the engine builds an unconfirmed
+    /// record only inside a pairing or from its own encoding.
+    pub fn unconfirmed_record(pair_id: PairId) -> PairingRecord {
+        let encoded =
+            refineid_rapp::encode_pair_record(&pair_record(pair_id, vec![ProfileName::CardStatus]))
+                .unwrap();
+        let WireValue::Map(mut fields) = decode_deterministic_cbor(&encoded).unwrap() else {
+            panic!("an encoded pair record is a map");
+        };
+        fields.insert(STORAGE_CONFIRMED_FIELD.to_owned(), WireValue::Bool(false));
+        let unconfirmed = encode_deterministic_cbor(&WireValue::Map(fields)).unwrap();
+        PairingRecord::new(
+            refineid_rapp::decode_pair_record(&unconfirmed).unwrap(),
+            phone(),
+        )
+    }
+
+    /// The field of the engine's record encoding that holds the storage
+    /// confirmation.
+    const STORAGE_CONFIRMED_FIELD: &str = "storage_confirmed";
+
+    /// The mock custodian's certificate.
+    pub fn certificate() -> OwnedCert {
+        OwnedCert::from_der(MOCK_CERTIFICATE_DER).unwrap()
     }
 }
 
@@ -460,109 +586,127 @@ impl OperationJournal for MemoryJournal {
     reason = "test fixtures are constructed to be infallible"
 )]
 mod tests {
+    use super::fixtures::{FIRST_PAIR, SECOND_PAIR, certificate, record, unconfirmed_record};
     use super::{
-        JournalEntry, MemoryJournal, MemoryPairingStore, OperationJournal, OperationState,
-        PairingDisposition, PairingRecord, PairingStore, StoreError,
+        MemoryPairingStore, PairingState, PairingStore, StoreError, expire_revocation_notices,
+        forget_pairing, remove_unconfirmed, revoke_pairing,
     };
-    use crate::ids::{OperationId, PairId};
-    use zeroize::Zeroizing;
+    use refineid_rapp::REVOCATION_NOTICE_MS;
 
-    fn record(pair_id: PairId) -> PairingRecord {
-        PairingRecord {
-            pair_id,
-            local_private: Zeroizing::new(vec![1; 32]),
-            local_public: vec![2; 32],
-            peer_public: vec![3; 32],
-            granted_profiles: vec!["fi.refineid.card-status.v1".into()],
-            grants_hash: [4; 32],
-            peer_display_name: "Phone".into(),
-            peer_platform: "iOS".into(),
-            storage_confirmed: true,
-            disposition: PairingDisposition::Paired,
-            peer_initiated_termination: false,
-            candidate_failures: 0,
-            auth_cert: None,
-            signature_cert: None,
-            root_ca: None,
-            intermediate_ca: None,
-        }
+    /// The wall-clock time the user forgets a pairing in these tests.
+    const FORGOTTEN_AT_MS: u64 = 1_800_000_000_000;
+    /// The last moment before a notice window closes.
+    const JUST_BEFORE_MS: u64 = 1;
+
+    #[test]
+    fn an_unconfirmed_record_is_removed_at_load_and_serves_nothing() {
+        let mut store = MemoryPairingStore::new();
+        store.insert(record(FIRST_PAIR)).unwrap();
+        store.insert(unconfirmed_record(SECOND_PAIR)).unwrap();
+        let pending = store.get(SECOND_PAIR).unwrap();
+        assert_eq!(pending.state(), PairingState::Unconfirmed);
+        assert!(!pending.serves());
+        assert!(!pending.owes_revocation_notice());
+        assert_eq!(remove_unconfirmed(&mut store), vec![SECOND_PAIR]);
+        assert!(matches!(store.get(SECOND_PAIR), Err(StoreError::Unknown)));
+        assert!(store.get(FIRST_PAIR).unwrap().serves());
+        assert!(remove_unconfirmed(&mut store).is_empty());
     }
 
     #[test]
-    fn an_unconfirmed_record_is_revoked_at_load_and_opens_nothing() {
+    fn forgetting_an_unconfirmed_record_removes_it_untold() {
         let mut store = MemoryPairingStore::new();
-        let confirmed = PairId::from_array([7; 16]);
-        let unconfirmed = PairId::from_array([8; 16]);
-        store.insert(record(confirmed)).unwrap();
-        let mut pending = record(unconfirmed);
-        pending.storage_confirmed = false;
-        store.insert(pending).unwrap();
-        {
-            let mut adapter = super::CorePairStoreAdapter::new(&mut store);
-            assert!(
-                refineid_rapp::PairStore::load(&mut adapter, unconfirmed)
-                    .unwrap()
-                    .is_none()
-            );
-            assert!(
-                refineid_rapp::PairStore::load(&mut adapter, confirmed)
-                    .unwrap()
-                    .is_some()
-            );
-        }
-        assert_eq!(super::revoke_unconfirmed(&mut store), vec![unconfirmed]);
-        let revoked = store.get(unconfirmed).unwrap();
-        assert_eq!(revoked.disposition, PairingDisposition::Revoked);
-        assert!(revoked.local_private.is_empty());
-        assert_eq!(
-            store.get(confirmed).unwrap().disposition,
-            PairingDisposition::Paired
-        );
-        assert!(super::revoke_unconfirmed(&mut store).is_empty());
+        store.insert(unconfirmed_record(FIRST_PAIR)).unwrap();
+        forget_pairing(&mut store, FIRST_PAIR, FORGOTTEN_AT_MS).unwrap();
+        assert!(store.pair_ids().is_empty());
     }
 
     #[test]
-    fn pairing_records_round_trip_and_update() {
+    fn a_forgotten_pairing_keeps_its_keys_and_serves_nothing() {
         let mut store = MemoryPairingStore::new();
-        let pair_id = PairId::from_array([7; 16]);
-        store.insert(record(pair_id)).unwrap();
+        store.insert(record(FIRST_PAIR)).unwrap();
+        forget_pairing(&mut store, FIRST_PAIR, FORGOTTEN_AT_MS).unwrap();
+        let forgotten = store.get(FIRST_PAIR).unwrap();
+        assert_eq!(forgotten.state(), PairingState::Forgotten);
+        assert!(!forgotten.serves());
+        assert!(forgotten.owes_revocation_notice());
+        let keys = forgotten.pair_record().unwrap();
+        assert_eq!(keys.forgotten_at_ms(), Some(FORGOTTEN_AT_MS));
+        assert!(keys.serving_profiles().is_empty());
+    }
+
+    #[test]
+    fn forgetting_a_revoked_record_removes_it() {
+        let mut store = MemoryPairingStore::new();
+        store.insert(record(FIRST_PAIR)).unwrap();
+        store.insert(record(SECOND_PAIR)).unwrap();
+        revoke_pairing(&mut store, SECOND_PAIR, true).unwrap();
+        forget_pairing(&mut store, SECOND_PAIR, FORGOTTEN_AT_MS).unwrap();
+        assert_eq!(store.pair_ids(), vec![FIRST_PAIR]);
+    }
+
+    #[test]
+    fn a_revocation_destroys_the_keys_and_certificates_and_keeps_the_record() {
+        let mut store = MemoryPairingStore::new();
+        store.insert(record(FIRST_PAIR)).unwrap();
         store
-            .update(pair_id, &mut |entry| entry.candidate_failures += 1)
+            .update(FIRST_PAIR, &mut |entry| {
+                entry.remember_authentication_certificate(certificate());
+            })
             .unwrap();
-        assert_eq!(store.get(pair_id).unwrap().candidate_failures, 1);
-        store.remove(pair_id).unwrap();
-        assert!(matches!(store.get(pair_id), Err(StoreError::Unknown)));
+        revoke_pairing(&mut store, FIRST_PAIR, true).unwrap();
+        let revoked = store.get(FIRST_PAIR).unwrap();
+        assert_eq!(revoked.state(), PairingState::Revoked { by_peer: true });
+        assert!(revoked.pair_record().is_none());
+        assert!(revoked.authentication_certificate().is_none());
+        assert!(revoked.granted_profiles().is_empty());
+        assert!(!revoked.serves());
+        assert!(!revoked.owes_revocation_notice());
     }
 
     #[test]
-    fn journal_reports_open_entries_only() {
-        let mut journal = MemoryJournal::new();
-        let open = JournalEntry {
-            operation_id: OperationId::from_array([1; 16]),
-            pair_id: PairId::from_array([7; 16]),
-            request_hash: [0; 32],
-            profile: "fi.refineid.authentication.v1".into(),
-            action: "sign".into(),
-            state: OperationState::Committed,
-            retry_prohibited: false,
-            reconciled_proxy_state: None,
-        };
-        let done = JournalEntry {
-            operation_id: OperationId::from_array([2; 16]),
-            state: OperationState::Completed,
-            ..open.clone()
-        };
-        journal.record(open.clone()).unwrap();
-        journal.record(done).unwrap();
-        let open_entries = journal.open_entries();
-        assert_eq!(open_entries.len(), 1);
-        assert_eq!(open_entries[0].operation_id, open.operation_id);
+    fn an_undelivered_notice_expires_after_its_window() {
+        let mut store = MemoryPairingStore::new();
+        store.insert(record(FIRST_PAIR)).unwrap();
+        forget_pairing(&mut store, FIRST_PAIR, FORGOTTEN_AT_MS).unwrap();
+        let window_end = FORGOTTEN_AT_MS + REVOCATION_NOTICE_MS;
+        assert!(expire_revocation_notices(&mut store, window_end - JUST_BEFORE_MS).is_empty());
+        assert_eq!(
+            expire_revocation_notices(&mut store, window_end),
+            vec![FIRST_PAIR]
+        );
+        assert_eq!(
+            store.get(FIRST_PAIR).unwrap().state(),
+            PairingState::Revoked { by_peer: false }
+        );
     }
 
     #[test]
-    fn pairing_record_debug_redacts_keys() {
-        let text = format!("{:?}", record(PairId::from_array([7; 16])));
-        assert!(!text.contains('1'));
+    fn records_are_replaced_updated_and_removed() {
+        let mut store = MemoryPairingStore::new();
+        store.insert(record(FIRST_PAIR)).unwrap();
+        store
+            .update(FIRST_PAIR, &mut |entry| {
+                entry.remember_authentication_certificate(certificate());
+            })
+            .unwrap();
+        assert!(
+            store
+                .get(FIRST_PAIR)
+                .unwrap()
+                .authentication_certificate()
+                .is_some()
+        );
+        store.insert(record(FIRST_PAIR)).unwrap();
+        assert_eq!(store.pair_ids(), vec![FIRST_PAIR]);
+        store.remove(FIRST_PAIR).unwrap();
+        assert!(matches!(store.get(FIRST_PAIR), Err(StoreError::Unknown)));
+    }
+
+    #[test]
+    fn a_record_prints_no_keys() {
+        let text = format!("{:?}", record(FIRST_PAIR));
+        assert!(!text.contains("synthetic requester"));
         assert!(text.contains("pair_id"));
     }
 }

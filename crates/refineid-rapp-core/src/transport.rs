@@ -1,16 +1,14 @@
-//! The transport-profile contract of specification Section 16.
+//! The transport-profile contract of RAPP v26.10.21 section 2.2.
 //!
-//! A transport delivers bounded binary frames in order, reports EOF and
-//! failure distinctly, and names the candidate both endpoints later echo
-//! inside the first authenticated message. Nothing here contributes
-//! identity: every channel runs the RAPP Noise handshake on top, and an
-//! already encrypted underlay changes nothing.
+//! A transport delivers bounded binary frames in order, reports EOF, the
+//! receive deadline and failure distinctly, and names the registered
+//! transport profile both endpoints bind into their handshakes. Nothing
+//! here contributes identity: every channel runs the RAPP Noise handshake on
+//! top, and an already encrypted underlay changes nothing.
 //!
 //! Two implementations ship with the crate: an in-memory pair for loopback
-//! conformance tests, and a length-prefixed byte-stream framing used by the
-//! experimental TCP profile `fi.refineid.stream.v1`. The named design
-//! targets of Section 16 (`local-quic-v1`, `relay-websocket-v1`) can be
-//! added behind the same trait without touching protocol code.
+//! conformance tests, and the length-prefixed byte-stream framing of the
+//! stream profile `fi.refineid.stream` (section 2.2.2).
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -20,8 +18,13 @@ use std::time::Duration;
 use crate::limits;
 pub use refineid_rapp::{BinaryFrame, FrameError};
 
-/// The experimental local byte-stream transport profile name.
+/// The local byte-stream transport profile name.
 pub const STREAM_PROFILE: &str = refineid_rapp::STREAM_PROFILE;
+
+/// How long a frame that has begun to arrive may take to complete: the
+/// silence that ends a session (section 8.3).
+const FRAME_COMPLETION_LIMIT: Duration =
+    Duration::from_millis(refineid_rapp::SESSION_SILENCE_LIMIT_MS);
 
 /// Bytes in the frame length prefix of the byte-stream framing.
 const LENGTH_PREFIX_BYTES: usize = 2;
@@ -73,7 +76,8 @@ pub trait FrameTransport {
     /// The transport profile name for prologue and parameter echo.
     fn profile(&self) -> &str;
 
-    /// The candidate identifier for the parameter echo of Section 8.4.
+    /// The candidate identifier of the transport's offer entry (section
+    /// 4.2).
     fn candidate_id(&self) -> &str;
 }
 
@@ -219,14 +223,15 @@ impl FrameTransport for TcpFrameTransport {
     }
 
     fn receive_frame(&mut self) -> Result<Vec<u8>, TransportError> {
+        let mut began = None;
         let mut prefix = [0u8; LENGTH_PREFIX_BYTES];
-        read_exact_classified(&mut self.stream, &mut prefix)?;
+        read_exact_classified(&mut self.stream, &mut prefix, &mut began)?;
         let length = usize::from(u16::from_be_bytes(prefix));
         if length == 0 {
             return Err(TransportError::Failed);
         }
         let mut frame = vec![0u8; length];
-        read_exact_classified(&mut self.stream, &mut frame)?;
+        read_exact_classified(&mut self.stream, &mut frame, &mut began)?;
         Ok(frame)
     }
 
@@ -269,24 +274,42 @@ impl refineid_rapp::FrameTransport for TcpFrameTransport {
     }
 }
 
-/// Reads exactly one buffer, classifying EOF, deadline, and failure.
-fn read_exact_classified(stream: &mut TcpStream, buffer: &mut [u8]) -> Result<(), TransportError> {
+/// Reads exactly one buffer of a frame, classifying EOF, deadline, and
+/// failure. `began` holds when the frame's first byte arrived: before it,
+/// the receive deadline reports [`TransportError::TimedOut`] and nothing
+/// is lost; after it, the rest of the frame is awaited for at most
+/// [`FRAME_COMPLETION_LIMIT`], and an end of stream truncates the frame
+/// (section 2.2.2).
+fn read_exact_classified(
+    stream: &mut TcpStream,
+    buffer: &mut [u8],
+    began: &mut Option<std::time::Instant>,
+) -> Result<(), TransportError> {
     let mut filled = 0;
     while filled < buffer.len() {
         match stream.read(&mut buffer[filled..]) {
             Ok(0) => {
-                return Err(if filled == 0 {
+                return Err(if began.is_none() {
                     TransportError::Eof
                 } else {
                     TransportError::Failed
                 });
             }
-            Ok(count) => filled += count,
+            Ok(count) => {
+                filled += count;
+                began.get_or_insert_with(std::time::Instant::now);
+            }
             Err(error)
                 if error.kind() == std::io::ErrorKind::WouldBlock
                     || error.kind() == std::io::ErrorKind::TimedOut =>
             {
-                return Err(TransportError::TimedOut);
+                match began {
+                    None => return Err(TransportError::TimedOut),
+                    Some(start) if start.elapsed() >= FRAME_COMPLETION_LIMIT => {
+                        return Err(TransportError::Failed);
+                    }
+                    Some(_) => {}
+                }
             }
             Err(_) => return Err(TransportError::Failed),
         }
@@ -334,6 +357,34 @@ mod tests {
         assert_eq!(server.receive_frame().unwrap(), vec![0xAA; 300]);
         drop(client);
         assert_eq!(server.receive_frame(), Err(TransportError::Eof));
+    }
+
+    #[test]
+    fn a_frame_that_has_begun_survives_a_receive_deadline() {
+        use std::io::Write as _;
+
+        const DEADLINE: Duration = Duration::from_millis(50);
+        const STALL: Duration = Duration::from_millis(150);
+        const FIRST_PART: &[u8] = b"a frame ";
+        const SECOND_PART: &[u8] = b"in two parts";
+        let length = u16::try_from(FIRST_PART.len() + SECOND_PART.len()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let mut server = TcpFrameTransport::new(server, "t-2", DEADLINE).unwrap();
+        assert_eq!(server.receive_frame(), Err(TransportError::TimedOut));
+        client.write_all(&length.to_be_bytes()).unwrap();
+        client.write_all(FIRST_PART).unwrap();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(STALL);
+            client.write_all(SECOND_PART).unwrap();
+            client
+        });
+        assert_eq!(
+            server.receive_frame().unwrap(),
+            [FIRST_PART, SECOND_PART].concat()
+        );
+        drop(writer.join().unwrap());
     }
 
     #[test]

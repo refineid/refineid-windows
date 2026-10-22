@@ -16,6 +16,7 @@ crate-type = ["cdylib"]
 name = "refineid_rapp_ffi"
 
 [dependencies]
+refineid-lib-core.workspace = true
 refineid-rapp-core.workspace = true
 refineid-rapp.workspace = true
 refineid-windows-credential-store.workspace = true

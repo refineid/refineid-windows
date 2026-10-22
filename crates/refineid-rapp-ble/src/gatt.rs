@@ -1,5 +1,5 @@
-//! The GATT central link of `"fi.refineid.rapp.ble.v1"` over the Windows Runtime
-//! (RAPP v26.10.18 sections 4.2, 5.1 to 5.3).
+//! The GATT central link of `"fi.refineid.rapp.ble"` over the Windows Runtime
+//! (RAPP v26.10.21 sections 4.2, 5.1 to 5.3).
 //!
 //! [`BleLink::open`] runs the connection the custodian's peripheral expects,
 //! in order: connect without bonding, discover the RAPP service uncached,

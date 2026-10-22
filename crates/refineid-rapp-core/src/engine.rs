@@ -1,10 +1,17 @@
-//! The requester engine: the workstation side of RAPP v26.10.18.
+//! The requester engine: the workstation side of RAPP v26.10.21.
 //!
-//! The engine drives pairing, sessions, and operations using the canonical
-//! protocol boundaries from `refineid_rapp`.
+//! The engine drives pairing, sessions, and operations through the
+//! canonical protocol boundaries of `refineid_rapp`: the Custodian's
+//! `session.ready` is verified by `SessionAuthentication`, liveness (section
+//! 8.3) runs in `EstablishedSessionRuntime`, and the operations of section 8
+//! in `RequesterOperationEngine`. Nothing of an operation outlives its
+//! session, so nothing of one is stored.
 //!
-//! The engine is blocking and synchronous: the PKCS#11 module, TLS client,
-//! CLI, and GUI call it from their own threads.
+//! The engine is blocking and synchronous: the PKCS#11 module, the key
+//! storage provider's agent, the CLI, and the GUI call it from their own
+//! threads. A session transport receives with [`SESSION_RECEIVE_TICK`] as
+//! its deadline, so a session that hears nothing still sends its ping after
+//! 5 seconds of silence and ends after 30.
 
 use std::time::{Duration, Instant};
 
@@ -17,21 +24,35 @@ const POST_PAKE_HANDSHAKE: Duration = Duration::from_millis(refineid_rapp::POST_
 const POST_PAKE_CONFIRMATION: Duration =
     Duration::from_millis(refineid_rapp::POST_PAKE_CONFIRMATION_MS);
 
-use crate::ids::{OperationId, PairId, RandomIdExt, SessionId};
-use crate::limits;
-use crate::message::{CloseReason, ResultStatus};
+/// Uniform bytes one `CPace` scalar is drawn from (section 6.1.1).
+const CPACE_SCALAR_ENTROPY_BYTES: usize = 64;
+
+/// The receive deadline of a session transport: how long one receive waits
+/// before the session's liveness is advanced. Well below the 5-second ping
+/// interval of section 8.3, so a ping goes out on time.
+pub const SESSION_RECEIVE_TICK: Duration = Duration::from_secs(1);
+
+/// How long a session handshake or the Custodian's first message may stay
+/// silent: the silence that ends an established session (section 8.3).
+const SESSION_SILENCE_LIMIT: Duration =
+    Duration::from_millis(refineid_rapp::SESSION_SILENCE_LIMIT_MS);
+
+use crate::ids::{Challenge, OperationId, PairId, RandomIdExt, SessionId};
+use crate::message::{CardStatusMessage, CloseReason, ResultError, ResultStatus};
 use crate::offer::{OfferError, PairingOffer};
-use crate::operations::{CardOperation, CardOperationResult, OperationError};
+use crate::operations::{CardOperation, CardOperationError, CardOperationResult};
 use crate::store::{
-    CorePairStoreAdapter, JournalEntry, OperationJournal, PairingDisposition, PairingRecord,
-    PairingStore, StoreError,
+    PairingRecord, PairingState, PairingStore, StoreError, expire_revocation_notices,
+    forget_pairing, revoke_pairing,
 };
 use crate::transport::{BinaryFrame, FrameTransport, TransportError};
 use refineid_rapp::{
-    EndpointRole, EstablishedEndpoint, ExplicitUserIntent, LivenessMessage, OperationReference,
-    OperationRequest, OperationState, PairRecord, PairingHandshake, PairingStorage, PingChallenge,
-    ProfileName, ProgressEvent, ProtocolErrorMessage, ReceiveOutcome, ResultError,
-    SessionCloseMessage, SessionHandshake, SessionState, TypedMessage, generate_pair_key_material,
+    ActivePairing, AuthenticatedViolation, EndpointRole, EstablishedSessionRuntime,
+    ExplicitUserIntent, OperationRequest, OperationViolation, PairRecord, PairingHandshake,
+    PairingStorage, PingChallenge, ProfileName, ProgressEvent, ReadyOutcome, RequesterDispatch,
+    RequesterEngineError, RequesterOperationEngine, RuntimePoll, RuntimeReceive,
+    SessionAuthentication, SessionHandshake, TransportProfile, TypedMessage,
+    generate_pair_key_material,
 };
 
 /// Local labels sent inside `pairing.hello`. Labels, not identities.
@@ -90,7 +111,7 @@ pub enum PairingError {
     /// A post-PAKE phase passed its section 3.3 deadline.
     DeadlineExpired,
     /// The peer never confirmed that it stored the pairing (section 4.3
-    /// item 4); the record stored here is revoked.
+    /// item 4); the record stored here is gone with its keys.
     StorageUnconfirmed,
 }
 
@@ -125,24 +146,31 @@ impl core::error::Error for PairingError {}
 pub enum SessionError {
     /// No pairing record exists.
     UnknownPairing,
-    /// The pairing is revoked.
-    NotPaired(PairingDisposition),
+    /// The pairing is revoked; its keys are gone.
+    NotPaired,
+    /// The user forgot the pairing: it serves nothing, and its next session
+    /// carries only the `pairing_revoked` close (section 4.6 item 2).
+    Forgotten,
+    /// The pairing owes no revocation notice: it was not forgotten here.
+    NotForgotten,
     /// The peer never confirmed that it stored the pairing; the record
     /// opens no session (section 4.3 item 4).
     StorageUnconfirmed,
-    /// The session handshake failed. When `suggest_repairing` is true,
-    /// three consecutive candidates failed authentication and re-pairing
-    /// should be suggested without touching stored keys.
-    HandshakeFailed {
-        /// Whether the consecutive-failure threshold was reached.
-        suggest_repairing: bool,
-    },
+    /// The session handshake or the Custodian's first message failed
+    /// authentication. Nothing stored changes (section 10.1 item 1).
+    HandshakeFailed,
     /// The transport failed.
     Transport(TransportError),
-    /// The peer's `session.ready` parameters did not match the local view.
-    ParameterMismatch,
-    /// The peer closed during establishment.
+    /// The Custodian's first message violated the protocol; the sealed
+    /// `protocol_violation` close was delivered and the pairing stays
+    /// (section 10.1 item 2).
+    Violation(AuthenticatedViolation),
+    /// The Custodian closed the session in place of `session.ready`. A
+    /// `pairing_revoked` close has revoked the pairing here (section 4.6
+    /// item 4).
     ClosedByPeer(CloseReason),
+    /// The session is over.
+    Ended(SessionEnd),
     /// A store operation failed.
     Store(StoreError),
     /// The engine encountered an internal fault.
@@ -153,18 +181,15 @@ impl core::fmt::Display for SessionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::UnknownPairing => f.write_str("unknown pairing"),
-            Self::NotPaired(d) => write!(f, "pairing not usable ({d:?})"),
+            Self::NotPaired => f.write_str("the pairing is revoked"),
+            Self::Forgotten => f.write_str("the pairing was forgotten on this computer"),
+            Self::NotForgotten => f.write_str("the pairing owes no revocation notice"),
             Self::StorageUnconfirmed => f.write_str("the phone did not confirm the pairing"),
-            Self::HandshakeFailed { suggest_repairing } => {
-                if *suggest_repairing {
-                    f.write_str("handshake failed (repairing recommended)")
-                } else {
-                    f.write_str("handshake failed")
-                }
-            }
+            Self::HandshakeFailed => f.write_str("handshake failed"),
             Self::Transport(e) => write!(f, "transport error: {e:?}"),
-            Self::ParameterMismatch => f.write_str("session parameter mismatch"),
+            Self::Violation(violation) => write!(f, "protocol violation: {violation:?}"),
             Self::ClosedByPeer(reason) => write!(f, "session closed by peer: {reason:?}"),
+            Self::Ended(end) => write!(f, "session ended: {end:?}"),
             Self::Store(e) => write!(f, "store error: {e:?}"),
             Self::EngineFault => f.write_str("engine fault"),
         }
@@ -180,16 +205,12 @@ pub enum AdmissionError {
     SessionNotHealthy,
     /// The profile is not in the granted set.
     ProfileNotGranted,
-    /// An operation is already active.
+    /// An operation of the session is already live (section 8.1 item 1).
     OperationActive,
-    /// The journal refused the durable write.
-    Store(StoreError),
     /// Identifier generation failed.
     RandomUnavailable,
-    /// A component exceeded an encoding limit.
-    Encoding,
     /// The typed operation violated an invariant.
-    Operation(OperationError),
+    Operation(CardOperationError),
 }
 
 impl core::fmt::Display for AdmissionError {
@@ -198,9 +219,7 @@ impl core::fmt::Display for AdmissionError {
             Self::SessionNotHealthy => f.write_str("session is not healthy"),
             Self::ProfileNotGranted => f.write_str("profile is not in granted set"),
             Self::OperationActive => f.write_str("an operation is already active"),
-            Self::Store(e) => write!(f, "journal error: {e:?}"),
             Self::RandomUnavailable => f.write_str("cryptographic random is unavailable"),
-            Self::Encoding => f.write_str("operation encoding limit exceeded"),
             Self::Operation(e) => write!(f, "operation error: {e:?}"),
         }
     }
@@ -208,22 +227,23 @@ impl core::fmt::Display for AdmissionError {
 
 impl core::error::Error for AdmissionError {}
 
-/// How a finished operation ended, with the session consequence.
+/// How an operation ended (RAPP v26.10.21 section 8).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OperationOutcome {
-    /// The result was delivered, schema-validated, and acknowledged.
+    /// `operation.result` `completed`, with its typed response.
     Completed(CardOperationResult),
-    /// The holder declined on the phone.
-    Denied,
-    /// Cancellation or expiry before physical transmission.
-    Cancelled,
-    /// A policy or card rejection, with the profile's failure name.
-    Rejected(Option<String>),
-    /// The card rejected CAN, PIN 1, or PIN 2; the session closes and the
-    /// pairing is durably revoked on both peers.
-    CredentialRejected,
-    /// Completion cannot be proven; automatic retry is permanently forbidden.
-    Ambiguous,
+    /// `operation.result` `rejected`; `user_cancelled` is the holder
+    /// declining on the phone.
+    Rejected(ResultError),
+    /// `operation.result` `cancelled`: the deadline passed before the card
+    /// was commanded.
+    Cancelled(ResultError),
+    /// An `error` refused the request before admission (`busy`,
+    /// `duplicate_operation`).
+    Refused(ResultError),
+    /// The session ended before a result; the operation is over with it
+    /// (section 8.1 item 3). A new operation needs a new request.
+    Lost,
 }
 
 /// What ended a session, reported after close.
@@ -237,38 +257,64 @@ pub enum SessionEnd {
     TransportLoss,
     /// A frame failed authenticated decryption.
     IntegrityFailure,
-    /// The peer committed an authenticated protocol violation;
-    /// the pairing was revoked immediately.
+    /// The peer's authenticated traffic violated the protocol; the sealed
+    /// `protocol_violation` close was delivered and the pairing stays.
     Violation,
+    /// Nothing arrived from the peer for the silence limit of section 8.3.
+    Silence,
 }
 
-/// One live session and its established endpoint.
+/// One live session: its transport, its liveness, and its operations.
 #[allow(
     clippy::struct_field_names,
     reason = "session_id disambiguates the RAPP session identifier"
 )]
 pub struct Session<Transport: FrameTransport> {
     transport: Transport,
-    endpoint: EstablishedEndpoint,
+    runtime: EstablishedSessionRuntime,
+    operations: RequesterOperationEngine,
     pair_id: PairId,
     session_id: SessionId,
-    state: SessionState,
-    granted_profiles: Vec<String>,
+    granted_profiles: Vec<ProfileName>,
     end: Option<SessionEnd>,
-    card_present: Option<bool>,
+    card: Option<CardStatusMessage>,
 }
 
 impl<Transport: FrameTransport> Session<Transport> {
     /// What the custodian last said about its card on this session
     /// (`card.status`, section 8.4): `None` until it has said anything.
     #[must_use]
-    pub const fn card_present(&self) -> Option<bool> {
-        self.card_present
+    pub const fn card_status(&self) -> Option<CardStatusMessage> {
+        self.card
     }
 
-    /// Records a `card.status` the custodian sent.
-    const fn note_card_status(&mut self, status: refineid_rapp::CardStatusMessage) {
-        self.card_present = Some(status.card_present);
+    /// The pairing this session belongs to.
+    #[must_use]
+    pub const fn pair_id(&self) -> PairId {
+        self.pair_id
+    }
+
+    /// How the session ended, once it has.
+    #[must_use]
+    pub const fn end(&self) -> Option<SessionEnd> {
+        self.end
+    }
+
+    /// Closes the session locally and records how it ended. The live
+    /// operation, if any, is over with it.
+    fn finish(&mut self, end: SessionEnd) {
+        self.runtime.close_session();
+        self.operations.session_closed();
+        self.end = Some(end);
+    }
+
+    /// Sends one sealed frame; a transport that fails ends the session.
+    fn deliver(&mut self, frame: &BinaryFrame) -> bool {
+        if self.transport.send_frame(frame.as_bytes()).is_ok() {
+            return true;
+        }
+        self.finish(SessionEnd::TransportLoss);
+        false
     }
 }
 
@@ -278,33 +324,40 @@ impl<Transport: FrameTransport> core::fmt::Debug for Session<Transport> {
             .debug_struct("Session")
             .field("pair_id", &self.pair_id)
             .field("session_id", &self.session_id)
-            .field("state", &self.state)
             .field("granted_profiles", &self.granted_profiles)
             .field("end", &self.end)
-            .field("card_present", &self.card_present)
+            .field("card", &self.card)
             .finish_non_exhaustive()
     }
 }
 
-/// The requester engine over its two durable stores.
-#[derive(Debug)]
-pub struct Requester<Store: PairingStore, Journal: OperationJournal> {
-    config: RequesterConfig,
-    store: Store,
-    journal: Journal,
+/// One step of a session, as an operation or an idle caller sees it.
+enum Event {
+    /// Nothing for the caller: a liveness exchange, a card status, a
+    /// message for no live operation, or a receive that timed out.
+    Idle,
+    /// The live operation's state changed.
+    Progress(OperationId, ProgressEvent),
+    /// The live operation ended.
+    Finished(OperationId, OperationOutcome),
+    /// The session is over.
+    Ended,
 }
 
-impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
-    /// Creates an engine over its stores.
-    pub const fn new(config: RequesterConfig, store: Store, journal: Journal) -> Self {
-        Self {
-            config,
-            store,
-            journal,
-        }
+/// The requester engine over its durable pairing store.
+#[derive(Debug)]
+pub struct Requester<Store: PairingStore> {
+    config: RequesterConfig,
+    store: Store,
+}
+
+impl<Store: PairingStore> Requester<Store> {
+    /// Creates an engine over its store.
+    pub const fn new(config: RequesterConfig, store: Store) -> Self {
+        Self { config, store }
     }
 
-    /// The pairing store, for inspection and the user's forget action.
+    /// The pairing store, for inspection.
     pub const fn store(&self) -> &Store {
         &self.store
     }
@@ -314,13 +367,8 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         &mut self.store
     }
 
-    /// The operation journal, for status display and reconciliation.
-    pub const fn journal(&self) -> &Journal {
-        &self.journal
-    }
-
     /// Pairs with the custodian showing `code`, as the requester (RAPP
-    /// v26.10.18 sections 3, 4.2 and 6).
+    /// v26.10.21 sections 3, 4.2 and 6).
     ///
     /// The transport is already past its `"pairing"` routing preamble. The
     /// custodian's first frame is its offer; the requester checks it lists
@@ -342,7 +390,7 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         &mut self,
         code: &str,
         mut transport: Transport,
-        confirm: impl FnOnce(&PeerIntroduction, &[String]) -> Option<Vec<String>>,
+        confirm: impl FnOnce(&PeerIntroduction, &[ProfileName]) -> Option<Vec<ProfileName>>,
     ) -> Result<PairId, PairingError> {
         if crate::offer::normalize_pairing_code(code)
             .map(Zeroizing::new)
@@ -361,7 +409,7 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
     }
 
     /// Pairs with the custodian showing `code` over a transport whose offer
-    /// bootstrap is not its first frame (RAPP v26.10.18 section 4.2 step 1:
+    /// bootstrap is not its first frame (RAPP v26.10.21 section 4.2 step 1:
     /// on BLE, a read of the Bootstrap Characteristic).
     ///
     /// The transport is already past its `"pairing"` routing preamble, and
@@ -377,12 +425,12 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         code: &str,
         offer: PairingOffer,
         mut transport: Transport,
-        confirm: impl FnOnce(&PeerIntroduction, &[String]) -> Option<Vec<String>>,
+        confirm: impl FnOnce(&PeerIntroduction, &[ProfileName]) -> Option<Vec<ProfileName>>,
     ) -> Result<PairId, PairingError> {
         let normalized = crate::offer::normalize_pairing_code(code)
             .map(Zeroizing::new)
             .ok_or(PairingError::InvalidCode)?;
-        let profile = refineid_rapp::TransportProfile::parse(transport.profile())
+        let profile = TransportProfile::parse(transport.profile())
             .ok_or(PairingError::UnregisteredTransport)?;
         let candidate_id = offer
             .entry(profile)
@@ -394,7 +442,7 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         let context =
             refineid_rapp::standard_pairing_context_v2(&offer_hash, profile.name(), &candidate_id)
                 .map_err(|_| PairingError::HandshakeFailed)?;
-        let mut entropy = Zeroizing::new([0u8; 64]);
+        let mut entropy = Zeroizing::new([0u8; CPACE_SCALAR_ENTROPY_BYTES]);
         getrandom::fill(entropy.as_mut()).map_err(|_| PairingError::KeyGeneration)?;
         let (initiator, step_one) =
             refineid_rapp::CpaceKc2Initiator::new(&normalized, &context, &offer.offer_id, &entropy)
@@ -422,15 +470,7 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
             .send_frame(step_three.as_bytes())
             .map_err(PairingError::Transport)?;
 
-        let requested: Vec<String> = offer.profiles.clone();
-        self.complete_pairing(
-            offer,
-            &candidate_id,
-            &pairing_secret,
-            &requested,
-            transport,
-            confirm,
-        )
+        self.complete_pairing(offer, &candidate_id, &pairing_secret, transport, confirm)
     }
 
     /// Runs `Noise_XXpsk3` under the `CPace` key, then the pairing hello and
@@ -444,11 +484,16 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         offer: PairingOffer,
         candidate_id: &str,
         pairing_secret: &refineid_rapp::PairingSecret,
-        requested_profiles: &[String],
         mut transport: Transport,
-        confirm: impl FnOnce(&PeerIntroduction, &[String]) -> Option<Vec<String>>,
+        confirm: impl FnOnce(&PeerIntroduction, &[ProfileName]) -> Option<Vec<ProfileName>>,
     ) -> Result<PairId, PairingError> {
-        let offer_profiles = offer.profiles.clone();
+        // The handshake refuses an offer naming an unregistered profile, so
+        // every name parses once it has begun.
+        let offered: Vec<ProfileName> = offer
+            .profiles
+            .iter()
+            .filter_map(|name| ProfileName::parse(name))
+            .collect();
         let handshake_deadline = Instant::now() + POST_PAKE_HANDSHAKE;
         let local_keys = generate_pair_key_material().map_err(|_| PairingError::KeyGeneration)?;
         let mut handshake = match PairingHandshake::begin(
@@ -535,29 +580,11 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
             platform: peer_hello.platform.clone(),
         };
 
-        // Confirmation callback
-        let answer = confirm(&intro, requested_profiles);
-        let Some(granted_names) = answer else {
+        // The user grants the profiles from those offered; the confirmation
+        // refuses an empty, repeated, or unoffered grant.
+        let Some(granted_profiles) = confirm(&intro, &offered) else {
             return Err(PairingError::DeniedLocally);
         };
-        let mut granted_profiles = Vec::new();
-        for name in &granted_names {
-            let Some(p) = ProfileName::parse(name) else {
-                return Err(PairingError::GrantsNotSubset);
-            };
-            if !requested_profiles.iter().any(|r| r == name) {
-                return Err(PairingError::GrantsNotSubset);
-            }
-            if !offer_profiles.iter().any(|o| o == name) {
-                return Err(PairingError::GrantsNotSubset);
-            }
-            granted_profiles.push(p);
-        }
-        if granted_profiles.is_empty() {
-            return Err(PairingError::GrantsNotSubset);
-        }
-
-        // Send local confirmation
         let confirm_frame = confirmation
             .send_confirmation(granted_profiles)
             .map_err(|err| match err {
@@ -590,37 +617,40 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         let (pair_record, storage) = confirmation
             .into_storage(crate::clock::unix_time_ms())
             .map_err(|_| PairingError::Channel)?;
-        let local_record =
-            PairingRecord::from_core_pair_record(&pair_record, intro.display_name, intro.platform);
         self.store
-            .insert(local_record)
+            .insert(PairingRecord::new(pair_record, intro))
             .map_err(PairingError::Store)?;
-        match Self::confirm_storage(&mut transport, pair_record, storage, confirmation_deadline) {
-            Ok(confirmed) => {
+        let confirmed = Self::confirm_storage(&mut transport, storage, confirmation_deadline)
+            .and_then(|active| {
+                let mut active = Some(active);
+                let mut confirmed = Err(PairingError::StorageUnconfirmed);
                 self.store
                     .update(pair_id, &mut |entry| {
-                        entry.storage_confirmed = confirmed.is_storage_confirmed();
+                        if let Some(active) = active.take() {
+                            confirmed = entry
+                                .confirm_storage(active)
+                                .map_err(|_| PairingError::ProtocolViolation);
+                        }
                     })
                     .map_err(PairingError::Store)?;
-                Ok(pair_id)
-            }
-            Err(error) => {
-                // A pairing the peer never confirmed does not survive here
-                // (section 4.6): the stored record becomes its tombstone.
-                self.revoke_pairing(pair_id, false);
-                Err(error)
-            }
+                confirmed
+            });
+        if let Err(error) = confirmed {
+            // A pairing the peer never confirmed does not survive here: its
+            // keys go at once and nobody is told (section 4.6 item 3).
+            let _ = self.store.remove(pair_id);
+            return Err(error);
         }
+        Ok(pair_id)
     }
 
-    /// Sends the local storage confirmation, receives the peer's, and
-    /// returns the record in its confirmed form (section 4.3 item 4).
+    /// Sends the local storage confirmation and receives the peer's; the
+    /// pairing is then active (section 4.3 item 4).
     fn confirm_storage<Transport: FrameTransport>(
         transport: &mut Transport,
-        record: PairRecord,
         mut storage: PairingStorage,
         confirmation_deadline: Instant,
-    ) -> Result<PairRecord, PairingError> {
+    ) -> Result<ActivePairing, PairingError> {
         // A transport that fails anywhere in this exchange left the peer's
         // confirmation unreceived; the outcome is the same whichever side
         // went first.
@@ -642,23 +672,25 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
                 refineid_rapp::PairingError::PairIdMismatch => PairingError::ProtocolViolation,
                 _ => PairingError::Channel,
             })?;
-        let active = storage
+        storage
             .into_active()
-            .map_err(|_| PairingError::StorageUnconfirmed)?;
-        active
-            .confirm(record)
-            .map_err(|_| PairingError::ProtocolViolation)
+            .map_err(|_| PairingError::StorageUnconfirmed)
     }
 
-    /// Opens a session to a paired proxy over a connected transport.
+    /// Opens a session to a paired custodian over a connected transport,
+    /// already past its `"session"` routing preamble: the `Noise_KK`
+    /// handshake, then the Custodian's `session.ready` (RAPP v26.10.21
+    /// sections 6.3 and 7.1 item 5).
+    ///
+    /// A Custodian that closes in place of `session.ready` ends the attempt;
+    /// a `pairing_revoked` close revokes the pairing here (section 4.6 item
+    /// 4). A first message that violates the protocol gets the sealed
+    /// `protocol_violation` close and the pairing stays (section 10.1).
     ///
     /// # Errors
-    /// Returns [`SessionError`] on unknown pairing, revoked pairing,
-    /// handshake failure, or transport loss.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "session handshake walks KK handshake and session ready exchange"
-    )]
+    /// [`SessionError`] on an unknown, revoked, forgotten, or unconfirmed
+    /// pairing, a failed handshake, a transport failure, a violation, or the
+    /// Custodian's close.
     pub fn connect<Transport: FrameTransport>(
         &mut self,
         pair_id: PairId,
@@ -668,180 +700,141 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
             .store
             .get(pair_id)
             .map_err(|_| SessionError::UnknownPairing)?;
-        if record.disposition != PairingDisposition::Paired {
-            return Err(SessionError::NotPaired(record.disposition));
-        }
-        if !record.storage_confirmed {
-            return Err(SessionError::StorageUnconfirmed);
-        }
-        let granted_profiles = record.granted_profiles.clone();
-        let core_record = record
-            .to_core_pair_record()
-            .map_err(|_| SessionError::EngineFault)?;
-        let profile = refineid_rapp::TransportProfile::parse(transport.profile())
-            .ok_or(SessionError::EngineFault)?;
-        let mut handshake =
-            SessionHandshake::begin_requester(&core_record, profile, ExplicitUserIntent::record())
-                .map_err(|_| SessionError::EngineFault)?;
-
-        // Message 1 (Requester -> Proxy)
-        let m1 = handshake
-            .write_message()
-            .map_err(|_| SessionError::EngineFault)?;
-        transport
-            .send_frame(m1.as_bytes())
-            .map_err(SessionError::Transport)?;
-
-        // Message 2 (Proxy -> Requester)
-        let m2_bytes = transport.receive_frame().map_err(SessionError::Transport)?;
-        let m2 = BinaryFrame::reconstruct(m2_bytes)
-            .map_err(|_| SessionError::Transport(TransportError::Failed))?;
-        if handshake.read_message(&m2).is_err() {
-            let mut failures = 0;
-            let _ = self.store.update(pair_id, &mut |entry| {
-                entry.candidate_failures += 1;
-                failures = entry.candidate_failures;
-            });
-            return Err(SessionError::HandshakeFailed {
-                suggest_repairing: failures >= limits::CANDIDATE_FAILURE_HINT_THRESHOLD,
-            });
-        }
-
-        if !handshake.is_complete() {
-            return Err(SessionError::EngineFault);
-        }
-
-        let mut auth = handshake
-            .into_authentication()
-            .map_err(|_| SessionError::EngineFault)?;
-        let session_id = auth.session_id();
-
-        let mut nonce = [0u8; 32];
-        getrandom::fill(&mut nonce).map_err(|_| SessionError::EngineFault)?;
-        let ready_frame = auth
-            .send_ready(nonce)
-            .map_err(|_| SessionError::Transport(TransportError::Failed))?;
-        transport
-            .send_frame(ready_frame.as_bytes())
-            .map_err(SessionError::Transport)?;
-
-        let peer_ready_bytes = transport.receive_frame().map_err(SessionError::Transport)?;
-        let peer_ready_frame = BinaryFrame::reconstruct(peer_ready_bytes)
-            .map_err(|_| SessionError::Transport(TransportError::Failed))?;
-        let now_ms = current_time_ms();
-        let mut store_adapter = CorePairStoreAdapter::new(&mut self.store);
-        auth.receive_ready(&mut store_adapter, &peer_ready_frame, now_ms)
-            .map_err(|err| match err {
-                refineid_rapp::SessionError::ParameterMismatch => SessionError::ParameterMismatch,
-                refineid_rapp::SessionError::IntegrityFailure => {
-                    SessionError::Transport(TransportError::Failed)
-                }
-                refineid_rapp::SessionError::AuthenticatedWire(_) => {
-                    SessionError::ParameterMismatch
-                }
-                _ => SessionError::EngineFault,
+        let keys = record
+            .serving_record()
+            .ok_or_else(|| match record.state() {
+                PairingState::Unconfirmed => SessionError::StorageUnconfirmed,
+                PairingState::Forgotten => SessionError::Forgotten,
+                PairingState::Revoked { .. } | PairingState::Serving => SessionError::NotPaired,
             })?;
-
-        let endpoint = auth
+        let granted_profiles = keys.serving_profiles().to_vec();
+        let mut authentication = Self::authenticate(keys, &mut transport)?;
+        let session_id = authentication.session_id();
+        let ready = receive_handshake_frame(&mut transport)?;
+        match authentication.receive_ready(&ready, current_time_ms()) {
+            Ok(ReadyOutcome::Verified) => {}
+            Ok(ReadyOutcome::PeerClosed(reason)) => {
+                self.apply_peer_close(pair_id, reason);
+                return Err(SessionError::ClosedByPeer(reason));
+            }
+            Ok(ReadyOutcome::ViolationClosed { violation, notice }) => {
+                if let Some(notice) = notice {
+                    let _ = transport.send_frame(notice.as_bytes());
+                }
+                return Err(SessionError::Violation(violation));
+            }
+            Err(refineid_rapp::SessionError::IntegrityFailure) => {
+                return Err(SessionError::HandshakeFailed);
+            }
+            Err(_) => return Err(SessionError::EngineFault),
+        }
+        let endpoint = authentication
             .into_established()
             .map_err(|_| SessionError::EngineFault)?;
-        let _ = self
-            .store
-            .update(pair_id, &mut |entry| entry.candidate_failures = 0);
-
         Ok(Session {
             transport,
-            endpoint,
+            runtime: EstablishedSessionRuntime::new(endpoint, current_time_ms()),
+            operations: RequesterOperationEngine::new(),
             pair_id,
             session_id,
-            state: SessionState::Healthy,
             granted_profiles,
             end: None,
-            card_present: None,
+            card: None,
         })
     }
 
-    /// Sends one liveness ping and verifies the echoed challenge.
+    /// Delivers the `pairing_revoked` close of a pairing forgotten while no
+    /// session was open, over a connected transport already past its
+    /// `"session"` routing preamble: the `Noise_KK` handshake, then the close
+    /// as the session's first and only message. The keys are destroyed once
+    /// it is sent (RAPP v26.10.21 section 4.6 items 2 and 3); no card session
+    /// starts. A notice past its 30 days is not sent: the keys go untold.
     ///
     /// # Errors
-    /// Returns [`SessionError`] on closed session, challenge mismatch,
-    /// peer close, or transport loss.
-    pub fn check_liveness<Transport: FrameTransport>(
+    /// [`SessionError::NotForgotten`] when the pairing owes no notice, and
+    /// the handshake and transport errors of [`Self::connect`].
+    pub fn deliver_revocation_notice<Transport: FrameTransport>(
+        &mut self,
+        pair_id: PairId,
+        mut transport: Transport,
+    ) -> Result<(), SessionError> {
+        expire_revocation_notices(&mut self.store, crate::clock::unix_time_ms());
+        let record = self
+            .store
+            .get(pair_id)
+            .map_err(|_| SessionError::UnknownPairing)?;
+        let keys = record
+            .pair_record()
+            .filter(|_| record.owes_revocation_notice())
+            .ok_or(SessionError::NotForgotten)?;
+        let mut authentication = Self::authenticate(keys, &mut transport)?;
+        let notice = authentication
+            .send_revocation_notice()
+            .map_err(|_| SessionError::EngineFault)?;
+        transport
+            .send_frame(notice.as_bytes())
+            .map_err(SessionError::Transport)?;
+        revoke_pairing(&mut self.store, pair_id, false).map_err(SessionError::Store)
+    }
+
+    /// The user forgets a pairing that has no open session here (RAPP
+    /// v26.10.21 section 4.6): it serves nothing from now on and keeps its
+    /// keys only for the `pairing_revoked` close of its next session. One
+    /// the peer never confirmed, and a revoked one, are removed.
+    ///
+    /// # Errors
+    /// [`SessionError::UnknownPairing`] when no record exists, and
+    /// [`SessionError::Store`] when the change is refused.
+    pub fn forget_pairing(&mut self, pair_id: PairId) -> Result<(), SessionError> {
+        forget_pairing(&mut self.store, pair_id, crate::clock::unix_time_ms()).map_err(|error| {
+            match error {
+                StoreError::Unknown => SessionError::UnknownPairing,
+                other => SessionError::Store(other),
+            }
+        })
+    }
+
+    /// The user forgets the pairing of an open session (RAPP v26.10.21
+    /// section 4.6 item 1): the `pairing_revoked` close goes out at once and
+    /// the keys are destroyed. A close that cannot be sent leaves the
+    /// pairing forgotten, for the next session to carry the close.
+    ///
+    /// # Errors
+    /// [`SessionError::Store`] when the change is refused.
+    pub fn forget_pairing_in_session<Transport: FrameTransport>(
         &mut self,
         session: &mut Session<Transport>,
     ) -> Result<(), SessionError> {
-        if session.state != SessionState::Healthy || session.end.is_some() {
-            return Err(SessionError::EngineFault);
+        let delivered = session.end.is_none()
+            && session
+                .runtime
+                .close_with_reason(CloseReason::PairingRevoked)
+                .is_ok_and(|notice| session.transport.send_frame(notice.as_bytes()).is_ok());
+        if session.end.is_none() {
+            session.finish(SessionEnd::LocalClose);
         }
-        let mut challenge_bytes = [0u8; 32];
-        getrandom::fill(&mut challenge_bytes).map_err(|_| SessionError::EngineFault)?;
-        let challenge = PingChallenge::reconstruct(challenge_bytes);
-        let last = session.endpoint.last_received_sequence().unwrap_or(0);
-        let ping_msg = TypedMessage::LivenessPing(LivenessMessage {
-            challenge,
-            last_received_sequence: last,
-        });
-        let frame = session
-            .endpoint
-            .send(&ping_msg)
-            .map_err(|_| SessionError::Transport(TransportError::Failed))?;
-        session
-            .transport
-            .send_frame(frame.as_bytes())
-            .map_err(SessionError::Transport)?;
+        if delivered {
+            revoke_pairing(&mut self.store, session.pair_id, false).map_err(SessionError::Store)
+        } else {
+            self.forget_pairing(session.pair_id)
+        }
+    }
 
-        loop {
-            let recv_bytes = session.transport.receive_frame().map_err(|e| {
-                finish_close(session, SessionEnd::TransportLoss);
-                SessionError::Transport(e)
-            })?;
-            let frame = BinaryFrame::reconstruct(recv_bytes).map_err(|_| {
-                finish_close(session, SessionEnd::IntegrityFailure);
-                SessionError::Transport(TransportError::Failed)
-            })?;
-            let now_ms = current_time_ms();
-            let mut adapter = CorePairStoreAdapter::new(&mut self.store);
-            match session.endpoint.receive(&mut adapter, &frame, now_ms) {
-                Ok(ReceiveOutcome::Message(TypedMessage::LivenessPong(pong))) => {
-                    if pong.challenge == challenge {
-                        return Ok(());
-                    }
-                }
-                Ok(ReceiveOutcome::Message(TypedMessage::LivenessPing(incoming_ping))) => {
-                    let reply_pong = TypedMessage::LivenessPong(LivenessMessage {
-                        challenge: incoming_ping.challenge,
-                        last_received_sequence: session
-                            .endpoint
-                            .last_received_sequence()
-                            .unwrap_or(0),
-                    });
-                    if let Ok(pong_frame) = session.endpoint.send(&reply_pong) {
-                        let _ = session.transport.send_frame(pong_frame.as_bytes());
-                    }
-                }
-                Ok(ReceiveOutcome::Message(TypedMessage::SessionClose(close_msg))) => {
-                    self.apply_peer_close_reason(session.pair_id, close_msg.reason);
-                    finish_close(session, SessionEnd::PeerClose(close_msg.reason));
-                    return Err(SessionError::ClosedByPeer(close_msg.reason));
-                }
-                Ok(ReceiveOutcome::Message(TypedMessage::CardStatus(status))) => {
-                    session.note_card_status(status);
-                }
-                Ok(ReceiveOutcome::Message(TypedMessage::OperationProgress(_))) => {}
-                Ok(ReceiveOutcome::Message(_)) => {
-                    self.handle_violation(session);
-                    return Err(SessionError::EngineFault);
-                }
-                Ok(ReceiveOutcome::PairRevoked { .. }) => {
-                    finish_close(session, SessionEnd::Violation);
-                    return Err(SessionError::EngineFault);
-                }
-                Ok(ReceiveOutcome::SessionClosed(_)) | Err(_) => {
-                    finish_close(session, SessionEnd::IntegrityFailure);
-                    return Err(SessionError::Transport(TransportError::Failed));
-                }
-            }
-        }
+    /// Keeps an idle session alive for one receive: answers the peer's
+    /// ping, sends ours after 5 seconds of silence, notes `card.status`, and
+    /// ends the session after 30 seconds of silence or on the peer's close
+    /// (RAPP v26.10.21 sections 8.3 and 8.4).
+    ///
+    /// # Errors
+    /// [`SessionError::Ended`] once the session is over.
+    pub fn keep_alive<Transport: FrameTransport>(
+        &mut self,
+        session: &mut Session<Transport>,
+    ) -> Result<(), SessionError> {
+        self.next_event(session);
+        session
+            .end
+            .map_or(Ok(()), |end| Err(SessionError::Ended(end)))
     }
 
     /// Closes a healthy session deliberately.
@@ -853,22 +846,16 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         if session.end.is_some() {
             return;
         }
-        let last = session.endpoint.last_received_sequence().unwrap_or(0);
-        let close_msg = TypedMessage::SessionClose(SessionCloseMessage {
-            reason,
-            last_received_sequence: last,
-        });
-        if let Ok(frame) = session.endpoint.send(&close_msg) {
-            let _ = session.transport.send_frame(frame.as_bytes());
+        if let Ok(notice) = session.runtime.close_with_reason(reason) {
+            let _ = session.transport.send_frame(notice.as_bytes());
         }
-        finish_close(session, SessionEnd::LocalClose);
+        session.finish(SessionEnd::LocalClose);
     }
 
     /// Runs one typed operation to its outcome.
     ///
     /// # Errors
-    /// Returns [`AdmissionError`] on admission failure, profile mismatch,
-    /// or session fault.
+    /// Returns [`AdmissionError`] on admission failure or profile mismatch.
     pub fn execute<Transport: FrameTransport>(
         &mut self,
         session: &mut Session<Transport>,
@@ -879,18 +866,14 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
     }
 
     /// Runs one typed operation to its outcome, reporting each
-    /// `operation.progress` event the custodian sends to `observe`: that the
-    /// consent view is on the phone's screen, or that the card is awaited
-    /// (section 8.2 item 3). Every result is acknowledged, whatever its
-    /// status (section 8.2 item 5).
+    /// `operation.progress` event of it to `observe`: queued behind another
+    /// session's operation, the consent view on the phone's screen, the
+    /// wait for the card and its end (RAPP v26.10.21 section 8.2). The
+    /// operation lives inside the session: it ends with its result, or with
+    /// the session (section 8.1).
     ///
     /// # Errors
-    /// Returns [`AdmissionError`] on admission failure, profile mismatch,
-    /// or session fault.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "operation execution manages request, progress, liveness, and result state transitions"
-    )]
+    /// Returns [`AdmissionError`] on admission failure or profile mismatch.
     pub fn execute_observed<Transport: FrameTransport>(
         &mut self,
         session: &mut Session<Transport>,
@@ -898,547 +881,256 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         expires_after_ms: u64,
         observe: &mut dyn FnMut(ProgressEvent),
     ) -> Result<OperationOutcome, AdmissionError> {
-        let profile_name = operation.required_profile();
-        let profile_wire = profile_name.as_str();
-        if session.state != SessionState::Healthy || session.end.is_some() {
+        if session.end.is_some() {
             return Err(AdmissionError::SessionNotHealthy);
         }
-        if !session
-            .granted_profiles
-            .iter()
-            .any(|name| name == profile_wire)
-        {
+        let profile: ProfileName = operation.required_profile();
+        if !session.granted_profiles.contains(&profile) {
             return Err(AdmissionError::ProfileNotGranted);
         }
         let operation_id = OperationId::random().map_err(|_| AdmissionError::RandomUnavailable)?;
-        let now_ms = current_time_ms();
         let request = OperationRequest::reconstruct(
             operation_id,
-            session.pair_id,
-            session.session_id,
-            profile_name,
-            now_ms,
+            profile,
+            current_time_ms(),
             expires_after_ms,
             operation.clone(),
         )
         .map_err(AdmissionError::Operation)?;
-        let req_hash = request
-            .request_hash()
-            .map_err(|_| AdmissionError::Encoding)?;
-        let consequential = request.operation.is_consequential();
-        let (action_wire, _, _) = request.wire_parts();
-
-        self.journal
-            .record(JournalEntry {
-                operation_id,
-                pair_id: session.pair_id,
-                request_hash: *req_hash.as_bytes(),
-                profile: profile_wire.into(),
-                action: action_wire.into(),
-                state: OperationState::Requested,
-                retry_prohibited: false,
-                reconciled_proxy_state: None,
-            })
-            .map_err(AdmissionError::Store)?;
-
-        let Ok(frame) = session
-            .endpoint
-            .send(&TypedMessage::OperationRequest(request))
-        else {
-            let outcome = self.close_with_operation(
-                session,
-                operation_id,
-                OperationState::Requested,
-                SessionEnd::TransportLoss,
-            );
-            return Ok(outcome);
+        let message = session
+            .operations
+            .begin(request)
+            .map_err(|error| match error {
+                RequesterEngineError::LiveOperation => AdmissionError::OperationActive,
+                RequesterEngineError::InvalidLocalRequest(error) => {
+                    AdmissionError::Operation(error)
+                }
+                _ => AdmissionError::SessionNotHealthy,
+            })?;
+        let Ok(frame) = session.runtime.endpoint_mut().send(&message) else {
+            session.finish(SessionEnd::TransportLoss);
+            return Ok(OperationOutcome::Lost);
         };
-        if session.transport.send_frame(frame.as_bytes()).is_err() {
-            let outcome = self.close_with_operation(
-                session,
-                operation_id,
-                OperationState::Requested,
-                SessionEnd::TransportLoss,
-            );
-            return Ok(outcome);
+        if !session.deliver(&frame) {
+            return Ok(OperationOutcome::Lost);
         }
-
-        // RAPP v26.10.18 section 8.2 executes directly: once a consequential
-        // request is sent the custodian may act on it after consent, so an
-        // unanswered one is in flight and ends ambiguous, never cancelled.
-        let mut state = if consequential {
-            OperationState::Committed
-        } else {
-            OperationState::Requested
-        };
-        self.journal_state(operation_id, state, false);
         loop {
-            let frame_bytes = match session.transport.receive_frame() {
-                Ok(bytes) => bytes,
-                Err(TransportError::TimedOut) if !consequential => {
-                    state = OperationState::Cancelled;
-                    self.journal_state(operation_id, state, false);
-                    return Ok(OperationOutcome::Cancelled);
-                }
-                Err(_) => {
-                    let outcome = self.close_with_operation(
-                        session,
-                        operation_id,
-                        state,
-                        SessionEnd::TransportLoss,
-                    );
-                    return Ok(outcome);
-                }
-            };
-            let Ok(frame) = BinaryFrame::reconstruct(frame_bytes) else {
-                let outcome = self.close_with_operation(
-                    session,
-                    operation_id,
-                    state,
-                    SessionEnd::IntegrityFailure,
-                );
-                return Ok(outcome);
-            };
-            let now_ms = current_time_ms();
-            let mut store_adapter = CorePairStoreAdapter::new(&mut self.store);
-            let Ok(outcome) = session.endpoint.receive(&mut store_adapter, &frame, now_ms) else {
-                let outcome = self.close_with_operation(
-                    session,
-                    operation_id,
-                    state,
-                    SessionEnd::IntegrityFailure,
-                );
-                return Ok(outcome);
-            };
-            match outcome {
-                ReceiveOutcome::Message(msg) => match msg {
-                    TypedMessage::LivenessPing(incoming_ping) => {
-                        let reply_pong = TypedMessage::LivenessPong(LivenessMessage {
-                            challenge: incoming_ping.challenge,
-                            last_received_sequence: session
-                                .endpoint
-                                .last_received_sequence()
-                                .unwrap_or(0),
-                        });
-                        if let Ok(pong_frame) = session.endpoint.send(&reply_pong) {
-                            let _ = session.transport.send_frame(pong_frame.as_bytes());
-                        }
-                    }
-                    TypedMessage::OperationResult(result_msg) => {
-                        if result_msg.operation_id != operation_id {
-                            let err_msg =
-                                TypedMessage::Error(ProtocolErrorMessage::UnknownOperation(Some(
-                                    result_msg.operation_id,
-                                )));
-                            if let Ok(err_frame) = session.endpoint.send(&err_msg) {
-                                let _ = session.transport.send_frame(err_frame.as_bytes());
-                            }
-                            continue;
-                        }
-                        if result_msg.request_hash != req_hash
-                            || result_msg
-                                .validate_for(
-                                    OperationReference {
-                                        operation_id,
-                                        request_hash: req_hash,
-                                    },
-                                    operation,
-                                )
-                                .is_err()
-                        {
-                            self.handle_violation(session);
-                            return Ok(self.classify_after_close(operation_id, state));
-                        }
-                        let reference = OperationReference {
-                            operation_id,
-                            request_hash: req_hash,
-                        };
-                        match result_msg.status {
-                            ResultStatus::Completed if result_msg.retired => {
-                                // A retired result's response was pruned; there
-                                // is nothing left to deliver.
-                                state = OperationState::Completed;
-                                self.journal_state(operation_id, state, false);
-                                acknowledge(session, reference);
-                                return Ok(OperationOutcome::Rejected(
-                                    result_msg.error.map(|e| e.as_str().to_owned()),
-                                ));
-                            }
-                            ResultStatus::Completed => {
-                                let Some(Ok(result)) = result_msg
-                                    .response
-                                    .as_ref()
-                                    .map(|response| response.typed_for(operation))
-                                else {
-                                    self.handle_violation(session);
-                                    return Ok(self.classify_after_close(operation_id, state));
-                                };
-                                state = OperationState::Completed;
-                                self.journal_state(operation_id, state, false);
-                                acknowledge(session, reference);
-                                return Ok(OperationOutcome::Completed(result));
-                            }
-                            ResultStatus::Rejected
-                                if matches!(
-                                    result_msg.error,
-                                    Some(ResultError::UserCancelled | ResultError::UserDeclined)
-                                ) =>
-                            {
-                                state = OperationState::Denied;
-                                self.journal_state(operation_id, state, false);
-                                acknowledge(session, reference);
-                                return Ok(OperationOutcome::Denied);
-                            }
-                            ResultStatus::Cancelled => {
-                                state = OperationState::Cancelled;
-                                self.journal_state(operation_id, state, false);
-                                acknowledge(session, reference);
-                                return Ok(OperationOutcome::Cancelled);
-                            }
-                            ResultStatus::Rejected => {
-                                state = OperationState::Rejected;
-                                self.journal_state(operation_id, state, false);
-                                acknowledge(session, reference);
-                                return Ok(OperationOutcome::Rejected(
-                                    result_msg.error.map(|e| e.as_str().to_owned()),
-                                ));
-                            }
-                            ResultStatus::CredentialRejected => {
-                                state = OperationState::CredentialRejected;
-                                self.revoke_pairing(session.pair_id, false);
-                                self.journal_state(operation_id, state, true);
-                                acknowledge(session, reference);
-                                self.await_close_after_credential_rejection(session);
-                                return Ok(OperationOutcome::CredentialRejected);
-                            }
-                            ResultStatus::Ambiguous => {
-                                state = OperationState::Ambiguous;
-                                self.journal_state(operation_id, state, true);
-                                acknowledge(session, reference);
-                                return Ok(OperationOutcome::Ambiguous);
-                            }
-                        }
-                    }
-                    TypedMessage::SessionClose(close_msg) => {
-                        let end = SessionEnd::PeerClose(close_msg.reason);
-                        self.apply_peer_close_reason(session.pair_id, close_msg.reason);
-                        let outcome = self.close_with_operation(session, operation_id, state, end);
-                        return Ok(outcome);
-                    }
-                    TypedMessage::Error(ProtocolErrorMessage::OperationFailed(_)) => {
-                        return Ok(OperationOutcome::Rejected(Some("peer_busy".to_owned())));
-                    }
-                    TypedMessage::Error(ProtocolErrorMessage::DuplicateOperation(id))
-                        if id == operation_id =>
-                    {
-                        return Ok(OperationOutcome::Rejected(Some(
-                            "duplicate_operation".to_owned(),
-                        )));
-                    }
-                    TypedMessage::OperationProgress(progress) => {
-                        // Progress names the operation by both halves of its
-                        // reference; a report under another commitment is
-                        // not this operation's and is not shown.
-                        if progress.reference.operation_id == operation_id
-                            && progress.reference.request_hash == req_hash
-                        {
-                            observe(progress.event);
-                        }
-                    }
-                    TypedMessage::CardStatus(status) => session.note_card_status(status),
-                    TypedMessage::Error(
-                        ProtocolErrorMessage::UnknownOperation(_)
-                        | ProtocolErrorMessage::DuplicateOperation(_),
-                    ) => {}
-                    _ => {
-                        self.handle_violation(session);
-                        return Ok(self.classify_after_close(operation_id, state));
-                    }
-                },
-                ReceiveOutcome::SessionClosed(_) => {
-                    let outcome = self.close_with_operation(
-                        session,
-                        operation_id,
-                        state,
-                        SessionEnd::IntegrityFailure,
-                    );
-                    return Ok(outcome);
-                }
-                ReceiveOutcome::PairRevoked { .. } => {
-                    let outcome = self.close_with_operation(
-                        session,
-                        operation_id,
-                        state,
-                        SessionEnd::Violation,
-                    );
-                    return Ok(outcome);
-                }
+            match self.next_event(session) {
+                Event::Progress(id, event) if id == operation_id => observe(event),
+                Event::Finished(id, outcome) if id == operation_id => return Ok(outcome),
+                Event::Ended => return Ok(OperationOutcome::Lost),
+                Event::Idle | Event::Progress(..) | Event::Finished(..) => {}
             }
         }
     }
 
-    /// Queries the proxy journal for an earlier operation.
-    ///
-    /// # Errors
-    /// Returns [`SessionError`] on closed session, peer close,
-    /// violation, or transport loss.
-    pub fn reconcile_status<Transport: FrameTransport>(
-        &mut self,
-        session: &mut Session<Transport>,
-        operation_id: OperationId,
-    ) -> Result<Option<String>, SessionError> {
-        if session.state != SessionState::Healthy || session.end.is_some() {
+    /// Runs the `Noise_KK` handshake of a stored record as the initiator and
+    /// enters the authentication of the Custodian's first message.
+    fn authenticate<Transport: FrameTransport>(
+        keys: &PairRecord,
+        transport: &mut Transport,
+    ) -> Result<SessionAuthentication, SessionError> {
+        let profile =
+            TransportProfile::parse(transport.profile()).ok_or(SessionError::EngineFault)?;
+        let mut handshake =
+            SessionHandshake::begin_requester(keys, profile, ExplicitUserIntent::record())
+                .map_err(|_| SessionError::EngineFault)?;
+        let first = handshake
+            .write_message()
+            .map_err(|_| SessionError::EngineFault)?;
+        transport
+            .send_frame(first.as_bytes())
+            .map_err(SessionError::Transport)?;
+        let second = receive_handshake_frame(transport)?;
+        handshake
+            .read_message(&second)
+            .map_err(|_| SessionError::HandshakeFailed)?;
+        if !handshake.is_complete() {
             return Err(SessionError::EngineFault);
         }
-        let req_msg = TypedMessage::OperationStatusRequest(operation_id);
-        let frame = session
-            .endpoint
-            .send(&req_msg)
-            .map_err(|_| SessionError::Transport(TransportError::Failed))?;
-        session
-            .transport
-            .send_frame(frame.as_bytes())
-            .map_err(SessionError::Transport)?;
-
-        loop {
-            let recv_bytes = session.transport.receive_frame().map_err(|e| {
-                finish_close(session, SessionEnd::TransportLoss);
-                SessionError::Transport(e)
-            })?;
-            let frame = BinaryFrame::reconstruct(recv_bytes).map_err(|_| {
-                finish_close(session, SessionEnd::IntegrityFailure);
-                SessionError::Transport(TransportError::Failed)
-            })?;
-            let now_ms = current_time_ms();
-            let mut adapter = CorePairStoreAdapter::new(&mut self.store);
-            match session.endpoint.receive(&mut adapter, &frame, now_ms) {
-                Ok(ReceiveOutcome::Message(TypedMessage::OperationStatus(report))) => {
-                    if report.operation_id != operation_id {
-                        continue;
-                    }
-                    let annotation = if report.known {
-                        report.state.map(|s| format!("{s:?}"))
-                    } else {
-                        None
-                    };
-                    if let Ok(entry) = self.journal.get(operation_id) {
-                        let mut updated = entry.clone();
-                        updated.reconciled_proxy_state.clone_from(&annotation);
-                        let _ = self.journal.record(updated);
-                    }
-                    return Ok(annotation);
-                }
-                Ok(ReceiveOutcome::Message(TypedMessage::LivenessPing(incoming_ping))) => {
-                    let reply_pong = TypedMessage::LivenessPong(LivenessMessage {
-                        challenge: incoming_ping.challenge,
-                        last_received_sequence: session
-                            .endpoint
-                            .last_received_sequence()
-                            .unwrap_or(0),
-                    });
-                    if let Ok(pong_frame) = session.endpoint.send(&reply_pong) {
-                        let _ = session.transport.send_frame(pong_frame.as_bytes());
-                    }
-                }
-                Ok(ReceiveOutcome::Message(TypedMessage::SessionClose(close_msg))) => {
-                    self.apply_peer_close_reason(session.pair_id, close_msg.reason);
-                    finish_close(session, SessionEnd::PeerClose(close_msg.reason));
-                    return Err(SessionError::ClosedByPeer(close_msg.reason));
-                }
-                Ok(ReceiveOutcome::Message(TypedMessage::CardStatus(status))) => {
-                    session.note_card_status(status);
-                }
-                Ok(ReceiveOutcome::Message(TypedMessage::OperationProgress(_))) => {}
-                Ok(ReceiveOutcome::Message(_)) => {
-                    self.handle_violation(session);
-                    return Err(SessionError::EngineFault);
-                }
-                Ok(ReceiveOutcome::SessionClosed(_) | ReceiveOutcome::PairRevoked { .. }) => {
-                    finish_close(session, SessionEnd::Violation);
-                    return Err(SessionError::EngineFault);
-                }
-                Err(_) => {
-                    finish_close(session, SessionEnd::IntegrityFailure);
-                    return Err(SessionError::Transport(TransportError::Failed));
-                }
-            }
-        }
+        handshake
+            .into_authentication()
+            .map_err(|_| SessionError::EngineFault)
     }
 
-    /// How the session ended, once closed.
-    pub const fn session_end<Transport: FrameTransport>(
-        session: &Session<Transport>,
-    ) -> Option<SessionEnd> {
-        session.end
-    }
-
-    /// Rewrites one journal entry's state.
-    fn journal_state(
-        &mut self,
-        operation_id: OperationId,
-        state: OperationState,
-        retry_prohibited: bool,
-    ) {
-        if let Ok(entry) = self.journal.get(operation_id) {
-            let mut updated = entry.clone();
-            updated.state = state;
-            updated.retry_prohibited = updated.retry_prohibited || retry_prohibited;
-            let _ = self.journal.record(updated);
-        }
-    }
-
-    /// Records a verified revocation by the custodian (section 4.6 item 5):
-    /// its session record carried this pairing's revocation hint, or it
-    /// closed a session with `pairing_revoked`. The record becomes its
-    /// tombstone and the caller tells the user that the phone forgot this
-    /// computer.
-    pub fn apply_verified_revocation(&mut self, pair_id: PairId) {
-        self.revoke_pairing(pair_id, true);
-    }
-
-    /// Tells the custodian, over a session the caller dialed, that this
-    /// computer is forgetting the pairing (section 4.6 item 1), then revokes
-    /// it here. The notice is one attempt; a custodian that cannot be
-    /// reached learns nothing, and the pairing is revoked here regardless.
-    pub fn forget_pairing<Transport: FrameTransport>(
-        &mut self,
-        pair_id: PairId,
-        transport: Option<Transport>,
-    ) {
-        if let Some(transport) = transport
-            && let Ok(mut session) = self.connect(pair_id, transport)
-        {
-            self.disconnect(&mut session, CloseReason::PairingRevoked);
-        }
-        self.revoke_pairing(pair_id, false);
-    }
-
-    /// Durably revokes the pairing.
-    fn revoke_pairing(&mut self, pair_id: PairId, peer_initiated: bool) {
-        let _ = self.store.update(pair_id, &mut |entry| {
-            entry.disposition = PairingDisposition::Revoked;
-            entry.peer_initiated_termination = peer_initiated;
-            entry.local_private = Zeroizing::new(Vec::new());
-            entry.peer_public = Vec::new();
-        });
-    }
-
-    /// Applies a peer close reason's pairing effect.
-    fn apply_peer_close_reason(&mut self, pair_id: PairId, reason: CloseReason) {
+    /// Applies a peer close reason's pairing effect: a `pairing_revoked`
+    /// close revokes the pairing here (section 4.6 item 4), and a
+    /// `service_withdrawn` close withdraws the custodian's presence (section
+    /// 4.5 item 6). No other close changes the pairing.
+    fn apply_peer_close(&mut self, pair_id: PairId, reason: CloseReason) {
         match reason {
-            CloseReason::PairingRevoked
-            | CloseReason::ProtocolViolation
-            | CloseReason::CredentialRejected => {
-                self.revoke_pairing(pair_id, true);
+            CloseReason::PairingRevoked => {
+                let _ = revoke_pairing(&mut self.store, pair_id, true);
             }
             CloseReason::ServiceWithdrawn => crate::stream::mark_withdrawn(pair_id),
             CloseReason::Normal
             | CloseReason::Complete
             | CloseReason::UserDisconnect
             | CloseReason::Policy
+            | CloseReason::ProtocolViolation
             | CloseReason::Shutdown
             | CloseReason::CardUnavailable => {}
         }
     }
 
-    /// Handles an authenticated protocol violation: revokes pairing and closes session.
-    fn handle_violation<Transport: FrameTransport>(&mut self, session: &mut Session<Transport>) {
-        let last = session.endpoint.last_received_sequence().unwrap_or(0);
-        let close_msg = TypedMessage::SessionClose(SessionCloseMessage {
-            reason: CloseReason::ProtocolViolation,
-            last_received_sequence: last,
-        });
-        if let Ok(frame) = session.endpoint.send(&close_msg) {
-            let _ = session.transport.send_frame(frame.as_bytes());
+    /// Advances the session by one receive: liveness first, then whatever
+    /// arrived.
+    fn next_event<Transport: FrameTransport>(&mut self, session: &mut Session<Transport>) -> Event {
+        if session.end.is_some() {
+            return Event::Ended;
         }
-        self.revoke_pairing(session.pair_id, false);
-        finish_close(session, SessionEnd::Violation);
-    }
-
-    /// Classifies the active operation after the session already closed.
-    fn classify_after_close(
-        &mut self,
-        operation_id: OperationId,
-        state: OperationState,
-    ) -> OperationOutcome {
-        match state {
-            OperationState::Denied => OperationOutcome::Denied,
-            OperationState::Rejected => OperationOutcome::Rejected(None),
-            OperationState::CredentialRejected => OperationOutcome::CredentialRejected,
-            OperationState::Completed | OperationState::Ambiguous => OperationOutcome::Ambiguous,
-            OperationState::Cancelled => OperationOutcome::Cancelled,
-            OperationState::Committed => {
-                self.journal_state(operation_id, OperationState::Ambiguous, true);
-                OperationOutcome::Ambiguous
+        let Ok(challenge) = Challenge::random() else {
+            session.finish(SessionEnd::LocalClose);
+            return Event::Ended;
+        };
+        match session.runtime.poll(
+            current_time_ms(),
+            PingChallenge::reconstruct(*challenge.as_bytes()),
+        ) {
+            Ok(RuntimePoll::NoAction) => {}
+            Ok(RuntimePoll::Send(ping)) => {
+                if !session.deliver(&ping) {
+                    return Event::Ended;
+                }
             }
-            _ => {
-                self.journal_state(operation_id, OperationState::Cancelled, false);
-                OperationOutcome::Cancelled
+            Ok(RuntimePoll::SessionClosed(_)) => {
+                session.finish(SessionEnd::Silence);
+                return Event::Ended;
+            }
+            Ok(RuntimePoll::AlreadyClosed) | Err(_) => {
+                session.finish(SessionEnd::TransportLoss);
+                return Event::Ended;
             }
         }
-    }
-
-    /// Consumes the proxy's close after a credential rejection.
-    fn await_close_after_credential_rejection<Transport: FrameTransport>(
-        &mut self,
-        session: &mut Session<Transport>,
-    ) {
-        let Ok(frame_bytes) = session.transport.receive_frame() else {
-            finish_close(session, SessionEnd::TransportLoss);
-            return;
-        };
-        let Ok(frame) = BinaryFrame::reconstruct(frame_bytes) else {
-            finish_close(session, SessionEnd::IntegrityFailure);
-            return;
-        };
-        let now_ms = current_time_ms();
-        let mut store_adapter = CorePairStoreAdapter::new(&mut self.store);
-        let end = match session.endpoint.receive(&mut store_adapter, &frame, now_ms) {
-            Ok(ReceiveOutcome::Message(TypedMessage::SessionClose(msg))) => {
-                self.apply_peer_close_reason(session.pair_id, msg.reason);
-                SessionEnd::PeerClose(msg.reason)
+        let bytes = match session.transport.receive_frame() {
+            Ok(bytes) => bytes,
+            Err(TransportError::TimedOut) => return Event::Idle,
+            Err(_) => {
+                session.finish(SessionEnd::TransportLoss);
+                return Event::Ended;
             }
-            Ok(ReceiveOutcome::SessionClosed(_)) => SessionEnd::IntegrityFailure,
-            _ => SessionEnd::TransportLoss,
         };
-        finish_close(session, end);
-    }
-
-    /// Closes the session and classifies the active operation in one step.
-    fn close_with_operation<Transport: FrameTransport>(
-        &mut self,
-        session: &mut Session<Transport>,
-        operation_id: OperationId,
-        state: OperationState,
-        end: SessionEnd,
-    ) -> OperationOutcome {
-        finish_close(session, end);
-        self.classify_after_close(operation_id, state)
+        let Ok(frame) = BinaryFrame::reconstruct(bytes) else {
+            session.finish(SessionEnd::IntegrityFailure);
+            return Event::Ended;
+        };
+        let message = match session.runtime.receive(&frame, current_time_ms()) {
+            Ok(RuntimeReceive::Message(message)) => message,
+            Ok(RuntimeReceive::Send(pong)) => {
+                return if session.deliver(&pong) {
+                    Event::Idle
+                } else {
+                    Event::Ended
+                };
+            }
+            Ok(RuntimeReceive::LivenessConfirmed | RuntimeReceive::IgnoredStalePong) => {
+                return Event::Idle;
+            }
+            Ok(RuntimeReceive::PeerClosed(reason)) => {
+                self.apply_peer_close(session.pair_id, reason);
+                session.finish(SessionEnd::PeerClose(reason));
+                return Event::Ended;
+            }
+            Ok(RuntimeReceive::ViolationClosed { notice, .. }) => {
+                return close_for_violation(session, notice);
+            }
+            Ok(RuntimeReceive::SessionClosed(_)) | Err(_) => {
+                session.finish(SessionEnd::IntegrityFailure);
+                return Event::Ended;
+            }
+        };
+        dispatch(session, message)
     }
 }
 
-/// Walks the session into closed and records the end.
-fn finish_close<Transport: FrameTransport>(session: &mut Session<Transport>, end: SessionEnd) {
-    session.endpoint.close_session();
-    session.state = SessionState::Closed;
-    session.end = Some(end);
-}
-
-/// Acknowledges a delivered result, whatever its status (section 8.2 item
-/// 5), after the outcome is journaled. A lost acknowledgement is recovered
-/// by the custodian's re-delivery on the next session.
-fn acknowledge<Transport: FrameTransport>(
+/// Hands one authenticated message to the session's operations.
+fn dispatch<Transport: FrameTransport>(
     session: &mut Session<Transport>,
-    reference: OperationReference,
-) {
-    let ack_msg = TypedMessage::OperationResultAck(reference);
-    if let Ok(ack_frame) = session.endpoint.send(&ack_msg) {
-        let _ = session.transport.send_frame(ack_frame.as_bytes());
+    message: TypedMessage,
+) -> Event {
+    match session.operations.receive(message) {
+        Ok(RequesterDispatch::CardStatus(status)) => {
+            session.card = Some(status);
+            Event::Idle
+        }
+        Ok(RequesterDispatch::Progress {
+            operation_id,
+            event,
+        }) => Event::Progress(operation_id, event),
+        Ok(RequesterDispatch::Completed {
+            operation_id,
+            result,
+        }) => Event::Finished(operation_id, OperationOutcome::Completed(result)),
+        Ok(RequesterDispatch::Ended {
+            operation_id,
+            status,
+            error,
+        }) => Event::Finished(
+            operation_id,
+            match status {
+                ResultStatus::Cancelled => OperationOutcome::Cancelled(error),
+                ResultStatus::Completed | ResultStatus::Rejected => {
+                    OperationOutcome::Rejected(error)
+                }
+            },
+        ),
+        Ok(RequesterDispatch::Refused {
+            operation_id,
+            error,
+        }) => Event::Finished(operation_id, OperationOutcome::Refused(error)),
+        Err(RequesterEngineError::AuthenticatedProtocolViolation(violation)) => {
+            let closed = session
+                .runtime
+                .close_for_operation_violation(OperationViolation::Requester(violation));
+            let notice = if let RuntimeReceive::ViolationClosed { notice, .. } = closed {
+                notice
+            } else {
+                None
+            };
+            close_for_violation(session, notice)
+        }
+        Ok(
+            RequesterDispatch::PeerError(_)
+            | RequesterDispatch::Ignored(_)
+            | RequesterDispatch::NotOperation(_),
+        )
+        | Err(_) => Event::Idle,
+    }
+}
+
+/// Delivers the sealed `protocol_violation` close, when there is one, and
+/// ends the session; the pairing stays (section 10.1 item 2).
+fn close_for_violation<Transport: FrameTransport>(
+    session: &mut Session<Transport>,
+    notice: Option<BinaryFrame>,
+) -> Event {
+    if let Some(notice) = notice {
+        let _ = session.transport.send_frame(notice.as_bytes());
+    }
+    session.finish(SessionEnd::Violation);
+    Event::Ended
+}
+
+/// Receives one handshake frame, waiting through the transport's receive
+/// ticks for at most the session silence limit.
+fn receive_handshake_frame<Transport: FrameTransport>(
+    transport: &mut Transport,
+) -> Result<BinaryFrame, SessionError> {
+    let started = Instant::now();
+    loop {
+        match transport.receive_frame() {
+            Ok(bytes) => {
+                return BinaryFrame::reconstruct(bytes)
+                    .map_err(|_| SessionError::Transport(TransportError::OversizedFrame));
+            }
+            Err(TransportError::TimedOut) if started.elapsed() < SESSION_SILENCE_LIMIT => {}
+            Err(error) => return Err(SessionError::Transport(error)),
+        }
     }
 }
 
 /// The continuous clock every protocol deadline is measured on (section
-/// 8.2 item 1).
+/// 8.1 item 2).
 fn current_time_ms() -> u64 {
     crate::clock::continuous_ms()
 }

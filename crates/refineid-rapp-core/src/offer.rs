@@ -1,6 +1,6 @@
 //! The pairing code and the offer the custodian serves.
 //!
-//! In RAPP v26.10.18 the custodian (the phone) shows a six-character code and
+//! In RAPP v26.10.21 the custodian (the phone) shows a six-character code and
 //! the requester types it (section 3). The custodian creates the offer with a
 //! random `offer_id` and sends it as its first frame after the pairing
 //! preamble (section 4.2); nothing derived from the code is ever published.
@@ -142,8 +142,10 @@ mod tests {
     #[test]
     fn the_bootstrap_offer_is_read_on_a_listed_transport() {
         let offer = offer_for(&[TransportProfile::Stream]);
-        let (mut custodian, mut requester) =
-            crate::transport::MemoryTransport::pair("stream-1", std::time::Duration::from_secs(1));
+        let (mut custodian, mut requester) = crate::transport::MemoryTransport::pair(
+            crate::stream::STREAM_CANDIDATE_ID,
+            std::time::Duration::from_secs(1),
+        );
         custodian
             .send_frame(&offer.to_cbor().expect("cbor"))
             .expect("send");
@@ -153,8 +155,10 @@ mod tests {
     #[test]
     fn an_offer_not_listing_the_transport_is_refused() {
         let offer = offer_for(&[TransportProfile::Ble]);
-        let (mut custodian, mut requester) =
-            crate::transport::MemoryTransport::pair("stream-1", std::time::Duration::from_secs(1));
+        let (mut custodian, mut requester) = crate::transport::MemoryTransport::pair(
+            crate::stream::STREAM_CANDIDATE_ID,
+            std::time::Duration::from_secs(1),
+        );
         custodian
             .send_frame(&offer.to_cbor().expect("cbor"))
             .expect("send");

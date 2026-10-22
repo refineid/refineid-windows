@@ -28,11 +28,10 @@ const ANSWER_SIGNATURE: u8 = 1;
 const ANSWER_DENIED: u8 = 2;
 const ANSWER_CANCELLED: u8 = 3;
 const ANSWER_REJECTED: u8 = 4;
-const ANSWER_AMBIGUOUS: u8 = 5;
+const ANSWER_LOST: u8 = 5;
 const ANSWER_NO_PHONE: u8 = 6;
 const ANSWER_BUSY: u8 = 7;
 const ANSWER_FAILED: u8 = 8;
-const ANSWER_CREDENTIAL_REJECTED: u8 = 9;
 
 const PROFILE_ECDSA_P256: u8 = 1;
 const PROFILE_ECDSA_P384: u8 = 2;
@@ -198,20 +197,19 @@ pub enum SignAnswer {
     Signature(Vec<u8>),
     /// The holder declined on the phone.
     Denied,
-    /// The operation was cancelled or expired before the holder answered.
+    /// The operation expired before the card was commanded.
     Cancelled,
     /// The phone refused the request.
     Rejected,
-    /// The request may or may not have been signed; it is not retried.
-    Ambiguous,
+    /// The session to the phone ended before its answer; the operation
+    /// ended with it (RAPP v26.10.21 section 8.1 item 3).
+    Lost,
     /// The paired phone could not be reached in time.
     NoPhone,
     /// Another signature is in progress.
     Busy,
     /// The agent could not serve the request.
     Failed,
-    /// The phone refused the pairing; it is revoked on both devices.
-    CredentialRejected,
 }
 
 impl SignAnswer {
@@ -230,11 +228,10 @@ impl SignAnswer {
             Self::Denied => ANSWER_DENIED,
             Self::Cancelled => ANSWER_CANCELLED,
             Self::Rejected => ANSWER_REJECTED,
-            Self::Ambiguous => ANSWER_AMBIGUOUS,
+            Self::Lost => ANSWER_LOST,
             Self::NoPhone => ANSWER_NO_PHONE,
             Self::Busy => ANSWER_BUSY,
             Self::Failed => ANSWER_FAILED,
-            Self::CredentialRejected => ANSWER_CREDENTIAL_REJECTED,
         };
         let mut bytes = vec![WIRE_VERSION, kind];
         if let Self::Signature(signature) = self {
@@ -265,11 +262,10 @@ impl SignAnswer {
             ANSWER_DENIED => Self::Denied,
             ANSWER_CANCELLED => Self::Cancelled,
             ANSWER_REJECTED => Self::Rejected,
-            ANSWER_AMBIGUOUS => Self::Ambiguous,
+            ANSWER_LOST => Self::Lost,
             ANSWER_NO_PHONE => Self::NoPhone,
             ANSWER_BUSY => Self::Busy,
             ANSWER_FAILED => Self::Failed,
-            ANSWER_CREDENTIAL_REJECTED => Self::CredentialRejected,
             _ => return Err(WireError::Kind),
         };
         reader.end()?;
@@ -481,11 +477,10 @@ mod tests {
             SignAnswer::Denied,
             SignAnswer::Cancelled,
             SignAnswer::Rejected,
-            SignAnswer::Ambiguous,
+            SignAnswer::Lost,
             SignAnswer::NoPhone,
             SignAnswer::Busy,
             SignAnswer::Failed,
-            SignAnswer::CredentialRejected,
         ] {
             assert_eq!(SignAnswer::decode(&answer.encode()), Ok(answer));
         }

@@ -1222,7 +1222,7 @@ fn parse_der_len(der: &[u8], idx: &mut usize) -> Option<usize> {
 
 /// Normalizes a remote ECDSA signature to IEEE P1363 (`r || s`).
 ///
-/// RAPP v26.10.10 section 9.2 sends the fixed-width raw form, which may itself
+/// RAPP v26.10.21 section 9.2 sends the fixed-width raw form, which may itself
 /// begin with the DER sequence tag, so the raw length is checked before any
 /// DER decoding; other lengths are accepted only as DER.
 #[cfg_attr(
@@ -1300,22 +1300,20 @@ pub fn ecdsa_der_to_p1363(der: &[u8], field_bytes: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// The lifetime a remote operation is sent with (RAPP v26.10.21 section
+/// 8.1 item 2).
+#[cfg(windows)]
+const REMOTE_OPERATION_LIFETIME_MS: u64 = 30_000;
+
 #[cfg(windows)]
 pub struct RemoteCardTransport {
     pub(crate) pair_id: refineid_rapp_core::ids::PairId,
-    pub(crate) pairing_record: refineid_rapp_core::store::PairingRecord,
 }
 
 #[cfg(windows)]
 impl RemoteCardTransport {
-    pub(crate) fn new(
-        pair_id: refineid_rapp_core::ids::PairId,
-        pairing_record: refineid_rapp_core::store::PairingRecord,
-    ) -> Self {
-        Self {
-            pair_id,
-            pairing_record,
-        }
+    pub(crate) const fn new(pair_id: refineid_rapp_core::ids::PairId) -> Self {
+        Self { pair_id }
     }
 
     /// Establishes a session transport to the paired custodian found by its
@@ -1323,34 +1321,25 @@ impl RemoteCardTransport {
     /// custodian. This computer only dials; it never listens.
     fn connect_session_transport(
         &self,
+        store: &refineid_windows_credential_store::ProtectedPairingStore,
     ) -> Result<refineid_rapp_core::transport::TcpFrameTransport, String> {
         use core::time::Duration;
+        use refineid_rapp_core::store::PairingStore as _;
 
         crate::diag::diag!("connect_session_transport: discovering the paired phone");
-        let pairing = self
-            .pairing_record
-            .to_core_pair_record()
-            .map_err(|_| "the stored pairing is unusable; pair again".to_owned())?;
+        let pairing = store
+            .get(self.pair_id)
+            .ok()
+            .and_then(refineid_rapp_core::store::PairingRecord::serving_record)
+            .ok_or_else(|| "the pairing serves nothing; pair again".to_owned())?;
         refineid_rapp_core::stream::dial_session(
-            &pairing,
+            pairing,
             &[],
             &["127.0.0.1:47110".to_owned()],
             Duration::from_secs(2),
-            Duration::from_secs(5),
         )
         .map_err(|error| {
             crate::diag::diag!("connect_session_transport: dial failed: {error:?}");
-            if error == refineid_rapp_core::stream::StreamError::Revoked {
-                // A verified revocation (RAPP v26.10.18 section 4.6 item 5):
-                // the pairing is forgotten here and the user told to pair
-                // again.
-                if let Ok(mut store) =
-                    refineid_windows_credential_store::ProtectedPairingStore::load()
-                {
-                    let _ = store.forget_after_revocation(self.pair_id);
-                }
-                return "the phone forgot this computer; pair again".to_owned();
-            }
             "unable to reach the paired phone".to_owned()
         })
     }
@@ -1359,35 +1348,44 @@ impl RemoteCardTransport {
         &self,
         operation: &refineid_rapp_core::operations::CardOperation,
     ) -> Result<refineid_rapp_core::operations::CardOperationResult, String> {
-        use refineid_rapp_core::engine::{OperationOutcome, Requester, RequesterConfig};
-        use refineid_rapp_core::message::CloseReason;
-        use refineid_rapp_core::store::{MemoryJournal, MemoryPairingStore, PairingStore};
+        use refineid_rapp_core::engine::{
+            OperationOutcome, Requester, RequesterConfig, SessionEnd, SessionError,
+        };
+        use refineid_rapp_core::message::{CloseReason, ResultError};
 
-        let transport = self.connect_session_transport()?;
-        let mut store = MemoryPairingStore::new();
-        let _ = store.insert(self.pairing_record.clone());
+        let store = refineid_windows_credential_store::ProtectedPairingStore::load()
+            .map_err(|error| format!("the pairing store cannot be loaded: {error}"))?;
+        let transport = self.connect_session_transport(&store)?;
         let mut requester = Requester::new(
             RequesterConfig {
                 display_name: "RefineID PKCS#11".into(),
                 platform: "Windows".into(),
             },
             store,
-            MemoryJournal::new(),
         );
 
-        let mut session = requester
-            .connect(self.pair_id, transport)
-            .map_err(|e| format!("session connect failed: {e:?}"))?;
+        // The phone's `pairing_revoked` close revokes the pairing in the
+        // protected store the requester runs over (RAPP v26.10.21 section
+        // 4.6 item 4), and the user is told to pair again.
+        let mut session = match requester.connect(self.pair_id, transport) {
+            Ok(session) => session,
+            Err(SessionError::ClosedByPeer(CloseReason::PairingRevoked)) => {
+                return Err("the phone forgot this computer; pair again".to_owned());
+            }
+            Err(error) => return Err(format!("session connect failed: {error}")),
+        };
 
         let outcome = requester
-            .execute(&mut session, operation, 30_000)
-            .map_err(|e| format!("operation execute failed: {e:?}"))?;
-
+            .execute(&mut session, operation, REMOTE_OPERATION_LIFETIME_MS)
+            .map_err(|e| format!("operation execute failed: {e}"))?;
+        if session.end() == Some(SessionEnd::PeerClose(CloseReason::PairingRevoked)) {
+            return Err("the phone forgot this computer; pair again".to_owned());
+        }
         requester.disconnect(&mut session, CloseReason::UserDisconnect);
 
         match outcome {
             OperationOutcome::Completed(result) => Ok(result),
-            OperationOutcome::Denied => {
+            OperationOutcome::Rejected(ResultError::UserCancelled) => {
                 Err("operation was denied by the user on the remote device".into())
             }
             other => Err(format!("operation failed with outcome: {other:?}")),
@@ -1415,17 +1413,14 @@ fn remote_card_sign(
         let pair = store
             .records()
             .iter()
-            .find(|p| hex::encode(p.pair_id.as_bytes()) == hex_id)
-            .cloned()
+            .find(|p| p.serves() && hex::encode(p.pair_id().as_bytes()) == hex_id)
             .ok_or(CKR_DEVICE_ERROR)?;
 
         let (key_profile, algorithm, digest) = match mechanism {
             Mechanism::Ecdsa => {
                 let kp = pair
-                    .auth_cert
-                    .as_ref()
-                    .and_then(|der| {
-                        let cert = OwnedCert::from_der(der.clone()).ok()?;
+                    .authentication_certificate()
+                    .and_then(|cert| {
                         let view = cert.view();
                         match view.spki.algorithm() {
                             PublicKeyAlgorithm::Ec(EcCurve::Secp384r1) => {
@@ -1448,10 +1443,8 @@ fn remote_card_sign(
             }
             Mechanism::RsaPkcs => {
                 let kp = pair
-                    .auth_cert
-                    .as_ref()
-                    .and_then(|der| {
-                        let cert = OwnedCert::from_der(der.clone()).ok()?;
+                    .authentication_certificate()
+                    .and_then(|cert| {
                         let view = cert.view();
                         match view.spki.algorithm() {
                             PublicKeyAlgorithm::Rsa { modulus_bits } => {
@@ -1483,7 +1476,7 @@ fn remote_card_sign(
             digest,
         };
 
-        let remote_tx = RemoteCardTransport::new(pair.pair_id, pair);
+        let remote_tx = RemoteCardTransport::new(pair.pair_id());
         let result = remote_tx.execute_operation(&op).map_err(|err| {
             crate::diag::diag!("remote_card_sign execute_operation failed: {err}");
             CKR_DEVICE_ERROR

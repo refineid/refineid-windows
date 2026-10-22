@@ -15,6 +15,7 @@ path = "src/main.rs"
 getrandom.workspace = true
 hex.workspace = true
 p384 = { version = "0.14", default-features = false, features = ["ecdsa"] }
+refineid-lib-core.workspace = true
 refineid-rapp.workspace = true
 refineid-rapp-core.workspace = true
 refineid-rapp-ble.workspace = true
@@ -22,7 +23,7 @@ refineid-windows-credential-store.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-refineid-lib-core.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

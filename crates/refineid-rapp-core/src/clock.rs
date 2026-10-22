@@ -1,7 +1,7 @@
 //! The clocks the requester reads.
 //!
-//! Protocol deadlines run on the continuous clock (RAPP v26.10.18 section
-//! 8.2 item 1): milliseconds that keep advancing while the machine sleeps,
+//! Protocol deadlines run on the continuous clock (RAPP v26.10.21 section
+//! 8.1 item 2): milliseconds that keep advancing while the machine sleeps,
 //! so a request that waited through a sleep is as old as it is. Record
 //! timestamps use the wall clock, which both endpoints can relate to.
 
@@ -25,7 +25,7 @@ pub fn continuous_ms() -> u64 {
 }
 
 /// Milliseconds since the Unix epoch on the wall clock, for record
-/// timestamps such as a pairing's creation time.
+/// timestamps such as a pairing's creation or the time it was forgotten.
 #[must_use]
 #[allow(
     clippy::cast_possible_truncation,
@@ -38,8 +38,8 @@ pub fn unix_time_ms() -> u64 {
         .as_millis() as u64
 }
 
-/// Seconds since the Unix epoch on the wall clock, for discovery and
-/// revocation hint epochs.
+/// Seconds since the Unix epoch on the wall clock, for discovery hint
+/// epochs and withdrawal hint counters.
 #[must_use]
 pub fn unix_time_seconds() -> u64 {
     unix_time_ms() / MILLISECONDS_PER_SECOND

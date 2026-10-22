@@ -16,5 +16,8 @@ refineid-lib-core.workspace = true
 refineid-rapp-core.workspace = true
 zeroize.workspace = true
 
+[dev-dependencies]
+refineid-rapp.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Security_Cryptography"] }

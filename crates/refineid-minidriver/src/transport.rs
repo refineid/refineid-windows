@@ -33,11 +33,13 @@ use refineid_lib_core::transport::{
     CardTransport, CommandApdu, ResponseApdu, TransportErrorExt, TransportErrorKind,
     TransportOutcome,
 };
-use refineid_rapp_core::engine::{OperationOutcome, Requester, RequesterConfig};
+use refineid_rapp_core::engine::{
+    OperationOutcome, Requester, RequesterConfig, SessionEnd, SessionError,
+};
 use refineid_rapp_core::ids::PairId;
-use refineid_rapp_core::message::CloseReason;
+use refineid_rapp_core::message::{CloseReason, ResultError};
 use refineid_rapp_core::operations::{CardOperation, CardOperationResult};
-use refineid_rapp_core::store::{MemoryJournal, MemoryPairingStore, PairingRecord, PairingStore};
+use refineid_rapp_core::store::{PairingRecord, PairingStore};
 use refineid_rapp_core::stream::StreamError;
 use refineid_rapp_core::transport::TcpFrameTransport;
 use refineid_windows_credential_store::ProtectedPairingStore;
@@ -253,10 +255,6 @@ const BROWSE_ROUND: Duration = Duration::from_secs(3);
 /// goes unanswered often enough that one round is not a verdict.
 const BROWSE_ROUNDS: u32 = 3;
 
-/// Frame receive deadline while an operation waits for the holder, who
-/// approves on the phone and may have to present the card.
-const OPERATION_RECEIVE_DEADLINE: Duration = Duration::from_secs(120);
-
 /// Operation expiry sent on the wire; the holder approves within this.
 const OPERATION_LIFETIME_MS: u64 = 120_000;
 
@@ -264,60 +262,46 @@ const OPERATION_LIFETIME_MS: u64 = 120_000;
 pub(crate) struct RemoteCardTransport {
     pub(crate) atr: Vec<u8>,
     pub(crate) pair_id: PairId,
-    pub(crate) pairing_record: PairingRecord,
 }
 
 impl RemoteCardTransport {
-    pub(crate) fn new(atr: Vec<u8>, pair_id: PairId, pairing_record: PairingRecord) -> Self {
-        Self {
-            atr,
-            pair_id,
-            pairing_record,
-        }
+    pub(crate) const fn new(atr: Vec<u8>, pair_id: PairId) -> Self {
+        Self { atr, pair_id }
     }
 
     /// Establishes a session transport to the paired custodian: an explicit
     /// `REFINEID_RAPP_ENDPOINT` for test harnesses first, then the phone found
     /// by its session-mode discovery record, then the local mock custodian.
     /// This computer only dials; it never listens.
-    fn connect_session_transport(&self) -> Result<TcpFrameTransport, String> {
+    fn connect_session_transport(
+        &self,
+        store: &ProtectedPairingStore,
+    ) -> Result<TcpFrameTransport, String> {
         let preferred: Vec<String> = std::env::var("REFINEID_RAPP_ENDPOINT")
             .ok()
             .map(|endpoint| endpoint.trim().to_owned())
             .filter(|endpoint| !endpoint.is_empty())
             .into_iter()
             .collect();
-        let pairing = self
-            .pairing_record
-            .to_core_pair_record()
-            .map_err(|_| "the stored pairing is unusable; pair again".to_owned())?;
+        let pairing = store
+            .get(self.pair_id)
+            .ok()
+            .and_then(PairingRecord::serving_record)
+            .ok_or_else(|| "the pairing serves nothing; pair again".to_owned())?;
         let mut outcome = Err(StreamError::Unreachable);
         for _ in 0..BROWSE_ROUNDS {
             outcome = refineid_rapp_core::stream::dial_session(
-                &pairing,
+                pairing,
                 &preferred,
                 &[LOCAL_MOCK_CUSTODIAN.to_owned()],
                 BROWSE_ROUND,
-                OPERATION_RECEIVE_DEADLINE,
             );
-            if matches!(
-                outcome,
-                Ok(_) | Err(StreamError::Withdrawn | StreamError::Revoked)
-            ) {
+            if matches!(outcome, Ok(_) | Err(StreamError::Withdrawn)) {
                 break;
             }
         }
         outcome.map_err(|error| match error {
             StreamError::Withdrawn => "the paired phone turned remote access off".to_owned(),
-            StreamError::Revoked => {
-                // A verified revocation (RAPP v26.10.18 section 4.6 item 5):
-                // the pairing is forgotten here and the user told to pair
-                // again.
-                if let Ok(mut store) = ProtectedPairingStore::load() {
-                    let _ = store.forget_after_revocation(self.pair_id);
-                }
-                "the phone forgot this computer; pair again".to_owned()
-            }
             _ => "unable to reach the paired phone".to_owned(),
         })
     }
@@ -327,31 +311,39 @@ impl RemoteCardTransport {
         &self,
         operation: &CardOperation,
     ) -> Result<CardOperationResult, String> {
-        let transport = self.connect_session_transport()?;
-        let mut store = MemoryPairingStore::new();
-        let _ = store.insert(self.pairing_record.clone());
+        let store = ProtectedPairingStore::load()
+            .map_err(|error| format!("the pairing store cannot be loaded: {error}"))?;
+        let transport = self.connect_session_transport(&store)?;
         let mut requester = Requester::new(
             RequesterConfig {
                 display_name: "RefineID Windows Remote Arm".into(),
                 platform: "Windows".into(),
             },
             store,
-            MemoryJournal::new(),
         );
 
-        let mut session = requester
-            .connect(self.pair_id, transport)
-            .map_err(|e| format!("session connect failed: {e:?}"))?;
+        // The phone's `pairing_revoked` close revokes the pairing in the
+        // protected store the requester runs over (RAPP v26.10.21 section
+        // 4.6 item 4), and the user is told to pair again.
+        let mut session = match requester.connect(self.pair_id, transport) {
+            Ok(session) => session,
+            Err(SessionError::ClosedByPeer(CloseReason::PairingRevoked)) => {
+                return Err("the phone forgot this computer; pair again".to_owned());
+            }
+            Err(error) => return Err(format!("session connect failed: {error}")),
+        };
 
         let outcome = requester
             .execute(&mut session, operation, OPERATION_LIFETIME_MS)
-            .map_err(|e| format!("operation execute failed: {e:?}"))?;
-
+            .map_err(|e| format!("operation execute failed: {e}"))?;
+        if session.end() == Some(SessionEnd::PeerClose(CloseReason::PairingRevoked)) {
+            return Err("the phone forgot this computer; pair again".to_owned());
+        }
         requester.disconnect(&mut session, CloseReason::UserDisconnect);
 
         match outcome {
             OperationOutcome::Completed(result) => Ok(result),
-            OperationOutcome::Denied => {
+            OperationOutcome::Rejected(ResultError::UserCancelled) => {
                 Err("operation was denied by the user on the remote device".into())
             }
             other => Err(format!("operation failed with outcome: {other:?}")),

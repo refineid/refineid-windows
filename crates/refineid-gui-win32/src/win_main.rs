@@ -63,7 +63,7 @@ use refineid_rapp_core::engine::{PairingError, Requester, RequesterConfig};
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::limits::OFFER_TTL_MS;
 use refineid_rapp_core::offer::normalize_pairing_code;
-use refineid_rapp_core::store::{MemoryJournal, PairingStore as _};
+use refineid_rapp_core::store::{PairingRecord, PairingState, PairingStore as _, forget_pairing};
 use refineid_rapp_core::stream::DialPurpose;
 use refineid_rapp_core::transport::FrameTransport;
 use refineid_windows_credential_store::ProtectedPairingStore;
@@ -2257,7 +2257,7 @@ fn start_doc_verify() {
 /// Pair with the code the phone shows, on a worker thread; the
 /// refresh timer picks progress and the outcome up from `INBOX`. The
 /// phone advertises a pairing-mode record over DNS-SD and serves its
-/// offer on the connection (RAPP v26.10.10 section 4.2); this side
+/// offer on the connection (RAPP v26.10.21 section 4.2); this side
 /// browses, dials, and types the code into `CPace`.
 fn start_pairing() {
     let snapshot = STATE.with(|cell| {
@@ -2329,7 +2329,6 @@ fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<S
         },
         ProtectedPairingStore::load()
             .map_err(|error| format!("Cannot open pairing store: {error}"))?,
-        MemoryJournal::new(),
     );
     let deadline = Instant::now() + Duration::from_millis(OFFER_TTL_MS);
     loop {
@@ -2364,7 +2363,7 @@ fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<S
 /// terminal: success, a mistyped code, or a refusal; `None` reposts
 /// a failure that leaves the next phone to be tried.
 fn attempt_pair(
-    requester: &mut Requester<ProtectedPairingStore, MemoryJournal>,
+    requester: &mut Requester<ProtectedPairingStore>,
     code: &str,
     transport: impl FrameTransport,
     main_raw: usize,
@@ -2396,8 +2395,8 @@ fn confirm_pairing_dialog(
     main_raw: usize,
     peer_name: &str,
     platform: &str,
-    requested: &[String],
-) -> Option<Vec<String>> {
+    requested: &[refineid_rapp_core::profiles::ProfileName],
+) -> Option<Vec<refineid_rapp_core::profiles::ProfileName>> {
     let owner = HWND(main_raw as *mut core::ffi::c_void);
     if !unsafe { IsWindow(Some(owner)) }.as_bool() {
         return None;
@@ -2414,7 +2413,7 @@ fn confirm_pairing_dialog(
 
 /// Success text naming the freshly stored pairing.
 fn paired_summary(
-    requester: &Requester<ProtectedPairingStore, MemoryJournal>,
+    requester: &Requester<ProtectedPairingStore>,
     pair_id: PairId,
 ) -> Result<String, String> {
     let record = requester
@@ -2423,7 +2422,8 @@ fn paired_summary(
         .map_err(|error| format!("Stored pairing unreadable: {error:?}"))?;
     Ok(format!(
         "Paired with {} ({}).",
-        record.peer_display_name, record.peer_platform
+        record.peer().display_name,
+        record.peer().platform
     ))
 }
 
@@ -2443,7 +2443,8 @@ fn set_remote_status(text: &str) {
 }
 
 /// Refill the paired-devices list from the protected pairing store. The
-/// usable pairing carries a `*` marker, mirroring the CLI.
+/// usable pairing carries a `*` marker, mirroring the CLI; a forgotten or
+/// revoked one says so.
 fn refresh_remote_devices() {
     let target = STATE.with(|cell| cell.borrow().as_ref().map(|state| state.remote_devices));
     let Some(list) = target else {
@@ -2452,18 +2453,24 @@ fn refresh_remote_devices() {
     send(list, LB_RESETCONTENT, 0, 0);
     match ProtectedPairingStore::load() {
         Ok(store) => {
-            let current = store.usable_pairing().map(|usable| usable.pair_id);
+            let current = store.usable_pairing().map(PairingRecord::pair_id);
             for (index, record) in store.records().iter().enumerate() {
-                let marker = if current == Some(record.pair_id) {
+                let marker = if current == Some(record.pair_id()) {
                     "* "
                 } else {
                     "  "
                 };
+                let state = match record.state() {
+                    PairingState::Forgotten => " forgotten",
+                    PairingState::Revoked { .. } => " revoked",
+                    PairingState::Serving | PairingState::Unconfirmed => "",
+                };
                 list_add(
                     list,
                     &format!(
-                        "{marker}[{index}] {} ({})",
-                        record.peer_display_name, record.peer_platform
+                        "{marker}[{index}] {} ({}){state}",
+                        record.peer().display_name,
+                        record.peer().platform
                     ),
                 );
             }
@@ -2472,7 +2479,10 @@ fn refresh_remote_devices() {
     }
 }
 
-/// Remove the selected pairing from the vault, then refresh.
+/// Forget the selected pairing, then refresh (RAPP v26.10.21 section 4.6):
+/// it serves nothing from now on and keeps its keys only until its phone is
+/// told, on the next session with it, or for 30 days. One already revoked
+/// is removed.
 fn remove_remote_device() {
     let target = STATE.with(|cell| cell.borrow().as_ref().map(|state| state.remote_devices));
     let Some(list) = target else {
@@ -2497,13 +2507,17 @@ fn remove_remote_device() {
         set_remote_status("Select a device first.");
         return;
     };
-    let pair_id = record.pair_id;
-    match store.remove(pair_id) {
+    let pair_id = record.pair_id();
+    match forget_pairing(
+        &mut store,
+        pair_id,
+        refineid_rapp_core::clock::unix_time_ms(),
+    ) {
         Ok(()) => {
             refresh_remote_devices();
-            set_remote_status("Pairing removed.");
+            set_remote_status("Pairing forgotten. The phone is told when it is next reached.");
         }
-        Err(error) => set_remote_status(&format!("Remove failed: {error:?}")),
+        Err(error) => set_remote_status(&format!("Forget failed: {error:?}")),
     }
 }
 

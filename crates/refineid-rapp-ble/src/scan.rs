@@ -1,10 +1,10 @@
-//! The scan for RAPP advertisers (RAPP v26.10.18 sections 4.1 and 4.4).
+//! The scan for RAPP advertisers (RAPP v26.10.21 section 4.1).
 //!
 //! The advertisement carries the RAPP Service UUID and nothing else, so a
 //! scan cannot tell this pairing's phone from another person's: it reports
-//! every advertiser with its filtered signal strength and whether the
-//! proximity gate admits it, strongest first, and the caller routes a
-//! preamble to find out (section 2.2.1).
+//! every advertiser, strongest signal first, and the caller routes a
+//! preamble to find out (section 2.2.1). Signal strength only orders the
+//! attempts; it proves nothing about distance (section 4.4).
 
 use std::collections::BTreeMap;
 use std::sync::mpsc::{RecvTimeoutError, channel};
@@ -17,7 +17,7 @@ use windows::Devices::Bluetooth::Advertisement::{
 use windows::Foundation::TypedEventHandler;
 
 use crate::gatt::SERVICE_UUID;
-use crate::link::{AdvertiserAddress, ProximityGate, ProximityReading, Rssi};
+use crate::link::{AdvertiserAddress, Rssi};
 
 /// How often a scan waiting for advertisements checks whether the radio
 /// aborted it, so a radio switched off ends the scan within this time.
@@ -37,10 +37,8 @@ fn watcher_aborted(watcher: &BluetoothLEAdvertisementWatcher) -> bool {
 pub struct ScannedAdvertiser {
     /// The address it advertised under during this scan.
     pub address: AdvertiserAddress,
-    /// Its filtered signal strength.
-    pub reading: ProximityReading,
-    /// Whether the proximity gate admits it.
-    pub admitted: bool,
+    /// The strongest signal it was received with during this scan.
+    pub rssi: Rssi,
 }
 
 /// Why a scan could not run.
@@ -69,8 +67,8 @@ impl From<windows::core::Error> for ScanError {
     }
 }
 
-/// Scans for `window` and reports every RAPP advertiser that sent enough
-/// advertisements for a reading, strongest first.
+/// Scans for `window` and reports every RAPP advertiser seen, strongest
+/// first.
 ///
 /// An advertisement whose address or signal strength its border refuses is
 /// not counted.
@@ -78,7 +76,7 @@ impl From<windows::core::Error> for ScanError {
 /// # Errors
 /// [`ScanError::RadioUnavailable`] when the radio is off or the scan was
 /// aborted, and [`ScanError::Platform`] for other Windows Runtime failures.
-pub fn scan(window: Duration, gate: ProximityGate) -> Result<Vec<ScannedAdvertiser>, ScanError> {
+pub fn scan(window: Duration) -> Result<Vec<ScannedAdvertiser>, ScanError> {
     let watcher = BluetoothLEAdvertisementWatcher::new()?;
     watcher.SetScanningMode(BluetoothLEScanningMode::Active)?;
     watcher
@@ -98,7 +96,7 @@ pub fn scan(window: Duration, gate: ProximityGate) -> Result<Vec<ScannedAdvertis
     }))?;
     watcher.Start()?;
     let deadline = Instant::now() + window;
-    let mut samples: BTreeMap<AdvertiserAddress, Vec<Rssi>> = BTreeMap::new();
+    let mut strongest: BTreeMap<AdvertiserAddress, Rssi> = BTreeMap::new();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() || watcher_aborted(&watcher) {
@@ -116,7 +114,10 @@ pub fn scan(window: Duration, gate: ProximityGate) -> Result<Vec<ScannedAdvertis
         ) else {
             continue;
         };
-        samples.entry(address).or_default().push(rssi);
+        strongest
+            .entry(address)
+            .and_modify(|seen| *seen = (*seen).max(rssi))
+            .or_insert(rssi);
     }
     let aborted = watcher_aborted(&watcher);
     // An aborted watcher may refuse `Stop`; the scan is over either way,
@@ -129,17 +130,10 @@ pub fn scan(window: Duration, gate: ProximityGate) -> Result<Vec<ScannedAdvertis
     stopped?;
     unhooked?;
 
-    let mut advertisers: Vec<ScannedAdvertiser> = samples
+    let mut advertisers: Vec<ScannedAdvertiser> = strongest
         .into_iter()
-        .filter_map(|(address, measured)| {
-            let reading = ProximityReading::median_of(&measured)?;
-            Some(ScannedAdvertiser {
-                address,
-                reading,
-                admitted: gate.admits(reading, false),
-            })
-        })
+        .map(|(address, rssi)| ScannedAdvertiser { address, rssi })
         .collect();
-    advertisers.sort_by_key(|advertiser| core::cmp::Reverse(advertiser.reading.rssi()));
+    advertisers.sort_by_key(|advertiser| core::cmp::Reverse(advertiser.rssi));
     Ok(advertisers)
 }
