@@ -15,6 +15,10 @@
 [CmdletBinding()]
 param(
     [string[]]$Architecture = @('x64', 'arm64'),
+    # Debug is the development build: it reports every error to the Windows
+    # Event Log (crate refineid-dev-errors). Release reports nothing.
+    [ValidateSet('Debug', 'Release')]
+    [string]$Configuration = 'Debug',
     # Rust build artifacts older than this many days are pruned before the
     # build. cargo never garbage-collects target/, so stale dependency and
     # toolchain outputs accumulate for weeks. Set to 0 to skip pruning.
@@ -51,6 +55,10 @@ $targets = [ordered]@{
     x64   = 'x86_64-pc-windows-msvc'
     arm64 = 'aarch64-pc-windows-msvc'
 }
+
+# Cargo's dev profile is the debug build; its output directory is `debug`.
+$profileArguments = if ($Configuration -eq 'Release') { @('--release') } else { @() }
+$profileDirectory = if ($Configuration -eq 'Release') { 'release' } else { 'debug' }
 
 # Prunes Rust build artifacts not touched in the last $Days days. Uses
 # cargo-sweep, which reads cargo's fingerprints and removes only unreferenced
@@ -104,14 +112,14 @@ try {
             throw "rustup target add failed for $target"
         }
 
-        & $cargoPath build --locked --release --target $target -p refineid-minidriver
+        & $cargoPath build --locked @profileArguments --target $target -p refineid-minidriver
         if ($LASTEXITCODE -ne 0) {
             throw "cargo build failed for $target"
         }
 
         $outputDirectory = Join-Path $repositoryRoot "dist\$name"
         New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
-        $builtDll = Join-Path $repositoryRoot "target\$target\release\refineid_minidriver.dll"
+        $builtDll = Join-Path $repositoryRoot "target\$target\$profileDirectory\refineid_minidriver.dll"
         Copy-Item -LiteralPath $builtDll -Destination $outputDirectory -Force
     }
 

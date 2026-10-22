@@ -105,6 +105,22 @@ internal sealed partial class MainWindow : Window
 
         this.RootFrame.Navigated += this.OnNavigated;
         this.RootFrame.Navigate(typeof(MainPage));
+#if DEBUG
+        Microsoft.UI.Xaml.Input.KeyboardAccelerator showErrors = new()
+        {
+            Key = Windows.System.VirtualKey.E,
+            Modifiers =
+                Windows.System.VirtualKeyModifiers.Control
+                | Windows.System.VirtualKeyModifiers.Shift,
+        };
+        showErrors.Invoked += (sender, args) =>
+        {
+            args.Handled = true;
+            DevErrorWindow.ShowWindow();
+        };
+        this.RootFrame.KeyboardAccelerators.Add(showErrors);
+        this.Closed += (sender, args) => DevErrorWindow.Shutdown();
+#endif
     }
 
     /// <summary>The title bar shows Back exactly when there is a page to go back to.</summary>

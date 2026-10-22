@@ -1112,22 +1112,28 @@ where
             data: Some(&data),
             error: None,
         }),
-        Ok(Err(error)) => serialize_envelope::<T>(&ApiEnvelope {
-            ok: false,
-            data: None,
-            error: Some(ApiError {
-                code: error.code,
-                message: &error.message,
-            }),
-        }),
-        Err(_) => serialize_envelope::<T>(&ApiEnvelope {
-            ok: false,
-            data: None,
-            error: Some(ApiError {
-                code: "internal_panic",
-                message: "The native card service stopped unexpectedly.",
-            }),
-        }),
+        Ok(Err(error)) => {
+            refineid_dev_errors::report!(CardService, "card service call failed", name error.code);
+            serialize_envelope::<T>(&ApiEnvelope {
+                ok: false,
+                data: None,
+                error: Some(ApiError {
+                    code: error.code,
+                    message: &error.message,
+                }),
+            })
+        }
+        Err(_) => {
+            refineid_dev_errors::report!(CardService, "card service call failed", "panic");
+            serialize_envelope::<T>(&ApiEnvelope {
+                ok: false,
+                data: None,
+                error: Some(ApiError {
+                    code: "internal_panic",
+                    message: "The native card service stopped unexpectedly.",
+                }),
+            })
+        }
     };
     CString::new(json).map_or(core::ptr::null_mut(), CString::into_raw)
 }

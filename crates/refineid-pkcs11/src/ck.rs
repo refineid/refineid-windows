@@ -806,3 +806,66 @@ pub const CKF_OS_LOCKING_OK: CkFlags = 0x0000_0002;
 pub const CKF_LIBRARY_CANT_CREATE_OS_THREADS: CkFlags = 0x0000_0001;
 /// `CKF_DONT_BLOCK`: `C_WaitForSlotEvent` must not block.
 pub const CKF_DONT_BLOCK: CkFlags = 0x0000_0001;
+
+/// The name PKCS#11 v2.40 gives `rv`, for a development build's error
+/// reports; `CK_RV` for a value this module never returns.
+#[cfg(debug_assertions)]
+pub(crate) fn rv_name(rv: CkRv) -> &'static str {
+    macro_rules! named {
+        ($($name:ident),* $(,)?) => {
+            [$(($name, stringify!($name))),*]
+        };
+    }
+    named![
+        CKR_OK,
+        CKR_CANCEL,
+        CKR_HOST_MEMORY,
+        CKR_SLOT_ID_INVALID,
+        CKR_GENERAL_ERROR,
+        CKR_FUNCTION_FAILED,
+        CKR_ARGUMENTS_BAD,
+        CKR_NO_EVENT,
+        CKR_ATTRIBUTE_SENSITIVE,
+        CKR_ATTRIBUTE_TYPE_INVALID,
+        CKR_ATTRIBUTE_VALUE_INVALID,
+        CKR_DATA_INVALID,
+        CKR_DATA_LEN_RANGE,
+        CKR_DEVICE_ERROR,
+        CKR_DEVICE_REMOVED,
+        CKR_FUNCTION_NOT_SUPPORTED,
+        CKR_FUNCTION_NOT_PARALLEL,
+        CKR_KEY_HANDLE_INVALID,
+        CKR_OBJECT_HANDLE_INVALID,
+        CKR_KEY_TYPE_INCONSISTENT,
+        CKR_KEY_INDIGESTIBLE,
+        CKR_KEY_FUNCTION_NOT_PERMITTED,
+        CKR_MECHANISM_INVALID,
+        CKR_MECHANISM_PARAM_INVALID,
+        CKR_OPERATION_ACTIVE,
+        CKR_OPERATION_NOT_INITIALIZED,
+        CKR_PIN_INCORRECT,
+        CKR_PIN_INVALID,
+        CKR_PIN_LEN_RANGE,
+        CKR_PIN_LOCKED,
+        CKR_SESSION_CLOSED,
+        CKR_SESSION_COUNT,
+        CKR_SESSION_HANDLE_INVALID,
+        CKR_SESSION_PARALLEL_NOT_SUPPORTED,
+        CKR_SESSION_READ_ONLY,
+        CKR_SIGNATURE_INVALID,
+        CKR_SIGNATURE_LEN_RANGE,
+        CKR_TOKEN_NOT_PRESENT,
+        CKR_TOKEN_WRITE_PROTECTED,
+        CKR_USER_ALREADY_LOGGED_IN,
+        CKR_USER_NOT_LOGGED_IN,
+        CKR_USER_PIN_NOT_INITIALIZED,
+        CKR_USER_TYPE_INVALID,
+        CKR_RANDOM_SEED_NOT_SUPPORTED,
+        CKR_BUFFER_TOO_SMALL,
+        CKR_CRYPTOKI_NOT_INITIALIZED,
+        CKR_CRYPTOKI_ALREADY_INITIALIZED,
+    ]
+    .into_iter()
+    .find(|(value, _)| *value == rv)
+    .map_or("CK_RV", |(_, name)| name)
+}

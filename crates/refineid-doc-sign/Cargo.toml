@@ -13,6 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 const-oid.workspace = true
+refineid-dev-errors.workspace = true
 crypto-bigint.workspace = true
 refineid-lib-core.workspace = true
 refineid-lib-pcsc.workspace = true

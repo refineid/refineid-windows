@@ -85,6 +85,9 @@ internal sealed partial class DocumentPage : Page
         }
         catch (Exception error) when (error is COMException or InvalidOperationException)
         {
+#if DEBUG
+            DevErrorLog.Report("file chooser not opened", error);
+#endif
             this.ShowStatus(InfoBarSeverity.Error, "The file chooser could not be opened.");
             return;
         }
@@ -225,11 +228,17 @@ internal sealed partial class DocumentPage : Page
         }
         catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException)
         {
+#if DEBUG
+            DevErrorLog.Report("card service not loaded", error);
+#endif
             this.ShowStatus(InfoBarSeverity.Error, "The card service is not installed.");
         }
         // codeql[cs/catch-of-all-exceptions]
         catch (Exception error)
         {
+#if DEBUG
+            DevErrorLog.Report("document action failed", error);
+#endif
             this.ShowStatus(InfoBarSeverity.Error, error.Message);
         }
         finally

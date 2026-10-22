@@ -1114,7 +1114,11 @@ fn card_sign_with_origin_source(
 ) -> Result<Vec<u8>, CkRv> {
     if let Some(hex_id) = reader_name.strip_prefix("rapp:") {
         let Some(effective_origin) = remote_origin(origin, variable) else {
-            crate::diag::diag!("card_sign: remote card sign missing required caller RP origin");
+            refineid_dev_errors::report!(
+                Pkcs11,
+                "remote signature refused",
+                "no relying party origin"
+            );
             return Err(CKR_ARGUMENTS_BAD);
         };
         return remote_card_sign(hex_id, &effective_origin, mechanism, input);
@@ -1308,7 +1312,6 @@ impl RemoteCardTransport {
         use core::time::Duration;
         use refineid_rapp_core::store::PairingStore as _;
 
-        crate::diag::diag!("connect_session_transport: discovering the paired phone");
         let pairing = store
             .get(self.pair_id)
             .ok()
@@ -1320,10 +1323,8 @@ impl RemoteCardTransport {
             &["127.0.0.1:47110".to_owned()],
             Duration::from_secs(2),
         )
-        .map_err(|error| {
-            crate::diag::diag!("connect_session_transport: dial failed: {error:?}");
-            "unable to reach the paired phone".to_owned()
-        })
+        // The stream reports the failed dial.
+        .map_err(|_| "unable to reach the paired phone".to_owned())
     }
 
     pub(crate) fn execute_operation(
@@ -1335,8 +1336,11 @@ impl RemoteCardTransport {
         };
         use refineid_rapp_core::message::{CloseReason, ResultError};
 
-        let store = refineid_windows_credential_store::ProtectedPairingStore::load()
-            .map_err(|error| format!("the pairing store cannot be loaded: {error}"))?;
+        let store =
+            refineid_windows_credential_store::ProtectedPairingStore::load().map_err(|error| {
+                refineid_dev_errors::report!(Pkcs11, "pairing store not loaded", error);
+                format!("the pairing store cannot be loaded: {error}")
+            })?;
         let transport = self.connect_session_transport(&store)?;
         let mut requester = Requester::new(
             RequesterConfig {
@@ -1382,7 +1386,11 @@ fn remote_card_sign(
     input: &[u8],
 ) -> Result<Vec<u8>, CkRv> {
     if origin.trim().is_empty() || origin.len() > 512 {
-        crate::diag::diag!("remote_card_sign: invalid or missing RP origin");
+        refineid_dev_errors::report!(
+            Pkcs11,
+            "remote signature refused",
+            "the relying party origin is invalid"
+        );
         return Err(CKR_ARGUMENTS_BAD);
     }
     #[cfg(windows)]
@@ -1459,10 +1467,10 @@ fn remote_card_sign(
         };
 
         let remote_tx = RemoteCardTransport::new(pair.pair_id());
-        let result = remote_tx.execute_operation(&op).map_err(|err| {
-            crate::diag::diag!("remote_card_sign execute_operation failed: {err}");
-            CKR_DEVICE_ERROR
-        })?;
+        // The engine reports why the operation failed.
+        let result = remote_tx
+            .execute_operation(&op)
+            .map_err(|_| CKR_DEVICE_ERROR)?;
 
         match result {
             CardOperationResult::Signature(signature_bytes) => match mechanism {

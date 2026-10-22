@@ -99,7 +99,31 @@ function Set-KeyStorageProviderRegistration([string]$Module) {
     }
 }
 
+# Development builds report every error to the Application log as source
+# RefineID (crate refineid-dev-errors, the app's DevErrorLog). The source's
+# message file is the .NET Framework's EventLogMessages.dll, part of
+# Windows, which renders every event identifier as its first string, so
+# Event Viewer shows each message as written.
+function Register-DevErrorSource {
+    $messageFile = @('Framework64', 'FrameworkArm64', 'Framework') |
+        ForEach-Object { "Microsoft.NET\$_\v4.0.30319\EventLogMessages.dll" } |
+        Where-Object { Test-Path -LiteralPath (Join-Path $env:SystemRoot $_) } |
+        Select-Object -First 1
+    if (-not $messageFile) {
+        throw 'The .NET Framework event message file EventLogMessages.dll was not found.'
+    }
+    # EVENTLOG_ERROR_TYPE (winnt.h): the only type RefineID writes.
+    $eventLogErrorType = 0x0001
+    New-Item -Path $devErrorSourceKey -Force | Out-Null
+    New-ItemProperty -Path $devErrorSourceKey -Name EventMessageFile `
+        -PropertyType ExpandString -Value "%SystemRoot%\$messageFile" -Force | Out-Null
+    New-ItemProperty -Path $devErrorSourceKey -Name TypesSupported `
+        -PropertyType DWord -Value $eventLogErrorType -Force | Out-Null
+}
+
 Assert-Administrator
+
+$devErrorSourceKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\RefineID'
 
 $contactlessAtr = $null
 if ($PSBoundParameters.ContainsKey('ContactlessAtrHex')) {
@@ -169,6 +193,8 @@ try {
 
     Set-KeyStorageProviderRegistration -Module $destination
 
+    Register-DevErrorSource
+
     Set-CardRegistration -Name 'FINEID-Dev-CCID' `
         -Atr ([byte[]](0x3B,0xFD,0x13,0x00,0x00,0x81,0x31,0xFE,0x15,0x80,0x73,0xC0,0x21,0xC0,0x57,0x59,0x75,0x62,0x69,0x4B,0x65,0x79,0x40)) `
         -AtrMask ([byte[]](0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF))
@@ -194,6 +220,7 @@ try {
 }
 
 Write-Host "Installed $destination"
+Write-Host 'Registered the RefineID event source in the Application log.'
 if ($null -ne $contactlessAtr) {
     Write-Host 'Registered the exact contactless ATR for FINEID S4-1 v4.0.'
 }

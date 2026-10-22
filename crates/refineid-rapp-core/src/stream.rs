@@ -454,6 +454,17 @@ pub fn dial_session(
     fallback: &[String],
     browse_window: Duration,
 ) -> Result<TcpFrameTransport, StreamError> {
+    dialled_session(pairing, preferred, fallback, browse_window)
+        .inspect_err(|error| refineid_dev_errors::report!(Rapp, "phone not dialled", error))
+}
+
+/// [`dial_session`], unreported.
+fn dialled_session(
+    pairing: &PairRecord,
+    preferred: &[String],
+    fallback: &[String],
+    browse_window: Duration,
+) -> Result<TcpFrameTransport, StreamError> {
     let key = RoutingKey::derive(pairing).map_err(|_| StreamError::Malformed)?;
     let attempt = |endpoints: &[String]| {
         if endpoints.is_empty() {

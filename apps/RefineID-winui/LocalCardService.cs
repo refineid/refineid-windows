@@ -14,7 +14,6 @@
 
 namespace RefineID;
 
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -176,14 +175,12 @@ internal static partial class LocalCardService
                 LocalCardJsonContext.Default.NativeEnvelopeReaderList
             ).Readers;
         }
-        catch (NativeRappException ex)
+        catch (NativeRappException)
         {
-            Debug.WriteLine($"PresentReaders native error: {ex.Message}");
             return [];
         }
-        catch (JsonException ex)
+        catch (JsonException)
         {
-            Debug.WriteLine($"PresentReaders JSON parse error: {ex.Message}");
             return [];
         }
     }
@@ -197,14 +194,12 @@ internal static partial class LocalCardService
                 LocalCardJsonContext.Default.NativeEnvelopeLocalCardSupport
             );
         }
-        catch (NativeRappException ex)
+        catch (NativeRappException)
         {
-            Debug.WriteLine($"DetectLocalCardSupport native error: {ex.Message}");
             return new LocalCardSupport { State = "unknown" };
         }
-        catch (JsonException ex)
+        catch (JsonException)
         {
-            Debug.WriteLine($"DetectLocalCardSupport JSON parse error: {ex.Message}");
             return new LocalCardSupport { State = "unknown" };
         }
     }
@@ -401,23 +396,20 @@ internal static partial class LocalCardService
         nint response = operation();
         if (response == nint.Zero)
         {
-            throw new NativeRappException(
-                "native_allocation_failed",
-                "The card service did not respond."
-            );
+            throw Refused("native_allocation_failed", "The card service did not respond.");
         }
 
         try
         {
             string json =
                 Marshal.PtrToStringUTF8(response)
-                ?? throw new NativeRappException(
+                ?? throw Refused(
                     "native_response_invalid",
                     "The card service response was not valid UTF-8."
                 );
             NativeEnvelope<T> envelope =
                 JsonSerializer.Deserialize(json, envelopeInfo)
-                ?? throw new NativeRappException(
+                ?? throw Refused(
                     "native_response_invalid",
                     "The card service response was not valid JSON."
                 );
@@ -430,14 +422,33 @@ internal static partial class LocalCardService
             }
 
             return envelope.Data
-                ?? throw new NativeRappException(
+                ?? throw Refused(
                     "native_response_empty",
                     "The card service response carried no data."
                 );
         }
+#if DEBUG
+        catch (JsonException error)
+        {
+            DevErrorLog.Report("card service answer refused", error);
+            throw;
+        }
+#endif
         finally
         {
             StringFree(response);
         }
+    }
+
+    /// <summary>
+    /// The failure of an answer this side cannot read; a development build
+    /// reports it, as the native side reports its own failures.
+    /// </summary>
+    private static NativeRappException Refused(string code, string message)
+    {
+#if DEBUG
+        DevErrorLog.Report("card service answer refused", code);
+#endif
+        return new NativeRappException(code, message);
     }
 }

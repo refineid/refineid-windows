@@ -1,0 +1,19 @@
+[package]
+name = "refineid-dev-errors"
+description = "Development builds write every reported failure to the Windows Event Log for the RefineID app's Errors window; release builds compile none of it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_EventLog",
+] }
+
+[lints]
+workspace = true

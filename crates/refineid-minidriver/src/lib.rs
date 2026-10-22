@@ -100,8 +100,28 @@ mod ksp_verify;
 mod ksp_codec;
 #[cfg(windows)]
 mod msroots;
+#[cfg(all(windows, debug_assertions))]
+mod reported;
 #[cfg(windows)]
 mod transport;
+
+/// The Card Module entry point `name` as the function table installs it: a
+/// development build installs the wrapper in [`reported`] that reports a
+/// failing return.
+#[cfg(all(windows, debug_assertions))]
+macro_rules! entry {
+    ($name:ident) => {
+        reported::$name
+    };
+}
+
+/// The Card Module entry point `name` as the function table installs it.
+#[cfg(all(windows, not(debug_assertions)))]
+macro_rules! entry {
+    ($name:ident) => {
+        $name
+    };
+}
 
 #[cfg(windows)]
 use core::mem::size_of;
@@ -112,7 +132,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 #[cfg(windows)]
-use cardmod::{CardCapabilityModel, CardModel, ContainerDescriptor, Ctx, KeyAlgorithm, Log};
+use cardmod::{CardCapabilityModel, CardModel, ContainerDescriptor, Ctx, KeyAlgorithm};
 #[cfg(windows)]
 #[allow(
     clippy::wildcard_imports,
@@ -211,15 +231,18 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
     pCardData: *mut CARD_DATA,
     _dwFlags: DWORD,
 ) -> DWORD {
-    Log::dbg("CardAcquireContext: entry");
     if pCardData.is_null() {
-        Log::dbg("CardAcquireContext: null CARD_DATA");
+        refineid_dev_errors::report!(CardModule, "CardAcquireContext failed", "no card data");
         return SCARD_E_INVALID_PARAMETER;
     }
     let cd = unsafe { &mut *pCardData };
 
     if cd.dwVersion < CARD_DATA_VERSION_FOUR {
-        Log::dbg("CardAcquireContext: unsupported CARD_DATA version");
+        refineid_dev_errors::report!(
+            CardModule,
+            "CardAcquireContext failed",
+            "card data version unsupported"
+        );
         return SCARD_E_UNSUPPORTED_FEATURE;
     }
 
@@ -231,12 +254,16 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
     cd.dwVersion = cd.dwVersion.min(max_supported_version);
 
     if cd.pbAtr.is_null() || cd.cbAtr == 0 || cd.hScard == 0 {
-        Log::dbg("CardAcquireContext: invalid ATR or card handle");
+        refineid_dev_errors::report!(
+            CardModule,
+            "CardAcquireContext failed",
+            "no ATR or card handle"
+        );
         return SCARD_E_INVALID_PARAMETER;
     }
     let atr_len = usize::try_from(cd.cbAtr).unwrap_or(usize::MAX);
     if atr_len > MAX_ATR_LEN {
-        Log::dbg("CardAcquireContext: ATR too long");
+        refineid_dev_errors::report!(CardModule, "CardAcquireContext failed", "ATR too long");
         return SCARD_E_INVALID_PARAMETER;
     }
     let atr = unsafe { core::slice::from_raw_parts(cd.pbAtr, atr_len) }.to_vec();
@@ -259,18 +286,19 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
     };
 
     let (transport, auth_cert_der, signature_cert_der) = if is_remote_card(&atr) {
-        Log::dbg("CardAcquireContext: remote card detected via ATR");
         let store = match ProtectedPairingStore::load() {
             Ok(s) => s,
             Err(e) => {
-                Log::dbg(&format!(
-                    "CardAcquireContext: failed to load ProtectedPairingStore: {e:?}"
-                ));
+                refineid_dev_errors::report!(CardModule, "CardAcquireContext failed", e);
                 return SCARD_F_INTERNAL_ERROR;
             }
         };
         let Some(pairing) = store.usable_pairing() else {
-            Log::dbg("CardAcquireContext: no usable pairing found for remote card");
+            refineid_dev_errors::report!(
+                CardModule,
+                "CardAcquireContext failed",
+                "no usable pairing"
+            );
             return SCARD_E_UNKNOWN_CARD;
         };
         let pair_id = pairing.pair_id();
@@ -282,7 +310,11 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
             pair_id,
             refineid_rapp_core::clock::unix_time_ms(),
         ) else {
-            Log::dbg("CardAcquireContext: no session confirmed the remote card in the grace");
+            refineid_dev_errors::report!(
+                CardModule,
+                "CardAcquireContext failed",
+                "no session heard the phone's card within the grace"
+            );
             return SCARD_E_UNKNOWN_CARD;
         };
         let sig = pairing.signature_certificate().unwrap_or(auth);
@@ -321,29 +353,39 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
                 let can = match read_can(&raw_transport.atr) {
                     Ok(Some(can)) => can,
                     Ok(None) => {
-                        Log::dbg(
-                            "CardAcquireContext: authentication cert is sealed and NFC is not primed",
+                        refineid_dev_errors::report!(
+                            CardModule,
+                            "CardAcquireContext failed",
+                            "the certificate is sealed and no card access number is saved"
                         );
                         return SCARD_F_INTERNAL_ERROR;
                     }
-                    Err(_error) => {
-                        Log::dbg("CardAcquireContext: Windows NFC credential lookup failed");
+                    Err(error) => {
+                        refineid_dev_errors::report!(
+                            CardModule,
+                            "card access number not read",
+                            error
+                        );
                         return SCARD_F_INTERNAL_ERROR;
                     }
                 };
                 let _master_file_selection = raw_transport.select_mf();
                 let pace_session = match run_pace_with_can(&mut raw_transport, can) {
                     Ok(session) => session,
-                    Err(_error) => {
-                        Log::dbg("CardAcquireContext: contactless PACE failed");
+                    Err(error) => {
+                        refineid_dev_errors::report!(CardModule, "contactless PACE failed", error);
                         return SCARD_F_INTERNAL_ERROR;
                     }
                 };
                 let mut protected = CardSessionTransport::protected(raw_transport, pace_session);
                 let cert = match protected.read_certificate(CertSlot::Authentication) {
                     Ok(cert) => cert.into_bytes(),
-                    Err(_error) => {
-                        Log::dbg("CardAcquireContext: protected authentication cert read failed");
+                    Err(error) => {
+                        refineid_dev_errors::report!(
+                            CardModule,
+                            "authentication certificate not read",
+                            error
+                        );
                         return SCARD_F_INTERNAL_ERROR;
                     }
                 };
@@ -352,8 +394,8 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
         };
         let signature_cert_der = match transport.read_certificate(CertSlot::Signature) {
             Ok(cert) => cert.into_bytes(),
-            Err(_err) => {
-                Log::dbg("CardAcquireContext: failed to read qualified-signature cert");
+            Err(error) => {
+                refineid_dev_errors::report!(CardModule, "signature certificate not read", error);
                 return SCARD_F_INTERNAL_ERROR;
             }
         };
@@ -367,7 +409,11 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
     };
 
     let Some(card) = CardModel::build_card_model(cd, auth_cert_der, signature_cert_der) else {
-        Log::dbg("CardAcquireContext: failed to build card model");
+        refineid_dev_errors::report!(
+            CardModule,
+            "CardAcquireContext failed",
+            "the card model was not built"
+        );
         return SCARD_F_INTERNAL_ERROR;
     };
 
@@ -379,31 +425,31 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
     });
     cd.pvVendorSpecific = Box::into_raw(ctx).cast();
 
-    cd.pfnCardDeleteContext = Some(CardDeleteContext);
-    cd.pfnCardQueryCapabilities = Some(CardQueryCapabilities);
+    cd.pfnCardDeleteContext = Some(entry!(CardDeleteContext));
+    cd.pfnCardQueryCapabilities = Some(entry!(CardQueryCapabilities));
     cd.pfnCardDeleteContainer = Some(unsupported_delete_container);
     cd.pfnCardCreateContainer = Some(unsupported_create_container);
-    cd.pfnCardGetContainerInfo = Some(CardGetContainerInfo);
-    cd.pfnCardAuthenticatePin = Some(CardAuthenticatePin);
+    cd.pfnCardGetContainerInfo = Some(entry!(CardGetContainerInfo));
+    cd.pfnCardAuthenticatePin = Some(entry!(CardAuthenticatePin));
     cd.pfnCardGetChallenge = Some(unsupported_get_challenge);
     cd.pfnCardAuthenticateChallenge = Some(unsupported_authenticate_challenge);
-    cd.pfnCardUnblockPin = Some(CardUnblockPin);
-    cd.pfnCardChangeAuthenticator = Some(CardChangeAuthenticator);
-    cd.pfnCardDeauthenticate = Some(CardDeauthenticate);
+    cd.pfnCardUnblockPin = Some(entry!(CardUnblockPin));
+    cd.pfnCardChangeAuthenticator = Some(entry!(CardChangeAuthenticator));
+    cd.pfnCardDeauthenticate = Some(entry!(CardDeauthenticate));
     cd.pfnCardCreateDirectory = Some(unsupported_create_directory);
     cd.pfnCardDeleteDirectory = Some(unsupported_delete_directory);
     cd.pvUnused3 = core::ptr::null_mut();
     cd.pvUnused4 = core::ptr::null_mut();
     cd.pfnCardCreateFile = Some(unsupported_create_file);
-    cd.pfnCardReadFile = Some(CardReadFile);
+    cd.pfnCardReadFile = Some(entry!(CardReadFile));
     cd.pfnCardWriteFile = Some(unsupported_write_file);
     cd.pfnCardDeleteFile = Some(unsupported_delete_file);
-    cd.pfnCardEnumFiles = Some(CardEnumFiles);
-    cd.pfnCardGetFileInfo = Some(CardGetFileInfo);
-    cd.pfnCardQueryFreeSpace = Some(CardQueryFreeSpace);
-    cd.pfnCardQueryKeySizes = Some(CardQueryKeySizes);
-    cd.pfnCardSignData = Some(CardSignData);
-    cd.pfnCardRSADecrypt = Some(CardRSADecrypt);
+    cd.pfnCardEnumFiles = Some(entry!(CardEnumFiles));
+    cd.pfnCardGetFileInfo = Some(entry!(CardGetFileInfo));
+    cd.pfnCardQueryFreeSpace = Some(entry!(CardQueryFreeSpace));
+    cd.pfnCardQueryKeySizes = Some(entry!(CardQueryKeySizes));
+    cd.pfnCardSignData = Some(entry!(CardSignData));
+    cd.pfnCardRSADecrypt = Some(entry!(CardRSADecrypt));
     cd.pfnCardConstructDHAgreement = None;
 
     if cd.dwVersion >= CARD_DATA_VERSION_FIVE {
@@ -413,12 +459,12 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
     }
     if cd.dwVersion >= CARD_DATA_VERSION_SIX {
         cd.pfnCardGetChallengeEx = Some(unsupported_get_challenge_ex);
-        cd.pfnCardAuthenticateEx = Some(CardAuthenticateEx);
-        cd.pfnCardChangeAuthenticatorEx = Some(CardChangeAuthenticatorEx);
-        cd.pfnCardDeauthenticateEx = Some(CardDeauthenticateEx);
-        cd.pfnCardGetContainerProperty = Some(CardGetContainerProperty);
+        cd.pfnCardAuthenticateEx = Some(entry!(CardAuthenticateEx));
+        cd.pfnCardChangeAuthenticatorEx = Some(entry!(CardChangeAuthenticatorEx));
+        cd.pfnCardDeauthenticateEx = Some(entry!(CardDeauthenticateEx));
+        cd.pfnCardGetContainerProperty = Some(entry!(CardGetContainerProperty));
         cd.pfnCardSetContainerProperty = Some(unsupported_set_container_property);
-        cd.pfnCardGetProperty = Some(CardGetProperty);
+        cd.pfnCardGetProperty = Some(entry!(CardGetProperty));
         cd.pfnCardSetProperty = Some(unsupported_set_property);
     }
     if ENABLE_CNG_KSP_SURFACE && cd.dwVersion >= CARD_DATA_VERSION_SEVEN {
@@ -435,7 +481,6 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
         cd.pfnCardCreateContainerEx = Some(unsupported_create_container_ex);
     }
 
-    Log::dbg("CardAcquireContext: success");
     SCARD_S_SUCCESS
 }
 
@@ -606,7 +651,6 @@ fn sync_transport_handle(
     pin1_authenticated: &mut bool,
     pin2_authenticated: &mut bool,
     live_h_card: usize,
-    site: &str,
 ) -> Result<bool, DWORD> {
     if tx.is_remote() {
         return Ok(false);
@@ -615,11 +659,6 @@ fn sync_transport_handle(
         return Ok(false);
     }
 
-    Log::dbg(&format!(
-        "{site}: transport hScard refresh {:#x} -> {:#x}",
-        tx.h_card(),
-        live_h_card
-    ));
     tx.raw_mut().h_card = live_h_card;
     *pin1_authenticated = false;
     *pin2_authenticated = false;
@@ -628,18 +667,22 @@ fn sync_transport_handle(
         let can = match read_can(tx.atr_bytes()) {
             Ok(Some(can)) => can,
             Ok(None) => {
-                Log::dbg(&format!("{site}: NFC credential is no longer configured"));
+                refineid_dev_errors::report!(
+                    CardModule,
+                    "card handle refresh failed",
+                    "no card access number is saved"
+                );
                 return Err(SCARD_F_INTERNAL_ERROR);
             }
-            Err(_error) => {
-                Log::dbg(&format!("{site}: NFC credential lookup failed"));
+            Err(error) => {
+                refineid_dev_errors::report!(CardModule, "card access number not read", error);
                 return Err(SCARD_F_INTERNAL_ERROR);
             }
         };
         let raw = tx.raw_mut();
         let _master_file_selection = raw.select_mf();
-        let session = run_pace_with_can(raw, can).map_err(|_error| {
-            Log::dbg(&format!("{site}: PACE re-establishment failed"));
+        let session = run_pace_with_can(raw, can).map_err(|error| {
+            refineid_dev_errors::report!(CardModule, "contactless PACE failed", error);
             SCARD_F_INTERNAL_ERROR
         })?;
         tx.replace_pace_session(session);
@@ -707,7 +750,11 @@ fn reverify_cached_pin(
     };
     if !pin1_status_permits_consumer_authentication(status) {
         clear_pin_state(pin1_authenticated, pin2_authenticated);
-        Log::dbg("reverify_cached_pin: PIN1 retry floor is below three or unreadable");
+        refineid_dev_errors::report!(
+            CardModule,
+            "held PIN 1 not used",
+            "the retry counter is below its floor or unreadable"
+        );
         return Some(SCARD_W_WRONG_CHV);
     }
     let slot = PinSlot::Pin1;
@@ -715,7 +762,6 @@ fn reverify_cached_pin(
         .ok()
         .flatten();
     let Some(checkout) = checkout else {
-        Log::dbg("reverify_cached_pin: no card-bound PIN1 available");
         return Some(SCARD_W_WRONG_CHV);
     };
     let pin = checkout.pin().clone();
@@ -723,7 +769,11 @@ fn reverify_cached_pin(
         with_pin_safety(|cache| cache.is_rejected(&serial, slot, &pin)).unwrap_or(false);
     if is_rejected {
         clear_pin_state(pin1_authenticated, pin2_authenticated);
-        Log::dbg("reverify_cached_pin: PIN was previously rejected by the card");
+        refineid_dev_errors::report!(
+            CardModule,
+            "held PIN 1 not used",
+            "the card rejected it before"
+        );
         return Some(SCARD_W_WRONG_CHV);
     }
     let outcome = tx.verify_pin1(pin.clone());
@@ -731,24 +781,27 @@ fn reverify_cached_pin(
         Ok(VerifyOutcome::Ok) => {
             let _ = with_pin_safety(|cache| checkout.restore_after_success(cache));
             *pin1_authenticated = true;
-            Log::dbg("reverify_cached_pin: verified cached PIN1 on card -> OK");
             None
         }
         Ok(VerifyOutcome::WrongPin { .. }) => {
             let _ = with_pin_safety(|cache| cache.record_rejected(&serial, slot, &pin));
             clear_pin_state(pin1_authenticated, pin2_authenticated);
-            Log::dbg("reverify_cached_pin: card rejected PIN; remembered for process lifetime");
+            refineid_dev_errors::report!(
+                CardModule,
+                "held PIN 1 not verified",
+                "the card rejected it"
+            );
             Some(SCARD_W_WRONG_CHV)
         }
         Ok(other) => {
             clear_pin_state(pin1_authenticated, pin2_authenticated);
-            Log::dbg(&format!("reverify_cached_pin: verify failed ({other:?})"));
+            refineid_dev_errors::report!(CardModule, "held PIN 1 not verified", other);
             Some(SCARD_W_WRONG_CHV)
         }
         Err(err) => {
             let _ = with_pin_safety(|cache| checkout.restore_after_unanswered(cache));
             reset_card_state(pin1_authenticated, pin2_authenticated);
-            Log::dbg(&format!("reverify_cached_pin: transport error ({err:?})"));
+            refineid_dev_errors::report!(CardModule, "held PIN 1 not verified", err);
             Some(SCARD_F_INTERNAL_ERROR)
         }
     }
@@ -1289,14 +1342,6 @@ unsafe extern "system" fn CardReadFile(
     };
 
     let file = read_cstr(pszFileName);
-    Log::dbg(&format!(
-        "CardReadFile dir={} file={file}",
-        if pszDirectoryName.is_null() {
-            String::from("<root>")
-        } else {
-            read_cstr(pszDirectoryName)
-        }
-    ));
     let data = if pszDirectoryName.is_null() {
         if cstr_eq(pszFileName, "cardcf") {
             synth_cardcf()
@@ -1560,7 +1605,6 @@ unsafe extern "system" fn CardGetContainerInfo(
     _flags: DWORD,
     pInfo: *mut CONTAINER_INFO,
 ) -> DWORD {
-    Log::dbg(&format!("CardGetContainerInfo idx={bContainerIndex}"));
     if pInfo.is_null() {
         return SCARD_E_INVALID_PARAMETER;
     }
@@ -1572,13 +1616,13 @@ unsafe extern "system" fn CardGetContainerInfo(
         return SCARD_E_NO_KEY_CONTAINER;
     };
     let Some(info) = (unsafe { build_container_info_struct(cd, container) }) else {
-        Log::dbg("CardGetContainerInfo -> INTERNAL (blob build failed)");
+        refineid_dev_errors::report!(
+            CardModule,
+            "CardGetContainerInfo failed",
+            "the public key blob was not built"
+        );
         return SCARD_F_INTERNAL_ERROR;
     };
-    Log::dbg(&format!(
-        "CardGetContainerInfo -> OK cbSig={} cbKeyEx={}",
-        info.cbSigPublicKey, info.cbKeyExPublicKey
-    ));
     unsafe {
         *pInfo = info;
     }
@@ -1593,7 +1637,6 @@ unsafe extern "system" fn CardAuthenticatePin(
     cbPin: DWORD,
     pcAttemptsRemaining: PDWORD,
 ) -> DWORD {
-    Log::dbg("CardAuthenticatePin: entry");
     let (cd, ctx) = match unsafe { checked_card_data_and_ctx_mut(pCardData) } {
         Ok(values) => values,
         Err(rc) => return rc,
@@ -1630,7 +1673,6 @@ unsafe extern "system" fn CardAuthenticatePin(
         &mut ctx.pin1_authenticated,
         &mut ctx.pin2_authenticated,
         cd.hScard,
-        "CardAuthenticatePin",
     ) {
         return error;
     }
@@ -1719,19 +1761,8 @@ unsafe extern "system" fn CardSignData(
     {
         let (pin1, pin2) = (&mut ctx.pin1_authenticated, &mut ctx.pin2_authenticated);
         let mut tx = lock_transport(&ctx.transport);
-        let _ = sync_transport_handle(&mut tx, pin1, pin2, cd.hScard, "CardSignData");
+        let _ = sync_transport_handle(&mut tx, pin1, pin2, cd.hScard);
     }
-
-    Log::dbg(&format!(
-        "CardSignData idx={} dwKeySpec={} cbData={} dwPaddingType={} aiHashAlg={:#x} pin1={} pin2={}",
-        info.bContainerIndex,
-        info.dwKeySpec,
-        info.cbData,
-        info.dwPaddingType,
-        info.aiHashAlg,
-        ctx.pin1_authenticated,
-        ctx.pin2_authenticated,
-    ));
 
     let authenticated = if ctx.transport.lock().is_ok_and(|tx| tx.is_remote()) {
         true
@@ -1742,7 +1773,11 @@ unsafe extern "system" fn CardSignData(
             || with_pin_safety(|cache| cache.has_positive_pin1()).unwrap_or(false)
     };
     if !authenticated {
-        Log::dbg("CardSignData -> WRONG_CHV (not authenticated)");
+        refineid_dev_errors::report!(
+            CardModule,
+            "CardSignData failed",
+            "the key's PIN is not verified"
+        );
         return SCARD_W_WRONG_CHV;
     }
 
@@ -1840,13 +1875,17 @@ unsafe extern "system" fn CardSignData(
         let result = match remote_tx.execute_operation(&operation) {
             Ok(r) => r,
             Err(err) => {
-                Log::dbg(&format!("CardSignData: remote operation failed: {err}"));
+                refineid_dev_errors::report!(CardModule, "remote signature failed", err);
                 return err.status();
             }
         };
 
         let CardOperationResult::Signature(mut sig_bytes) = result else {
-            Log::dbg("CardSignData: remote operation did not return signature");
+            refineid_dev_errors::report!(
+                CardModule,
+                "remote signature failed",
+                "another result came"
+            );
             return SCARD_F_INTERNAL_ERROR;
         };
 
@@ -1855,11 +1894,11 @@ unsafe extern "system" fn CardSignData(
         } else if let KeyAlgorithm::Ec(curve) = &container.key_alg {
             let field_bytes = curve.bits() / 8;
             let Some(p1363) = cardmod::remote_ecdsa_to_p1363(&sig_bytes, field_bytes) else {
-                Log::dbg(&format!(
-                    "CardSignData: unexpected remote ECDSA signature length: {} (expected {})",
-                    sig_bytes.len(),
-                    field_bytes * 2
-                ));
+                refineid_dev_errors::report!(
+                    CardModule,
+                    "remote signature failed",
+                    "the ECDSA signature length is wrong"
+                );
                 return SCARD_F_INTERNAL_ERROR;
             };
             sig_bytes = p1363;
@@ -1942,17 +1981,12 @@ unsafe extern "system" fn CardSignData(
         ) {
             return rc;
         }
-        Log::dbg(&format!(
-            "CardSignData PSS native: protocol={:?} digest_len={}",
-            tx.protocol(),
-            in_bytes.len()
-        ));
         let sig = tx.sign_pre_hashed_rsa_pss(key_ref, hash);
         drop(tx);
         let sig = match sig {
             Ok(sig) => sig,
             Err(err) => {
-                Log::dbg(&format!("CardSignData PSS -> INTERNAL ({err:?})"));
+                refineid_dev_errors::report!(CardModule, "RSA-PSS signature failed", err);
                 reset_card_state(&mut ctx.pin1_authenticated, &mut ctx.pin2_authenticated);
                 return SCARD_F_INTERNAL_ERROR;
             }
@@ -2145,10 +2179,6 @@ unsafe extern "system" fn CardGetProperty(
     if wszProperty.is_null() {
         return SCARD_E_INVALID_PARAMETER;
     }
-    Log::dbg(&format!(
-        "CardGetProperty '{}' cbData={cbData} dwFlags={dwFlags}",
-        unsafe { read_wstr(wszProperty) }
-    ));
     let (_cd, ctx) = match unsafe { checked_card_data_and_ctx(pCardData) } {
         Ok(values) => values,
         Err(rc) => return rc,
@@ -2568,20 +2598,20 @@ unsafe extern "system" fn CardChangeAuthenticator(
 }
 
 #[cfg(windows)]
-#[expect(clippy::too_many_lines, reason = "Minidriver API implementation")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "CardAuthenticateEx validates, verifies and maps every verification outcome in one ABI entry point"
+)]
 unsafe extern "system" fn CardAuthenticateEx(
     pCardData: *mut CARD_DATA,
     PinId: DWORD,
-    dwFlags: DWORD,
+    _dwFlags: DWORD,
     pbPinData: PBYTE,
     cbPinData: DWORD,
     ppbSessionPin: *mut PBYTE,
     pcbSessionPin: PDWORD,
     pcAttemptsRemaining: PDWORD,
 ) -> DWORD {
-    Log::dbg(&format!(
-        "CardAuthenticateEx PinId={PinId} dwFlags={dwFlags:#x} cbPinData={cbPinData}"
-    ));
     // The Base CSP probes session-PIN support. We do not implement
     // session PINs: initialise the out parameters (the caller reads
     // them after return -- leaving them dangling makes the KSP fail
@@ -2626,7 +2656,6 @@ unsafe extern "system" fn CardAuthenticateEx(
         &mut ctx.pin1_authenticated,
         &mut ctx.pin2_authenticated,
         cd.hScard,
-        "CardAuthenticateEx",
     ) {
         return error;
     }
@@ -2650,7 +2679,6 @@ unsafe extern "system" fn CardAuthenticateEx(
     drop(tx);
     match outcome {
         Ok(VerifyOutcome::Ok) => {
-            Log::dbg("CardAuthenticateEx -> OK");
             if slot == PinSlot::Pin1 {
                 ctx.pin1_authenticated = true;
                 if pin1_cache_allowed {
@@ -2662,9 +2690,11 @@ unsafe extern "system" fn CardAuthenticateEx(
             SCARD_S_SUCCESS
         }
         Ok(VerifyOutcome::WrongPin { retries_left }) => {
-            Log::dbg(&format!(
-                "CardAuthenticateEx -> WRONG_CHV (retries={retries_left})"
-            ));
+            refineid_dev_errors::report!(
+                CardModule,
+                "CardAuthenticateEx failed",
+                "the card rejected the PIN"
+            );
             let _ = with_pin_safety(|cache| cache.record_rejected(&serial, slot, &pin));
             clear_cached_pin(ctx, PinId);
             if !pcAttemptsRemaining.is_null() {
@@ -2675,17 +2705,22 @@ unsafe extern "system" fn CardAuthenticateEx(
             SCARD_W_WRONG_CHV
         }
         Ok(VerifyOutcome::Locked) => {
-            Log::dbg("CardAuthenticateEx -> CHV_BLOCKED");
+            refineid_dev_errors::report!(
+                CardModule,
+                "CardAuthenticateEx failed",
+                "the PIN is blocked"
+            );
             clear_cached_pin(ctx, PinId);
             SCARD_W_CHV_BLOCKED
         }
         Ok(VerifyOutcome::Other(sw)) => {
-            Log::dbg(&format!("CardAuthenticateEx -> WRONG_CHV (sw={sw:#06x})"));
+            let status = refineid_lib_core::apdu::status_word::StatusWord::from_u16(sw);
+            refineid_dev_errors::report!(CardModule, "CardAuthenticateEx failed", status);
             clear_cached_pin(ctx, PinId);
             SCARD_W_WRONG_CHV
         }
         Err(e) => {
-            Log::dbg(&format!("CardAuthenticateEx -> INTERNAL ({e:?})"));
+            refineid_dev_errors::report!(CardModule, "CardAuthenticateEx failed", e);
             clear_cached_pin(ctx, PinId);
             SCARD_F_INTERNAL_ERROR
         }

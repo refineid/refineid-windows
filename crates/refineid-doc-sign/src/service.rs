@@ -919,6 +919,16 @@ pub fn sign_qualified(
     backend: PcscBackend,
     options: SignOptions,
 ) -> Result<SignReport, SignErrorKind> {
+    signed_qualified(backend, options).inspect_err(|error| {
+        refineid_dev_errors::report!(DocumentSigning, "document signing failed", error);
+    })
+}
+
+/// [`sign_qualified`], unreported.
+fn signed_qualified(
+    backend: PcscBackend,
+    options: SignOptions,
+) -> Result<SignReport, SignErrorKind> {
     if let Some(request) = options.document.as_ref() {
         request.validate_signing_policy()?;
     }
@@ -1338,10 +1348,7 @@ fn post_timestamp_query(
     retry_timestamp_query(
         || post_timestamp_query_once(uri, timestamp_query_der, max_response, credentials),
         |delay, error| {
-            eprintln!(
-                "timestamp authority temporarily unavailable ({error}); retrying in {} seconds",
-                delay.as_secs()
-            );
+            refineid_dev_errors::report!(DocumentSigning, "timestamp authority unavailable", error);
             std::thread::sleep(delay);
         },
     )
@@ -1492,8 +1499,12 @@ fn collect_document_timestamps(
             "no timestamp authority produced an acceptable token, so the signature would carry no attested time -- {detail}"
         )));
     }
-    for refusal in &refusals {
-        eprintln!("timestamp authority declined, continuing without it -- {refusal}");
+    if !refusals.is_empty() {
+        refineid_dev_errors::report!(
+            DocumentSigning,
+            "timestamp authority declined",
+            "continuing with the authorities that answered"
+        );
     }
     Ok(CollectedTimestamps { tokens, material })
 }
@@ -1720,8 +1731,12 @@ fn first_answering_token(
                     ));
                     continue;
                 }
-                for refusal in &refusals {
-                    eprintln!("archive timestamp: {refusal}");
+                if !refusals.is_empty() {
+                    refineid_dev_errors::report!(
+                        DocumentSigning,
+                        "archive timestamp authority declined",
+                        "continuing with the next authority"
+                    );
                 }
                 return Ok(token);
             }

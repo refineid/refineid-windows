@@ -635,12 +635,6 @@ pub fn change_pin_first(
     // `card activate` dispatch cannot reach this function.
     let person = ctx.identity().person_string();
     let card_serial = ctx.identity().best_serial().unwrap_or("").to_owned();
-    crate::events::CardTarget {
-        device: ctx.reader_id().as_str(),
-        card: &card_serial,
-        person: &person,
-    }
-    .emit();
 
     // Re-open against the bound reader, SELECT, and re-verify
     // the bound serial -- catches a card swap between the
@@ -709,12 +703,6 @@ pub fn unblock_pin_first(
 ) -> Result<UnblockPinReport, CardPinError> {
     let person = ctx.identity().person_string();
     let card_serial = ctx.identity().best_serial().unwrap_or("").to_owned();
-    crate::events::CardTarget {
-        device: ctx.reader_id().as_str(),
-        card: &card_serial,
-        person: &person,
-    }
-    .emit();
 
     let mut transport = backend.open_exclusive(ctx.reader_id(), ReaderAccessCap::Read)?;
     transport
@@ -1273,7 +1261,7 @@ const fn change_to_unblock(o: ChangePinOutcome) -> UnblockOutcome {
 /// `activation_pin_bytes` and `new_pin` are consumed by value so
 /// the PIN material drops + zeroizes at function return.
 fn activate_slot_setup<T: refineid_lib_core::transport::CardTransport>(
-    transport: &mut crate::apdu_trace::ApduTraceTransport<T>,
+    transport: &mut T,
     slot: PinSlot,
     generation: CardGeneration,
     activation_pin_bytes: PinBytes,
@@ -1307,9 +1295,8 @@ const fn activation_continues_after_pin1(outcome: UnblockOutcome) -> bool {
 ///      already activated -- the factory PIN is single-use.
 ///   4. Issue the generation-appropriate APDU (`CHANGE
 ///      REFERENCE DATA` newer / `RESET RETRY COUNTER` older).
-///   5. Emit per-step events; return the typed
-///      [`ActivateReport`] so the CLI can summarise outcomes
-///      without leaking PIN bytes.
+///   5. Return the typed [`ActivateReport`] so the caller can
+///      summarise outcomes without leaking PIN bytes.
 ///
 /// `options` (and the inner [`PinBytes`]) is consumed by value
 /// per Rule E1 -- on return the activation PIN + new PIN1/PIN2
@@ -1326,28 +1313,16 @@ pub fn activate_first(
     ctx: ActivationCardContext,
     options: ActivateOptions,
 ) -> Result<ActivateReport, CardPinError> {
-    let person = ctx.identity.person_string();
-    crate::events::CardTarget {
-        device: ctx.reader_id.as_str(),
-        card: ctx.identity.best_serial().unwrap_or(""),
-        person: &person,
-    }
-    .emit();
-
     // Validate the variant-vs-generation invariant *before*
-    // opening the reader so a mismatch surfaces a structured
-    // length_mismatch event and the typed
+    // opening the reader so a mismatch surfaces the typed
     // `CardPinError::ActivationLengthMismatch` without burning
     // PC/SC resources.
     let reader_label = ctx.reader_id.as_str().to_owned();
-    if let Some(err) =
-        ActivateGuard::check_length_match(&reader_label, &options.activation_pin, ctx.generation)
-    {
+    if let Some(err) = ActivateGuard::check_length_match(&options.activation_pin, ctx.generation) {
         return Err(err);
     }
 
-    let inner = backend.open_exclusive(&ctx.reader_id, ReaderAccessCap::Read)?;
-    let mut transport = crate::apdu_trace::ApduTraceTransport::new(inner);
+    let mut transport = backend.open_exclusive(&ctx.reader_id, ReaderAccessCap::Read)?;
     transport
         .select_pkcs15_application()
         .map_err(|e| CardPinError::Pkcs15Select(format!("{e}")))?;
@@ -1367,7 +1342,6 @@ pub fn activate_first(
     // refineid falls back to the existing PinStatus-only logic.
     let pin1_changed = transport.pin_changed_flag(PinSlot::Pin1).ok().flatten();
     let pin2_changed = transport.pin_changed_flag(PinSlot::Pin2).ok().flatten();
-    ActivateGuard::emit_pin_changed_probed(pin1_changed, pin2_changed);
     let preflight = classify_preflight(
         pin1_probe,
         pin2_probe,
@@ -1377,14 +1351,6 @@ pub fn activate_first(
     );
 
     if !options.allow_reactivate && preflight.looks_activated() {
-        if let ActivatePreflightOutcome::LooksActivated { pin1, pin2 } = &preflight {
-            crate::events::CardActivatePreflightRefused {
-                reader: &reader_label,
-                pin1_status: &format!("{pin1:?}"),
-                pin2_status: &pin2.as_ref().map_or_else(String::new, |s| format!("{s:?}")),
-            }
-            .emit();
-        }
         return Ok(ActivateReport {
             reader: reader_label,
             preflight,
@@ -1392,8 +1358,6 @@ pub fn activate_first(
             pin2_outcome: None,
         });
     }
-
-    ActivateGuard::emit_scheme_selected(ctx.generation);
 
     // Re-verify session before the first modify APDU.
     re_verify_session(&mut transport, &ctx.bound_serial)?;
@@ -1411,12 +1375,6 @@ pub fn activate_first(
         activation_pin_bytes.clone(),
         options.new_pin1.clone(),
     )?;
-
-    crate::events::CardActivatePin1Set {
-        reader: &reader_label,
-        outcome: &format!("{pin1_outcome:?}"),
-    }
-    .emit();
 
     // Single-shot: if PIN1 setup rejected the activation PIN
     // (wrong code, locked slot, anything other than Ok), don't
@@ -1444,12 +1402,6 @@ pub fn activate_first(
         options.new_pin2,
     )?;
 
-    crate::events::CardActivatePin2Set {
-        reader: &reader_label,
-        outcome: &format!("{pin2_outcome:?}"),
-    }
-    .emit();
-
     Ok(ActivateReport {
         reader: reader_label,
         preflight,
@@ -1463,12 +1415,12 @@ pub fn activate_first(
 struct ActivateGuard;
 
 impl ActivateGuard {
-    /// Variant-vs-generation invariant. Emits the
-    /// `card.activate.preflight.length_mismatch` event for the
-    /// length-mismatch arms; returns the typed error so the
-    /// caller can short-circuit.
-    fn check_length_match(
-        reader_label: &str,
+    /// Variant-vs-generation invariant: the typed error for an
+    /// activation PIN whose length does not fit the card generation
+    /// (FINEID S4-1 §4.6.1/4.6.2: older-generation cards use an
+    /// 8-digit activation PIN, newer use 7), so the caller can
+    /// short-circuit.
+    const fn check_length_match(
         activation_pin: &ActivationCode,
         generation: CardGeneration,
     ) -> Option<CardPinError> {
@@ -1477,7 +1429,6 @@ impl ActivateGuard {
             | (ActivationCode::Eight(_), CardGeneration::Older) => None,
             (_, CardGeneration::Unknown) => Some(CardPinError::UnknownCardGeneration),
             (ActivationCode::Seven(_), CardGeneration::Older) => {
-                Self::emit_length_mismatch(reader_label, generation, 8);
                 Some(CardPinError::ActivationLengthMismatch {
                     generation,
                     expected: 8,
@@ -1485,7 +1436,6 @@ impl ActivateGuard {
                 })
             }
             (ActivationCode::Eight(_), CardGeneration::Newer) => {
-                Self::emit_length_mismatch(reader_label, generation, 7);
                 Some(CardPinError::ActivationLengthMismatch {
                     generation,
                     expected: 7,
@@ -1493,70 +1443,6 @@ impl ActivateGuard {
                 })
             }
         }
-    }
-
-    /// Emit the `card.activate.preflight.length_mismatch`
-    /// event when the operator-supplied activation PIN length
-    /// doesn't fit the card generation.
-    ///
-    /// FINEID S4-1 §4.6.1/4.6.2 -- older-generation cards use
-    /// an 8-digit activation PIN, newer use 7. The event is
-    /// emitted *before* the typed error is returned so the
-    /// audit trail captures the local-policy refusal even on
-    /// pipelines that swallow the error string.
-    fn emit_length_mismatch(reader_label: &str, generation: CardGeneration, expected: usize) {
-        crate::events::CardActivatePreflightLengthMismatch {
-            reader: reader_label,
-            generation: &format!("{generation:?}"),
-            expected_length: &format!("{expected}"),
-        }
-        .emit();
-    }
-
-    /// Emit the `card.activate.preflight.pin_changed_probed`
-    /// event with the per-slot PIN-changed flag values.
-    ///
-    /// FINEID S1 v4.2 §3.15.2 -- the card-side flag indicates
-    /// whether the slot's PIN has been changed from its
-    /// factory value. `None` collapses to "indeterminate"
-    /// (older firmware doesn't expose the GET DATA); the
-    /// activate flow uses this purely as a preflight signal,
-    /// not as a gate.
-    fn emit_pin_changed_probed(pin1: Option<bool>, pin2: Option<bool>) {
-        let render = |flag: Option<bool>| -> &'static str {
-            match flag {
-                Some(true) => "yes",
-                Some(false) => "no",
-                None => "indeterminate",
-            }
-        };
-        crate::events::CardActivatePreflightPinChangedProbed {
-            pin1_changed: render(pin1),
-            pin2_changed: render(pin2),
-        }
-        .emit();
-    }
-
-    /// Emit the `card.activate.scheme_selected` event naming
-    /// the APDU scheme chosen for this card generation.
-    ///
-    /// FINEID S4-1 §4.6.1 / §4.6.2 -- newer cards use the
-    /// `CHANGE REFERENCE DATA` form (INS=`24`), older use
-    /// `RESET RETRY COUNTER` (INS=`2C`). Emitted before the
-    /// modify APDU goes out so the audit trail shows which
-    /// path the activate flow took.
-    fn emit_scheme_selected(generation: CardGeneration) {
-        let (scheme, apdu_ins, section) = match generation {
-            CardGeneration::Newer => ("new", "24", "4.6.2"),
-            CardGeneration::Older => ("old", "2c", "4.6.1"),
-            CardGeneration::Unknown => ("unknown", "", ""),
-        };
-        crate::events::CardActivateSchemeSelected {
-            scheme,
-            apdu_ins,
-            fineid_s4_1_section: section,
-        }
-        .emit();
     }
 }
 

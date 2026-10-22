@@ -164,23 +164,20 @@ internal static partial class NativeRappService
         nint response = operation();
         if (response == nint.Zero)
         {
-            throw new NativeRappException(
-                "native_allocation_failed",
-                "The remote-card service did not respond."
-            );
+            throw Refused("native_allocation_failed", "The remote-card service did not respond.");
         }
 
         try
         {
             string json =
                 Marshal.PtrToStringUTF8(response)
-                ?? throw new NativeRappException(
+                ?? throw Refused(
                     "native_response_invalid",
                     "The remote-card response was not valid UTF-8."
                 );
             NativeEnvelope<T> envelope =
                 JsonSerializer.Deserialize(json, envelopeInfo)
-                ?? throw new NativeRappException(
+                ?? throw Refused(
                     "native_response_invalid",
                     "The remote-card response was not valid JSON."
                 );
@@ -193,14 +190,33 @@ internal static partial class NativeRappService
             }
 
             return envelope.Data
-                ?? throw new NativeRappException(
+                ?? throw Refused(
                     "native_response_empty",
                     "The remote-card response carried no data."
                 );
         }
+#if DEBUG
+        catch (JsonException error)
+        {
+            DevErrorLog.Report("requester answer refused", error);
+            throw;
+        }
+#endif
         finally
         {
             StringFree(response);
         }
+    }
+
+    /// <summary>
+    /// The failure of an answer this side cannot read; a development build
+    /// reports it, as the native side reports its own failures.
+    /// </summary>
+    private static NativeRappException Refused(string code, string message)
+    {
+#if DEBUG
+        DevErrorLog.Report("requester answer refused", code);
+#endif
+        return new NativeRappException(code, message);
     }
 }

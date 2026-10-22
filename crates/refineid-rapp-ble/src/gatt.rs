@@ -202,6 +202,23 @@ impl BleLink {
         purpose: DialPurpose<'_>,
         receive_deadline: Duration,
     ) -> Result<Self, BleLinkError> {
+        let opened = Self::opened(address, purpose, receive_deadline);
+        match &opened {
+            Ok(_) => {}
+            Err(BleLinkError::Platform(code)) => {
+                refineid_dev_errors::report!(Bluetooth, "Bluetooth link failed", status code);
+            }
+            Err(error) => refineid_dev_errors::report!(Bluetooth, "Bluetooth link failed", error),
+        }
+        opened
+    }
+
+    /// [`Self::open`], unreported.
+    fn opened(
+        address: AdvertiserAddress,
+        purpose: DialPurpose<'_>,
+        receive_deadline: Duration,
+    ) -> Result<Self, BleLinkError> {
         let device = BluetoothLEDevice::FromBluetoothAddressAsync(address.bluetooth_address())?
             .join()
             .map_err(|_| BleLinkError::Unreachable)?;
@@ -295,6 +312,19 @@ impl BleLink {
     /// [`BleLinkError::BootstrapUnreadable`] when the read fails, and
     /// [`BleLinkError::Offer`] when the offer is refused at its border.
     pub fn read_bootstrap(&self) -> Result<PairingOffer, BleLinkError> {
+        let offer = self.bootstrap_offer();
+        match &offer {
+            Ok(_) => {}
+            Err(BleLinkError::Platform(code)) => {
+                refineid_dev_errors::report!(Bluetooth, "pairing offer not read", status code);
+            }
+            Err(error) => refineid_dev_errors::report!(Bluetooth, "pairing offer not read", error),
+        }
+        offer
+    }
+
+    /// [`Self::read_bootstrap`], unreported.
+    fn bootstrap_offer(&self) -> Result<PairingOffer, BleLinkError> {
         let read = self
             .bootstrap
             .ReadValueWithCacheModeAsync(BluetoothCacheMode::Uncached)?

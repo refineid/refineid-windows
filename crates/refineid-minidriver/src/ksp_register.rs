@@ -39,8 +39,6 @@ use windows_sys::Win32::System::LibraryLoader::{
 };
 use windows_sys::core::PWSTR;
 
-use crate::cardmod::Log;
-
 /// The function class a key storage provider registers under.
 const KEY_STORAGE_FUNCTION: &str = "KEY_STORAGE";
 /// `ERROR_SUCCESS`, the custom action return value for success.
@@ -159,25 +157,28 @@ fn unregister() -> Result<(), NTSTATUS> {
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "system" fn RefineIdRegisterKeyStorageProvider(_hInstall: u32) -> u32 {
     match register() {
-        Ok(()) => {
-            Log::dbg("KSP: registered with CNG");
-            ERROR_SUCCESS
-        }
+        Ok(()) => ERROR_SUCCESS,
         Err(status) => {
-            Log::dbg(&format!("KSP: registration failed with status {status:#x}"));
+            refineid_dev_errors::report!(
+                KeyStorageProvider,
+                "key storage provider not registered",
+                status status
+            );
             ERROR_INSTALL_FAILURE
         }
     }
 }
 
-/// Windows Installer custom action: remove the registration. A failure is
-/// logged but never blocks an uninstall.
+/// Windows Installer custom action: remove the registration. A failure
+/// never blocks an uninstall.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "system" fn RefineIdUnregisterKeyStorageProvider(_hInstall: u32) -> u32 {
     if let Err(status) = unregister() {
-        Log::dbg(&format!(
-            "KSP: unregistration failed with status {status:#x}"
-        ));
+        refineid_dev_errors::report!(
+            KeyStorageProvider,
+            "key storage provider not unregistered",
+            status status
+        );
     }
     ERROR_SUCCESS
 }

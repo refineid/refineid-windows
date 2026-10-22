@@ -118,7 +118,10 @@ pub enum PcscError {
 }
 
 impl From<pcsc::Error> for PcscError {
+    /// A PC/SC call that failed; development builds report its status.
     fn from(e: pcsc::Error) -> Self {
+        let status = e as u32;
+        refineid_dev_errors::report!(Reader, "PC/SC call failed", status status);
         Self::Pcsc(e)
     }
 }

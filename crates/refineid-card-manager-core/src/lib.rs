@@ -22,9 +22,7 @@
 
 extern crate alloc;
 
-mod apdu_trace;
 pub mod card_pin;
-mod events;
 pub mod service;
 mod trust_roots;
 

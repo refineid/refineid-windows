@@ -14,7 +14,6 @@
 
 namespace RefineID;
 
-using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Text.Json;
@@ -60,6 +59,9 @@ internal sealed partial class MainPage : Page
         this.cardPollTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
         this.cardPollTimer.Tick += (s, e) => this.CheckLocalCard();
         this.DiagnosticsText.Text = DiagnosticsLabel();
+#if DEBUG
+        this.DiagnosticsText.Tapped += (sender, args) => DevErrorWindow.ShowWindow();
+#endif
         this.Loaded += this.OnLoaded;
         this.Unloaded += this.OnUnloaded;
     }
@@ -336,9 +338,8 @@ internal sealed partial class MainPage : Page
         {
             readers = await Task.Run(LocalCardService.PresentReaders).ConfigureAwait(true);
         }
-        catch (NativeRappException ex)
+        catch (NativeRappException)
         {
-            Debug.WriteLine($"CheckLocalCardAsync reader list error: {ex.Message}");
             this.inspectedReaders = null;
             this.PinsCard.Visibility = Visibility.Collapsed;
             this.UpdateLocalCardDisconnected();
@@ -398,14 +399,12 @@ internal sealed partial class MainPage : Page
             this.UpdateLocalCardDisconnected();
             this.inspectedReaders = readers;
         }
-        catch (NativeRappException ex)
+        catch (NativeRappException)
         {
-            Debug.WriteLine($"CheckLocalCardAsync native error: {ex.Message}");
             this.UpdateLocalCardDisconnected();
         }
-        catch (JsonException ex)
+        catch (JsonException)
         {
-            Debug.WriteLine($"CheckLocalCardAsync JSON parse error: {ex.Message}");
             this.UpdateLocalCardDisconnected();
         }
     }

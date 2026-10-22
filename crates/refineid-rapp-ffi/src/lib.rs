@@ -703,6 +703,11 @@ fn pairing_thread(handle_id: u64, mut requester: StreamRequester, code: &str) {
             }
         }
     }
+    refineid_dev_errors::report!(
+        RappBridge,
+        "pairing failed",
+        "no phone in pairing mode found"
+    );
     set_phase(
         handle_id,
         Phase::Failed("No phone in pairing mode was found on this network.".to_owned()),
@@ -732,6 +737,11 @@ fn finish_pairing(handle_id: u64, mut requester: StreamRequester, pair_id: PairI
         .get(pair_id)
         .is_ok_and(PairingRecord::serves)
     {
+        refineid_dev_errors::report!(
+            RappBridge,
+            "pairing failed",
+            "the stored pairing is unreadable"
+        );
         set_phase(
             handle_id,
             Phase::Failed("The stored pairing could not be read.".to_owned()),
@@ -845,10 +855,14 @@ fn offering_watch(handle_id: u64) {
     let _mark = WatchMark(handle_id);
     let mut offer = Offer::default();
     while !ended(handle_id) {
-        let Ok(store) = ProtectedPairingStore::load() else {
-            withdraw_offer(handle_id, &mut offer, PHONE_UNREACHABLE_STATUS);
-            wait_watching(handle_id, WATCH_RETRY_MS);
-            continue;
+        let store = match ProtectedPairingStore::load() {
+            Ok(store) => store,
+            Err(error) => {
+                refineid_dev_errors::report!(RappBridge, "pairing store not loaded", error);
+                withdraw_offer(handle_id, &mut offer, PHONE_UNREACHABLE_STATUS);
+                wait_watching(handle_id, WATCH_RETRY_MS);
+                continue;
+            }
         };
         let Some(pair_id) = store.usable_pairing().map(PairingRecord::pair_id) else {
             withdraw_offer(handle_id, &mut offer, NO_PAIRING_STATUS);
@@ -1150,8 +1164,10 @@ fn remember_certificate(requester: &mut StreamRequester, pair_id: PairId, certif
 /// `RefineID` key storage provider, so Edge and Chrome offer it.
 #[cfg(windows)]
 fn offer_to_browsers(certificate: &OwnedCert, pair_id: PairId) -> Result<(), ApiFailure> {
-    install_browser_certificate(certificate, pair_id)
-        .map_err(|error| ApiFailure::new("certificate_store_failed", format!("{error}")))
+    install_browser_certificate(certificate, pair_id).map_err(|error| {
+        refineid_dev_errors::report!(RappBridge, "certificate not offered to browsers", error);
+        ApiFailure::new("certificate_store_failed", format!("{error}"))
+    })
 }
 
 #[cfg(not(windows))]
@@ -1168,7 +1184,9 @@ const fn offer_to_browsers(_certificate: &OwnedCert, _pair_id: PairId) -> Result
 fn forget_browser_certificates() {
     // Forgetting the pairing is the action that matters; a certificate
     // left behind opens nothing without it.
-    let _ = remove_browser_certificates();
+    if let Err(error) = remove_browser_certificates() {
+        refineid_dev_errors::report!(RappBridge, "offered certificates not withdrawn", error);
+    }
 }
 
 #[cfg(not(windows))]
@@ -1470,22 +1488,28 @@ where
             data: Some(&data),
             error: None,
         }),
-        Ok(Err(error)) => serialize_envelope::<T>(&ApiEnvelope {
-            ok: false,
-            data: None,
-            error: Some(ApiError {
-                code: error.code,
-                message: &error.message,
-            }),
-        }),
-        Err(_) => serialize_envelope::<T>(&ApiEnvelope {
-            ok: false,
-            data: None,
-            error: Some(ApiError {
-                code: "internal_panic",
-                message: "The native requester stopped unexpectedly.",
-            }),
-        }),
+        Ok(Err(error)) => {
+            refineid_dev_errors::report!(RappBridge, "requester call failed", name error.code);
+            serialize_envelope::<T>(&ApiEnvelope {
+                ok: false,
+                data: None,
+                error: Some(ApiError {
+                    code: error.code,
+                    message: &error.message,
+                }),
+            })
+        }
+        Err(_) => {
+            refineid_dev_errors::report!(RappBridge, "requester call failed", "panic");
+            serialize_envelope::<T>(&ApiEnvelope {
+                ok: false,
+                data: None,
+                error: Some(ApiError {
+                    code: "internal_panic",
+                    message: "The native requester stopped unexpectedly.",
+                }),
+            })
+        }
     };
     CString::new(json).map_or(core::ptr::null_mut(), CString::into_raw)
 }

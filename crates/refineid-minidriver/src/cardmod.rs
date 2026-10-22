@@ -26,7 +26,6 @@
 )]
 
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::Mutex;
 
 use crate::ffi::{
@@ -480,9 +479,7 @@ impl CardModel {
             if let Some(mut cached) = Self::parse_cmapfile_records(&bytes) {
                 cached.resize(MAX_VIRTUAL_CONTAINERS, CONTAINER_MAP_RECORD::empty());
                 card.cmapfile_records = cached;
-                Log::dbg("build_card_model: loaded virtual cmapfile from Base CSP cache");
             } else {
-                Log::dbg("build_card_model: virtual cmapfile cache parse failed, using defaults");
                 let _rc: DWORD = unsafe { cache_delete_tag(cd, VIRTUAL_CMAPFILE_CACHE_TAG) };
             }
         }
@@ -594,6 +591,152 @@ fn parse_der_len(der: &[u8], idx: &mut usize) -> Option<usize> {
     } else {
         None
     }
+}
+
+impl CONTAINER_MAP_RECORD {
+    /// A zeroed record -- the starting point before a visible
+    /// container's fields are written in.
+    fn empty() -> Self {
+        Self {
+            wszGuid: [0_u16; MAX_CONTAINER_NAME_LEN + 1],
+            bFlags: 0,
+            bReserved: 0,
+            wSigKeySizeBits: 0,
+            wKeyExchangeKeySizeBits: 0,
+        }
+    }
+
+    /// The container GUID stored in `wszGuid` (NUL-terminated UTF-16),
+    /// parsed into a typed [`Guid`]. `None` when the slot is empty or
+    /// carries a malformed value.
+    fn read_guid(&self) -> Option<Guid> {
+        let len = self
+            .wszGuid
+            .iter()
+            .position(|ch| *ch == 0)
+            .unwrap_or(self.wszGuid.len());
+        let text = String::from_utf16_lossy(self.wszGuid.get(..len).unwrap_or(&[]));
+        Guid::parse(&text).ok()
+    }
+
+    /// Write `guid` into `wszGuid` as NUL-terminated UTF-16, truncated
+    /// to the field width.
+    fn write_guid(&mut self, guid: &Guid) {
+        self.wszGuid = [0_u16; MAX_CONTAINER_NAME_LEN + 1];
+        for (slot, ch) in self
+            .wszGuid
+            .iter_mut()
+            .zip(guid.as_str().encode_utf16().take(MAX_CONTAINER_NAME_LEN))
+        {
+            *slot = ch;
+        }
+    }
+}
+
+// ----- Base CSP file cache (CspCacheLookupFile / AddFile / DeleteFile) -----
+//
+// The Base CSP hands the Card Module a small key/value cache through
+// callback pointers in `CARD_DATA`, keyed by a wide-string tag and
+// scoped to `pvCacheContext`. The minidriver uses it to persist the
+// virtual cmapfile (the container map) across calls instead of
+// re-deriving it every context. Every callback is optional -- a CSP
+// may pass null pointers, in which case the operation degrades to a
+// cache miss / unsupported-feature.
+//
+// Buffer ownership crosses the boundary in both directions: AddFile
+// data must be allocated from the CSP's own allocator (`pfnCspAlloc`),
+// and a successful LookupFile hands back a CSP-owned buffer the Card
+// Module must copy out of and release with `pfnCspFree`.
+
+/// Cache tag for the persisted virtual cmapfile blob.
+const VIRTUAL_CMAPFILE_CACHE_TAG: &str = "refineid.virtual.cmapfile";
+
+/// Encode a cache tag as a NUL-terminated UTF-16 string for the
+/// wide-string CSP cache callbacks.
+fn cache_tag_wide(tag: &str) -> Vec<u16> {
+    tag.encode_utf16().chain(core::iter::once(0)).collect()
+}
+
+/// Allocate `len` bytes from the CSP's allocator, or null if the
+/// allocator callback is absent.
+unsafe fn cspalloc(cd: &CARD_DATA, len: usize) -> PVOID {
+    match cd.pfnCspAlloc {
+        Some(alloc) => unsafe { alloc(len) },
+        None => core::ptr::null_mut(),
+    }
+}
+
+/// Release a CSP-allocated buffer through the CSP's free callback
+/// (no-op if the callback is absent).
+unsafe fn cspfree(cd: &CARD_DATA, p: PVOID) {
+    if let Some(free) = cd.pfnCspFree {
+        unsafe { free(p) };
+    }
+}
+
+/// Look up `tag` in the Base CSP file cache. On a hit, copies the
+/// bytes out of the CSP-owned buffer and frees it; returns `None` on
+/// a miss or when the lookup callback is absent.
+unsafe fn cache_lookup_bytes(cd: &CARD_DATA, tag: &str) -> Option<Vec<u8>> {
+    let lookup = cd.pfnCspCacheLookupFile?;
+    let wide = cache_tag_wide(tag);
+    let mut ptr: PBYTE = core::ptr::null_mut();
+    let mut len: DWORD = 0;
+    let rc = unsafe {
+        lookup(
+            cd.pvCacheContext,
+            wide.as_ptr().cast_mut(),
+            0,
+            &raw mut ptr,
+            &raw mut len,
+        )
+    };
+    if rc != SCARD_S_SUCCESS || ptr.is_null() {
+        return None;
+    }
+    let len = usize::try_from(len).unwrap_or(0);
+    let bytes = unsafe { core::slice::from_raw_parts(ptr, len) }.to_vec();
+    unsafe { cspfree(cd, ptr.cast::<c_void>()) };
+    Some(bytes)
+}
+
+/// Store `bytes` under `tag` in the Base CSP file cache via a
+/// CSP-allocated copy. Returns the callback's status word, or an
+/// unsupported / no-memory status when the callback or allocation
+/// is unavailable.
+unsafe fn cache_store_bytes(cd: &CARD_DATA, tag: &str, bytes: &[u8]) -> DWORD {
+    let Some(add) = cd.pfnCspCacheAddFile else {
+        return SCARD_E_UNSUPPORTED_FEATURE;
+    };
+    let wide = cache_tag_wide(tag);
+    let ptr = unsafe { cspalloc(cd, bytes.len()) };
+    if ptr.is_null() {
+        refineid_dev_errors::report!(CardModule, "card cache store failed", "no memory");
+        return SCARD_E_NO_MEMORY;
+    }
+    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.cast::<u8>(), bytes.len()) };
+    let len = DWORD::try_from(bytes.len()).unwrap_or(DWORD::MAX);
+    let rc = unsafe {
+        add(
+            cd.pvCacheContext,
+            wide.as_ptr().cast_mut(),
+            0,
+            ptr.cast::<BYTE>(),
+            len,
+        )
+    };
+    unsafe { cspfree(cd, ptr) };
+    rc
+}
+
+/// Delete `tag` from the Base CSP file cache. Returns the callback's
+/// status word, or unsupported-feature when the callback is absent.
+unsafe fn cache_delete_tag(cd: &CARD_DATA, tag: &str) -> DWORD {
+    let Some(delete) = cd.pfnCspCacheDeleteFile else {
+        return SCARD_E_UNSUPPORTED_FEATURE;
+    };
+    let wide = cache_tag_wide(tag);
+    unsafe { delete(cd.pvCacheContext, wide.as_ptr().cast_mut(), 0) }
 }
 
 #[cfg(test)]
@@ -759,280 +902,5 @@ mod tests {
         der.push(48);
         der.extend(vec![0x22u8; 48]);
         assert!(ecdsa_der_to_p1363(&der, 48).is_none());
-    }
-}
-
-impl CONTAINER_MAP_RECORD {
-    /// A zeroed record -- the starting point before a visible
-    /// container's fields are written in.
-    fn empty() -> Self {
-        Self {
-            wszGuid: [0_u16; MAX_CONTAINER_NAME_LEN + 1],
-            bFlags: 0,
-            bReserved: 0,
-            wSigKeySizeBits: 0,
-            wKeyExchangeKeySizeBits: 0,
-        }
-    }
-
-    /// The container GUID stored in `wszGuid` (NUL-terminated UTF-16),
-    /// parsed into a typed [`Guid`]. `None` when the slot is empty or
-    /// carries a malformed value.
-    fn read_guid(&self) -> Option<Guid> {
-        let len = self
-            .wszGuid
-            .iter()
-            .position(|ch| *ch == 0)
-            .unwrap_or(self.wszGuid.len());
-        let text = String::from_utf16_lossy(self.wszGuid.get(..len).unwrap_or(&[]));
-        Guid::parse(&text).ok()
-    }
-
-    /// Write `guid` into `wszGuid` as NUL-terminated UTF-16, truncated
-    /// to the field width.
-    fn write_guid(&mut self, guid: &Guid) {
-        self.wszGuid = [0_u16; MAX_CONTAINER_NAME_LEN + 1];
-        for (slot, ch) in self
-            .wszGuid
-            .iter_mut()
-            .zip(guid.as_str().encode_utf16().take(MAX_CONTAINER_NAME_LEN))
-        {
-            *slot = ch;
-        }
-    }
-}
-
-// ----- Base CSP file cache (CspCacheLookupFile / AddFile / DeleteFile) -----
-//
-// The Base CSP hands the Card Module a small key/value cache through
-// callback pointers in `CARD_DATA`, keyed by a wide-string tag and
-// scoped to `pvCacheContext`. The minidriver uses it to persist the
-// virtual cmapfile (the container map) across calls instead of
-// re-deriving it every context. Every callback is optional -- a CSP
-// may pass null pointers, in which case the operation degrades to a
-// cache miss / unsupported-feature.
-//
-// Buffer ownership crosses the boundary in both directions: AddFile
-// data must be allocated from the CSP's own allocator (`pfnCspAlloc`),
-// and a successful LookupFile hands back a CSP-owned buffer the Card
-// Module must copy out of and release with `pfnCspFree`.
-
-/// Cache tag for the persisted virtual cmapfile blob.
-const VIRTUAL_CMAPFILE_CACHE_TAG: &str = "refineid.virtual.cmapfile";
-
-/// Encode a cache tag as a NUL-terminated UTF-16 string for the
-/// wide-string CSP cache callbacks.
-fn cache_tag_wide(tag: &str) -> Vec<u16> {
-    tag.encode_utf16().chain(core::iter::once(0)).collect()
-}
-
-/// Allocate `len` bytes from the CSP's allocator, or null if the
-/// allocator callback is absent.
-unsafe fn cspalloc(cd: &CARD_DATA, len: usize) -> PVOID {
-    match cd.pfnCspAlloc {
-        Some(alloc) => unsafe { alloc(len) },
-        None => core::ptr::null_mut(),
-    }
-}
-
-/// Release a CSP-allocated buffer through the CSP's free callback
-/// (no-op if the callback is absent).
-unsafe fn cspfree(cd: &CARD_DATA, p: PVOID) {
-    if let Some(free) = cd.pfnCspFree {
-        unsafe { free(p) };
-    }
-}
-
-/// Look up `tag` in the Base CSP file cache. On a hit, copies the
-/// bytes out of the CSP-owned buffer and frees it; returns `None` on
-/// a miss or when the lookup callback is absent.
-unsafe fn cache_lookup_bytes(cd: &CARD_DATA, tag: &str) -> Option<Vec<u8>> {
-    let Some(lookup) = cd.pfnCspCacheLookupFile else {
-        Log::dbg("cache_lookup_bytes: pfnCspCacheLookupFile=None (no cache callback)");
-        return None;
-    };
-    let wide = cache_tag_wide(tag);
-    let mut ptr: PBYTE = core::ptr::null_mut();
-    let mut len: DWORD = 0;
-    let rc = unsafe {
-        lookup(
-            cd.pvCacheContext,
-            wide.as_ptr().cast_mut(),
-            0,
-            &raw mut ptr,
-            &raw mut len,
-        )
-    };
-    if rc != SCARD_S_SUCCESS || ptr.is_null() {
-        Log::dbg("cache_lookup_bytes -> MISS");
-        return None;
-    }
-    let len = usize::try_from(len).unwrap_or(0);
-    let bytes = unsafe { core::slice::from_raw_parts(ptr, len) }.to_vec();
-    unsafe { cspfree(cd, ptr.cast::<c_void>()) };
-    Log::dbg("cache_lookup_bytes -> HIT");
-    Some(bytes)
-}
-
-/// Store `bytes` under `tag` in the Base CSP file cache via a
-/// CSP-allocated copy. Returns the callback's status word, or an
-/// unsupported / no-memory status when the callback or allocation
-/// is unavailable.
-unsafe fn cache_store_bytes(cd: &CARD_DATA, tag: &str, bytes: &[u8]) -> DWORD {
-    let Some(add) = cd.pfnCspCacheAddFile else {
-        Log::dbg("cache_store_bytes: pfnCspCacheAddFile=None");
-        return SCARD_E_UNSUPPORTED_FEATURE;
-    };
-    let wide = cache_tag_wide(tag);
-    let ptr = unsafe { cspalloc(cd, bytes.len()) };
-    if ptr.is_null() {
-        Log::dbg("cache_store_bytes: cspalloc -> null");
-        return SCARD_E_NO_MEMORY;
-    }
-    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.cast::<u8>(), bytes.len()) };
-    let len = DWORD::try_from(bytes.len()).unwrap_or(DWORD::MAX);
-    let rc = unsafe {
-        add(
-            cd.pvCacheContext,
-            wide.as_ptr().cast_mut(),
-            0,
-            ptr.cast::<BYTE>(),
-            len,
-        )
-    };
-    unsafe { cspfree(cd, ptr) };
-    rc
-}
-
-/// Delete `tag` from the Base CSP file cache. Returns the callback's
-/// status word, or unsupported-feature when the callback is absent.
-unsafe fn cache_delete_tag(cd: &CARD_DATA, tag: &str) -> DWORD {
-    let Some(delete) = cd.pfnCspCacheDeleteFile else {
-        Log::dbg("cache_delete_tag: pfnCspCacheDeleteFile=None");
-        return SCARD_E_UNSUPPORTED_FEATURE;
-    };
-    let wide = cache_tag_wide(tag);
-    unsafe { delete(cd.pvCacheContext, wide.as_ptr().cast_mut(), 0) }
-}
-
-// ----- Diagnostic logging (Windows Event Log) -----
-//
-// The minidriver runs inside SCardSvr -- no console, no stdout, no
-// flat-file fallback. Production diagnostics go to the Windows Event
-// Log (Application channel, source "RefineID-Minidriver"), visible in
-// Event Viewer. The `advapi32` Event Log API is hand-rolled here, the
-// same way `transport.rs` hand-rolls the `winscard` API, so the crate
-// adds no `windows-sys` dependency.
-//
-// Source registration happens at MSIX install time; if the source
-// isn't registered, ReportEventW still works (Event Viewer just shows
-// a generic "description for Event ID X cannot be found" preamble).
-
-#[link(name = "advapi32")]
-unsafe extern "system" {
-    fn RegisterEventSourceW(server_name: *const u16, source_name: *const u16) -> *mut c_void;
-    fn ReportEventW(
-        event_log: *mut c_void,
-        event_type: u16,
-        category: u16,
-        event_id: u32,
-        user_sid: *mut c_void,
-        num_strings: u16,
-        data_size: u32,
-        strings: *const *const u16,
-        raw_data: *const c_void,
-    ) -> i32;
-}
-
-/// `EVENTLOG_*` severities (ISO 7816-unrelated -- Win32 Event Log
-/// `wType` values, winnt.h).
-const EVENTLOG_ERROR_TYPE: u16 = 0x0001;
-const EVENTLOG_WARNING_TYPE: u16 = 0x0002;
-const EVENTLOG_INFORMATION_TYPE: u16 = 0x0004;
-
-/// `"RefineID-Minidriver\0"` as a NUL-terminated UTF-16 source name
-/// for `RegisterEventSourceW`.
-const EVENT_SOURCE_NAME: &[u16] = &[
-    'R' as u16, 'e' as u16, 'F' as u16, 'i' as u16, 'n' as u16, 'e' as u16, 'I' as u16, 'D' as u16,
-    '-' as u16, 'M' as u16, 'i' as u16, 'n' as u16, 'i' as u16, 'd' as u16, 'r' as u16, 'i' as u16,
-    'v' as u16, 'e' as u16, 'r' as u16, 0,
-];
-
-/// Cached event-source handle. `AtomicPtr` so no pointer<->integer
-/// casts are needed; first writer wins (a leaked duplicate handle is
-/// cheap and harmless).
-static EVENT_SOURCE: AtomicPtr<c_void> = AtomicPtr::new(core::ptr::null_mut());
-
-/// Event Log severity for [`Log::report`].
-#[derive(Clone, Copy)]
-#[repr(u16)]
-enum LogLevel {
-    Info,
-    Warn,
-    Error,
-}
-
-/// Diagnostic-logging helpers grouped on a unit struct, so the
-/// borrowed-parameter entries are associated fns rather than
-/// top-level free fns (typing-discipline Rule A).
-pub(crate) struct Log;
-
-impl Log {
-    /// The cached event-source handle, registering it on first use.
-    fn source() -> *mut c_void {
-        let cached = EVENT_SOURCE.load(Ordering::Acquire);
-        if !cached.is_null() {
-            return cached;
-        }
-        let handle = unsafe { RegisterEventSourceW(core::ptr::null(), EVENT_SOURCE_NAME.as_ptr()) };
-        if !handle.is_null() {
-            let _ignored = EVENT_SOURCE.compare_exchange(
-                core::ptr::null_mut(),
-                handle,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            );
-        }
-        handle
-    }
-
-    /// Write one Event Log record. No-op if the source handle can't be
-    /// acquired. Hard rule: never pass PIN / PUK / key / session-key
-    /// material as `msg` (alpha logging policy: PINs and personal
-    /// certificate material are never event-log data).
-    fn report(level: LogLevel, event_id: u32, msg: &str) {
-        let handle = Self::source();
-        if handle.is_null() {
-            return;
-        }
-        let wide: Vec<u16> = msg.encode_utf16().chain(core::iter::once(0)).collect();
-        let strings: [*const u16; 1] = [wide.as_ptr()];
-        let event_type = match level {
-            LogLevel::Info => EVENTLOG_INFORMATION_TYPE,
-            LogLevel::Warn => EVENTLOG_WARNING_TYPE,
-            LogLevel::Error => EVENTLOG_ERROR_TYPE,
-        };
-        unsafe {
-            ReportEventW(
-                handle,
-                event_type,
-                0,
-                event_id,
-                core::ptr::null_mut(),
-                1,
-                0,
-                strings.as_ptr(),
-                core::ptr::null(),
-            );
-        }
-    }
-
-    /// Alpha-stage trace: every callback entry / branch / return code
-    /// is reported at Info against the `RefineID-Minidriver` source
-    /// (golden rule #2 -- Event Log is the only diagnostic channel
-    /// inside `SCardSvr`). Unconditional during alpha; level gating
-    /// returns with the manifested ETW provider post-alpha.
-    pub(crate) fn dbg(msg: &str) {
-        Self::report(LogLevel::Info, 1, msg);
     }
 }
