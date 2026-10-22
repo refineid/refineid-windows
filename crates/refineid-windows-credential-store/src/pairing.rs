@@ -15,7 +15,7 @@
 //! Durable pairing storage, protected to the Windows user by DPAPI.
 //!
 //! RAPP requires the pair keys to live in device-only, non-migrating secret
-//! storage (RAPP v26.10.21 section 4.3 item 4). The whole pairing set is
+//! storage (RAPP v26.10.22 section 4.3 item 4). The whole pairing set is
 //! serialized by [`refineid_rapp_core::persistence`], protected with
 //! `CryptProtectData` to the current user under a purpose entropy, and
 //! written as one file in the user's local application data, through a
@@ -34,11 +34,19 @@
 //! satisfy the borrowing [`PairingStore`] contract, and writes the set through
 //! on every change, after re-reading it: a change is never written over a set
 //! that could not be read.
+//!
+//! Beside the set, in a plain file, the store keeps the last card a session
+//! heard present for each pairing (RAPP v26.10.22 section 8.4): a pair
+//! identifier, the fingerprint of a public certificate and a time, nothing
+//! secret. Every requester process of this user offers the phone's identity
+//! by it, and a session refreshes it every few seconds, so it is not written
+//! through the protected set.
 
 use std::path::{Path, PathBuf};
 
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::persistence::{decode_pairing_records, encode_pairing_records};
+use refineid_rapp_core::presence::{CardSighting, decode_sightings, encode_sightings};
 use refineid_rapp_core::store::{
     PairingRecord, PairingStore, StoreError, expire_revocation_notices, remove_unconfirmed,
     revoke_pairing,
@@ -55,6 +63,7 @@ use crate::CredentialStoreError;
 #[derive(Debug)]
 pub struct ProtectedPairingStore {
     records: Vec<PairingRecord>,
+    sightings: Vec<(PairId, CardSighting)>,
     directory: PathBuf,
 }
 
@@ -64,7 +73,7 @@ impl ProtectedPairingStore {
     ///
     /// A record whose peer never confirmed its storage was written inside a
     /// pairing this computer did not complete; it is removed with its keys
-    /// here, at the first load after that pairing (RAPP v26.10.21 section
+    /// here, at the first load after that pairing (RAPP v26.10.22 section
     /// 4.3 item 4). A forgotten pairing whose `pairing_revoked` close was
     /// not delivered within 30 days loses its keys untold (section 4.6
     /// item 3).
@@ -86,7 +95,12 @@ impl ProtectedPairingStore {
                 .map_err(|_error| CredentialStoreError::InvalidStoredPairing)?,
             None => Vec::new(),
         };
-        let mut store = Self { records, directory };
+        let sightings = read_sightings(&directory);
+        let mut store = Self {
+            records,
+            sightings,
+            directory,
+        };
         // Each change is written as it is made; one that could not be
         // written stands in memory and is written here.
         let removed = remove_unconfirmed(&mut store);
@@ -122,7 +136,7 @@ impl ProtectedPairingStore {
     }
 
     /// The pairings forgotten here whose `pairing_revoked` close is still
-    /// owed to the phone (RAPP v26.10.21 section 4.6 item 2).
+    /// owed to the phone (RAPP v26.10.22 section 4.6 item 2).
     pub fn forgotten_pairings(&self) -> impl Iterator<Item = &PairingRecord> {
         self.records
             .iter()
@@ -136,7 +150,7 @@ impl ProtectedPairingStore {
     }
 
     /// Records that the phone revoked `pair_id` with its `pairing_revoked`
-    /// close (RAPP v26.10.21 section 4.6 item 4): the keys are destroyed and
+    /// close (RAPP v26.10.22 section 4.6 item 4): the keys are destroyed and
     /// the record stays so the user is told.
     ///
     /// # Errors
@@ -159,6 +173,7 @@ impl ProtectedPairingStore {
     /// held here stay as they were, and a change written over a set that
     /// could not be read would lose it.
     pub fn refresh(&mut self) -> Result<(), StoreError> {
+        self.sightings = read_sightings(&self.directory);
         match read_pairing_set(&self.directory) {
             Ok(Some(blob)) => {
                 self.records =
@@ -231,6 +246,8 @@ impl PairingStore for ProtectedPairingStore {
             .collect()
     }
 
+    /// Removes the record, then its card sighting; a sighting that cannot
+    /// be removed offers nothing without its record.
     fn remove(&mut self, pair_id: PairId) -> Result<(), StoreError> {
         self.change(|records| {
             let before = records.len();
@@ -239,7 +256,35 @@ impl PairingStore for ProtectedPairingStore {
                 return Err(StoreError::Unknown);
             }
             Ok(())
-        })
+        })?;
+        let mut sightings = read_sightings(&self.directory);
+        sightings.retain(|(sighted, _)| *sighted != pair_id);
+        if write_sightings(&self.directory, &sightings).is_ok() {
+            self.sightings = sightings;
+        }
+        Ok(())
+    }
+
+    fn card_sighting(&self, pair_id: PairId) -> Option<CardSighting> {
+        self.sightings
+            .iter()
+            .find(|(sighted, _)| *sighted == pair_id)
+            .map(|(_, sighting)| *sighting)
+    }
+
+    /// Re-reads the sightings other processes recorded, puts this one in
+    /// place of the pairing's earlier one, and writes them.
+    fn record_card_sighting(
+        &mut self,
+        pair_id: PairId,
+        sighting: CardSighting,
+    ) -> Result<(), StoreError> {
+        let mut sightings = read_sightings(&self.directory);
+        sightings.retain(|(sighted, _)| *sighted != pair_id);
+        sightings.push((pair_id, sighting));
+        write_sightings(&self.directory, &sightings).map_err(|_error| StoreError::WriteRefused)?;
+        self.sightings = sightings;
+        Ok(())
     }
 }
 
@@ -248,8 +293,10 @@ const PROFILE_DIRECTORY: &str = "RefineID";
 /// The protected pairing set.
 #[cfg(windows)]
 const PAIRING_SET_FILE: &str = "pairing-set.dpapi";
+/// The last card a session heard present for each pairing, unprotected:
+/// nothing in it is secret.
+const CARD_SIGHTINGS_FILE: &str = "card-sightings.bin";
 /// The suffix of the temporary file a write fills before the rename.
-#[cfg(windows)]
 const PARTIAL_SUFFIX: &str = "partial";
 /// The purpose the set is protected for: a DPAPI blob protected for anything
 /// else does not unprotect as a pairing set.
@@ -448,40 +495,59 @@ fn unprotect(protected: &[u8]) -> Result<Zeroizing<Vec<u8>>, CredentialStoreErro
     Ok(Zeroizing::new(output.bytes()?.to_vec()))
 }
 
-/// A temporary file name no other write uses: two stores writing at once
-/// each fill their own file, and the later rename wins whole.
-#[cfg(windows)]
-fn partial_file_name() -> String {
+/// A temporary file name for `file` no other write uses: two stores writing
+/// at once each fill their own file, and the later rename wins whole.
+fn partial_file_name(file: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static WRITES: AtomicU64 = AtomicU64::new(0);
     let write = WRITES.fetch_add(1, Ordering::Relaxed);
-    format!(
-        "{PAIRING_SET_FILE}.{}.{write}.{PARTIAL_SUFFIX}",
-        std::process::id()
-    )
+    format!("{file}.{}.{write}.{PARTIAL_SUFFIX}", std::process::id())
 }
 
-/// Protects the serialized pairing set and replaces the stored file with it.
-#[cfg(windows)]
-fn write_pairing_set(directory: &Path, blob: &[u8]) -> Result<(), CredentialStoreError> {
+/// Replaces the file `file` in `directory` with `bytes` whole, through a
+/// temporary file of its own and a rename.
+fn replace_file(directory: &Path, file: &str, bytes: &[u8]) -> Result<(), CredentialStoreError> {
     use std::io::Write as _;
 
-    let protected = protect(blob)?;
     std::fs::create_dir_all(directory).map_err(|error| CredentialStoreError::file(&error))?;
-    let partial = directory.join(partial_file_name());
-    let written = std::fs::File::create_new(&partial).and_then(|mut file| {
-        file.write_all(&protected)?;
-        file.sync_all()
+    let partial = directory.join(partial_file_name(file));
+    let written = std::fs::File::create_new(&partial).and_then(|mut opened| {
+        opened.write_all(bytes)?;
+        opened.sync_all()
     });
     if let Err(error) = written {
         let _ = std::fs::remove_file(&partial);
         return Err(CredentialStoreError::file(&error));
     }
-    std::fs::rename(&partial, directory.join(PAIRING_SET_FILE)).map_err(|error| {
+    std::fs::rename(&partial, directory.join(file)).map_err(|error| {
         let _ = std::fs::remove_file(&partial);
         CredentialStoreError::file(&error)
     })
+}
+
+/// The card sightings recorded in `directory`. A file that is missing,
+/// unreadable or not a sighting set holds none: the offers it bounded lapse
+/// until a session hears the card again.
+fn read_sightings(directory: &Path) -> Vec<(PairId, CardSighting)> {
+    std::fs::read(directory.join(CARD_SIGHTINGS_FILE))
+        .ok()
+        .and_then(|bytes| decode_sightings(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// Writes `sightings` as the card sightings of `directory`.
+fn write_sightings(
+    directory: &Path,
+    sightings: &[(PairId, CardSighting)],
+) -> Result<(), CredentialStoreError> {
+    replace_file(directory, CARD_SIGHTINGS_FILE, &encode_sightings(sightings))
+}
+
+/// Protects the serialized pairing set and replaces the stored file with it.
+#[cfg(windows)]
+fn write_pairing_set(directory: &Path, blob: &[u8]) -> Result<(), CredentialStoreError> {
+    replace_file(directory, PAIRING_SET_FILE, &protect(blob)?)
 }
 
 #[cfg(not(windows))]
@@ -522,16 +588,75 @@ pub fn delete_pairing_set() -> Result<(), CredentialStoreError> {
 #[cfg(windows)]
 fn delete_pairing_set_in(directory: &Path) -> Result<(), CredentialStoreError> {
     remove_unprotected_copies(directory)?;
-    match std::fs::remove_file(directory.join(PAIRING_SET_FILE)) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(CredentialStoreError::file(&error)),
+    for file in [PAIRING_SET_FILE, CARD_SIGHTINGS_FILE] {
+        match std::fs::remove_file(directory.join(file)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(CredentialStoreError::file(&error)),
+        }
     }
+    Ok(())
 }
 
 #[cfg(not(windows))]
 const fn delete_pairing_set_in(_directory: &Path) -> Result<(), CredentialStoreError> {
     Err(CredentialStoreError::UnsupportedPlatform)
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test scaffolding is constructed to be infallible"
+)]
+mod sighting_tests {
+    use refineid_rapp::CertificateFingerprint;
+    use refineid_rapp_core::ids::PairId;
+    use refineid_rapp_core::presence::CardSighting;
+
+    use super::{CARD_SIGHTINGS_FILE, read_sightings, write_sightings};
+
+    /// A synthetic pair identifier.
+    const PAIR: PairId = PairId::from_array(*b"synthetic pair 1");
+    /// A synthetic card fingerprint.
+    const CARD: CertificateFingerprint =
+        CertificateFingerprint::from_array(*b"the fingerprint of a known card.");
+    /// The wall-clock time the card is heard present.
+    const HEARD_AT_MS: u64 = 1_700_000_000_000;
+
+    /// A directory of this test's own, removed when it ends.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("refineid-sightings-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            Self(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn written_sightings_read_back() {
+        let scratch = Scratch::new("round-trip");
+        assert!(read_sightings(&scratch.0).is_empty());
+        let set = vec![(PAIR, CardSighting::new(CARD, HEARD_AT_MS))];
+        write_sightings(&scratch.0, &set).unwrap();
+        assert_eq!(read_sightings(&scratch.0), set);
+    }
+
+    #[test]
+    fn a_sighting_file_that_does_not_decode_holds_none() {
+        let scratch = Scratch::new("foreign");
+        std::fs::create_dir_all(&scratch.0).unwrap();
+        std::fs::write(scratch.0.join(CARD_SIGHTINGS_FILE), b"not a sighting set").unwrap();
+        assert!(read_sightings(&scratch.0).is_empty());
+    }
 }
 
 #[cfg(all(test, windows))]

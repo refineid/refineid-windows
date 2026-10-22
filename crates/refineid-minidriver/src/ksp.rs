@@ -381,7 +381,7 @@ unsafe extern "system" fn SetProviderProperty(
     _dwFlags: u32,
 ) -> HRESULT {
     // Window handles, use contexts and PIN hints have no meaning here: the
-    // phone carries its own consent prompt. Accepting them keeps callers
+    // phone carries its own PIN prompt. Accepting them keeps callers
     // that set them before signing on their happy path.
     if is_provider(hProvider) {
         S_OK

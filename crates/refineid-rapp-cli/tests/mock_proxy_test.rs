@@ -194,7 +194,7 @@ fn test_mock_proxy_pairing_and_card_operations() {
     };
     assert!(!sig_der.is_empty());
 
-    // 4. BrowserAuthenticate: consent on the phone, then the signature.
+    // 4. BrowserAuthenticate: the PIN prompt on the phone, then the signature.
     let digest = Sha384::digest(LOGIN_CHALLENGE);
     let outcome = requester
         .execute(&mut session, &authentication(&digest), OPERATION_EXPIRY_MS)

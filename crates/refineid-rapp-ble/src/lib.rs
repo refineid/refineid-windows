@@ -1,5 +1,5 @@
 //! The RAPP Bluetooth Low Energy transport profile
-//! `"fi.refineid.rapp.ble"` for the Windows requester (RAPP v26.10.21
+//! `"fi.refineid.rapp.ble"` for the Windows requester (RAPP v26.10.22
 //! sections 2.2, 4.1 and 5).
 //!
 //! The requester is the GATT central. It scans for the RAPP Service UUID,

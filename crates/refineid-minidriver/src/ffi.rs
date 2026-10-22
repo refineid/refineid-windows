@@ -94,9 +94,6 @@ pub(crate) const SCARD_E_NO_MORE_AVAILABLE: DWORD = 0x8010_0022;
 pub(crate) const SCARD_W_CANCELLED_BY_USER: DWORD = 0x8010_006E;
 /// "A communications error with the smart card has been detected."
 pub(crate) const SCARD_E_COMM_DATA_LOST: DWORD = 0x8010_002F;
-/// "The operation requires a smart card, but no smart card is currently in
-/// the device."
-pub(crate) const SCARD_E_NO_SMARTCARD: DWORD = 0x8010_000C;
 /// "The specified reader is not currently available for use."
 pub(crate) const SCARD_E_READER_UNAVAILABLE: DWORD = 0x8010_0017;
 pub(crate) const NTE_NO_KEY: DWORD = 0x8009_000D;

@@ -45,8 +45,8 @@ use refineid_rapp_core::transport::TcpFrameTransport;
 use refineid_windows_credential_store::ProtectedPairingStore;
 
 use crate::ffi::{
-    DWORD, SCARD_E_COMM_DATA_LOST, SCARD_E_NO_KEY_CONTAINER, SCARD_E_NO_SMARTCARD,
-    SCARD_E_READER_UNAVAILABLE, SCARD_F_INTERNAL_ERROR, SCARD_W_CANCELLED_BY_USER, SCARDHANDLE,
+    DWORD, SCARD_E_COMM_DATA_LOST, SCARD_E_NO_KEY_CONTAINER, SCARD_E_READER_UNAVAILABLE,
+    SCARD_F_INTERNAL_ERROR, SCARD_W_CANCELLED_BY_USER, SCARDHANDLE,
 };
 
 /// PC/SC `SCARD_S_SUCCESS`: the winscard call returned no error.
@@ -267,13 +267,15 @@ pub(crate) enum RemoteFailure {
     /// The holder declined on the phone (`user_cancelled`).
     UserCancelled,
     /// The pairing serves nothing: the user forgot it here, or the phone
-    /// closed with `pairing_revoked` (RAPP v26.10.21 section 4.6).
+    /// closed with `pairing_revoked` (RAPP v26.10.22 section 4.6).
     Unpaired,
     /// The phone was not reached, or has turned remote access off.
     Unreachable,
     /// The session ended before the operation's result arrived.
     Lost,
-    /// The phone's card did not answer (`card_error`).
+    /// The phone's card did not answer this operation (`card_error`): a
+    /// failed operation, never the card's absence, which only `card.status`
+    /// reports (RAPP v26.10.22 section 8.4 item 1).
     CardError,
     /// Any other refusal or fault, named for debug logs.
     Failed(String),
@@ -288,8 +290,7 @@ impl RemoteFailure {
             Self::UserCancelled => SCARD_W_CANCELLED_BY_USER,
             Self::Unpaired => SCARD_E_NO_KEY_CONTAINER,
             Self::Unreachable => SCARD_E_READER_UNAVAILABLE,
-            Self::Lost => SCARD_E_COMM_DATA_LOST,
-            Self::CardError => SCARD_E_NO_SMARTCARD,
+            Self::Lost | Self::CardError => SCARD_E_COMM_DATA_LOST,
             Self::Failed(_) => SCARD_F_INTERNAL_ERROR,
         }
     }
@@ -371,7 +372,7 @@ impl RemoteCardTransport {
         );
 
         // The phone's `pairing_revoked` close revokes the pairing in the
-        // protected store the requester runs over (RAPP v26.10.21 section
+        // protected store the requester runs over (RAPP v26.10.22 section
         // 4.6 item 4), and the user is told to pair again.
         let mut session = match requester.connect(self.pair_id, transport) {
             Ok(session) => session,

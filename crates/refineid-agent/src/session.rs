@@ -16,6 +16,7 @@ use refineid_lib_core::x509::OwnedCert;
 use refineid_rapp::RoutingKey;
 use refineid_rapp_ble::gatt::BleLink;
 use refineid_rapp_ble::reach::{Attempt, ReachError, reach_revocation_notice, reach_session};
+use refineid_rapp_core::clock::unix_time_ms;
 use refineid_rapp_core::engine::{
     OperationOutcome, Requester, RequesterConfig, Session, SessionEnd, SessionError,
 };
@@ -24,7 +25,7 @@ use refineid_rapp_core::message::{
     CardStatusMessage, CertificateFingerprint, CloseReason, ResultError,
 };
 use refineid_rapp_core::operations::{CardOperation, CardOperationResult, CertificateKind};
-use refineid_rapp_core::store::{PairingRecord, PairingStore};
+use refineid_rapp_core::store::{PairingRecord, PairingStore, offered_certificate};
 use refineid_windows_credential_store::{
     ProtectedPairingStore, install_browser_certificate, remove_browser_certificates,
 };
@@ -45,6 +46,18 @@ const NOTICE_REACH_WINDOW: Duration = Duration::from_secs(5);
 const STORE_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 /// The operation lifetime sent on the wire, in milliseconds.
 const OPERATION_LIFETIME_MS: u64 = OPERATION_LIFETIME.as_secs() * 1_000;
+/// How far ahead the agent judges the offer between sessions: it looks
+/// again only after a search and its pause, and an offer must not outlive
+/// the grace of RAPP v26.10.22 section 8.4 item 3.
+const BETWEEN_SESSIONS_HORIZON: Duration = REACH_WINDOW.saturating_add(SEARCH_PAUSE);
+
+/// The certificate the agent has offered to browsers: which pairing's, and
+/// which card's.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Offered {
+    pair_id: PairId,
+    card: CertificateFingerprint,
+}
 
 /// One signature request on its way from the pipe to the session.
 struct Job {
@@ -161,7 +174,7 @@ fn requester_over(store: ProtectedPairingStore) -> AgentRequester {
     )
 }
 
-fn load_pairing(started: Instant, offered: &mut Option<PairId>) -> Option<Pairing> {
+fn load_pairing(started: Instant, offered: &mut Option<Offered>) -> Option<Pairing> {
     let store = match ProtectedPairingStore::load() {
         Ok(store) => store,
         Err(error) => {
@@ -177,17 +190,13 @@ fn load_pairing(started: Instant, offered: &mut Option<PairId>) -> Option<Pairin
     let record = requester.store().usable_pairing()?;
     let pair_id = record.pair_id();
     let key = RoutingKey::derive(record.pair_record()?).ok()?;
-    // W-R-8: the certificate is offered whenever the pairing is usable and
-    // its certificate known, before a session is open; one offered for
-    // another pairing is withdrawn first.
-    if offered.is_some_and(|offered_id| offered_id != pair_id) {
-        withdraw_certificates(started, offered);
-    }
-    if let Some(certificate) = record.authentication_certificate()
-        && *offered != Some(pair_id)
-    {
-        offer_certificate(started, certificate, pair_id, offered);
-    }
+    sync_offer(
+        started,
+        &requester,
+        pair_id,
+        offered,
+        BETWEEN_SESSIONS_HORIZON,
+    );
     Some(Pairing {
         requester,
         pair_id,
@@ -197,7 +206,7 @@ fn load_pairing(started: Instant, offered: &mut Option<PairId>) -> Option<Pairin
 
 /// Gives the phone of each pairing the user forgot while it was out of
 /// reach its `pairing_revoked` close, as the first message of a session
-/// (RAPP v26.10.21 section 4.6 item 2); a phone not found now is tried
+/// (RAPP v26.10.22 section 4.6 item 2); a phone not found now is tried
 /// again on the next round, for at most 30 days.
 fn deliver_revocation_notices(started: Instant, requester: &mut AgentRequester) {
     let owed: Vec<(PairId, RoutingKey)> = requester
@@ -219,16 +228,42 @@ fn deliver_revocation_notices(started: Instant, requester: &mut AgentRequester) 
     }
 }
 
-fn offer_certificate(
+/// W-R-8: brings the browsers' offer in line with the certificate the
+/// pairing's identity is offered on (RAPP v26.10.22 section 8.4 item 3) as
+/// it will stand `horizon` from now. The offer stands before and between
+/// sessions on a certificate whose card a session heard present within the
+/// grace, and goes at once when the pairing is forgotten or revoked or a
+/// session hears another card; another card's certificate is withdrawn
+/// before this one is installed, as installing adds a certificate beside it.
+fn sync_offer(
     started: Instant,
-    certificate: &OwnedCert,
+    requester: &AgentRequester,
     pair_id: PairId,
-    offered: &mut Option<PairId>,
+    offered: &mut Option<Offered>,
+    horizon: Duration,
 ) {
+    let horizon_ms = u64::try_from(horizon.as_millis()).unwrap_or(u64::MAX);
+    let judged_at = unix_time_ms().saturating_add(horizon_ms);
+    let Some(certificate) = offered_certificate(requester.store(), pair_id, judged_at) else {
+        if offered.is_some() {
+            withdraw_certificates(started, offered);
+        }
+        return;
+    };
+    let wanted = Offered {
+        pair_id,
+        card: CertificateFingerprint::of_certificate(certificate.as_der()),
+    };
+    if *offered == Some(wanted) {
+        return;
+    }
+    if offered.is_some() {
+        withdraw_certificates(started, offered);
+    }
     match install_browser_certificate(certificate, pair_id) {
         Ok(()) => {
             log(started, "the phone's certificate is offered to browsers");
-            *offered = Some(pair_id);
+            *offered = Some(wanted);
         }
         Err(error) => log(
             started,
@@ -237,7 +272,7 @@ fn offer_certificate(
     }
 }
 
-fn withdraw_certificates(started: Instant, offered: &mut Option<PairId>) {
+fn withdraw_certificates(started: Instant, offered: &mut Option<Offered>) {
     match remove_browser_certificates() {
         Ok(count) => log(started, &format!("withdrew {count} offered certificates")),
         Err(error) => log(started, &format!("certificates not withdrawn: {error}")),
@@ -311,9 +346,6 @@ fn serve_phone(started: Instant, inbox: &Receiver<Job>) {
             }
         };
         log(started, "session open over Bluetooth");
-        if offered != Some(pairing.pair_id) {
-            learn_certificate(started, &mut pairing, &mut session, &mut offered);
-        }
         if let Some(job) = pending.take() {
             if session.end().is_some() {
                 job.answer(SignAnswer::NoPhone);
@@ -333,16 +365,17 @@ fn serve_phone(started: Instant, inbox: &Receiver<Job>) {
 }
 
 /// Holds an open session: runs every job that arrives, keeps the session
-/// alive in between (RAPP v26.10.21 section 8.3), reads the certificate
-/// again when the phone reports another card (section 8.4 item 2), and
-/// closes with `pairing_revoked` when the user forgot the pairing
-/// meanwhile (section 4.6 item 1). Returns false when the pipe is gone and
-/// the agent stops.
+/// alive in between (RAPP v26.10.22 section 8.3), reads the certificate
+/// when the phone reports a card whose certificate is not the cached one
+/// (section 8.4 item 2), keeps the offer in line with what the session
+/// hears (section 8.4 item 3), and closes with `pairing_revoked` when the
+/// user forgot the pairing meanwhile (section 4.6 item 1). Returns false
+/// when the pipe is gone and the agent stops.
 fn hold_session(
     started: Instant,
     pairing: &mut Pairing,
     session: &mut Session<BleLink>,
-    offered: &mut Option<PairId>,
+    offered: &mut Option<Offered>,
     inbox: &Receiver<Job>,
 ) -> bool {
     let mut store_checked = Instant::now();
@@ -351,7 +384,7 @@ fn hold_session(
         match inbox.try_recv() {
             Ok(job) => {
                 // A pairing the user forgot meanwhile signs nothing (RAPP
-                // v26.10.21 section 4.6).
+                // v26.10.22 section 4.6).
                 store_checked = Instant::now();
                 close_if_forgotten(started, pairing, session, offered);
                 if session.end().is_some() {
@@ -383,30 +416,46 @@ fn hold_session(
                 .and_then(PairingRecord::authentication_certificate)
                 .map(|certificate| CertificateFingerprint::of_certificate(certificate.as_der()));
             if known != Some(fingerprint) {
-                // The earlier card's certificate is withdrawn before the new
-                // one is read: installing adds a certificate beside it.
-                log(started, "the phone serves another card");
-                withdraw_certificates(started, offered);
-                learn_certificate(started, pairing, session, offered);
+                // The session recorded the card it hears, so the earlier
+                // card's offer goes before this one's certificate is read.
+                log(
+                    started,
+                    "the phone serves a card whose certificate is not cached",
+                );
+                sync_offer(
+                    started,
+                    &pairing.requester,
+                    pairing.pair_id,
+                    offered,
+                    Duration::ZERO,
+                );
+                learn_certificate(started, pairing, session);
             }
         }
         if store_checked.elapsed() >= STORE_CHECK_INTERVAL {
             store_checked = Instant::now();
             close_if_forgotten(started, pairing, session, offered);
         }
+        sync_offer(
+            started,
+            &pairing.requester,
+            pairing.pair_id,
+            offered,
+            Duration::ZERO,
+        );
     }
     true
 }
 
 /// Closes the session when its pairing no longer serves: one the user
 /// forgot gets the `pairing_revoked` close now and loses its keys (RAPP
-/// v26.10.21 section 4.6 item 1); one already revoked or removed is closed.
+/// v26.10.22 section 4.6 item 1); one already revoked or removed is closed.
 /// A store that cannot be read changes nothing.
 fn close_if_forgotten(
     started: Instant,
     pairing: &mut Pairing,
     session: &mut Session<BleLink>,
-    offered: &mut Option<PairId>,
+    offered: &mut Option<Offered>,
 ) {
     if pairing.requester.store_mut().refresh().is_err() {
         return;
@@ -428,14 +477,10 @@ fn close_if_forgotten(
     withdraw_certificates(started, offered);
 }
 
-/// Reads the authentication certificate, keeps it on the pairing record
-/// for the key storage provider, and offers it to browsers.
-fn learn_certificate(
-    started: Instant,
-    pairing: &mut Pairing,
-    session: &mut Session<BleLink>,
-    offered: &mut Option<PairId>,
-) {
+/// Reads the authentication certificate and keeps it on the pairing record,
+/// for the key storage provider and for the offer, which stands once a
+/// session has heard its card.
+fn learn_certificate(started: Instant, pairing: &mut Pairing, session: &mut Session<BleLink>) {
     let operation = CardOperation::ReadCertificate {
         kind: CertificateKind::Authentication,
     };
@@ -475,9 +520,7 @@ fn learn_certificate(
             started,
             &format!("the certificate was not stored: {error:?}"),
         );
-        return;
     }
-    offer_certificate(started, &certificate, pairing.pair_id, offered);
 }
 
 /// Runs one job as a `browser_authenticate` and answers it.

@@ -95,7 +95,8 @@ pub enum CredentialStoreError {
     /// An unprotected copy of this user's pairing set exists and could not
     /// be deleted.
     UnprotectedCopyRemains,
-    /// The protected pairing set file could not be written, read, or removed.
+    /// The protected pairing set file, or the card sightings beside it,
+    /// could not be written, read, or removed.
     File {
         /// What the file system reported.
         kind: std::io::ErrorKind,
@@ -106,7 +107,6 @@ pub enum CredentialStoreError {
 
 impl CredentialStoreError {
     /// The file-system failure behind a pairing set operation.
-    #[cfg(windows)]
     fn file(error: &std::io::Error) -> Self {
         Self::File { kind: error.kind() }
     }

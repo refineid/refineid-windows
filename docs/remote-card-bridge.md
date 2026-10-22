@@ -11,7 +11,7 @@ below.
 
 RAPP is not an APDU tunnel: the proxy rejects arbitrary APDU bytes, and
 every operation is a typed request from a registered profile, authorized
-on the phone when it uses a key (RAPP v26.10.21 sections 8 and 9). The card-protocol stack in `refineid-lib-core` is
+on the phone when it uses a key (RAPP v26.10.22 sections 8 and 9). The card-protocol stack in `refineid-lib-core` is
 deliberately the opposite altitude: everything is built over a raw-APDU
 `CardTransport`. A remote card therefore cannot be a `CardTransport`
 implementation, and must not be — that seam exists so a *local* card's
@@ -22,8 +22,10 @@ The bridge sits at the operation altitude instead. The minidriver's
 secure-messaging arm; the remote card becomes a third arm whose
 operations — read certificate, verify presence of a PIN, sign a digest
 — map one to one onto the typed RAPP registry, executed by the
-requester engine over a stream session, approved by the holder on the
-phone. PIN collection never happens on Windows: the Card Module reports
+requester engine over a stream session, authorized by the PIN the
+phone takes (RAPP v26.10.22 section 11 item 2: PIN 1 asked once and held
+in its memory, PIN 2 for every signature). PIN collection never happens
+on Windows: the Card Module reports
 the PIN as externally verified, the way a reader with a secure PIN pad
 does, and the phone is that pad.
 
@@ -53,7 +55,7 @@ Hyper-V guest cannot create one.
 ## Staging
 
 1. **Wire path** — done. `refineid-rapp-core` implements the requester
-   role of RAPP v26.10.21 through the `refineid_rapp` engine;
+   role of RAPP v26.10.22 through the `refineid_rapp` engine;
    `refineid-rapp pair-demo` proves pairing, sessions, and typed
    operations against a real phone from a terminal.
    *Transport & Discovery Model*: Governed normatively by

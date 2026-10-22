@@ -25,7 +25,7 @@
 //! a pairing with the code the phone shows, polls its state, confirms it,
 //! then reads the paired card. Each handle owns one background pairing
 //! thread that finds the phone by its DNS-SD `mode=pairing` record and dials
-//! it (RAPP v26.10.21 section 2.2), and, after pairing, the live `Requester`
+//! it (RAPP v26.10.22 section 2.2), and, after pairing, the live `Requester`
 //! whose device-only credential store persists the pairing so the minidriver
 //! can later load and use it behind this same ABI. After a card read the
 //! handle also holds the offering session of section 8.4 on a watch thread:
@@ -53,6 +53,7 @@ use std::thread::JoinHandle;
 
 use refineid_lib_core::x509::OwnedCert;
 use refineid_rapp::ProfileName;
+use refineid_rapp_core::clock::unix_time_ms;
 use refineid_rapp_core::engine::{
     OperationOutcome, PairingError, PeerIntroduction, Requester, RequesterConfig, Session,
     SessionEnd, SessionError,
@@ -63,7 +64,7 @@ use refineid_rapp_core::message::{
 };
 use refineid_rapp_core::offer::normalize_pairing_code;
 use refineid_rapp_core::operations::{CardOperation, CardOperationResult, CertificateKind};
-use refineid_rapp_core::store::{PairingRecord, PairingState, PairingStore};
+use refineid_rapp_core::store::{PairingRecord, PairingState, PairingStore, offered_certificate};
 use refineid_rapp_core::stream::{
     DialPurpose, DiscoveryMode, STREAM_CANDIDATE_ID, StreamError, browse, dial, dial_session,
 };
@@ -102,6 +103,16 @@ const MAX_GRANTED_BYTES: usize = 4_096;
 /// Pause before the watch dials the phone again after losing it.
 const WATCH_RETRY_MS: u64 = 15_000;
 
+/// How far ahead the watch judges the offer between sessions: it looks
+/// again only after a browse and its pause, and an offer must not outlive
+/// the grace of section 8.4 item 3.
+const WATCH_HORIZON_MS: u64 = BROWSE_WINDOW_MS + WATCH_RETRY_MS;
+
+/// How far ahead the watch judges the offer while it holds a session: it
+/// looks again after every receive tick, so the offer is judged as it
+/// stands now.
+const IN_SESSION_HORIZON_MS: u64 = 0;
+
 /// How often the offering session reads the pairing store again, so a
 /// pairing forgotten meanwhile is closed with its `pairing_revoked` close.
 const STORE_CHECK_INTERVAL_MS: u64 = 10_000;
@@ -109,8 +120,8 @@ const STORE_CHECK_INTERVAL_MS: u64 = 10_000;
 /// How long telling a forgotten phone browses for it, once.
 const FORGET_BROWSE_WINDOW_MS: u64 = 1_500;
 
-/// Shown while the phone's consent view is on screen.
-const CONSENT_SHOWN_STATUS: &str = "Approve the request on your phone.";
+/// Shown while the phone's PIN prompt is on screen.
+const CONSENT_SHOWN_STATUS: &str = "Enter the PIN on your phone.";
 
 /// Shown while the offering session reports no card on the phone.
 const CARD_ABSENT_STATUS: &str = "The phone has no card.";
@@ -118,7 +129,7 @@ const CARD_ABSENT_STATUS: &str = "The phone has no card.";
 /// Shown while the phone's card cannot be confirmed by its certificate.
 const CARD_UNCONFIRMED_STATUS: &str = "The phone's card could not be read.";
 
-/// Shown while the phone cannot be reached and nothing is offered.
+/// Shown while the phone cannot be reached.
 const PHONE_UNREACHABLE_STATUS: &str = "The phone is not reachable.";
 
 /// Shown once the phone announced it forgot this computer.
@@ -265,7 +276,7 @@ pub unsafe extern "C" fn refineid_rapp_string_free(json: *mut c_char) {
     drop(unsafe { CString::from_raw(json) });
 }
 
-/// Forget every stored pairing (RAPP v26.10.21 section 4.6).
+/// Forget every stored pairing (RAPP v26.10.22 section 4.6).
 ///
 /// This is the holder's local forget action. Each pairing serves nothing
 /// from now on; its phone is told with the `pairing_revoked` close as the
@@ -392,7 +403,7 @@ pub unsafe extern "C" fn refineid_rapp_open_pairing(
 /// Begin a pairing with the code the phone shows.
 ///
 /// Returns `{ handle }` immediately, or `invalid_code` when the input is not
-/// a six-character pairing code (RAPP v26.10.21 section 3.1). The background
+/// a six-character pairing code (RAPP v26.10.22 section 3.1). The background
 /// thread finds the phone in pairing mode, dials it, reads its offer, and
 /// runs the pairing handshake; the caller drives confirmation through
 /// [`refineid_rapp_poll_pairing`] and [`refineid_rapp_confirm_pairing`].
@@ -470,7 +481,7 @@ pub unsafe extern "C" fn refineid_rapp_confirm_pairing(
 }
 
 /// The profiles a caller grants: a JSON array of registered profile names
-/// (RAPP v26.10.21 section 9), parsed here, at the border.
+/// (RAPP v26.10.22 section 9), parsed here, at the border.
 fn granted_profiles(text: &str) -> Result<Vec<ProfileName>, ApiFailure> {
     let invalid = || {
         ApiFailure::new(
@@ -830,12 +841,13 @@ fn start_offering_watch(handle_id: u64) {
 }
 
 /// The offering session of section 8.4: holds a session to the paired phone
-/// for as long as the handle lives, offers the phone's certificate to
-/// browsers while that session reports the card whose fingerprint the
-/// certificate has, and withdraws it the moment the session ends, the card
-/// leaves, or the phone closes with `pairing_revoked`. A pairing the user
-/// forgot meanwhile is closed with its own `pairing_revoked` close (section
-/// 4.6 item 1).
+/// for as long as the handle lives and offers the phone's certificate to
+/// browsers on the card a session heard present, before and between
+/// sessions (item 3). The offer goes once no session has heard that card
+/// for the grace, at once when a session hears another card, when the
+/// pairing is forgotten or revoked, and when the watch ends, as nothing is
+/// left to withdraw it after. A pairing the user forgot meanwhile is closed
+/// with its own `pairing_revoked` close (section 4.6 item 1).
 fn offering_watch(handle_id: u64) {
     let _mark = WatchMark(handle_id);
     let mut offer = Offer::default();
@@ -850,11 +862,12 @@ fn offering_watch(handle_id: u64) {
             return;
         };
         let mut requester = background_requester(store);
+        sync_offer(&requester, pair_id, &mut offer, WATCH_HORIZON_MS);
         let transport = serving_keys(&requester, pair_id)
             .ok_or(StreamError::Unreachable)
             .and_then(|keys| dial_session(keys, &[], &[], browse_window()));
         let Ok(transport) = transport else {
-            withdraw_offer(handle_id, &mut offer, PHONE_UNREACHABLE_STATUS);
+            set_watch_status(handle_id, PHONE_UNREACHABLE_STATUS);
             pause(WATCH_RETRY_MS);
             continue;
         };
@@ -866,7 +879,7 @@ fn offering_watch(handle_id: u64) {
                 return;
             }
             Err(_) => {
-                withdraw_offer(handle_id, &mut offer, PHONE_UNREACHABLE_STATUS);
+                set_watch_status(handle_id, PHONE_UNREACHABLE_STATUS);
                 pause(WATCH_RETRY_MS);
                 continue;
             }
@@ -878,7 +891,7 @@ fn offering_watch(handle_id: u64) {
             set_phase(handle_id, Phase::Failed(REVOKED_STATUS.to_owned()));
             return;
         }
-        withdraw_offer(handle_id, &mut offer, PHONE_UNREACHABLE_STATUS);
+        set_watch_status(handle_id, PHONE_UNREACHABLE_STATUS);
         if !ended(handle_id) {
             pause(WATCH_RETRY_MS);
         }
@@ -889,10 +902,44 @@ fn offering_watch(handle_id: u64) {
 /// What the offering session has offered to browsers.
 #[derive(Default)]
 struct Offer {
-    /// The fingerprint of the card whose certificate is offered.
-    offered: Option<CertificateFingerprint>,
+    /// The certificate offered: which pairing's, and which card's.
+    offered: Option<Offered>,
     /// The fingerprint last acted on, offered or not.
     checked: Option<CertificateFingerprint>,
+}
+
+/// One certificate offered to browsers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Offered {
+    pair_id: PairId,
+    card: CertificateFingerprint,
+}
+
+/// Brings the browsers' offer in line with the certificate the pairing's
+/// identity is offered on (section 8.4 item 3) as it will stand
+/// `horizon_ms` from now; another card's certificate is withdrawn before
+/// this one is installed, as installing adds a certificate beside it.
+fn sync_offer(requester: &StreamRequester, pair_id: PairId, offer: &mut Offer, horizon_ms: u64) {
+    let judged_at = unix_time_ms().saturating_add(horizon_ms);
+    let Some(certificate) = offered_certificate(requester.store(), pair_id, judged_at) else {
+        if offer.offered.take().is_some() {
+            forget_browser_certificates();
+        }
+        return;
+    };
+    let wanted = Offered {
+        pair_id,
+        card: fingerprint_of(certificate),
+    };
+    if offer.offered == Some(wanted) {
+        return;
+    }
+    if offer.offered.take().is_some() {
+        forget_browser_certificates();
+    }
+    if offer_to_browsers(certificate, pair_id).is_ok() {
+        offer.offered = Some(wanted);
+    }
 }
 
 /// Keeps the offering session alive and follows its card status until the
@@ -911,22 +958,19 @@ fn hold_offering_session(
         match card {
             Some(CardStatusMessage::Present(fingerprint)) if offer.checked != Some(fingerprint) => {
                 offer.checked = Some(fingerprint);
-                // Another card's certificate is withdrawn before this one is
-                // read: installing adds a certificate beside it.
-                if offer.offered.is_some_and(|offered| offered != fingerprint) {
-                    withdraw_offer(handle_id, offer, CARD_UNCONFIRMED_STATUS);
-                }
-                match confirmed_certificate(requester, session, fingerprint) {
-                    Some(certificate) if offer_to_browsers(&certificate, pair_id).is_ok() => {
-                        offer.offered = Some(fingerprint);
-                        clear_watch_status(handle_id);
-                    }
-                    _ => withdraw_offer(handle_id, offer, CARD_UNCONFIRMED_STATUS),
+                // The session recorded the card it hears, so another card's
+                // offer goes before this one's certificate is read.
+                sync_offer(requester, pair_id, offer, IN_SESSION_HORIZON_MS);
+                if caches_confirmed_certificate(requester, session, fingerprint) {
+                    clear_watch_status(handle_id);
+                } else {
+                    set_watch_status(handle_id, CARD_UNCONFIRMED_STATUS);
                 }
             }
             Some(CardStatusMessage::Absent) => {
+                // The offer stands through the grace (section 8.4 item 3).
                 offer.checked = None;
-                withdraw_offer(handle_id, offer, CARD_ABSENT_STATUS);
+                set_watch_status(handle_id, CARD_ABSENT_STATUS);
             }
             Some(CardStatusMessage::Present(_)) | None => {}
         }
@@ -934,29 +978,28 @@ fn hold_offering_session(
             store_checked = std::time::Instant::now();
             close_if_forgotten(requester, session);
         }
+        sync_offer(requester, pair_id, offer, IN_SESSION_HORIZON_MS);
     }
 }
 
-/// The certificate of the card whose fingerprint the session reports (RAPP
-/// v26.10.21 section 8.4 item 2): the one stored for the pairing when its
-/// fingerprint matches, or else read afresh on the session and stored. A
-/// certificate whose fingerprint the phone has not confirmed is not
-/// returned.
-fn confirmed_certificate(
+/// Whether the pairing caches the certificate of the card whose fingerprint
+/// the session reports (RAPP v26.10.22 section 8.4 item 2): the stored one
+/// when its fingerprint matches, or else one read afresh on the session,
+/// stored only when the phone confirmed its fingerprint.
+fn caches_confirmed_certificate(
     requester: &mut StreamRequester,
     session: &mut Session<TcpFrameTransport>,
     fingerprint: CertificateFingerprint,
-) -> Option<OwnedCert> {
+) -> bool {
     let pair_id = session.pair_id();
-    let stored = requester
+    let cached = requester
         .store()
         .get(pair_id)
         .ok()
         .and_then(PairingRecord::authentication_certificate)
-        .filter(|certificate| fingerprint_of(certificate) == fingerprint)
-        .cloned();
-    if stored.is_some() {
-        return stored;
+        .is_some_and(|certificate| fingerprint_of(certificate) == fingerprint);
+    if cached {
+        return true;
     }
     let read = requester.execute(
         session,
@@ -966,18 +1009,21 @@ fn confirmed_certificate(
         OPERATION_EXPIRY_MS,
     );
     let Ok(OperationOutcome::Completed(CardOperationResult::Certificate(der))) = read else {
-        return None;
+        return false;
     };
-    let certificate = OwnedCert::from_der(der)
+    let Some(certificate) = OwnedCert::from_der(der)
         .ok()
-        .filter(|certificate| fingerprint_of(certificate) == fingerprint)?;
+        .filter(|certificate| fingerprint_of(certificate) == fingerprint)
+    else {
+        return false;
+    };
     remember_certificate(requester, pair_id, &certificate);
-    Some(certificate)
+    true
 }
 
 /// Closes the session when its pairing no longer serves: one the user
 /// forgot gets the `pairing_revoked` close now and loses its keys (RAPP
-/// v26.10.21 section 4.6 item 1); one already revoked or removed is closed.
+/// v26.10.22 section 4.6 item 1); one already revoked or removed is closed.
 /// A store that cannot be read changes nothing.
 fn close_if_forgotten(requester: &mut StreamRequester, session: &mut Session<TcpFrameTransport>) {
     if requester.store_mut().refresh().is_err() {
@@ -1013,7 +1059,7 @@ fn serving_keys(
 
 /// The authentication certificate among those an identity read answered
 /// with: the one whose fingerprint the session's card status names (RAPP
-/// v26.10.21 section 8.4 item 2), or, before the phone has named one, the
+/// v26.10.22 section 8.4 item 2), or, before the phone has named one, the
 /// first. Each is parsed here, at the border.
 fn authentication_certificate(
     card: Option<CardStatusMessage>,
@@ -1058,11 +1104,16 @@ fn clear_watch_status(handle_id: u64) {
     });
 }
 
-/// Withdraws the offer, if one stands, and tells the user why.
+/// Withdraws the offer at once, if one stands, and tells the user why.
 fn withdraw_offer(handle_id: u64, offer: &mut Offer, status: &str) {
     if offer.offered.take().is_some() {
         forget_browser_certificates();
     }
+    set_watch_status(handle_id, status);
+}
+
+/// Tells the user what the watch sees; the offer is left to [`sync_offer`].
+fn set_watch_status(handle_id: u64, status: &str) {
     registry_entry_apply(handle_id, |shared| {
         shared.status = Some(status.to_owned());
     });

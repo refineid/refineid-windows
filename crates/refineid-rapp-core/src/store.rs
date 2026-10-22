@@ -1,6 +1,6 @@
 //! Durable pairing records.
 //!
-//! A pairing record is the atomic result of pairing (RAPP v26.10.21 section
+//! A pairing record is the atomic result of pairing (RAPP v26.10.22 section
 //! 4.3): the engine's own [`PairRecord`], which holds the pair keys,
 //! `pair_id`, the granted profiles, `grants_hash`, whether the peer
 //! confirmed its storage, and when the user forgot the pairing, together
@@ -18,6 +18,11 @@
 //! revoked record keeps no keys and no certificates; it stays only so the
 //! user is told, until the user forgets it too.
 //!
+//! The store also keeps, per pairing, the last [`CardSighting`]: the card a
+//! session on this computer last heard present, which bounds the identity
+//! every local consumer is offered (section 8.4 item 3,
+//! [`offered_certificate`]).
+//!
 //! The store is a trait so the Windows build can put pair keys behind the
 //! platform credential store, while tests use the in-memory form shipped
 //! here. A record is neither `Clone` nor printable with its keys: the keys
@@ -28,6 +33,7 @@ use refineid_rapp::{ActivePairing, PairRecord, PairingError, ProfileName};
 
 use crate::engine::PeerIntroduction;
 use crate::ids::PairId;
+use crate::presence::CardSighting;
 
 /// The keys of a stored pairing.
 enum Keys {
@@ -42,7 +48,7 @@ enum Keys {
     },
 }
 
-/// Where a stored pairing stands (RAPP v26.10.21 sections 4.3 and 4.6).
+/// Where a stored pairing stands (RAPP v26.10.22 sections 4.3 and 4.6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PairingState {
     /// Stored, and the peer has not confirmed its own storage: serves
@@ -328,7 +334,7 @@ pub trait PairingStore {
         change: &mut dyn FnMut(&mut PairingRecord),
     ) -> Result<(), StoreError>;
 
-    /// Removes one record entirely.
+    /// Removes one record entirely, with its card sighting.
     ///
     /// # Errors
     ///
@@ -337,6 +343,46 @@ pub trait PairingStore {
 
     /// Every stored pairing, newest first.
     fn pair_ids(&self) -> Vec<PairId>;
+
+    /// The card a session on this computer last heard present for
+    /// `pair_id` (section 8.4 item 1).
+    fn card_sighting(&self, pair_id: PairId) -> Option<CardSighting>;
+
+    /// Records that a session heard `sighting`'s card present for
+    /// `pair_id`, in place of the pairing's earlier sighting.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the write is refused.
+    fn record_card_sighting(
+        &mut self,
+        pair_id: PairId,
+        sighting: CardSighting,
+    ) -> Result<(), StoreError>;
+}
+
+/// The certificate a pairing's identity is offered to local consumers on at
+/// `now_ms` (RAPP v26.10.22 section 8.4 item 3).
+///
+/// It is the cached authentication certificate of a pairing that serves,
+/// while the last card a session on this computer heard present is that
+/// certificate's card and was heard within the grace. `None` withdraws the
+/// offer: the pairing is forgotten or revoked, a session heard another
+/// card, or no session has heard the card for the grace.
+pub fn offered_certificate<S: PairingStore + ?Sized>(
+    store: &S,
+    pair_id: PairId,
+    now_ms: u64,
+) -> Option<&OwnedCert> {
+    let certificate = store
+        .get(pair_id)
+        .ok()
+        .filter(|record| record.serves())?
+        .authentication_certificate()?;
+    store
+        .card_sighting(pair_id)
+        .filter(|sighting| sighting.stands_for(certificate, now_ms))
+        .map(|_| certificate)
 }
 
 /// Revokes a pairing: its keys are destroyed and the record stays so the
@@ -381,7 +427,7 @@ pub fn forget_pairing<S: PairingStore + ?Sized>(
 /// keys included.
 ///
 /// Such a record was written inside a confirmation window this endpoint
-/// did not complete (RAPP v26.10.21 section 4.3 item 4); its keys are
+/// did not complete (RAPP v26.10.22 section 4.3 item 4); its keys are
 /// destroyed and nobody is told (section 4.6 item 3). Returns the removed
 /// pair identifiers.
 pub fn remove_unconfirmed<S: PairingStore + ?Sized>(store: &mut S) -> Vec<PairId> {
@@ -404,7 +450,7 @@ pub fn remove_unconfirmed<S: PairingStore + ?Sized>(store: &mut S) -> Vec<PairId
 /// at `now_ms`.
 ///
 /// Its `pairing_revoked` close was not delivered within 30 days of the
-/// forget (RAPP v26.10.21 section 4.6 item 3). Returns the revoked pair
+/// forget (RAPP v26.10.22 section 4.6 item 3). Returns the revoked pair
 /// identifiers.
 pub fn expire_revocation_notices<S: PairingStore + ?Sized>(
     store: &mut S,
@@ -431,6 +477,7 @@ pub fn expire_revocation_notices<S: PairingStore + ?Sized>(
 #[derive(Debug, Default)]
 pub struct MemoryPairingStore {
     records: Vec<PairingRecord>,
+    sightings: Vec<(PairId, CardSighting)>,
 }
 
 impl MemoryPairingStore {
@@ -476,6 +523,7 @@ impl PairingStore for MemoryPairingStore {
         if self.records.len() == before {
             return Err(StoreError::Unknown);
         }
+        self.sightings.retain(|(sighted, _)| *sighted != pair_id);
         Ok(())
     }
 
@@ -485,6 +533,23 @@ impl PairingStore for MemoryPairingStore {
             .rev()
             .map(PairingRecord::pair_id)
             .collect()
+    }
+
+    fn card_sighting(&self, pair_id: PairId) -> Option<CardSighting> {
+        self.sightings
+            .iter()
+            .find(|(sighted, _)| *sighted == pair_id)
+            .map(|(_, sighting)| *sighting)
+    }
+
+    fn record_card_sighting(
+        &mut self,
+        pair_id: PairId,
+        sighting: CardSighting,
+    ) -> Result<(), StoreError> {
+        self.sightings.retain(|(sighted, _)| *sighted != pair_id);
+        self.sightings.push((pair_id, sighting));
+        Ok(())
     }
 }
 
@@ -589,9 +654,10 @@ mod tests {
     use super::fixtures::{FIRST_PAIR, SECOND_PAIR, certificate, record, unconfirmed_record};
     use super::{
         MemoryPairingStore, PairingState, PairingStore, StoreError, expire_revocation_notices,
-        forget_pairing, remove_unconfirmed, revoke_pairing,
+        forget_pairing, offered_certificate, remove_unconfirmed, revoke_pairing,
     };
-    use refineid_rapp::REVOCATION_NOTICE_MS;
+    use crate::presence::CardSighting;
+    use refineid_rapp::{CertificateFingerprint, IDENTITY_OFFER_GRACE_MS, REVOCATION_NOTICE_MS};
 
     /// The wall-clock time the user forgets a pairing in these tests.
     const FORGOTTEN_AT_MS: u64 = 1_800_000_000_000;
@@ -701,6 +767,71 @@ mod tests {
         assert_eq!(store.pair_ids(), vec![FIRST_PAIR]);
         store.remove(FIRST_PAIR).unwrap();
         assert!(matches!(store.get(FIRST_PAIR), Err(StoreError::Unknown)));
+    }
+
+    /// The wall-clock time a session hears the card present in these tests.
+    const HEARD_AT_MS: u64 = 1_800_000_000_000;
+
+    /// A store holding a confirmed pairing whose certificate is cached and
+    /// whose card a session heard at [`HEARD_AT_MS`].
+    fn offering_store() -> MemoryPairingStore {
+        let mut store = MemoryPairingStore::new();
+        store.insert(record(FIRST_PAIR)).unwrap();
+        store
+            .update(FIRST_PAIR, &mut |entry| {
+                entry.remember_authentication_certificate(certificate());
+            })
+            .unwrap();
+        store
+            .record_card_sighting(
+                FIRST_PAIR,
+                CardSighting::new(
+                    CertificateFingerprint::of_certificate(certificate().as_der()),
+                    HEARD_AT_MS,
+                ),
+            )
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn a_confirmed_certificate_is_offered_through_the_grace() {
+        let store = offering_store();
+        assert!(offered_certificate(&store, FIRST_PAIR, HEARD_AT_MS).is_some());
+        assert!(
+            offered_certificate(&store, FIRST_PAIR, HEARD_AT_MS + IDENTITY_OFFER_GRACE_MS)
+                .is_none()
+        );
+        assert!(offered_certificate(&store, SECOND_PAIR, HEARD_AT_MS).is_none());
+    }
+
+    #[test]
+    fn a_removed_pairing_takes_its_sighting_with_it() {
+        let mut store = offering_store();
+        store.remove(FIRST_PAIR).unwrap();
+        assert_eq!(store.card_sighting(FIRST_PAIR), None);
+    }
+
+    #[test]
+    fn a_forgotten_pairing_offers_nothing_at_once() {
+        let mut store = offering_store();
+        forget_pairing(&mut store, FIRST_PAIR, HEARD_AT_MS).unwrap();
+        assert!(offered_certificate(&store, FIRST_PAIR, HEARD_AT_MS).is_none());
+    }
+
+    #[test]
+    fn another_card_heard_withdraws_the_offer_at_once() {
+        let mut store = offering_store();
+        store
+            .record_card_sighting(
+                FIRST_PAIR,
+                CardSighting::new(
+                    CertificateFingerprint::from_array(*b"the fingerprint of another card."),
+                    HEARD_AT_MS,
+                ),
+            )
+            .unwrap();
+        assert!(offered_certificate(&store, FIRST_PAIR, HEARD_AT_MS).is_none());
     }
 
     #[test]

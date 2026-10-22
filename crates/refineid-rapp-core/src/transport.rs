@@ -1,4 +1,4 @@
-//! The transport-profile contract of RAPP v26.10.21 section 2.2.
+//! The transport-profile contract of RAPP v26.10.22 section 2.2.
 //!
 //! A transport delivers bounded binary frames in order, reports EOF, the
 //! receive deadline and failure distinctly, and names the registered

@@ -1,4 +1,4 @@
-//! Reaching a stored pairing's phone over Bluetooth (RAPP v26.10.21
+//! Reaching a stored pairing's phone over Bluetooth (RAPP v26.10.22
 //! section 2.2.1).
 //!
 //! An advertisement cannot say whose phone it is, so a session preamble is

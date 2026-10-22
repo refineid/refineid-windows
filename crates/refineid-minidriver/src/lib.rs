@@ -120,7 +120,9 @@ use cardmod::{CardCapabilityModel, CardModel, ContainerDescriptor, Ctx, KeyAlgor
 )]
 use ffi::*;
 #[cfg(windows)]
-use refineid_lib_core::auth::{ChangePinOutcome, PinOps, PinSlot, UnblockOutcome, VerifyOutcome};
+use refineid_lib_core::auth::{
+    ChangePinOutcome, PinOps, PinSlot, PinStatus, UnblockOutcome, VerifyOutcome,
+};
 #[cfg(windows)]
 use refineid_lib_core::crypto::container::{Ciphertext, RsaPkcs1};
 #[cfg(windows)]
@@ -134,7 +136,7 @@ use refineid_lib_core::pace::run_pace_with_can;
 #[cfg(windows)]
 use refineid_lib_core::pin::PinBytes;
 #[cfg(windows)]
-use refineid_lib_core::pin_cache::{PIN2_CACHE_LIFETIME, PinSafetyCache};
+use refineid_lib_core::pin_cache::PinSafetyCache;
 #[cfg(windows)]
 use refineid_lib_core::pin_retry_risk::pin1_status_permits_consumer_authentication;
 #[cfg(windows)]
@@ -145,7 +147,7 @@ use refineid_lib_core::sign::{KeyRef, SignOps, commands::ExternalHashValue};
 use refineid_lib_core::x509::{EcCurve, OwnedCert, PublicKeyAlgorithm, extract_rsa_public_key};
 #[cfg(windows)]
 use refineid_rapp_core::operations::{
-    CardOperation, CardOperationResult, CertificateKind, KeyProfile, SignatureAlgorithm,
+    CardOperation, CardOperationResult, KeyProfile, SignatureAlgorithm,
 };
 #[cfg(windows)]
 use refineid_windows_credential_store::{ProtectedPairingStore, read_can};
@@ -166,13 +168,16 @@ fn live_token_serial(tx: &mut CardSessionTransport) -> Result<TokenSerial, DWORD
 }
 
 #[cfg(windows)]
-fn live_pin1_authentication_is_permitted(tx: &mut CardSessionTransport) -> Result<bool, DWORD> {
+fn live_pin1_status(tx: &mut CardSessionTransport) -> Result<PinStatus, DWORD> {
     tx.select_pkcs15_application()
         .map_err(|_error| SCARD_F_INTERNAL_ERROR)?;
-    let pin1 = tx
-        .pin_status(PinSlot::Pin1)
-        .map_err(|_error| SCARD_F_INTERNAL_ERROR)?;
-    Ok(pin1_status_permits_consumer_authentication(pin1))
+    tx.pin_status(PinSlot::Pin1)
+        .map_err(|_error| SCARD_F_INTERNAL_ERROR)
+}
+
+#[cfg(windows)]
+fn live_pin1_authentication_is_permitted(tx: &mut CardSessionTransport) -> Result<bool, DWORD> {
+    live_pin1_status(tx).map(pin1_status_permits_consumer_authentication)
 }
 
 #[cfg(windows)]
@@ -269,27 +274,19 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
             return SCARD_E_UNKNOWN_CARD;
         };
         let pair_id = pairing.pair_id();
-        let (auth_der, sig_der) = if let Some(auth) = pairing.authentication_certificate() {
-            let sig = pairing.signature_certificate().unwrap_or(auth);
-            (auth.as_der().to_vec(), sig.as_der().to_vec())
-        } else {
-            let remote_tx = RemoteCardTransport::new(atr.clone(), pair_id);
-            let cert_res = match remote_tx.execute_operation(&CardOperation::ReadCertificate {
-                kind: CertificateKind::Authentication,
-            }) {
-                Ok(r) => r,
-                Err(e) => {
-                    Log::dbg(&format!(
-                        "CardAcquireContext: remote read_certificate failed: {e}"
-                    ));
-                    return e.status();
-                }
-            };
-            let CardOperationResult::Certificate(der) = cert_res else {
-                return SCARD_F_INTERNAL_ERROR;
-            };
-            (der.clone(), der)
+        // The card is offered on the certificate whose card a session heard
+        // present within the grace, and on nothing else (RAPP v26.10.22
+        // section 8.4 items 2 and 3).
+        let Some(auth) = refineid_rapp_core::store::offered_certificate(
+            &store,
+            pair_id,
+            refineid_rapp_core::clock::unix_time_ms(),
+        ) else {
+            Log::dbg("CardAcquireContext: no session confirmed the remote card in the grace");
+            return SCARD_E_UNKNOWN_CARD;
         };
+        let sig = pairing.signature_certificate().unwrap_or(auth);
+        let (auth_der, sig_der) = (auth.as_der().to_vec(), sig.as_der().to_vec());
 
         // Cache root/intermediate CA certificates from pairing record if present
         if let Some(root) = pairing.root_certificate() {
@@ -691,20 +688,30 @@ fn reverify_cached_pin(
             Some(SCARD_W_WRONG_CHV)
         };
     }
+    // A failed read is a transport failure: the held PIN 1 stays, and the
+    // retry counter read before its next use decides (RAPP v26.10.22
+    // section 11 item 2).
     let serial = match live_token_serial(tx) {
         Ok(serial) => serial,
         Err(error) => {
-            clear_pin_state(pin1_authenticated, pin2_authenticated);
+            reset_card_state(pin1_authenticated, pin2_authenticated);
             return Some(error);
         }
     };
-    if !matches!(live_pin1_authentication_is_permitted(tx), Ok(true)) {
+    let status = match live_pin1_status(tx) {
+        Ok(status) => status,
+        Err(error) => {
+            reset_card_state(pin1_authenticated, pin2_authenticated);
+            return Some(error);
+        }
+    };
+    if !pin1_status_permits_consumer_authentication(status) {
         clear_pin_state(pin1_authenticated, pin2_authenticated);
         Log::dbg("reverify_cached_pin: PIN1 retry floor is below three or unreadable");
         return Some(SCARD_W_WRONG_CHV);
     }
     let slot = PinSlot::Pin1;
-    let checkout = with_pin_safety(|cache| cache.checkout_pin1(&serial))
+    let checkout = with_pin_safety(|cache| cache.checkout_pin1(&serial, status))
         .ok()
         .flatten();
     let Some(checkout) = checkout else {
@@ -739,7 +746,8 @@ fn reverify_cached_pin(
             Some(SCARD_W_WRONG_CHV)
         }
         Err(err) => {
-            clear_pin_state(pin1_authenticated, pin2_authenticated);
+            let _ = with_pin_safety(|cache| checkout.restore_after_unanswered(cache));
+            reset_card_state(pin1_authenticated, pin2_authenticated);
             Log::dbg(&format!("reverify_cached_pin: transport error ({err:?})"));
             Some(SCARD_F_INTERNAL_ERROR)
         }
@@ -918,56 +926,32 @@ fn pin_unblock_permission(pin_id: DWORD) -> DWORD {
     }
 }
 
+/// `dwPinCachePolicyInfo` carries a value only for `PIN_CACHE_TIMED`, which
+/// no PIN here uses.
+#[cfg(windows)]
+const NO_PIN_CACHE_POLICY_INFO: DWORD = 0;
+
+/// The Base CSP's PIN caching for each PIN (RAPP v26.10.22 section 11 item
+/// 2): PIN 1 in its process memory, as this module holds it; PIN 2 asked for
+/// every signature.
 #[cfg(windows)]
 fn pin_cache_policy(pin_id: DWORD) -> DWORD {
     match pin_id {
         PIN_ID_AUTH => PIN_CACHE_NORMAL,
-        PIN_ID_QUALIFIED_SIG => PIN_CACHE_TIMED,
+        PIN_ID_QUALIFIED_SIG => PIN_CACHE_ALWAYS_PROMPT,
         _ => PIN_CACHE_NONE,
     }
-}
-
-#[cfg(windows)]
-fn pin_cache_policy_info(pin_id: DWORD) -> DWORD {
-    /// Microsoft defines `dwPinCachePolicyInfo` in seconds for
-    /// `PIN_CACHE_TIMED`.
-    const PIN2_CACHE_TIMEOUT_SECONDS: DWORD = cache_timeout_seconds(PIN2_CACHE_LIFETIME);
-    match pin_id {
-        PIN_ID_QUALIFIED_SIG => PIN2_CACHE_TIMEOUT_SECONDS,
-        _ => 0,
-    }
-}
-
-/// Converts a shared policy lifetime to the whole seconds Windows wants.
-///
-/// The assertion runs at compile time, so a future lifetime too large for
-/// the field fails the build instead of silently wrapping into a much
-/// shorter cache window than the policy intends.
-#[cfg(windows)]
-const fn cache_timeout_seconds(lifetime: core::time::Duration) -> DWORD {
-    let seconds = lifetime.as_secs();
-    assert!(
-        seconds <= DWORD::MAX as u64,
-        "a PIN cache lifetime must fit the Windows dwPinCachePolicyInfo field"
-    );
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "the assertion above rejects any value that would truncate"
-    )]
-    let seconds = seconds as DWORD;
-    seconds
 }
 
 #[cfg(windows)]
 fn authenticated_pin_set(ctx: &Ctx) -> DWORD {
     let mut pin_set = PIN_SET_NONE;
     let has_pin1 = ctx.pin1_authenticated
-        || with_pin_safety(PinSafetyCache::has_positive_pin1).unwrap_or(false);
+        || with_pin_safety(|cache| cache.has_positive_pin1()).unwrap_or(false);
     if has_pin1 {
         pin_set |= create_pin_set(PIN_ID_AUTH);
     }
-    let has_pin2 = ctx.pin2_authenticated
-        || with_pin_safety(PinSafetyCache::has_positive_pin2).unwrap_or(false);
+    let has_pin2 = ctx.pin2_authenticated;
     if has_pin2 {
         pin_set |= create_pin_set(PIN_ID_QUALIFIED_SIG);
     }
@@ -1012,13 +996,32 @@ fn clear_cached_pin(ctx: &mut Ctx, _pin_id: DWORD) {
     clear_pin_state(&mut ctx.pin1_authenticated, &mut ctx.pin2_authenticated);
 }
 
+/// Destroys the held PIN 1 and forgets the card's verified state: the card
+/// rejected a PIN, reported a retry counter that forbids reuse, or a new PIN
+/// is being entered.
 #[cfg(windows)]
 fn clear_pin_state(pin1_authenticated: &mut bool, pin2_authenticated: &mut bool) {
     let _ = with_pin_safety(|cache| {
         cache.clear_positive();
     });
+    reset_card_state(pin1_authenticated, pin2_authenticated);
+}
+
+/// Forgets the card's verified state after a transport failure or a failed
+/// command: the held PIN 1 stays, and the retry counter read before its next
+/// use decides (RAPP v26.10.22 section 11 item 2).
+#[cfg(windows)]
+const fn reset_card_state(pin1_authenticated: &mut bool, pin2_authenticated: &mut bool) {
     *pin1_authenticated = false;
     *pin2_authenticated = false;
+}
+
+/// PIN 2 is entered for every signature and never held (RAPP v26.10.22
+/// section 11 item 2): the card spends it on one signature, and the next
+/// one asks again.
+#[cfg(windows)]
+const fn spend_pin2(ctx: &mut Ctx) {
+    ctx.pin2_authenticated = false;
 }
 
 #[cfg(windows)]
@@ -1659,7 +1662,6 @@ unsafe extern "system" fn CardAuthenticatePin(
                 }
             } else {
                 ctx.pin2_authenticated = true;
-                let _ = with_pin_safety(|cache| cache.store_pin2(serial, pin));
             }
             SCARD_S_SUCCESS
         }
@@ -1737,7 +1739,7 @@ unsafe extern "system" fn CardSignData(
         ctx.pin2_authenticated
     } else {
         ctx.pin1_authenticated
-            || with_pin_safety(PinSafetyCache::has_positive_pin1).unwrap_or(false)
+            || with_pin_safety(|cache| cache.has_positive_pin1()).unwrap_or(false)
     };
     if !authenticated {
         Log::dbg("CardSignData -> WRONG_CHV (not authenticated)");
@@ -1951,7 +1953,7 @@ unsafe extern "system" fn CardSignData(
             Ok(sig) => sig,
             Err(err) => {
                 Log::dbg(&format!("CardSignData PSS -> INTERNAL ({err:?})"));
-                clear_cached_pin(ctx, container.pin_id);
+                reset_card_state(&mut ctx.pin1_authenticated, &mut ctx.pin2_authenticated);
                 return SCARD_F_INTERNAL_ERROR;
             }
         };
@@ -1967,7 +1969,7 @@ unsafe extern "system" fn CardSignData(
         info.pbSignedData = p;
         info.cbSignedData = sig_len;
         if container.pin_id == PIN_ID_QUALIFIED_SIG {
-            clear_cached_pin(ctx, container.pin_id);
+            spend_pin2(ctx);
         }
         return SCARD_S_SUCCESS;
     }
@@ -2010,7 +2012,7 @@ unsafe extern "system" fn CardSignData(
     drop(tx);
 
     let Ok(mut sig_bytes) = sig else {
-        clear_cached_pin(ctx, container.pin_id);
+        reset_card_state(&mut ctx.pin1_authenticated, &mut ctx.pin2_authenticated);
         return SCARD_F_INTERNAL_ERROR;
     };
     if matches!(container.key_alg, KeyAlgorithm::Rsa { .. }) {
@@ -2025,7 +2027,7 @@ unsafe extern "system" fn CardSignData(
     info.pbSignedData = p;
     info.cbSignedData = needed;
     if container.pin_id == PIN_ID_QUALIFIED_SIG {
-        clear_cached_pin(ctx, container.pin_id);
+        spend_pin2(ctx);
     }
     SCARD_S_SUCCESS
 }
@@ -2105,7 +2107,7 @@ unsafe extern "system" fn CardRSADecrypt(pCardData: *mut CARD_DATA, pInfo: PVOID
     let plain = tx.decrypt_rsa_pkcs1_auth(Ciphertext::<RsaPkcs1>::new(ciphertext));
     drop(tx);
     let Ok(plaintext) = plain else {
-        clear_cached_pin(ctx, PIN_ID_AUTH);
+        reset_card_state(&mut ctx.pin1_authenticated, &mut ctx.pin2_authenticated);
         return SCARD_F_INTERNAL_ERROR;
     };
     let plaintext_bytes = plaintext.as_bytes();
@@ -2280,7 +2282,7 @@ unsafe extern "system" fn CardGetProperty(
             PinCachePolicy: PIN_CACHE_POLICY {
                 dwVersion: PIN_CACHE_POLICY_CURRENT_VERSION,
                 PinCachePolicyType: pin_cache_policy(dwFlags),
-                dwPinCachePolicyInfo: pin_cache_policy_info(dwFlags),
+                dwPinCachePolicyInfo: NO_PIN_CACHE_POLICY_INFO,
             },
             dwFlags: if is_remote || dwFlags == PIN_ID_AUTH {
                 CARD_PIN_INFO_NO_PROMPT_ON_SIGN
@@ -2656,7 +2658,6 @@ unsafe extern "system" fn CardAuthenticateEx(
                 }
             } else {
                 ctx.pin2_authenticated = true;
-                let _ = with_pin_safety(|cache| cache.store_pin2(serial, pin));
             }
             SCARD_S_SUCCESS
         }

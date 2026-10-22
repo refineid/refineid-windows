@@ -3,7 +3,7 @@
 //!
 //! The custodian here is test scaffolding, not a product: the real
 //! custodians are the holder's phones. It speaks the exact wire of RAPP
-//! v26.10.21 so the requester is exercised end to end: code pairing through
+//! v26.10.22 so the requester is exercised end to end: code pairing through
 //! `CPace` KC2 and `Noise_XXpsk3` with grant agreement and the storage
 //! confirmation, `Noise_KK` sessions with the Custodian's `session.ready`
 //! and card status, operations and their results inside their session,
@@ -114,7 +114,7 @@ fn custodian_offer() -> refineid_rapp::PairingOffer {
     .unwrap()
 }
 
-/// Serves the offer bootstrap (RAPP v26.10.21 section 4.2) and returns the
+/// Serves the offer bootstrap (RAPP v26.10.22 section 4.2) and returns the
 /// offer and its `CPace` context.
 fn serve_offer<T: FrameTransport>(transport: &mut T) -> (refineid_rapp::PairingOffer, Vec<u8>) {
     let offer = custodian_offer();
@@ -369,6 +369,33 @@ fn the_card_status_is_noted_on_the_session() {
     }
     let _proxy_session = proxy.join().unwrap();
     assert_eq!(seen, expected);
+    // The card heard present bounds what every local consumer is offered
+    // (section 8.4 item 3).
+    assert_eq!(
+        requester
+            .store()
+            .card_sighting(pair_id)
+            .map(|sighting| sighting.fingerprint()),
+        Some(card_fingerprint())
+    );
+}
+
+#[test]
+fn a_card_reported_absent_is_never_recorded_as_seen() {
+    let mut requester = test_requester();
+    let granted = [ProfileName::CardStatus];
+    let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
+    let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    let proxy = std::thread::spawn(move || {
+        proxy_accept_session_with_card(&proxy_pairing, proxy_transport, CardStatusMessage::Absent)
+    });
+    let mut session = requester.connect(pair_id, requester_transport).unwrap();
+    while session.card_status().is_none() {
+        requester.keep_alive(&mut session).unwrap();
+    }
+    let _proxy_session = proxy.join().unwrap();
+    assert_eq!(session.card_status(), Some(CardStatusMessage::Absent));
+    assert_eq!(requester.store().card_sighting(pair_id), None);
 }
 
 #[test]
@@ -406,7 +433,7 @@ fn a_silent_custodian_is_pinged_and_its_pong_keeps_the_session() {
 }
 
 #[test]
-fn the_consent_view_is_reported_while_a_request_waits() {
+fn the_pin_prompt_is_reported_while_a_request_waits() {
     let mut requester = test_requester();
     let granted = [ProfileName::Authentication];
     let (pair_id, proxy_pairing) = paired(&mut requester, &granted);

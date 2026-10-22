@@ -23,9 +23,12 @@ Implemented:
   card removal the same way, so that daemon neither prompts a
   second time nor serves a stale cache. Forwards run detached;
   failure is a diagnostic line, never an error to NSS.
-  PIN1 is validated as 4..=12 ASCII digits and cached in memory for
-  at most five minutes;
-  it is verified on the card inside each sign, never logged, and zeroized on logout, session close, or finalize.
+  PIN1 is validated as 4..=12 ASCII digits and held in memory only, with no
+  time window, until the card is removed or replaced, the card rejects it or
+  reports a retry counter below pristine, or the login ends (logout, the last
+  session's close, finalize); a transport failure keeps it (RAPP v26.10.22
+  section 11 item 2).
+  It is verified on the card inside each sign, never logged, and zeroized when it ends.
 - Objects: `C_FindObjectsInit` / `C_FindObjects` / `C_FindObjectsFinal` and `C_GetAttributeValue` over three objects
   -- the authentication certificate (`CKO_CERTIFICATE`, `CKC_X_509`),
   its public key (`CKO_PUBLIC_KEY`, from the certificate SPKI, for
