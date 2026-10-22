@@ -1,4 +1,4 @@
-//! The scan for RAPP advertisers (RAPP v26.10.21 section 4.1).
+//! The scan for RAPP advertisers (RAPP v26.10.22 section 4.1).
 //!
 //! The advertisement carries the RAPP Service UUID and nothing else, so a
 //! scan cannot tell this pairing's phone from another person's: it reports

@@ -73,7 +73,7 @@ impl core::error::Error for LinkValueError {
 /// The Bluetooth device address an advertisement came from.
 ///
 /// Phones advertise under a resolvable private address that rotates (RAPP
-/// v26.10.21 section 4.1), so an address names an advertiser for as long as
+/// v26.10.22 section 4.1), so an address names an advertiser for as long as
 /// it is advertised, not a phone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AdvertiserAddress(u64);

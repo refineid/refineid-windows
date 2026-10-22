@@ -1,13 +1,13 @@
 //! Mock RAPP custodian for automated verification and testing.
 //!
-//! Listens like a phone does (RAPP v26.10.21 section 2.2.2), shows a pairing
+//! Listens like a phone does (RAPP v26.10.22 section 2.2.2), shows a pairing
 //! code, serves a random offer after the pairing preamble, answers `CPace`
 //! KC2 as responder and `Noise_XXpsk3` with the hello, confirmation, and
 //! storage confirmation exchange, then accepts sessions routed by their
 //! routing tag, each on its own thread. Every session sends `session.ready`
 //! and the card's status (section 8.4), keeps liveness (section 8.3), and
 //! serves its operations through the engine's custodian side (section 8):
-//! reads at once, a consequential operation after reporting its consent view
+//! reads at once, a consequential operation after reporting its PIN prompt
 //! and approving it, behind the retry floor (section 10.2). It publishes no
 //! DNS-SD record: requesters dial it by address.
 
@@ -102,9 +102,10 @@ pub struct MockProxyOptions {
     pub resume_state: Option<String>,
     /// Path to save proxy pairing state to.
     pub save_state: Option<String>,
-    /// Report the card as absent on every session (section 8.4), so a
-    /// requester under test withdraws what it offers; every operation then
-    /// ends with `card_error`, as no card answers (section 10.3).
+    /// Hold no card: every session reports the card absent (section 8.4
+    /// item 1), so a requester under test withdraws its offer once the grace
+    /// of item 3 has passed; every operation ends with `card_error`, as no
+    /// card answers, and presence stays as reported (section 10.3).
     pub card_absent: bool,
 }
 
@@ -625,9 +626,9 @@ fn serve_messages(
 }
 
 /// Serves one admitted operation: a read at once; a consequential one after
-/// its consent view, approved at once, behind the retry floor. With no card
-/// present, the card answers nothing and the operation ends with
-/// `card_error` (section 10.3).
+/// its PIN prompt, approved at once, behind the retry floor. With no card
+/// held, the card answers nothing and the operation ends with `card_error`,
+/// presence unchanged (sections 8.4 item 1 and 10.3).
 fn serve_operation(
     session: &mut CustodianSession,
     request: &OperationRequest,

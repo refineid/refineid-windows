@@ -1,4 +1,4 @@
-//! The requester engine: the workstation side of RAPP v26.10.21.
+//! The requester engine: the workstation side of RAPP v26.10.22.
 //!
 //! The engine drives pairing, sessions, and operations through the
 //! canonical protocol boundaries of `refineid_rapp`: the Custodian's
@@ -41,6 +41,7 @@ use crate::ids::{Challenge, OperationId, PairId, RandomIdExt, SessionId};
 use crate::message::{CardStatusMessage, CloseReason, ResultError, ResultStatus};
 use crate::offer::{OfferError, PairingOffer};
 use crate::operations::{CardOperation, CardOperationError, CardOperationResult};
+use crate::presence::{CardSighting, SIGHTING_REFRESH_MS};
 use crate::store::{
     PairingRecord, PairingState, PairingStore, StoreError, expire_revocation_notices,
     forget_pairing, revoke_pairing,
@@ -227,7 +228,7 @@ impl core::fmt::Display for AdmissionError {
 
 impl core::error::Error for AdmissionError {}
 
-/// How an operation ended (RAPP v26.10.21 section 8).
+/// How an operation ended (RAPP v26.10.22 section 8).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OperationOutcome {
     /// `operation.result` `completed`, with its typed response.
@@ -278,6 +279,9 @@ pub struct Session<Transport: FrameTransport> {
     granted_profiles: Vec<ProfileName>,
     end: Option<SessionEnd>,
     card: Option<CardStatusMessage>,
+    /// When, on the continuous clock, this session last recorded the card
+    /// it hears present; `None` until it records the present status.
+    sighted_at_ms: Option<u64>,
 }
 
 impl<Transport: FrameTransport> Session<Transport> {
@@ -368,7 +372,7 @@ impl<Store: PairingStore> Requester<Store> {
     }
 
     /// Pairs with the custodian showing `code`, as the requester (RAPP
-    /// v26.10.21 sections 3, 4.2 and 6).
+    /// v26.10.22 sections 3, 4.2 and 6).
     ///
     /// The transport is already past its `"pairing"` routing preamble. The
     /// custodian's first frame is its offer; the requester checks it lists
@@ -409,7 +413,7 @@ impl<Store: PairingStore> Requester<Store> {
     }
 
     /// Pairs with the custodian showing `code` over a transport whose offer
-    /// bootstrap is not its first frame (RAPP v26.10.21 section 4.2 step 1:
+    /// bootstrap is not its first frame (RAPP v26.10.22 section 4.2 step 1:
     /// on BLE, a read of the Bootstrap Characteristic).
     ///
     /// The transport is already past its `"pairing"` routing preamble, and
@@ -679,7 +683,7 @@ impl<Store: PairingStore> Requester<Store> {
 
     /// Opens a session to a paired custodian over a connected transport,
     /// already past its `"session"` routing preamble: the `Noise_KK`
-    /// handshake, then the Custodian's `session.ready` (RAPP v26.10.21
+    /// handshake, then the Custodian's `session.ready` (RAPP v26.10.22
     /// sections 6.3 and 7.1 item 5).
     ///
     /// A Custodian that closes in place of `session.ready` ends the attempt;
@@ -740,6 +744,7 @@ impl<Store: PairingStore> Requester<Store> {
             granted_profiles,
             end: None,
             card: None,
+            sighted_at_ms: None,
         })
     }
 
@@ -747,7 +752,7 @@ impl<Store: PairingStore> Requester<Store> {
     /// session was open, over a connected transport already past its
     /// `"session"` routing preamble: the `Noise_KK` handshake, then the close
     /// as the session's first and only message. The keys are destroyed once
-    /// it is sent (RAPP v26.10.21 section 4.6 items 2 and 3); no card session
+    /// it is sent (RAPP v26.10.22 section 4.6 items 2 and 3); no card session
     /// starts. A notice past its 30 days is not sent: the keys go untold.
     ///
     /// # Errors
@@ -778,7 +783,7 @@ impl<Store: PairingStore> Requester<Store> {
     }
 
     /// The user forgets a pairing that has no open session here (RAPP
-    /// v26.10.21 section 4.6): it serves nothing from now on and keeps its
+    /// v26.10.22 section 4.6): it serves nothing from now on and keeps its
     /// keys only for the `pairing_revoked` close of its next session. One
     /// the peer never confirmed, and a revoked one, are removed.
     ///
@@ -794,7 +799,7 @@ impl<Store: PairingStore> Requester<Store> {
         })
     }
 
-    /// The user forgets the pairing of an open session (RAPP v26.10.21
+    /// The user forgets the pairing of an open session (RAPP v26.10.22
     /// section 4.6 item 1): the `pairing_revoked` close goes out at once and
     /// the keys are destroyed. A close that cannot be sent leaves the
     /// pairing forgotten, for the next session to carry the close.
@@ -823,7 +828,7 @@ impl<Store: PairingStore> Requester<Store> {
     /// Keeps an idle session alive for one receive: answers the peer's
     /// ping, sends ours after 5 seconds of silence, notes `card.status`, and
     /// ends the session after 30 seconds of silence or on the peer's close
-    /// (RAPP v26.10.21 sections 8.3 and 8.4).
+    /// (RAPP v26.10.22 sections 8.3 and 8.4).
     ///
     /// # Errors
     /// [`SessionError::Ended`] once the session is over.
@@ -867,8 +872,8 @@ impl<Store: PairingStore> Requester<Store> {
 
     /// Runs one typed operation to its outcome, reporting each
     /// `operation.progress` event of it to `observe`: queued behind another
-    /// session's operation, the consent view on the phone's screen, the
-    /// wait for the card and its end (RAPP v26.10.21 section 8.2). The
+    /// session's operation, the PIN prompt on the phone's screen, the
+    /// wait for the card and its end (RAPP v26.10.22 section 8.2). The
     /// operation lives inside the session: it ends with its result, or with
     /// the session (section 8.1).
     ///
@@ -973,9 +978,51 @@ impl<Store: PairingStore> Requester<Store> {
         }
     }
 
+    /// Advances the session by one receive and records the card it hears
+    /// present.
+    fn next_event<Transport: FrameTransport>(&mut self, session: &mut Session<Transport>) -> Event {
+        let event = self.receive_event(session);
+        self.record_sighting(session);
+        event
+    }
+
+    /// Records the card the session hears present in the pairing store, at
+    /// once when the custodian reports it and again every
+    /// [`SIGHTING_REFRESH_MS`] while it stays present, so every local
+    /// consumer's offer follows the custodian's word (section 8.4 item 3).
+    /// An ended session or a report of absence records nothing: the last
+    /// sighting ages out over the grace. A refused write is tried again on
+    /// the next event.
+    fn record_sighting<Transport: FrameTransport>(&mut self, session: &mut Session<Transport>) {
+        let Some(CardStatusMessage::Present(fingerprint)) = session.card else {
+            return;
+        };
+        if session.end.is_some() {
+            return;
+        }
+        let now = current_time_ms();
+        if session
+            .sighted_at_ms
+            .is_some_and(|at| now.saturating_sub(at) < SIGHTING_REFRESH_MS)
+        {
+            return;
+        }
+        let sighting = CardSighting::new(fingerprint, crate::clock::unix_time_ms());
+        if self
+            .store
+            .record_card_sighting(session.pair_id, sighting)
+            .is_ok()
+        {
+            session.sighted_at_ms = Some(now);
+        }
+    }
+
     /// Advances the session by one receive: liveness first, then whatever
     /// arrived.
-    fn next_event<Transport: FrameTransport>(&mut self, session: &mut Session<Transport>) -> Event {
+    fn receive_event<Transport: FrameTransport>(
+        &mut self,
+        session: &mut Session<Transport>,
+    ) -> Event {
         if session.end.is_some() {
             return Event::Ended;
         }
@@ -1051,6 +1098,7 @@ fn dispatch<Transport: FrameTransport>(
     match session.operations.receive(message) {
         Ok(RequesterDispatch::CardStatus(status)) => {
             session.card = Some(status);
+            session.sighted_at_ms = None;
             Event::Idle
         }
         Ok(RequesterDispatch::Progress {

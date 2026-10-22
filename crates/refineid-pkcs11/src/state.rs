@@ -353,11 +353,19 @@ impl ModuleState {
         let Ok(store) = ProtectedPairingStore::load() else {
             return;
         };
+        let now_ms = refineid_rapp_core::clock::unix_time_ms();
         let pairs: Vec<_> = store.usable_pairing().into_iter().collect();
-        // A remote token whose pairing no longer serves (forgotten here or
-        // revoked by the phone) is withdrawn (RAPP v26.10.21 section 4.6).
-        let serving: Vec<String> = pairs
+        // A remote token stands on the certificate the pairing's identity is
+        // offered on: one whose card a session heard present within the
+        // grace. It goes once that lapses, at once when a session hears
+        // another card, and when the pairing is forgotten or revoked (RAPP
+        // v26.10.22 sections 4.6 and 8.4 item 3).
+        let offering: Vec<String> = pairs
             .iter()
+            .filter(|pair| {
+                refineid_rapp_core::store::offered_certificate(&store, pair.pair_id(), now_ms)
+                    .is_some()
+            })
             .map(|pair| format!("rapp:{}", hex::encode(pair.pair_id().as_bytes())))
             .collect();
         let withdrawn: Vec<CkSlotId> = self
@@ -366,7 +374,7 @@ impl ModuleState {
             .filter(|slot| {
                 slot.card_present
                     && slot.reader_name.starts_with("rapp:")
-                    && !serving.contains(&slot.reader_name)
+                    && !offering.contains(&slot.reader_name)
             })
             .map(|slot| {
                 slot.card_present = false;
@@ -382,9 +390,12 @@ impl ModuleState {
             let name = format!("rapp:{hex_id}");
             let serial_prefix = hex_id.get(..8).unwrap_or(&hex_id);
             let serial = format!("REMOTE-{serial_prefix}");
-            let parsed_objects = pair.authentication_certificate().and_then(|cert| {
-                crate::token::remote_token_objects(cert.as_der().to_vec(), serial.clone()).ok()
-            });
+            let parsed_objects =
+                refineid_rapp_core::store::offered_certificate(&store, pair.pair_id(), now_ms)
+                    .and_then(|cert| {
+                        crate::token::remote_token_objects(cert.as_der().to_vec(), serial.clone())
+                            .ok()
+                    });
             let card_present = parsed_objects.is_some();
             if let Some(pos) = self.slots.iter().position(|s| s.reader_name == name) {
                 if let Some(slot) = self.slots.get_mut(pos) {
@@ -569,11 +580,9 @@ impl ModuleState {
         if self.remote_logged_in.contains(&slot_id) {
             return true;
         }
-        self.pin_caches.get(&slot_id).is_some_and(|cache| {
-            cache
-                .lock()
-                .is_ok_and(|mut cache| cache.has_positive_pin1())
-        })
+        self.pin_caches
+            .get(&slot_id)
+            .is_some_and(|cache| cache.lock().is_ok_and(|cache| cache.has_positive_pin1()))
     }
 
     /// Report the next pending slot event: the first slot whose
@@ -629,11 +638,14 @@ impl ModuleState {
                     .find(|p| p.serves() && hex::encode(p.pair_id().as_bytes()) == hex_id)
                     .ok_or(CKR_DEVICE_ERROR)?;
 
-                let cert_der = pair
-                    .authentication_certificate()
-                    .ok_or(crate::ck::CKR_TOKEN_NOT_PRESENT)?
-                    .as_der()
-                    .to_vec();
+                let cert_der = refineid_rapp_core::store::offered_certificate(
+                    &store,
+                    pair.pair_id(),
+                    refineid_rapp_core::clock::unix_time_ms(),
+                )
+                .ok_or(crate::ck::CKR_TOKEN_NOT_PRESENT)?
+                .as_der()
+                .to_vec();
 
                 let serial = format!("REMOTE-{}", &hex_id[..std::cmp::min(8, hex_id.len())]);
                 let objects = crate::token::remote_token_objects(cert_der, serial)?;

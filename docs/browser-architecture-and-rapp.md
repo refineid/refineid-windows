@@ -172,11 +172,13 @@ CryptoAPI and CNG. For a mutual-TLS site (such as `https://suomi.fi` or
 1. **Certificate in the user store**:
    - The `read_identity` answer carries the authentication certificate: the
      one whose SHA-256 fingerprint the session's `card.status` names (RAPP
-     v26.10.21 section 8.4). The RefineID app keeps it on the pairing record,
+     v26.10.22 section 8.4). The RefineID app keeps it on the pairing record,
      and its offering session adds it to `Cert:\CurrentUser\My` with
      `CERT_KEY_PROV_INFO` naming the provider `RefineID Key Storage Provider`
-     and the key `rapp:<pair id>` while that session reports the same card;
-     the certificate is removed when the session ends or reports no card.
+     and the key `rapp:<pair id>` once a session hears that card present.
+     It stays offered between sessions while a session heard the card within
+     120 seconds, and is removed once that lapses, at once when a session
+     hears another card, and when the app's watch ends.
    - Forgetting the pairing removes every certificate bound to the provider.
 2. **Provider registration**:
    - The DLL registers itself through `BCryptRegisterProvider` and

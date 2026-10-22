@@ -2257,7 +2257,7 @@ fn start_doc_verify() {
 /// Pair with the code the phone shows, on a worker thread; the
 /// refresh timer picks progress and the outcome up from `INBOX`. The
 /// phone advertises a pairing-mode record over DNS-SD and serves its
-/// offer on the connection (RAPP v26.10.21 section 4.2); this side
+/// offer on the connection (RAPP v26.10.22 section 4.2); this side
 /// browses, dials, and types the code into `CPace`.
 fn start_pairing() {
     let snapshot = STATE.with(|cell| {
@@ -2479,7 +2479,7 @@ fn refresh_remote_devices() {
     }
 }
 
-/// Forget the selected pairing, then refresh (RAPP v26.10.21 section 4.6):
+/// Forget the selected pairing, then refresh (RAPP v26.10.22 section 4.6):
 /// it serves nothing from now on and keeps its keys only until its phone is
 /// told, on the next session with it, or for 30 days. One already revoked
 /// is removed.
@@ -2509,7 +2509,7 @@ fn remove_remote_device() {
     };
     let pair_id = record.pair_id();
     // An unconfirmed or revoked pairing is removed and nobody is told (RAPP
-    // v26.10.21 section 4.6 item 3).
+    // v26.10.22 section 4.6 item 3).
     let status = match record.state() {
         PairingState::Serving | PairingState::Forgotten => {
             "Pairing forgotten. The phone is told when it is next reached."

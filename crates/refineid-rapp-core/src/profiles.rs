@@ -1,4 +1,4 @@
-//! The credential-profile registry (RAPP v26.10.21 section 9).
+//! The credential-profile registry (RAPP v26.10.22 section 9).
 //!
 //! The names come from `refineid_rapp`; this module names them for callers
 //! that hold a profile as text, such as a stored grant.

@@ -1131,20 +1131,13 @@ fn card_sign_with_origin_source(
         .map_err(|_open_err| CKR_DEVICE_ERROR)?;
     card.select_pkcs15_application()
         .map_err(|_select_err| CKR_DEVICE_ERROR)?;
-    let serial = match live_token_serial(&mut card) {
-        Ok(serial) => serial,
-        Err(error) => {
-            clear_positive(pin_cache);
-            return Err(error);
-        }
-    };
-    let pin1_status = match card.pin_status(PinSlot::Pin1) {
-        Ok(status) => status,
-        Err(_status_err) => {
-            clear_positive(pin_cache);
-            return Err(CKR_DEVICE_ERROR);
-        }
-    };
+    // A failed read is a transport failure: the held PIN 1 stays, and the
+    // retry counter read before its next use decides (RAPP v26.10.22
+    // section 11 item 2).
+    let serial = live_token_serial(&mut card)?;
+    let pin1_status = card
+        .pin_status(PinSlot::Pin1)
+        .map_err(|_status_err| CKR_DEVICE_ERROR)?;
     if let Err(error) = pin1_verify_guard(pin1_status) {
         clear_positive(pin_cache);
         return Err(error);
@@ -1152,36 +1145,18 @@ fn card_sign_with_origin_source(
     let checkout = pin_cache
         .lock()
         .map_err(|_poisoned| CKR_DEVICE_ERROR)?
-        .checkout_pin1(&serial)
+        .checkout_pin1(&serial, pin1_status)
         .ok_or(CKR_USER_NOT_LOGGED_IN)?;
 
-    let is_verified = pin1_status == PinStatus::Verified;
-    let outcome = if is_verified {
-        // Citing FINEID S1 v4.2 §3.5: card is already in verified state and session holds authenticated PIN1
-        match sign_with_card(&mut card, mechanism, input) {
-            Ok(signature) => {
-                let mut cache = pin_cache.lock().map_err(|_poisoned| CKR_DEVICE_ERROR)?;
-                checkout.restore_after_success(&mut cache);
-                return Ok(signature);
-            }
-            Err(CKR_DEVICE_ERROR) => {
-                // Security not satisfied or session reset: fall back to VERIFY PIN1
-                card.verify_pin(PinSlot::Pin1, checkout.pin().clone())
-                    .map_err(|_verify_err| CKR_DEVICE_ERROR)
-            }
-            Err(e) => return Err(e),
-        }
-    } else {
-        card.verify_pin(PinSlot::Pin1, checkout.pin().clone())
-            .map_err(|_verify_err| CKR_DEVICE_ERROR)
-    };
-
+    // The held PIN 1 is presented to the card for every operation; the
+    // card's verified state is never taken as lasting (credential custody).
+    let outcome = card.verify_pin(PinSlot::Pin1, checkout.pin().clone());
     match outcome {
         Ok(VerifyOutcome::Ok) => {
-            let signature = sign_with_card(&mut card, mechanism, input)?;
             let mut cache = pin_cache.lock().map_err(|_poisoned| CKR_DEVICE_ERROR)?;
             checkout.restore_after_success(&mut cache);
-            Ok(signature)
+            drop(cache);
+            sign_with_card(&mut card, mechanism, input)
         }
         Ok(VerifyOutcome::WrongPin { .. }) => {
             pin_cache
@@ -1191,7 +1166,14 @@ fn card_sign_with_origin_source(
             Err(CKR_PIN_INCORRECT)
         }
         Ok(VerifyOutcome::Locked) => Err(CKR_PIN_LOCKED),
-        Ok(VerifyOutcome::Other(_)) | Err(_) => Err(CKR_DEVICE_ERROR),
+        Ok(VerifyOutcome::Other(_)) => Err(CKR_DEVICE_ERROR),
+        Err(_transport) => {
+            // The answer was lost: the PIN stays held for a retry counter
+            // that shows the card did not refuse it.
+            let mut cache = pin_cache.lock().map_err(|_poisoned| CKR_DEVICE_ERROR)?;
+            checkout.restore_after_unanswered(&mut cache);
+            Err(CKR_DEVICE_ERROR)
+        }
     }
 }
 
@@ -1222,7 +1204,7 @@ fn parse_der_len(der: &[u8], idx: &mut usize) -> Option<usize> {
 
 /// Normalizes a remote ECDSA signature to IEEE P1363 (`r || s`).
 ///
-/// RAPP v26.10.21 section 9.2 sends the fixed-width raw form, which may itself
+/// RAPP v26.10.22 section 9.2 sends the fixed-width raw form, which may itself
 /// begin with the DER sequence tag, so the raw length is checked before any
 /// DER decoding; other lengths are accepted only as DER.
 #[cfg_attr(
@@ -1300,7 +1282,7 @@ pub fn ecdsa_der_to_p1363(der: &[u8], field_bytes: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// The lifetime a remote operation is sent with (RAPP v26.10.21 section
+/// The lifetime a remote operation is sent with (RAPP v26.10.22 section
 /// 8.1 item 2).
 #[cfg(windows)]
 const REMOTE_OPERATION_LIFETIME_MS: u64 = 30_000;
@@ -1365,7 +1347,7 @@ impl RemoteCardTransport {
         );
 
         // The phone's `pairing_revoked` close revokes the pairing in the
-        // protected store the requester runs over (RAPP v26.10.21 section
+        // protected store the requester runs over (RAPP v26.10.22 section
         // 4.6 item 4), and the user is told to pair again.
         let mut session = match requester.connect(self.pair_id, transport) {
             Ok(session) => session,
@@ -1522,20 +1504,10 @@ pub(super) fn card_login(
         .map_err(|_open_err| CKR_DEVICE_ERROR)?;
     card.select_pkcs15_application()
         .map_err(|_select_err| CKR_DEVICE_ERROR)?;
-    let serial = match live_token_serial(&mut card) {
-        Ok(serial) => serial,
-        Err(error) => {
-            clear_positive(pin_cache);
-            return Err(error);
-        }
-    };
-    let pin1_status = match card.pin_status(PinSlot::Pin1) {
-        Ok(status) => status,
-        Err(_status_err) => {
-            clear_positive(pin_cache);
-            return Err(CKR_DEVICE_ERROR);
-        }
-    };
+    let serial = live_token_serial(&mut card)?;
+    let pin1_status = card
+        .pin_status(PinSlot::Pin1)
+        .map_err(|_status_err| CKR_DEVICE_ERROR)?;
     if let Err(error) = pin1_verify_guard(pin1_status) {
         clear_positive(pin_cache);
         return Err(error);

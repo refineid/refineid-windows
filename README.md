@@ -219,15 +219,18 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 ## Remote authorization (RAPP)
 
 `crates/refineid-rapp-core` implements the requester role of the Remote
-Authorization Proxy Protocol, RAPP v26.10.21 (specified in refineid-core
-`docs/protocols/rapp-v26.10.21.md`), through the `refineid_rapp` engine.
+Authorization Proxy Protocol, RAPP v26.10.22 (specified in refineid-core
+`docs/protocols/rapp-v26.10.22.md`), through the `refineid_rapp` engine.
 RAPP lets this Windows machine use an identity card held by the holder's
 phone: pairing takes the six-character code the phone shows (`CPace`,
 then `Noise_XXpsk3`), every session is a mutually authenticated
 `Noise_KK` channel that the phone opens with `session.ready` and its card
-status, each operation lives inside its session and is approved on the
-phone when it uses a key, and no CAN, PIN, or private key ever reaches
-the requester. Forgetting a pairing tells the phone with a
+status, each operation lives inside its session, the phone takes the PIN
+for each key it uses (PIN 1 asked once and held in its memory, PIN 2 for
+every signature), and no CAN, PIN, or private key ever reaches the
+requester. Browsers, the PKCS#11 slot and the card module are offered the
+phone's certificate while a session on this computer heard its card
+within the last 120 seconds. Forgetting a pairing tells the phone with a
 `pairing_revoked` close, on an open session at once or as the first
 message of the next one. The crate carries the stream transport
 `fi.refineid.stream`; `refineid-rapp-ble` carries `fi.refineid.rapp.ble`.
@@ -247,6 +250,12 @@ for architecture details.
 ## Security boundary
 
 - PIN values and private card material must never be logged.
+- A card in a reader of this computer follows the phone's PIN rule (RAPP
+  v26.10.22 section 11 item 2): PIN 1 is held in process memory only, never
+  in storage and with no time window, until the card is removed or
+  replaced, rejects it or shows a retry counter below pristine, or the user
+  or the process ends it; a transport failure keeps it. PIN 2 is entered
+  for every signature and never held.
 - Secret byte containers are zeroized on drop.
 - `unsafe_code` is denied workspace-wide and explicitly expected only in the
   Windows ABI adapter.
