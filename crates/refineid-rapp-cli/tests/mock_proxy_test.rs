@@ -256,3 +256,37 @@ fn the_retry_floor_refuses_without_a_verification() {
         .expect("proxy thread finished")
         .expect("mock proxy failed");
 }
+
+#[test]
+fn an_absent_card_answers_card_error() {
+    let (endpoint, proxy_handle) = start_custodian(MockProxyOptions {
+        card_absent: true,
+        ..options()
+    });
+    let mut requester = requester();
+    let (_pair_id, mut session) = paired_session(&mut requester, &endpoint);
+    let read = requester
+        .execute(
+            &mut session,
+            &CardOperation::ReadCertificate {
+                kind: CertificateKind::Authentication,
+            },
+            OPERATION_EXPIRY_MS,
+        )
+        .expect("execute read_certificate");
+    assert_eq!(read, OperationOutcome::Rejected(ResultError::CardError));
+    assert_eq!(session.card_status(), Some(CardStatusMessage::Absent));
+    let signed = requester
+        .execute(
+            &mut session,
+            &authentication(&Sha384::digest(LOGIN_CHALLENGE)),
+            OPERATION_EXPIRY_MS,
+        )
+        .expect("execute browser_authenticate");
+    assert_eq!(signed, OperationOutcome::Rejected(ResultError::CardError));
+    requester.disconnect(&mut session, CloseReason::UserDisconnect);
+    proxy_handle
+        .join()
+        .expect("proxy thread finished")
+        .expect("mock proxy failed");
+}

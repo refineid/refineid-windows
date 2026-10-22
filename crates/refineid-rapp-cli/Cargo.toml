@@ -20,6 +20,7 @@ refineid-rapp.workspace = true
 refineid-rapp-core.workspace = true
 refineid-rapp-ble.workspace = true
 refineid-windows-credential-store.workspace = true
+sec1 = { version = "0.8", default-features = false, features = ["der"] }
 zeroize.workspace = true
 
 [dev-dependencies]

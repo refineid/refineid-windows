@@ -282,7 +282,7 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
                     Log::dbg(&format!(
                         "CardAcquireContext: remote read_certificate failed: {e}"
                     ));
-                    return SCARD_F_INTERNAL_ERROR;
+                    return e.status();
                 }
             };
             let CardOperationResult::Certificate(der) = cert_res else {
@@ -1839,7 +1839,7 @@ unsafe extern "system" fn CardSignData(
             Ok(r) => r,
             Err(err) => {
                 Log::dbg(&format!("CardSignData: remote operation failed: {err}"));
-                return SCARD_F_INTERNAL_ERROR;
+                return err.status();
             }
         };
 

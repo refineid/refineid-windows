@@ -11,6 +11,7 @@
 //! and approving it, behind the retry floor (section 10.2). It publishes no
 //! DNS-SD record: requesters dial it by address.
 
+use std::io::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -63,13 +64,12 @@ const MOCK_FALLBACK_SIGNATURE_BYTE: u8 = 0xAB;
 /// certificate checked in as `mock_cert.der`.
 pub const DEFAULT_MOCK_CERT_DER: &[u8] = include_bytes!("mock_cert.der");
 
-/// The private scalar of `mock_key.der`, the SEC1 key of the self-issued
-/// mock certificate `mock_cert.der`.
-pub const DEFAULT_MOCK_PRIVATE_KEY_SCALAR: &[u8; 48] = &[
-    0x33, 0x51, 0xea, 0xcb, 0x1f, 0x41, 0x18, 0x9a, 0x6c, 0xdb, 0xbd, 0xae, 0x48, 0x27, 0xf1, 0xc1,
-    0x47, 0x25, 0x4d, 0x3a, 0x56, 0x30, 0x53, 0xff, 0x6f, 0xd4, 0xd3, 0x76, 0xf8, 0x66, 0x8b, 0x2d,
-    0x88, 0x78, 0xc4, 0xce, 0x86, 0x5a, 0xbb, 0xfd, 0xb3, 0x80, 0x1c, 0xae, 0x5b, 0x8e, 0x3d, 0xad,
-];
+/// The SEC1 `ECPrivateKey` of the self-issued mock certificate
+/// `mock_cert.der`, checked in as `mock_key.der`.
+const DEFAULT_MOCK_KEY_DER: &[u8] = include_bytes!("mock_key.der");
+
+/// The session count that serves sessions until the process ends.
+pub const SERVE_FOREVER: usize = 0;
 
 /// The PIN tries a mock card reports unless told otherwise.
 const DEFAULT_PIN_ATTEMPTS: u8 = 5;
@@ -85,7 +85,8 @@ pub struct MockProxyOptions {
     pub name: String,
     /// Platform string sent to requester.
     pub platform: String,
-    /// Number of sessions to serve before exiting (default: 1; 0 means infinite).
+    /// Number of sessions to serve before exiting (default: 1), or
+    /// [`SERVE_FOREVER`].
     pub count: usize,
     /// Display name to return for identity operations.
     pub identity_name: String,
@@ -102,7 +103,8 @@ pub struct MockProxyOptions {
     /// Path to save proxy pairing state to.
     pub save_state: Option<String>,
     /// Report the card as absent on every session (section 8.4), so a
-    /// requester under test withdraws what it offers.
+    /// requester under test withdraws what it offers; every operation then
+    /// ends with `card_error`, as no card answers (section 10.3).
     pub card_absent: bool,
 }
 
@@ -160,7 +162,11 @@ impl ProxyPairing {
             encode_pair_record(&self.record)
                 .map_err(|e| format!("cannot serialize pair record: {e:?}"))?,
         );
-        std::fs::write(path, format!("{}\n", hex::encode(&*cbor)))
+        let text = Zeroizing::new(hex::encode(&*cbor));
+        let mut file =
+            std::fs::File::create(path).map_err(|e| format!("cannot save state to {path}: {e}"))?;
+        file.write_all(text.as_bytes())
+            .and_then(|()| file.write_all(b"\n"))
             .map_err(|e| format!("cannot save state to {path}: {e}"))
     }
 
@@ -169,7 +175,9 @@ impl ProxyPairing {
     /// # Errors
     /// When the file cannot be read or does not hold a custodian's record.
     pub fn load_from_file(path: &str) -> Result<Self, String> {
-        let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+        let text = Zeroizing::new(
+            std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?,
+        );
         let line = text.lines().next().ok_or("state file is empty")?;
         let cbor =
             Zeroizing::new(hex::decode(line.trim()).map_err(|e| format!("invalid hex: {e}"))?);
@@ -227,7 +235,7 @@ pub fn serve_mock_proxy(
     let options = Arc::new(options);
     let mut sessions_served = 0;
     let mut workers = Vec::new();
-    while options.count == 0 || sessions_served < options.count {
+    while options.count == SERVE_FOREVER || sessions_served < options.count {
         let transport = accept_session(listener, &pairing)?;
         sessions_served += 1;
         println!("serving session {sessions_served}...");
@@ -617,7 +625,9 @@ fn serve_messages(
 }
 
 /// Serves one admitted operation: a read at once; a consequential one after
-/// its consent view, approved at once, behind the retry floor.
+/// its consent view, approved at once, behind the retry floor. With no card
+/// present, the card answers nothing and the operation ends with
+/// `card_error` (section 10.3).
 fn serve_operation(
     session: &mut CustodianSession,
     request: &OperationRequest,
@@ -629,6 +639,12 @@ fn serve_operation(
         .prerequisites_complete(operation_id, continuous_ms(), DEFAULT_OPERATION_LIFETIME_MS)
         .map_err(|e| format!("prerequisites refused: {e:?}"))?;
     let dispatch = match prerequisites {
+        ProxyDispatch::ExecuteSafeRead { read, .. } if options.card_absent => {
+            println!("no card for {:?}", read.operation);
+            session
+                .operations
+                .finish_failure(operation_id, ProxyFailure::CardError)
+        }
         ProxyDispatch::ExecuteSafeRead { read, .. } => {
             println!("serving {:?}", read.operation);
             let result = perform(&read.operation, options)?;
@@ -668,14 +684,20 @@ fn serve_operation(
     session.send_dispatch(dispatch)
 }
 
-/// The one card command an approval gives, behind the retry floor (section
-/// 10.2).
+/// The one card command an approval gives: `card_error` with no card
+/// present, else behind the retry floor (section 10.2).
 fn execute(
     session: &mut CustodianSession,
     operation_id: refineid_rapp::OperationId,
     operation: &CardOperation,
     options: &MockProxyOptions,
 ) -> Result<Result<ProxyDispatch, ProxyEngineError>, String> {
+    if options.card_absent {
+        println!("no card for {operation:?}");
+        return Ok(session
+            .operations
+            .finish_failure(operation_id, ProxyFailure::CardError));
+    }
     let remaining = match operation {
         CardOperation::BrowserAuthenticate { .. } => options.pin1_attempts,
         _ => options.pin2_attempts,
@@ -750,7 +772,8 @@ fn perform(
 
 fn sign_digest(digest: &[u8], algorithm: SignatureAlgorithm) -> Vec<u8> {
     use p384::ecdsa::signature::hazmat::PrehashSigner;
-    if let Ok(signing_key) = p384::ecdsa::SigningKey::from_slice(DEFAULT_MOCK_PRIVATE_KEY_SCALAR)
+    if let Ok(key) = sec1::EcPrivateKey::try_from(DEFAULT_MOCK_KEY_DER)
+        && let Ok(signing_key) = p384::ecdsa::SigningKey::from_slice(key.private_key)
         && let Ok(signature) =
             PrehashSigner::<p384::ecdsa::Signature>::sign_prehash(&signing_key, digest)
     {

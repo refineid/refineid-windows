@@ -23,7 +23,10 @@ use std::time::{Duration, Instant};
 
 use refineid_lib_core::x509::OwnedCert;
 use refineid_rapp::ProfileName;
-use refineid_rapp_cli::mock_proxy::{DEFAULT_LISTEN, MockProxyOptions, run_mock_proxy};
+use refineid_rapp_cli::mock_proxy::{
+    DEFAULT_LISTEN, MockProxyOptions, SERVE_FOREVER, run_mock_proxy,
+};
+use refineid_rapp_core::clock::unix_time_ms;
 use refineid_rapp_core::engine::{
     OperationOutcome, PairingError, PeerIntroduction, Requester, RequesterConfig,
 };
@@ -35,7 +38,9 @@ use refineid_rapp_core::operations::{
     SignatureAlgorithm, SignatureAlgorithmExt,
 };
 use refineid_rapp_core::persistence::{decode_pairing_records, encode_pairing_records};
-use refineid_rapp_core::store::{MemoryPairingStore, PairingRecord, PairingStore};
+use refineid_rapp_core::store::{
+    MemoryPairingStore, PairingRecord, PairingState, PairingStore, forget_pairing,
+};
 use refineid_rapp_core::stream::{
     DialPurpose, DiscoveryMode, STREAM_CANDIDATE_ID, browse, dial, dial_session,
 };
@@ -78,7 +83,7 @@ fn main() {
         Some("mock-proxy") => mock_proxy_cmd(&arguments[1..]),
         Some("setup-mock-pairing") => setup_mock_pairing(&arguments[1..]),
         Some("clear-pairing") => clear_pairing(),
-        Some("remove-pairing") => remove_pairing(&arguments[1..]),
+        Some("forget-pairing") => forget_pairing_cmd(&arguments[1..]),
         Some("list-pairing") => list_pairing(),
         Some("export-cert") => export_cert(&arguments[1..]),
         Some("export-pairing") => export_pairing(&arguments[1..]),
@@ -105,7 +110,8 @@ fn main() {
             eprintln!(
                 "  refineid-rapp setup-mock-pairing [--cert <path>] [--root-ca <path>] [--intermediate-ca <path>] [--state <path>] [--serve]"
             );
-            eprintln!("  refineid-rapp clear-pairing");
+            eprintln!("  refineid-rapp forget-pairing <pair-id>");
+            eprintln!("  refineid-rapp clear-pairing   (local wipe; no phone is told)");
             eprintln!("  refineid-rapp list-pairing");
             eprintln!("  refineid-rapp export-cert [<path>]");
             eprintln!("  refineid-rapp export-pairing [<path>]");
@@ -638,10 +644,10 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
 
     let options = MockProxyOptions {
         code: Some(MOCK_PAIRING_CODE.to_owned()),
-        count: usize::from(!serve),
+        count: if serve { SERVE_FOREVER } else { defaults.count },
         certificate: certificate.clone(),
         save_state: Some(state_path.clone()),
-        ..MockProxyOptions::with_mock_certificate()?
+        ..defaults
     };
     let proxy_handle = std::thread::spawn(move || run_mock_proxy(options));
 
@@ -711,6 +717,10 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Deletes this user's whole pairing set, keys included, and tells no
+/// phone: a local wipe for a development machine, for instance of a set
+/// that no longer decodes. `forget-pairing` is the user's forget action of
+/// RAPP v26.10.21 section 4.6.
 fn clear_pairing() -> Result<(), String> {
     refineid_windows_credential_store::delete_pairing_set()
         .map_err(|e| format!("failed to clear pairing: {e:?}"))?;
@@ -718,7 +728,11 @@ fn clear_pairing() -> Result<(), String> {
     Ok(())
 }
 
-fn remove_pairing(arguments: &[String]) -> Result<(), String> {
+/// The user's forget action on one pairing (RAPP v26.10.21 section 4.6): a
+/// confirmed pairing keeps its keys only for the `pairing_revoked` close
+/// its phone is given on the next session, and serves nothing from now on;
+/// an unconfirmed or revoked one is removed.
+fn forget_pairing_cmd(arguments: &[String]) -> Result<(), String> {
     let pair_id_str = arguments.first().ok_or("pair ID required")?;
     let raw = hex::decode(pair_id_str).map_err(|e| format!("invalid hex: {e}"))?;
     let pair_id = PairId::reconstruct(&raw).map_err(|_| {
@@ -729,10 +743,21 @@ fn remove_pairing(arguments: &[String]) -> Result<(), String> {
     })?;
     let mut store = ProtectedPairingStore::load()
         .map_err(|e| format!("cannot load ProtectedPairingStore: {e}"))?;
-    store
-        .remove(pair_id)
-        .map_err(|e| format!("failed to remove pairing: {e:?}"))?;
-    println!("Removed pairing {}", hex::encode(pair_id.as_bytes()));
+    let state = store
+        .get(pair_id)
+        .map_err(|e| format!("no such pairing: {e:?}"))?
+        .state();
+    forget_pairing(&mut store, pair_id, unix_time_ms())
+        .map_err(|e| format!("failed to forget pairing: {e:?}"))?;
+    let shown = hex::encode(pair_id.as_bytes());
+    match state {
+        PairingState::Serving | PairingState::Forgotten => {
+            println!("Forgot pairing {shown}; its phone is told on the next session");
+        }
+        PairingState::Unconfirmed | PairingState::Revoked { .. } => {
+            println!("Removed pairing {shown}");
+        }
+    }
     Ok(())
 }
 

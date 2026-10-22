@@ -44,7 +44,10 @@ use refineid_rapp_core::stream::StreamError;
 use refineid_rapp_core::transport::TcpFrameTransport;
 use refineid_windows_credential_store::ProtectedPairingStore;
 
-use crate::ffi::SCARDHANDLE;
+use crate::ffi::{
+    DWORD, SCARD_E_COMM_DATA_LOST, SCARD_E_NO_KEY_CONTAINER, SCARD_E_NO_SMARTCARD,
+    SCARD_E_READER_UNAVAILABLE, SCARD_F_INTERNAL_ERROR, SCARD_W_CANCELLED_BY_USER, SCARDHANDLE,
+};
 
 /// PC/SC `SCARD_S_SUCCESS`: the winscard call returned no error.
 const SCARD_S_SUCCESS: u32 = 0;
@@ -258,6 +261,53 @@ const BROWSE_ROUNDS: u32 = 3;
 /// Operation expiry sent on the wire; the holder approves within this.
 const OPERATION_LIFETIME_MS: u64 = 120_000;
 
+/// Why a remote operation gave no result.
+#[derive(Debug)]
+pub(crate) enum RemoteFailure {
+    /// The holder declined on the phone (`user_cancelled`).
+    UserCancelled,
+    /// The pairing serves nothing: the user forgot it here, or the phone
+    /// closed with `pairing_revoked` (RAPP v26.10.21 section 4.6).
+    Unpaired,
+    /// The phone was not reached, or has turned remote access off.
+    Unreachable,
+    /// The session ended before the operation's result arrived.
+    Lost,
+    /// The phone's card did not answer (`card_error`).
+    CardError,
+    /// Any other refusal or fault, named for debug logs.
+    Failed(String),
+}
+
+impl RemoteFailure {
+    /// The Card Module status this failure reports. `retry_floor` and every
+    /// other refusal have no Windows status of their own and report an
+    /// internal error.
+    pub(crate) const fn status(&self) -> DWORD {
+        match self {
+            Self::UserCancelled => SCARD_W_CANCELLED_BY_USER,
+            Self::Unpaired => SCARD_E_NO_KEY_CONTAINER,
+            Self::Unreachable => SCARD_E_READER_UNAVAILABLE,
+            Self::Lost => SCARD_E_COMM_DATA_LOST,
+            Self::CardError => SCARD_E_NO_SMARTCARD,
+            Self::Failed(_) => SCARD_F_INTERNAL_ERROR,
+        }
+    }
+}
+
+impl core::fmt::Display for RemoteFailure {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::UserCancelled => formatter.write_str("the holder declined on the phone"),
+            Self::Unpaired => formatter.write_str("the pairing serves nothing; pair again"),
+            Self::Unreachable => formatter.write_str("the paired phone was not reached"),
+            Self::Lost => formatter.write_str("the session ended before the result"),
+            Self::CardError => formatter.write_str("the phone's card did not answer"),
+            Self::Failed(reason) => formatter.write_str(reason),
+        }
+    }
+}
+
 /// Remote card transport backed by the RAPP requester engine over a stream session.
 pub(crate) struct RemoteCardTransport {
     pub(crate) atr: Vec<u8>,
@@ -276,7 +326,7 @@ impl RemoteCardTransport {
     fn connect_session_transport(
         &self,
         store: &ProtectedPairingStore,
-    ) -> Result<TcpFrameTransport, String> {
+    ) -> Result<TcpFrameTransport, RemoteFailure> {
         let preferred: Vec<String> = std::env::var("REFINEID_RAPP_ENDPOINT")
             .ok()
             .map(|endpoint| endpoint.trim().to_owned())
@@ -287,7 +337,7 @@ impl RemoteCardTransport {
             .get(self.pair_id)
             .ok()
             .and_then(PairingRecord::serving_record)
-            .ok_or_else(|| "the pairing serves nothing; pair again".to_owned())?;
+            .ok_or(RemoteFailure::Unpaired)?;
         let mut outcome = Err(StreamError::Unreachable);
         for _ in 0..BROWSE_ROUNDS {
             outcome = refineid_rapp_core::stream::dial_session(
@@ -300,19 +350,17 @@ impl RemoteCardTransport {
                 break;
             }
         }
-        outcome.map_err(|error| match error {
-            StreamError::Withdrawn => "the paired phone turned remote access off".to_owned(),
-            _ => "unable to reach the paired phone".to_owned(),
-        })
+        outcome.map_err(|_| RemoteFailure::Unreachable)
     }
 
     /// Executes a typed card operation via RAPP.
     pub(crate) fn execute_operation(
         &self,
         operation: &CardOperation,
-    ) -> Result<CardOperationResult, String> {
-        let store = ProtectedPairingStore::load()
-            .map_err(|error| format!("the pairing store cannot be loaded: {error}"))?;
+    ) -> Result<CardOperationResult, RemoteFailure> {
+        let store = ProtectedPairingStore::load().map_err(|error| {
+            RemoteFailure::Failed(format!("the pairing store cannot be loaded: {error}"))
+        })?;
         let transport = self.connect_session_transport(&store)?;
         let mut requester = Requester::new(
             RequesterConfig {
@@ -328,25 +376,39 @@ impl RemoteCardTransport {
         let mut session = match requester.connect(self.pair_id, transport) {
             Ok(session) => session,
             Err(SessionError::ClosedByPeer(CloseReason::PairingRevoked)) => {
-                return Err("the phone forgot this computer; pair again".to_owned());
+                return Err(RemoteFailure::Unpaired);
             }
-            Err(error) => return Err(format!("session connect failed: {error}")),
+            Err(error) => {
+                return Err(RemoteFailure::Failed(format!(
+                    "session connect failed: {error}"
+                )));
+            }
         };
 
-        let outcome = requester
-            .execute(&mut session, operation, OPERATION_LIFETIME_MS)
-            .map_err(|e| format!("operation execute failed: {e}"))?;
-        if session.end() == Some(SessionEnd::PeerClose(CloseReason::PairingRevoked)) {
-            return Err("the phone forgot this computer; pair again".to_owned());
-        }
+        let outcome = requester.execute(&mut session, operation, OPERATION_LIFETIME_MS);
+        // A session the phone already closed is not closed again (section
+        // 4.6 item 4).
         requester.disconnect(&mut session, CloseReason::UserDisconnect);
-
+        if session.end() == Some(SessionEnd::PeerClose(CloseReason::PairingRevoked)) {
+            return Err(RemoteFailure::Unpaired);
+        }
         match outcome {
-            OperationOutcome::Completed(result) => Ok(result),
-            OperationOutcome::Rejected(ResultError::UserCancelled) => {
-                Err("operation was denied by the user on the remote device".into())
-            }
-            other => Err(format!("operation failed with outcome: {other:?}")),
+            Ok(OperationOutcome::Completed(result)) => Ok(result),
+            Ok(
+                OperationOutcome::Rejected(ResultError::UserCancelled)
+                | OperationOutcome::Cancelled(ResultError::UserCancelled),
+            ) => Err(RemoteFailure::UserCancelled),
+            Ok(
+                OperationOutcome::Rejected(ResultError::CardError)
+                | OperationOutcome::Cancelled(ResultError::CardError),
+            ) => Err(RemoteFailure::CardError),
+            Ok(OperationOutcome::Lost) => Err(RemoteFailure::Lost),
+            Ok(other) => Err(RemoteFailure::Failed(format!(
+                "operation failed with outcome: {other:?}"
+            ))),
+            Err(error) => Err(RemoteFailure::Failed(format!(
+                "operation execute failed: {error}"
+            ))),
         }
     }
 }

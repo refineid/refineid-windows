@@ -354,6 +354,29 @@ impl ModuleState {
             return;
         };
         let pairs: Vec<_> = store.usable_pairing().into_iter().collect();
+        // A remote token whose pairing no longer serves (forgotten here or
+        // revoked by the phone) is withdrawn (RAPP v26.10.21 section 4.6).
+        let serving: Vec<String> = pairs
+            .iter()
+            .map(|pair| format!("rapp:{}", hex::encode(pair.pair_id().as_bytes())))
+            .collect();
+        let withdrawn: Vec<CkSlotId> = self
+            .slots
+            .iter_mut()
+            .filter(|slot| {
+                slot.card_present
+                    && slot.reader_name.starts_with("rapp:")
+                    && !serving.contains(&slot.reader_name)
+            })
+            .map(|slot| {
+                slot.card_present = false;
+                slot.id
+            })
+            .collect();
+        for id in withdrawn {
+            self.remote_logged_in.remove(&id);
+            self.invalidate_slot(id);
+        }
         for pair in pairs {
             let hex_id = hex::encode(pair.pair_id().as_bytes());
             let name = format!("rapp:{hex_id}");

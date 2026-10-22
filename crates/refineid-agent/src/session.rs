@@ -383,7 +383,10 @@ fn hold_session(
                 .and_then(PairingRecord::authentication_certificate)
                 .map(|certificate| CertificateFingerprint::of_certificate(certificate.as_der()));
             if known != Some(fingerprint) {
+                // The earlier card's certificate is withdrawn before the new
+                // one is read: installing adds a certificate beside it.
                 log(started, "the phone serves another card");
+                withdraw_certificates(started, offered);
                 learn_certificate(started, pairing, session, offered);
             }
         }

@@ -548,7 +548,7 @@ mod tests {
 
     #[test]
     fn round_trips_an_empty_set() {
-        let none: [PairingRecord; 0] = [];
+        let none: Vec<PairingRecord> = Vec::new();
         assert!(
             decode_pairing_records(&encode_pairing_records(none.iter()).unwrap())
                 .unwrap()

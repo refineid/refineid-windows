@@ -144,7 +144,7 @@ mod tests {
         let offer = offer_for(&[TransportProfile::Stream]);
         let (mut custodian, mut requester) = crate::transport::MemoryTransport::pair(
             crate::stream::STREAM_CANDIDATE_ID,
-            std::time::Duration::from_secs(1),
+            crate::engine::SESSION_RECEIVE_TICK,
         );
         custodian
             .send_frame(&offer.to_cbor().expect("cbor"))
@@ -157,7 +157,7 @@ mod tests {
         let offer = offer_for(&[TransportProfile::Ble]);
         let (mut custodian, mut requester) = crate::transport::MemoryTransport::pair(
             crate::stream::STREAM_CANDIDATE_ID,
-            std::time::Duration::from_secs(1),
+            crate::engine::SESSION_RECEIVE_TICK,
         );
         custodian
             .send_frame(&offer.to_cbor().expect("cbor"))

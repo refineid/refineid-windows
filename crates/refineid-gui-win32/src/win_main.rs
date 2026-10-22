@@ -2508,6 +2508,14 @@ fn remove_remote_device() {
         return;
     };
     let pair_id = record.pair_id();
+    // An unconfirmed or revoked pairing is removed and nobody is told (RAPP
+    // v26.10.21 section 4.6 item 3).
+    let status = match record.state() {
+        PairingState::Serving | PairingState::Forgotten => {
+            "Pairing forgotten. The phone is told when it is next reached."
+        }
+        PairingState::Unconfirmed | PairingState::Revoked { .. } => "Pairing removed.",
+    };
     match forget_pairing(
         &mut store,
         pair_id,
@@ -2515,7 +2523,7 @@ fn remove_remote_device() {
     ) {
         Ok(()) => {
             refresh_remote_devices();
-            set_remote_status("Pairing forgotten. The phone is told when it is next reached.");
+            set_remote_status(status);
         }
         Err(error) => set_remote_status(&format!("Forget failed: {error:?}")),
     }

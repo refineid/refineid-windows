@@ -911,6 +911,11 @@ fn hold_offering_session(
         match card {
             Some(CardStatusMessage::Present(fingerprint)) if offer.checked != Some(fingerprint) => {
                 offer.checked = Some(fingerprint);
+                // Another card's certificate is withdrawn before this one is
+                // read: installing adds a certificate beside it.
+                if offer.offered.is_some_and(|offered| offered != fingerprint) {
+                    withdraw_offer(handle_id, offer, CARD_UNCONFIRMED_STATUS);
+                }
                 match confirmed_certificate(requester, session, fingerprint) {
                     Some(certificate) if offer_to_browsers(&certificate, pair_id).is_ok() => {
                         offer.offered = Some(fingerprint);

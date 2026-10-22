@@ -1375,15 +1375,15 @@ impl RemoteCardTransport {
             Err(error) => return Err(format!("session connect failed: {error}")),
         };
 
-        let outcome = requester
-            .execute(&mut session, operation, REMOTE_OPERATION_LIFETIME_MS)
-            .map_err(|e| format!("operation execute failed: {e}"))?;
+        let outcome = requester.execute(&mut session, operation, REMOTE_OPERATION_LIFETIME_MS);
+        // A session the phone already closed is not closed again (section
+        // 4.6 item 4).
+        requester.disconnect(&mut session, CloseReason::UserDisconnect);
         if session.end() == Some(SessionEnd::PeerClose(CloseReason::PairingRevoked)) {
             return Err("the phone forgot this computer; pair again".to_owned());
         }
-        requester.disconnect(&mut session, CloseReason::UserDisconnect);
 
-        match outcome {
+        match outcome.map_err(|e| format!("operation execute failed: {e}"))? {
             OperationOutcome::Completed(result) => Ok(result),
             OperationOutcome::Rejected(ResultError::UserCancelled) => {
                 Err("operation was denied by the user on the remote device".into())

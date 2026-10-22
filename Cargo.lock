@@ -971,6 +971,7 @@ dependencies = [
  "refineid-rapp-ble",
  "refineid-rapp-core",
  "refineid-windows-credential-store",
+ "sec1",
  "sha2 0.11.0",
  "zeroize",
 ]
