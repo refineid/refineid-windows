@@ -51,9 +51,9 @@ impl CardSighting {
     /// 8.4 item 3).
     ///
     /// A sighting dated after `now_ms`, by a wall clock set back since,
-    /// counts as heard now while it lies less than the grace ahead; one
-    /// further ahead does not stand, so a large step back of the clock never
-    /// stretches the offer beyond the grace the custodian's word allows.
+    /// stands until the grace after its date has passed while it lies less
+    /// than the grace ahead; one further ahead does not stand, so a step
+    /// back of the clock stretches the offer by less than one grace.
     #[must_use]
     pub fn stands_for(&self, certificate: &OwnedCert, now_ms: u64) -> bool {
         let age = now_ms.saturating_sub(self.at_ms);
