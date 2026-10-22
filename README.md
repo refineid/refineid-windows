@@ -115,12 +115,16 @@ from macOS or Linux, and
 [docs/store-and-driver-distribution.md](docs/store-and-driver-distribution.md)
 for how the Store MSIX and the pkg.refineid.fi driver installer split up.
 
-Build both supported architectures:
+Build the development Card Module for both supported architectures:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass `
   -File scripts/build.ps1 -Architecture x64,arm64
 ```
+
+The script builds the debug configuration, which reports its errors (see
+[Development builds](#development-builds)); `-Configuration Release` builds
+the release profile instead.
 
 Outputs:
 
@@ -160,13 +164,47 @@ dotnet build apps/RefineID-winui/RefineID.csproj `
   -p:EnableMsixTooling=false
 ```
 
+## Development builds
+
+A development build makes every error visible. The debug configuration
+(Rust `debug_assertions`, C# `DEBUG`) reports each failure of every
+RefineID process, the app, the agent, the Card Module inside `lsass.exe`,
+browsers and `certutil.exe`, the PKCS#11 module, the document signer and
+the RAPP crates, to the Windows Event Log: Application log, source
+`RefineID`, event and cause by name only (`refineid-dev-errors`). The app
+opens its Errors window when an error arrives; Ctrl+Shift+E or the version
+line opens it again. A release build contains no logging at all.
+
+Read the entries from PowerShell:
+
+```powershell
+Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'RefineID' } |
+  Format-Table TimeCreated, Id, Message -AutoSize
+```
+
+Build the development app package, the debug configuration signed with the
+development certificate (`CN=RefineID` with the code-signing EKU):
+
+```powershell
+dotnet publish apps/RefineID-winui/RefineID.csproj `
+  -c Debug `
+  -p:Platform=x64 `
+  -p:WindowsPackageType=MSIX `
+  -p:EnableMsixTooling=true `
+  -p:GenerateAppxPackageOnBuild=true `
+  -p:AppxPackageDir=dist\msix\ `
+  -p:PackageCertificateThumbprint=<thumbprint>
+```
+
 ## Development install
 
 Production Windows binaries must be Authenticode-signed. Do not distribute an
 unsigned or test-signed DLL to end users.
 
 For an isolated development machine with Windows test-signing policy configured,
-build the matching architecture and run an elevated PowerShell:
+build the matching architecture and run an elevated PowerShell. The script
+also registers the `RefineID` event source that development builds report to,
+and `uninstall-dev.ps1` removes it:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass `

@@ -808,6 +808,7 @@ name = "refineid-agent"
 version = "26.10.22"
 dependencies = [
  "refineid-agent-pipe",
+ "refineid-dev-errors",
  "refineid-lib-core",
  "refineid-rapp",
  "refineid-rapp-ble",
@@ -819,6 +820,7 @@ dependencies = [
 name = "refineid-agent-pipe"
 version = "26.10.22"
 dependencies = [
+ "refineid-dev-errors",
  "refineid-rapp",
  "refineid-rapp-core",
  "windows-sys",
@@ -828,9 +830,16 @@ dependencies = [
 name = "refineid-card-manager-core"
 version = "26.10.22"
 dependencies = [
- "hex",
+ "refineid-dev-errors",
  "refineid-lib-core",
  "refineid-lib-pcsc",
+]
+
+[[package]]
+name = "refineid-dev-errors"
+version = "26.10.22"
+dependencies = [
+ "windows-sys",
 ]
 
 [[package]]
@@ -850,6 +859,7 @@ dependencies = [
  "crypto-bigint",
  "hex",
  "miniz_oxide",
+ "refineid-dev-errors",
  "refineid-lib-core",
  "refineid-lib-pcsc",
  "sha1",
@@ -901,6 +911,7 @@ name = "refineid-lib-pcsc"
 version = "26.10.22"
 dependencies = [
  "pcsc",
+ "refineid-dev-errors",
  "refineid-lib-core",
 ]
 
@@ -909,6 +920,7 @@ name = "refineid-minidriver"
 version = "26.10.22"
 dependencies = [
  "refineid-agent-pipe",
+ "refineid-dev-errors",
  "refineid-lib-core",
  "refineid-rapp-core",
  "refineid-windows-credential-store",
@@ -928,6 +940,7 @@ name = "refineid-pkcs11"
 version = "26.10.22"
 dependencies = [
  "hex",
+ "refineid-dev-errors",
  "refineid-lib-core",
  "refineid-lib-pcsc",
  "refineid-rapp-core",
@@ -954,6 +967,7 @@ dependencies = [
 name = "refineid-rapp-ble"
 version = "26.10.22"
 dependencies = [
+ "refineid-dev-errors",
  "refineid-rapp",
  "refineid-rapp-core",
  "windows",
@@ -981,6 +995,7 @@ name = "refineid-rapp-core"
 version = "26.10.22"
 dependencies = [
  "getrandom 0.4.3",
+ "refineid-dev-errors",
  "refineid-lib-core",
  "refineid-rapp",
  "refineid-remote",
@@ -998,6 +1013,7 @@ version = "26.10.22"
 dependencies = [
  "getrandom 0.4.3",
  "hex",
+ "refineid-dev-errors",
  "refineid-lib-core",
  "refineid-rapp",
  "refineid-rapp-core",
@@ -1019,6 +1035,7 @@ name = "refineid-settings-ffi"
 version = "26.10.22"
 dependencies = [
  "refineid-card-manager-core",
+ "refineid-dev-errors",
  "refineid-doc-sign",
  "refineid-lib-core",
  "refineid-lib-pcsc",

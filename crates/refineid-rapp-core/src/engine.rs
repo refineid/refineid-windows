@@ -305,8 +305,12 @@ impl<Transport: FrameTransport> Session<Transport> {
     }
 
     /// Closes the session locally and records how it ended. The live
-    /// operation, if any, is over with it.
+    /// operation, if any, is over with it. Development builds report every
+    /// end but a deliberate local close.
     fn finish(&mut self, end: SessionEnd) {
+        if end != SessionEnd::LocalClose {
+            refineid_dev_errors::report!(Rapp, "phone session closed", end);
+        }
         self.runtime.close_session();
         self.operations.session_closed();
         self.end = Some(end);
@@ -393,6 +397,17 @@ impl<Store: PairingStore> Requester<Store> {
     pub fn pair_with_code<Transport: FrameTransport>(
         &mut self,
         code: &str,
+        transport: Transport,
+        confirm: impl FnOnce(&PeerIntroduction, &[ProfileName]) -> Option<Vec<ProfileName>>,
+    ) -> Result<PairId, PairingError> {
+        self.pairing_with_code(code, transport, confirm)
+            .inspect_err(|error| refineid_dev_errors::report!(Rapp, "pairing failed", error))
+    }
+
+    /// [`Self::pair_with_code`], unreported.
+    fn pairing_with_code<Transport: FrameTransport>(
+        &mut self,
+        code: &str,
         mut transport: Transport,
         confirm: impl FnOnce(&PeerIntroduction, &[ProfileName]) -> Option<Vec<ProfileName>>,
     ) -> Result<PairId, PairingError> {
@@ -409,7 +424,7 @@ impl<Store: PairingStore> Requester<Store> {
             }
             crate::offer::BootstrapError::Offer(error) => PairingError::Offer(error),
         })?;
-        self.pair_with_offer(code, offer, transport, confirm)
+        self.pairing_with_offer(code, offer, transport, confirm)
     }
 
     /// Pairs with the custodian showing `code` over a transport whose offer
@@ -425,6 +440,18 @@ impl<Store: PairingStore> Requester<Store> {
     /// As [`Self::pair_with_code`]; [`PairingError::UnregisteredTransport`]
     /// also when the offer does not list the transport the connection runs.
     pub fn pair_with_offer<Transport: FrameTransport>(
+        &mut self,
+        code: &str,
+        offer: PairingOffer,
+        transport: Transport,
+        confirm: impl FnOnce(&PeerIntroduction, &[ProfileName]) -> Option<Vec<ProfileName>>,
+    ) -> Result<PairId, PairingError> {
+        self.pairing_with_offer(code, offer, transport, confirm)
+            .inspect_err(|error| refineid_dev_errors::report!(Rapp, "pairing failed", error))
+    }
+
+    /// [`Self::pair_with_offer`], unreported.
+    fn pairing_with_offer<Transport: FrameTransport>(
         &mut self,
         code: &str,
         offer: PairingOffer,
@@ -698,6 +725,17 @@ impl<Store: PairingStore> Requester<Store> {
     pub fn connect<Transport: FrameTransport>(
         &mut self,
         pair_id: PairId,
+        transport: Transport,
+    ) -> Result<Session<Transport>, SessionError> {
+        self.open_session(pair_id, transport).inspect_err(|error| {
+            refineid_dev_errors::report!(Rapp, "phone session not opened", error);
+        })
+    }
+
+    /// [`Self::connect`], unreported.
+    fn open_session<Transport: FrameTransport>(
+        &mut self,
+        pair_id: PairId,
         mut transport: Transport,
     ) -> Result<Session<Transport>, SessionError> {
         let record = self
@@ -759,6 +797,18 @@ impl<Store: PairingStore> Requester<Store> {
     /// [`SessionError::NotForgotten`] when the pairing owes no notice, and
     /// the handshake and transport errors of [`Self::connect`].
     pub fn deliver_revocation_notice<Transport: FrameTransport>(
+        &mut self,
+        pair_id: PairId,
+        transport: Transport,
+    ) -> Result<(), SessionError> {
+        self.revocation_notice(pair_id, transport)
+            .inspect_err(|error| {
+                refineid_dev_errors::report!(Rapp, "revocation notice not delivered", error);
+            })
+    }
+
+    /// [`Self::deliver_revocation_notice`], unreported.
+    fn revocation_notice<Transport: FrameTransport>(
         &mut self,
         pair_id: PairId,
         mut transport: Transport,
@@ -880,6 +930,25 @@ impl<Store: PairingStore> Requester<Store> {
     /// # Errors
     /// Returns [`AdmissionError`] on admission failure or profile mismatch.
     pub fn execute_observed<Transport: FrameTransport>(
+        &mut self,
+        session: &mut Session<Transport>,
+        operation: &CardOperation,
+        expires_after_ms: u64,
+        observe: &mut dyn FnMut(ProgressEvent),
+    ) -> Result<OperationOutcome, AdmissionError> {
+        let outcome = self.run_operation(session, operation, expires_after_ms, observe);
+        match &outcome {
+            Ok(OperationOutcome::Completed(_)) => {}
+            Ok(ended) => {
+                refineid_dev_errors::report!(Rapp, "operation ended without a result", ended);
+            }
+            Err(error) => refineid_dev_errors::report!(Rapp, "operation not admitted", error),
+        }
+        outcome
+    }
+
+    /// [`Self::execute_observed`], unreported.
+    fn run_operation<Transport: FrameTransport>(
         &mut self,
         session: &mut Session<Transport>,
         operation: &CardOperation,

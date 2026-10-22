@@ -62,12 +62,31 @@ use crate::ck::{
     CkTokenInfoPtr, CkUlong, CkUlongPtr, CkUserType, CkUtf8Char, CkUtf8CharPtr, CkVersion,
     CkVoidPtr,
 };
-use crate::diag::diag;
 use crate::sign::Mechanism;
 use crate::state::{
     MODULE, ModuleState, PIN1_MAX_DIGITS, PIN1_MIN_DIGITS, Session, SlotRecord, session_state,
 };
 use crate::token::{AttrValue, ObjectKind, TokenObjects};
+
+#[cfg(debug_assertions)]
+mod reported;
+
+/// The function `name` as [`FUNCTION_LIST`] lists it: a development build
+/// lists the wrapper in [`reported`] that reports a failing return.
+#[cfg(debug_assertions)]
+macro_rules! entry {
+    ($name:ident) => {
+        crate::api::reported::$name
+    };
+}
+
+/// The function `name` as [`FUNCTION_LIST`] lists it.
+#[cfg(not(debug_assertions))]
+macro_rules! entry {
+    ($name:ident) => {
+        crate::api::$name
+    };
+}
 
 /// Cryptoki interface version this module implements (`2.40`, OASIS
 /// PKCS#11 v2.40). Reported in [`CkInfo::cryptoki_version`] and the
@@ -231,7 +250,6 @@ unsafe extern "C" fn c_initialize(init_args: CkVoidPtr) -> CkRv {
         // caller sets CKF_OS_LOCKING_OK and whether or not it supplies
         // its own locking callbacks.
     }
-    diag!("C_Initialize");
     let mut guard = match lock_module() {
         Ok(guard) => guard,
         Err(err) => return err,
@@ -246,7 +264,6 @@ unsafe extern "C" fn c_initialize(init_args: CkVoidPtr) -> CkRv {
 /// `C_Finalize`: tear down module state, dropping sessions and
 /// zeroizing any cached PIN1 (v2.40 s5.6.2).
 unsafe extern "C" fn c_finalize(reserved: CkVoidPtr) -> CkRv {
-    diag!("C_Finalize");
     if !reserved.is_null() {
         return CKR_ARGUMENTS_BAD;
     }
@@ -323,10 +340,6 @@ unsafe extern "C" fn c_get_slot_list(
         .filter(|id| !only_present || module.slot(*id).is_some_and(SlotRecord::card_present))
         .collect();
     drop(guard);
-    diag!(
-        "C_GetSlotList token_present={only_present} slots={}",
-        ids.len()
-    );
     // SAFETY: caller guarantees `count` is a readable/writable
     // CK_ULONG; when slot_list is non-NULL it holds `*count` entries.
     unsafe { write_handle_list(slot_list, count, &ids) }
@@ -424,7 +437,6 @@ unsafe extern "C" fn c_get_slot_info(slot_id: CkSlotId, info: CkSlotInfoPtr) -> 
 
 /// `C_GetTokenInfo`: describe the token in a slot (v2.40 s5.5.7).
 unsafe extern "C" fn c_get_token_info(slot_id: CkSlotId, info: CkTokenInfoPtr) -> CkRv {
-    diag!("C_GetTokenInfo slot={slot_id}");
     if info.is_null() {
         return CKR_ARGUMENTS_BAD;
     }
@@ -438,22 +450,16 @@ unsafe extern "C" fn c_get_token_info(slot_id: CkSlotId, info: CkTokenInfoPtr) -
     let Some(slot) = module.slot(slot_id) else {
         return CKR_SLOT_ID_INVALID;
     };
-    let rv = if slot.card_present() {
+    if slot.card_present() {
         let reader_name = slot.reader_name().to_owned();
         let serial = match module.ensure_token(slot_id) {
             Ok(objects) => objects.token_serial().to_owned(),
-            Err(error) => {
-                diag!("C_GetTokenInfo slot={slot_id} ensure_token error={error:#06x}");
-                return error;
-            }
+            Err(error) => return error,
         };
         drop(guard);
         let pin1_status = match crate::token::card_pin1_status(&reader_name) {
             Ok(status) => status,
-            Err(error) => {
-                diag!("C_GetTokenInfo slot={slot_id} auth_status error={error:#06x}");
-                return error;
-            }
+            Err(error) => return error,
         };
         let is_remote = reader_name.starts_with("rapp:");
         // SAFETY: caller guarantees info is a writable CK_TOKEN_INFO.
@@ -463,9 +469,7 @@ unsafe extern "C" fn c_get_token_info(slot_id: CkSlotId, info: CkTokenInfoPtr) -
         CKR_OK
     } else {
         CKR_TOKEN_NOT_PRESENT
-    };
-    diag!("C_GetTokenInfo slot={slot_id} rv={rv:#06x}");
-    rv
+    }
 }
 
 /// Fixed token label for the authentication (PIN1) token.
@@ -699,7 +703,6 @@ unsafe extern "C" fn c_open_session(
     }
     let handle = module.open_session(slot_id, flags);
     drop(guard);
-    diag!("C_OpenSession slot={slot_id} flags={flags:#06x} session={handle}");
     // SAFETY: caller guarantees session is a writable handle slot.
     unsafe {
         session.write(handle);
@@ -709,7 +712,6 @@ unsafe extern "C" fn c_open_session(
 
 /// `C_CloseSession`: close one session (v2.40 s5.6.2).
 unsafe extern "C" fn c_close_session(session: CkSessionHandle) -> CkRv {
-    diag!("C_CloseSession session={session}");
     let mut guard = match lock_module() {
         Ok(guard) => guard,
         Err(err) => return err,
@@ -809,7 +811,6 @@ unsafe extern "C" fn c_login(
         // Protected authentication path: PIN1 is never typed on or transmitted by this computer.
         // The mobile device holds credentials in protected on-device storage.
         module.set_remote_logged_in(slot_id, true);
-        diag!("C_Login remote reader session={session} logged in via protected auth path");
         return CKR_OK;
     }
     if module.is_logged_in(slot_id) {
@@ -820,8 +821,6 @@ unsafe extern "C" fn c_login(
         return CKR_ARGUMENTS_BAD;
     }
     let length = usize_from_ulong(pin_len);
-    // Hard rule: neither PIN bytes nor PIN lengths are ever logged.
-    diag!("C_Login session={session} user_type={user_type}");
     // SAFETY: caller guarantees pin_ptr points to `pin_len` bytes;
     // the bytes are copied straight into a zeroizing PinBytes and
     // never logged (PIN secrecy rule).
@@ -833,10 +832,8 @@ unsafe extern "C" fn c_login(
     // in fully automated test runs (Marionette / CI headless).  The feature
     // is never compiled into production (non-test) builds.
     #[cfg(feature = "test-pin-env")]
-    let caller_bytes = std::env::var("REFINEID_TEST_PIN1").map_or(caller_bytes, |env_pin| {
-        diag!("C_Login: test auth credential override (test-pin-env feature)");
-        env_pin.into_bytes()
-    });
+    let caller_bytes =
+        std::env::var("REFINEID_TEST_PIN1").map_or(caller_bytes, std::string::String::into_bytes);
 
     let pin1 = match PinBytes::new(caller_bytes) {
         Ok(pin) => pin,
@@ -850,12 +847,10 @@ unsafe extern "C" fn c_login(
         Err(error) => return error,
     };
     drop(guard);
-    let rv = match crate::token::card_login(&reader_name, &pin_cache, pin1) {
+    match crate::token::card_login(&reader_name, &pin_cache, pin1) {
         Ok(()) => CKR_OK,
         Err(error) => error,
-    };
-    diag!("C_Login rv={rv:#06x}");
-    rv
+    }
 }
 
 /// Classify a rejected PIN1 without disclosing its bytes: a
@@ -875,7 +870,6 @@ const fn classify_pin_error(error: PinRoleError) -> CkRv {
 
 /// `C_Logout`: drop the token's cached PIN1 (v2.40 s5.6.6).
 unsafe extern "C" fn c_logout(session: CkSessionHandle) -> CkRv {
-    diag!("C_Logout session={session}");
     let mut guard = match lock_module() {
         Ok(guard) => guard,
         Err(err) => return err,
@@ -947,14 +941,6 @@ unsafe extern "C" fn c_find_objects_init(
     let parsed = unsafe { read_template(template, count) };
     // Attribute types and value lengths only -- template values (an
     // object class, a CKA_ID) stay out of the log.
-    diag!(
-        "C_FindObjectsInit session={session} template=[{}]",
-        parsed
-            .iter()
-            .map(|(attr, value)| format!("{attr:#06x}={}", hex::encode(value)))
-            .collect::<Vec<_>>()
-            .join(",")
-    );
     let mut guard = match lock_module() {
         Ok(guard) => guard,
         Err(err) => return err,
@@ -1017,7 +1003,6 @@ unsafe extern "C" fn c_find_objects(
         return CKR_OPERATION_NOT_INITIALIZED;
     };
     drop(guard);
-    diag!("C_FindObjects session={session} returned={}", batch.len());
     for (index, handle) in batch.iter().enumerate() {
         // SAFETY: index < wanted <= max_count, so object.add(index)
         // is within the caller's array.
@@ -1067,7 +1052,6 @@ unsafe extern "C" fn c_get_attribute_value(
     if template.is_null() {
         return CKR_ARGUMENTS_BAD;
     }
-    diag!("C_GetAttributeValue session={session} object={object} count={count}");
     let Some(kind) = ObjectKind::from_handle(object) else {
         return CKR_OBJECT_HANDLE_INVALID;
     };
@@ -1206,7 +1190,6 @@ unsafe extern "C" fn c_sign_init(
     }
     // SAFETY: caller guarantees mechanism is a valid CK_MECHANISM.
     let requested = unsafe { mechanism.read() }.mechanism;
-    diag!("C_SignInit session={session} mechanism={requested:#06x}");
     let Some(requested_mechanism) = Mechanism::from_ck_type(requested) else {
         return CKR_MECHANISM_INVALID;
     };
@@ -1312,9 +1295,8 @@ unsafe extern "C" fn c_sign(
         // caller contract.
         unsafe { core::slice::from_raw_parts(data, input_len) }.to_vec()
     };
-    diag!("C_Sign session={session} data_len={input_len}");
     let outcome = crate::token::card_sign(&reader_name, &pin_cache, mechanism, &input, None);
-    let rv = match outcome {
+    match outcome {
         Ok(bytes) => {
             // The module lock was dropped across the card round trip,
             // so another thread may have closed this session (or torn
@@ -1341,9 +1323,7 @@ unsafe extern "C" fn c_sign(
         // `card_sign` destructively checks the cache out before any
         // VERIFY and restores it only after the entire operation succeeds.
         Err(err) => err,
-    };
-    diag!("C_Sign rv={rv:#06x}");
-    rv
+    }
 }
 
 /// `C_SetPIN` (login-only build): PIN change is gated off until the
@@ -1479,7 +1459,6 @@ unsafe extern "C" fn c_wait_for_slot_event(
     let Some(slot_id) = event else {
         return CKR_NO_EVENT;
     };
-    diag!("C_WaitForSlotEvent slot={slot_id}");
     // SAFETY: caller guarantees `slot` is a writable CK_SLOT_ID
     // location (checked non-NULL above).
     unsafe {
@@ -1761,7 +1740,6 @@ unsafe extern "C" fn c_verify_init(
     }
     // SAFETY: caller guarantees mechanism is a valid CK_MECHANISM.
     let requested = unsafe { mechanism.read() }.mechanism;
-    diag!("C_VerifyInit session={session} mechanism={requested:#06x}");
     let Some(requested_mechanism) = Mechanism::from_ck_type(requested) else {
         return CKR_MECHANISM_INVALID;
     };
@@ -1849,9 +1827,7 @@ unsafe extern "C" fn c_verify(
         // bytes per the caller contract.
         unsafe { core::slice::from_raw_parts(signature, sig_len) }.to_vec()
     };
-    let rv = token.verify_signature(mechanism, &input, &sig);
-    diag!("C_Verify session={session} data_len={input_len} sig_len={sig_len} rv={rv:#06x}");
-    rv
+    token.verify_signature(mechanism, &input, &sig)
 }
 
 /// `C_VerifyUpdate` stub: verification is out of scope.
@@ -2038,35 +2014,35 @@ unsafe extern "C" fn c_cancel_function(_session: CkSessionHandle) -> CkRv {
 /// the canonical `pkcs11f.h` declaration order exactly.
 pub static FUNCTION_LIST: CkFunctionList = CkFunctionList {
     version: CRYPTOKI_VERSION,
-    C_Initialize: c_initialize,
-    C_Finalize: c_finalize,
-    C_GetInfo: c_get_info,
+    C_Initialize: entry!(c_initialize),
+    C_Finalize: entry!(c_finalize),
+    C_GetInfo: entry!(c_get_info),
     C_GetFunctionList: c_get_function_list,
-    C_GetSlotList: c_get_slot_list,
-    C_GetSlotInfo: c_get_slot_info,
-    C_GetTokenInfo: c_get_token_info,
-    C_GetMechanismList: c_get_mechanism_list,
-    C_GetMechanismInfo: c_get_mechanism_info,
+    C_GetSlotList: entry!(c_get_slot_list),
+    C_GetSlotInfo: entry!(c_get_slot_info),
+    C_GetTokenInfo: entry!(c_get_token_info),
+    C_GetMechanismList: entry!(c_get_mechanism_list),
+    C_GetMechanismInfo: entry!(c_get_mechanism_info),
     C_InitToken: c_init_token,
     C_InitPIN: c_init_pin,
     C_SetPIN: c_set_pin,
-    C_OpenSession: c_open_session,
-    C_CloseSession: c_close_session,
-    C_CloseAllSessions: c_close_all_sessions,
-    C_GetSessionInfo: c_get_session_info,
+    C_OpenSession: entry!(c_open_session),
+    C_CloseSession: entry!(c_close_session),
+    C_CloseAllSessions: entry!(c_close_all_sessions),
+    C_GetSessionInfo: entry!(c_get_session_info),
     C_GetOperationState: c_get_operation_state,
     C_SetOperationState: c_set_operation_state,
-    C_Login: c_login,
-    C_Logout: c_logout,
+    C_Login: entry!(c_login),
+    C_Logout: entry!(c_logout),
     C_CreateObject: c_create_object,
     C_CopyObject: c_copy_object,
     C_DestroyObject: c_destroy_object,
     C_GetObjectSize: c_get_object_size,
-    C_GetAttributeValue: c_get_attribute_value,
+    C_GetAttributeValue: entry!(c_get_attribute_value),
     C_SetAttributeValue: c_set_attribute_value,
-    C_FindObjectsInit: c_find_objects_init,
-    C_FindObjects: c_find_objects,
-    C_FindObjectsFinal: c_find_objects_final,
+    C_FindObjectsInit: entry!(c_find_objects_init),
+    C_FindObjects: entry!(c_find_objects),
+    C_FindObjectsFinal: entry!(c_find_objects_final),
     C_EncryptInit: c_encrypt_init,
     C_Encrypt: c_encrypt,
     C_EncryptUpdate: c_encrypt_update,
@@ -2080,14 +2056,14 @@ pub static FUNCTION_LIST: CkFunctionList = CkFunctionList {
     C_DigestUpdate: c_digest_update,
     C_DigestKey: c_digest_key,
     C_DigestFinal: c_digest_final,
-    C_SignInit: c_sign_init,
-    C_Sign: c_sign,
+    C_SignInit: entry!(c_sign_init),
+    C_Sign: entry!(c_sign),
     C_SignUpdate: c_sign_update,
     C_SignFinal: c_sign_final,
     C_SignRecoverInit: c_sign_recover_init,
     C_SignRecover: c_sign_recover,
-    C_VerifyInit: c_verify_init,
-    C_Verify: c_verify,
+    C_VerifyInit: entry!(c_verify_init),
+    C_Verify: entry!(c_verify),
     C_VerifyUpdate: c_verify_update,
     C_VerifyFinal: c_verify_final,
     C_VerifyRecoverInit: c_verify_recover_init,
@@ -2105,7 +2081,7 @@ pub static FUNCTION_LIST: CkFunctionList = CkFunctionList {
     C_GenerateRandom: c_generate_random,
     C_GetFunctionStatus: c_get_function_status,
     C_CancelFunction: c_cancel_function,
-    C_WaitForSlotEvent: c_wait_for_slot_event,
+    C_WaitForSlotEvent: entry!(c_wait_for_slot_event),
 };
 
 #[cfg(test)]
@@ -2113,7 +2089,7 @@ mod tests {
     use refineid_lib_core::apdu::status_word::PinRetries;
     use refineid_lib_core::auth::PinStatus;
 
-    use super::{FUNCTION_LIST, c_sign, padded_field, user_pin_status_flags};
+    use super::{FUNCTION_LIST, padded_field, user_pin_status_flags};
     use crate::ck::{
         CKF_USER_PIN_COUNT_LOW, CKF_USER_PIN_FINAL_TRY, CKF_USER_PIN_LOCKED, CkBytePtr, CkRv,
         CkSessionHandle, CkUlong, CkUlongPtr, CkVersion,
@@ -2132,16 +2108,16 @@ mod tests {
 
     #[test]
     fn function_list_sign_slot_points_at_c_sign() {
-        // The C_Sign slot must point at our single-part c_sign, and
-        // must be a distinct pointer from the multi-part C_SignUpdate
-        // slot.
+        // The C_Sign slot must point at our single-part c_sign (in a
+        // development build, its reporting wrapper), and must be a
+        // distinct pointer from the multi-part C_SignUpdate slot.
         let expected: unsafe extern "C" fn(
             CkSessionHandle,
             CkBytePtr,
             CkUlong,
             CkBytePtr,
             CkUlongPtr,
-        ) -> CkRv = c_sign;
+        ) -> CkRv = entry!(c_sign);
         assert!(core::ptr::fn_addr_eq(FUNCTION_LIST.C_Sign, expected));
         assert!(!core::ptr::fn_addr_eq(
             FUNCTION_LIST.C_Sign,

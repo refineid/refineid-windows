@@ -12,6 +12,6 @@ publish = false
 workspace = true
 
 [dependencies]
+refineid-dev-errors.workspace = true
 refineid-lib-core.workspace = true
 refineid-lib-pcsc.workspace = true
-hex.workspace = true

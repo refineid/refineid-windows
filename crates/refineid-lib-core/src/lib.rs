@@ -98,7 +98,6 @@ pub mod crl;
 pub mod crypto;
 pub mod emrtd;
 pub mod error;
-pub mod events;
 pub mod fineid_card;
 pub mod hex;
 pub mod icao_pkd;

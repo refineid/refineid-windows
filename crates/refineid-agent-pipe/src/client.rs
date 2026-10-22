@@ -40,6 +40,19 @@ pub fn request_signature(
     request: &SignRequest,
     deadline: Duration,
 ) -> Result<SignAnswer, PipeError> {
+    let answer = requested_signature(request, deadline);
+    match &answer {
+        Ok(_) => {}
+        Err(PipeError::Identity(code) | PipeError::Pipe(code)) => {
+            refineid_dev_errors::report!(AgentPipe, "signature request failed", status code);
+        }
+        Err(error) => refineid_dev_errors::report!(AgentPipe, "signature request failed", error),
+    }
+    answer
+}
+
+/// [`request_signature`], unreported.
+fn requested_signature(request: &SignRequest, deadline: Duration) -> Result<SignAnswer, PipeError> {
     let ends = Instant::now() + deadline;
     let identity = ProcessIdentity::current()?;
     let name = wide(&pipe_name(&identity.user.to_sddl()?, identity.session));

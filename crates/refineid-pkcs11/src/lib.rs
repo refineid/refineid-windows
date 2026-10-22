@@ -61,7 +61,6 @@ extern crate alloc;
 
 mod api;
 pub mod ck;
-mod diag;
 mod sign;
 mod state;
 mod token;

@@ -196,6 +196,7 @@ impl ScardTransaction {
         // SAFETY: `h_card` is the open handle the Base CSP gave us.
         let rc = unsafe { SCardBeginTransaction(h_card) };
         if rc != SCARD_S_SUCCESS {
+            refineid_dev_errors::report!(CardModule, "card transaction not begun", status rc);
             return Err(TransportError::TransactionFailed(rc));
         }
         Ok(Self { h_card })
@@ -644,6 +645,7 @@ impl WinScardTransport {
             )
         };
         if rc != SCARD_S_SUCCESS {
+            refineid_dev_errors::report!(CardModule, "card transmit failed", status rc);
             return Err(TransportError::ApduFailed(rc));
         }
 

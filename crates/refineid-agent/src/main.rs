@@ -10,9 +10,8 @@
 //! pairing's authentication certificate in the user's store while the
 //! pairing is usable, and runs each request as one `browser_authenticate`.
 //!
-//! Nothing personal is logged: the agent prints what it does and the
-//! signal strength of the phone it reaches, never a name or an identity
-//! code.
+//! A development build reports the agent's failures to the Windows Event
+//! Log through `refineid-dev-errors`; a release build writes nothing.
 
 #[cfg(windows)]
 mod session;

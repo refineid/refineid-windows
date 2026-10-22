@@ -188,11 +188,10 @@ internal sealed partial class PairingDialog : ContentDialog
             {
                 NativeRappService.CancelPairing(current);
             }
-            catch (NativeRappException ex)
+            catch (NativeRappException)
             {
-                System.Diagnostics.Debug.WriteLine(
-                    $"CancelPairing ignored on dismissal: {ex.Message}"
-                );
+                // The requester bridge reports its own failure; the dismissal
+                // goes on.
             }
 
             NativeRappService.EndPairing(current);

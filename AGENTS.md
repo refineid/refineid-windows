@@ -10,6 +10,15 @@
   display, or format PIN bytes, candidate PIN lengths (e.g. `got {len}`), or
   development PIN identifiers in log sinks, audit records, or error strings.
   Never commit test PINs or card secrets.
+- Development builds make every error visible; release builds never log. A
+  debug build (`debug_assertions` in Rust, `DEBUG` in C#) reports each
+  failure at its typed boundary with `refineid_dev_errors::report!` or
+  `DevErrorLog.Report` to the Windows Event Log (Application log, source
+  `RefineID`), and the app's Errors window shows it as it arrives. A report
+  names the event and its cause: an error case, a fixed text or a
+  spec-named status, never a value it carries. Release, Store and
+  production builds contain no logging code: no sink, no Event Log call,
+  and no stderr, debugger or file log.
 - Safe Rust owns protocol, parsing, and secret handling. Keep `unsafe` inside
   the Windows Card Module or PC/SC boundary.
 - Every Windows ABI pointer access must validate nullability and length before

@@ -77,6 +77,19 @@ impl From<windows::core::Error> for ScanError {
 /// [`ScanError::RadioUnavailable`] when the radio is off or the scan was
 /// aborted, and [`ScanError::Platform`] for other Windows Runtime failures.
 pub fn scan(window: Duration) -> Result<Vec<ScannedAdvertiser>, ScanError> {
+    let scanned = scanned(window);
+    match &scanned {
+        Ok(_) => {}
+        Err(ScanError::Platform(code)) => {
+            refineid_dev_errors::report!(Bluetooth, "Bluetooth scan failed", status code);
+        }
+        Err(error) => refineid_dev_errors::report!(Bluetooth, "Bluetooth scan failed", error),
+    }
+    scanned
+}
+
+/// [`scan`], unreported.
+fn scanned(window: Duration) -> Result<Vec<ScannedAdvertiser>, ScanError> {
     let watcher = BluetoothLEAdvertisementWatcher::new()?;
     watcher.SetScanningMode(BluetoothLEScanningMode::Active)?;
     watcher

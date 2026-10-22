@@ -67,7 +67,7 @@ use windows_sys::Win32::Security::Cryptography::{
 use windows_sys::Win32::System::Memory::{GetProcessHeap, HEAP_ZERO_MEMORY, HeapAlloc, HeapFree};
 use windows_sys::core::{HRESULT, PCWSTR};
 
-use crate::cardmod::{Log, remote_ecdsa_to_p1363};
+use crate::cardmod::remote_ecdsa_to_p1363;
 use crate::ksp_codec::{Digest, KeyKind, ecc_public_blob, rsa_public_blob, rsa_signature_to_width};
 use crate::ksp_verify::verifies;
 
@@ -158,7 +158,7 @@ fn usable_keys() -> Vec<OpenKey> {
             .into_iter()
             .collect(),
         Err(error) => {
-            Log::dbg(&format!("KSP: pairing store unavailable: {error}"));
+            refineid_dev_errors::report!(KeyStorageProvider, "pairing store not loaded", error);
             Vec::new()
         }
     }
@@ -295,10 +295,13 @@ unsafe extern "system" fn OpenKey(
         return NTE_BAD_KEYSET;
     };
     let Some(key) = usable_keys().into_iter().find(|key| key.pair_id == pair_id) else {
-        Log::dbg("KSP: OpenKey: no usable pairing with a cached certificate");
+        refineid_dev_errors::report!(
+            KeyStorageProvider,
+            "OpenKey failed",
+            "no usable pairing with a cached certificate"
+        );
         return NTE_BAD_KEYSET;
     };
-    Log::dbg(&format!("KSP: OpenKey: {}", key.kind.algorithm_name()));
     // SAFETY: checked non-null; the caller owns the handle slot.
     unsafe { *phKey = register(Handle::Key(Box::new(key))) };
     S_OK
@@ -727,24 +730,25 @@ unsafe extern "system" fn SignHash(
     let Ok(request) = SignRequest::new(key.pair_id, key_profile, algorithm, hash) else {
         return NTE_INVALID_PARAMETER;
     };
-    Log::dbg(&format!("KSP: SignHash: {}", key.kind.algorithm_name()));
     // W-R-1: the provider opens no transport; the user's agent holds the
     // phone's session and signs.
     let signature = match request_signature(&request, SIGNATURE_DEADLINE) {
         Ok(SignAnswer::Signature(signature)) => signature,
         Ok(SignAnswer::Denied | SignAnswer::Cancelled) => return NTE_USER_CANCELLED,
         Ok(SignAnswer::NoPhone) | Err(PipeError::NoAgent) => {
-            Log::dbg("KSP: SignHash: no agent or no phone");
+            refineid_dev_errors::report!(
+                KeyStorageProvider,
+                "SignHash failed",
+                "no agent or no phone"
+            );
             return NTE_DEVICE_NOT_READY;
         }
         Ok(answer) => {
-            Log::dbg(&format!("KSP: SignHash: the agent answered {answer:?}"));
+            refineid_dev_errors::report!(KeyStorageProvider, "SignHash failed", answer);
             return NTE_FAIL;
         }
-        Err(error) => {
-            Log::dbg(&format!("KSP: SignHash: agent pipe: {error}"));
-            return NTE_FAIL;
-        }
+        // The pipe client reports its own failure.
+        Err(_) => return NTE_FAIL,
     };
     let encoded = match key.kind {
         KeyKind::EcP256 | KeyKind::EcP384 => {
@@ -753,13 +757,21 @@ unsafe extern "system" fn SignHash(
         KeyKind::Rsa { .. } => rsa_signature_to_width(&signature, key.kind.element_bytes()),
     };
     let Some(encoded) = encoded else {
-        Log::dbg("KSP: SignHash: remote signature has an unexpected length");
+        refineid_dev_errors::report!(
+            KeyStorageProvider,
+            "SignHash failed",
+            "the remote signature length is wrong"
+        );
         return NTE_FAIL;
     };
     // W-R-5: only a signature that verifies against the opened certificate
     // reaches the caller.
     if !verifies(key.certificate.as_der(), algorithm, hash, &encoded) {
-        Log::dbg("KSP: SignHash: the signature does not verify against the certificate");
+        refineid_dev_errors::report!(
+            KeyStorageProvider,
+            "SignHash failed",
+            "the signature does not verify against the certificate"
+        );
         return NTE_BAD_SIGNATURE;
     }
     // SAFETY: the output triple is the caller's.

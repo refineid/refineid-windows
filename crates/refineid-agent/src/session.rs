@@ -15,7 +15,7 @@ use refineid_agent_pipe::{
 use refineid_lib_core::x509::OwnedCert;
 use refineid_rapp::RoutingKey;
 use refineid_rapp_ble::gatt::BleLink;
-use refineid_rapp_ble::reach::{Attempt, ReachError, reach_revocation_notice, reach_session};
+use refineid_rapp_ble::reach::{ReachError, reach_revocation_notice, reach_session};
 use refineid_rapp_core::clock::unix_time_ms;
 use refineid_rapp_core::engine::{
     OperationOutcome, Requester, RequesterConfig, Session, SessionEnd, SessionError,
@@ -89,51 +89,52 @@ impl Job {
     }
 }
 
-fn log(started: Instant, line: &str) {
-    eprintln!("[{:>8.1}s] {line}", started.elapsed().as_secs_f64());
+/// Reports a pipe failure in a development build, by the Windows error it
+/// carries where it carries one.
+macro_rules! report_pipe {
+    ($event:literal, $error:expr) => {
+        match $error {
+            PipeError::Identity(code) | PipeError::Pipe(code) => {
+                refineid_dev_errors::report!(Agent, $event, status code);
+            }
+            other => refineid_dev_errors::report!(Agent, $event, other),
+        }
+    };
 }
 
 /// Serves the pipe until the process ends.
 pub fn run() -> ExitCode {
-    let started = Instant::now();
     let lock = match AgentLock::acquire() {
         Ok(lock) => lock,
         Err(error) => {
-            log(started, &error.to_string());
+            report_pipe!("agent not started", error);
             return ExitCode::FAILURE;
         }
     };
     let mut server = match PipeServer::bind(&lock) {
         Ok(server) => server,
         Err(error) => {
-            log(
-                started,
-                &format!("the agent pipe cannot be created: {error}"),
-            );
+            report_pipe!("agent pipe not created", error);
             return ExitCode::FAILURE;
         }
     };
     let (jobs, inbox) = channel();
-    thread::spawn(move || serve_phone(started, &inbox));
+    thread::spawn(move || serve_phone(&inbox));
     let computer = computer_name();
-    log(started, "serving the key storage provider");
     loop {
         let mut client = match server.accept() {
             Ok(client) => client,
-            Err(PipeError::Stranger) => {
-                log(started, "refused a client of another user or session");
-                continue;
-            }
             Err(error) => {
-                log(started, &format!("pipe: {error}"));
-                thread::sleep(PIPE_PAUSE);
+                report_pipe!("agent pipe client refused", error);
+                if error != PipeError::Stranger {
+                    thread::sleep(PIPE_PAUSE);
+                }
                 continue;
             }
         };
         let program = program_label(&client.identity().image);
         let answer = match client.request() {
             Ok(request) => {
-                log(started, &format!("signature requested by {program}"));
                 let (reply, answered) = channel();
                 let job = Job {
                     request,
@@ -151,21 +152,16 @@ pub fn run() -> ExitCode {
                 }
             }
             Err(error) => {
-                log(started, &format!("refused a request: {error}"));
+                report_pipe!("signature request refused", error);
                 SignAnswer::Failed
             }
         };
-        log(started, &format!("answer: {}", describe(&answer)));
-        if let Err(error) = client.answer(&answer) {
-            log(started, &format!("the answer was not delivered: {error}"));
+        if !matches!(answer, SignAnswer::Signature(_)) {
+            refineid_dev_errors::report!(Agent, "signature not made", answer);
         }
-    }
-}
-
-fn describe(answer: &SignAnswer) -> String {
-    match answer {
-        SignAnswer::Signature(bytes) => format!("signature, {} bytes", bytes.len()),
-        other => format!("{other:?}"),
+        if let Err(error) = client.answer(&answer) {
+            report_pipe!("signature answer not delivered", error);
+        }
     }
 }
 
@@ -189,23 +185,20 @@ fn requester_over(store: ProtectedPairingStore) -> AgentRequester {
     )
 }
 
-fn load_pairing(started: Instant, offered: &mut Option<Offered>) -> Option<Pairing> {
+fn load_pairing(offered: &mut Option<Offered>) -> Option<Pairing> {
     let store = match ProtectedPairingStore::load() {
         Ok(store) => store,
         Err(error) => {
-            log(
-                started,
-                &format!("the pairing store cannot be loaded: {error}"),
-            );
+            refineid_dev_errors::report!(Agent, "pairing store not loaded", error);
             return None;
         }
     };
     let mut requester = requester_over(store);
-    deliver_revocation_notices(started, &mut requester);
+    deliver_revocation_notices(&mut requester);
     let record = requester.store().usable_pairing()?;
     let pair_id = record.pair_id();
     let key = RoutingKey::derive(record.pair_record()?).ok()?;
-    sync_offer(started, &requester, pair_id, offered);
+    sync_offer(&requester, pair_id, offered);
     Some(Pairing {
         requester,
         pair_id,
@@ -217,7 +210,7 @@ fn load_pairing(started: Instant, offered: &mut Option<Offered>) -> Option<Pairi
 /// reach its `pairing_revoked` close, as the first message of a session
 /// (RAPP v26.10.22 section 4.6 item 2); a phone not found now is tried
 /// again on the next round, for at most 30 days.
-fn deliver_revocation_notices(started: Instant, requester: &mut AgentRequester) {
+fn deliver_revocation_notices(requester: &mut AgentRequester) {
     let owed: Vec<(PairId, RoutingKey)> = requester
         .store()
         .forgotten_pairings()
@@ -227,13 +220,9 @@ fn deliver_revocation_notices(started: Instant, requester: &mut AgentRequester) 
         })
         .collect();
     for (pair_id, key) in owed {
-        match reach_revocation_notice(requester, pair_id, &key, NOTICE_REACH_WINDOW, |_| {}) {
-            Ok(()) => log(started, "told a phone this computer forgot it"),
-            Err(error) => log(
-                started,
-                &format!("a forgotten phone was not told yet: {error}"),
-            ),
-        }
+        // A phone not found now is told on a later round; the scan and the
+        // session report their own failures.
+        let _ = reach_revocation_notice(requester, pair_id, &key, NOTICE_REACH_WINDOW, |_| {});
     }
 }
 
@@ -244,15 +233,10 @@ fn deliver_revocation_notices(started: Instant, requester: &mut AgentRequester) 
 /// pairing is forgotten or revoked or a session hears another card; another
 /// card's certificate is withdrawn before this one is installed, as
 /// installing adds a certificate beside it.
-fn sync_offer(
-    started: Instant,
-    requester: &AgentRequester,
-    pair_id: PairId,
-    offered: &mut Option<Offered>,
-) {
+fn sync_offer(requester: &AgentRequester, pair_id: PairId, offered: &mut Option<Offered>) {
     let Some(certificate) = offered_certificate(requester.store(), pair_id, unix_time_ms()) else {
         if offered.is_some() {
-            withdraw_certificates(started, offered);
+            withdraw_certificates(offered);
         }
         return;
     };
@@ -264,17 +248,13 @@ fn sync_offer(
         return;
     }
     if offered.is_some() {
-        withdraw_certificates(started, offered);
+        withdraw_certificates(offered);
     }
     match install_browser_certificate(certificate, pair_id) {
-        Ok(()) => {
-            log(started, "the phone's certificate is offered to browsers");
-            *offered = Some(wanted);
+        Ok(()) => *offered = Some(wanted),
+        Err(error) => {
+            refineid_dev_errors::report!(Agent, "certificate not offered to browsers", error);
         }
-        Err(error) => log(
-            started,
-            &format!("the certificate was not offered: {error}"),
-        ),
     }
 }
 
@@ -301,25 +281,24 @@ fn bounded_by_offer(step: Duration, until_lapse: Option<Duration>) -> Duration {
     until_lapse.map_or(step, |left| step.min(left))
 }
 
-fn withdraw_certificates(started: Instant, offered: &mut Option<Offered>) {
-    match remove_browser_certificates() {
-        Ok(count) => log(started, &format!("withdrew {count} offered certificates")),
-        Err(error) => log(started, &format!("certificates not withdrawn: {error}")),
+fn withdraw_certificates(offered: &mut Option<Offered>) {
+    if let Err(error) = remove_browser_certificates() {
+        refineid_dev_errors::report!(Agent, "offered certificates not withdrawn", error);
     }
     *offered = None;
 }
 
 /// The session thread: keeps the phone's session and runs every job.
-fn serve_phone(started: Instant, inbox: &Receiver<Job>) {
+fn serve_phone(inbox: &Receiver<Job>) {
     // W-R-8: certificates offered by an earlier run are purged first.
     let mut offered = None;
-    withdraw_certificates(started, &mut offered);
+    withdraw_certificates(&mut offered);
     let mut pending: Option<Waiting> = None;
     loop {
-        let Some(mut pairing) = load_pairing(started, &mut offered) else {
+        let Some(mut pairing) = load_pairing(&mut offered) else {
             // W-R-8: no usable pairing, so nothing stays offered.
             if offered.is_some() {
-                withdraw_certificates(started, &mut offered);
+                withdraw_certificates(&mut offered);
             }
             if let Some(waiting) = pending.take() {
                 waiting.job.answer(SignAnswer::Failed);
@@ -342,55 +321,30 @@ fn serve_phone(started: Instant, inbox: &Receiver<Job>) {
             pairing.pair_id,
             &pairing.key,
             bounded_by_offer(search, until_lapse),
-            |attempt| match attempt {
-                Attempt::Routing(advertiser) => log(
-                    started,
-                    &format!(
-                        "routing a session to an advertiser at {} dBm",
-                        advertiser.rssi.dbm()
-                    ),
-                ),
-                Attempt::LinkFailed(error) => log(started, &format!("  {error}")),
-                Attempt::Refused(error) => log(started, &format!("  no session: {error}")),
-            },
+            |_| {},
         );
         let mut session = match reached {
             Ok(session) => session,
             Err(error) => {
-                match after_failed_search(
-                    started,
-                    &error,
-                    &pairing,
-                    &mut offered,
-                    &mut pending,
-                    inbox,
-                ) {
+                match after_failed_search(&error, &pairing, &mut offered, &mut pending, inbox) {
                     AfterSearch::Again => continue,
                     AfterSearch::Stop => return,
                 }
             }
         };
-        log(started, "session open over Bluetooth");
         // A waiting request runs only once the phone has said which card it
         // holds and the offer follows it (RAPP v26.10.22 section 8.4).
         await_card_report(&mut pairing, &mut session);
         let mut card_checked = None;
-        follow_card(
-            started,
-            &mut pairing,
-            &mut session,
-            &mut offered,
-            &mut card_checked,
-        );
+        follow_card(&mut pairing, &mut session, &mut offered, &mut card_checked);
         if let Some(waiting) = pending.take() {
             if session.end().is_some() {
                 waiting.job.answer(SignAnswer::NoPhone);
             } else {
-                sign(started, &mut pairing, &mut session, waiting.job);
+                sign(&mut pairing, &mut session, waiting.job);
             }
         }
         if !hold_session(
-            started,
             &mut pairing,
             &mut session,
             &mut offered,
@@ -399,10 +353,8 @@ fn serve_phone(started: Instant, inbox: &Receiver<Job>) {
         ) {
             return;
         }
-        let end = session.end();
-        log(started, &format!("session ended: {end:?}"));
-        if end == Some(SessionEnd::PeerClose(CloseReason::PairingRevoked)) {
-            withdraw_certificates(started, &mut offered);
+        if session.end() == Some(SessionEnd::PeerClose(CloseReason::PairingRevoked)) {
+            withdraw_certificates(&mut offered);
         }
     }
 }
@@ -420,7 +372,6 @@ enum AfterSearch {
 /// behind it; then the agent pauses, never past the moment the standing
 /// offer lapses (RAPP v26.10.22 section 8.4 item 3).
 fn after_failed_search(
-    started: Instant,
     error: &ReachError,
     pairing: &Pairing,
     offered: &mut Option<Offered>,
@@ -431,8 +382,7 @@ fn after_failed_search(
         error,
         ReachError::Pairing(SessionError::ClosedByPeer(CloseReason::PairingRevoked))
     ) {
-        log(started, "the phone forgot this computer");
-        withdraw_certificates(started, offered);
+        withdraw_certificates(offered);
     }
     if pending.is_none() {
         *pending = inbox.try_recv().ok().map(Waiting::from_now);
@@ -446,10 +396,7 @@ fn after_failed_search(
         Some(waiting) => {
             // Every request that arrived during the search waited for it.
             for job in core::iter::once(waiting.job).chain(inbox.try_iter()) {
-                log(
-                    started,
-                    &format!("no phone for the waiting request: {error}"),
-                );
+                refineid_dev_errors::report!(Agent, "no phone for a signature request", error);
                 job.answer(SignAnswer::NoPhone);
             }
         }
@@ -482,7 +429,6 @@ fn await_card_report(pairing: &mut Pairing, session: &mut Session<BleLink>) {
 /// withdrawn at once and its certificate read on the session, and the
 /// offer is then brought in line with what the session heard.
 fn follow_card(
-    started: Instant,
     pairing: &mut Pairing,
     session: &mut Session<BleLink>,
     offered: &mut Option<Offered>,
@@ -502,15 +448,11 @@ fn follow_card(
         if known != Some(fingerprint) {
             // The session recorded the card it hears, so the earlier card's
             // offer goes before this one's certificate is read.
-            log(
-                started,
-                "the phone serves a card whose certificate is not cached",
-            );
-            sync_offer(started, &pairing.requester, pairing.pair_id, offered);
-            learn_certificate(started, pairing, session);
+            sync_offer(&pairing.requester, pairing.pair_id, offered);
+            learn_certificate(pairing, session);
         }
     }
-    sync_offer(started, &pairing.requester, pairing.pair_id, offered);
+    sync_offer(&pairing.requester, pairing.pair_id, offered);
 }
 
 /// Holds an open session: runs every job that arrives, keeps the session
@@ -521,7 +463,6 @@ fn follow_card(
 /// user forgot the pairing meanwhile (section 4.6 item 1). Returns false
 /// when the pipe is gone and the agent stops.
 fn hold_session(
-    started: Instant,
     pairing: &mut Pairing,
     session: &mut Session<BleLink>,
     offered: &mut Option<Offered>,
@@ -535,11 +476,11 @@ fn hold_session(
                 // A pairing the user forgot meanwhile signs nothing (RAPP
                 // v26.10.22 section 4.6).
                 store_checked = Instant::now();
-                close_if_forgotten(started, pairing, session, offered);
+                close_if_forgotten(pairing, session, offered);
                 if session.end().is_some() {
                     job.answer(SignAnswer::Failed);
                 } else {
-                    sign(started, pairing, session, job);
+                    sign(pairing, session, job);
                 }
             }
             Err(TryRecvError::Empty) => {
@@ -555,9 +496,9 @@ fn hold_session(
         }
         if store_checked.elapsed() >= STORE_CHECK_INTERVAL {
             store_checked = Instant::now();
-            close_if_forgotten(started, pairing, session, offered);
+            close_if_forgotten(pairing, session, offered);
         }
-        follow_card(started, pairing, session, offered, &mut card_checked);
+        follow_card(pairing, session, offered, &mut card_checked);
     }
     true
 }
@@ -567,7 +508,6 @@ fn hold_session(
 /// v26.10.22 section 4.6 item 1); one already revoked or removed is closed.
 /// A store that cannot be read changes nothing.
 fn close_if_forgotten(
-    started: Instant,
     pairing: &mut Pairing,
     session: &mut Session<BleLink>,
     offered: &mut Option<Offered>,
@@ -580,22 +520,21 @@ fn close_if_forgotten(
         return;
     }
     if record.is_some_and(PairingRecord::owes_revocation_notice) {
-        match pairing.requester.forget_pairing_in_session(session) {
-            Ok(()) => log(started, "told the phone this computer forgot it"),
-            Err(error) => log(started, &format!("the forget was not recorded: {error}")),
+        if let Err(error) = pairing.requester.forget_pairing_in_session(session) {
+            refineid_dev_errors::report!(Agent, "forgotten pairing not recorded", error);
         }
     } else {
         pairing
             .requester
             .disconnect(session, CloseReason::UserDisconnect);
     }
-    withdraw_certificates(started, offered);
+    withdraw_certificates(offered);
 }
 
 /// Reads the authentication certificate and keeps it on the pairing record,
 /// for the key storage provider and for the offer, which stands once a
 /// session has heard its card.
-fn learn_certificate(started: Instant, pairing: &mut Pairing, session: &mut Session<BleLink>) {
+fn learn_certificate(pairing: &mut Pairing, session: &mut Session<BleLink>) {
     let operation = CardOperation::ReadCertificate {
         kind: CertificateKind::Authentication,
     };
@@ -604,24 +543,16 @@ fn learn_certificate(started: Instant, pairing: &mut Pairing, session: &mut Sess
         .execute(session, &operation, OPERATION_LIFETIME_MS)
     {
         Ok(OperationOutcome::Completed(CardOperationResult::Certificate(der))) => der,
-        Ok(outcome) => {
-            log(
-                started,
-                &format!("the certificate was not read: {outcome:?}"),
-            );
+        Ok(OperationOutcome::Completed(_)) => {
+            refineid_dev_errors::report!(Agent, "certificate not read", "another result came");
             return;
         }
-        Err(error) => {
-            log(started, &format!("the certificate was not read: {error}"));
-            return;
-        }
+        // The engine reports an operation that ended without its result,
+        // and one it did not admit.
+        Ok(_) | Err(_) => return,
     };
-    log(
-        started,
-        &format!("read the authentication certificate, {} bytes", der.len()),
-    );
     let Ok(certificate) = OwnedCert::from_der(der) else {
-        log(started, "the phone's certificate does not parse");
+        refineid_dev_errors::report!(Agent, "certificate not read", "it does not parse");
         return;
     };
     let stored = pairing
@@ -631,17 +562,14 @@ fn learn_certificate(started: Instant, pairing: &mut Pairing, session: &mut Sess
             record.remember_authentication_certificate(certificate.clone());
         });
     if let Err(error) = stored {
-        log(
-            started,
-            &format!("the certificate was not stored: {error:?}"),
-        );
+        refineid_dev_errors::report!(Agent, "certificate not stored", error);
     }
 }
 
 /// Runs one job as a `browser_authenticate` and answers it.
-fn sign(started: Instant, pairing: &mut Pairing, session: &mut Session<BleLink>, job: Job) {
+fn sign(pairing: &mut Pairing, session: &mut Session<BleLink>, job: Job) {
     if job.request.pair_id() != pairing.pair_id {
-        log(started, "refused a request for another pairing");
+        refineid_dev_errors::report!(Agent, "signature request refused", "another pairing");
         job.answer(SignAnswer::Failed);
         return;
     }
@@ -651,20 +579,11 @@ fn sign(started: Instant, pairing: &mut Pairing, session: &mut Session<BleLink>,
         algorithm: job.request.algorithm(),
         digest: job.request.digest().to_vec(),
     };
-    log(started, "asking the phone to sign");
-    let answer = match pairing
+    // The engine reports a request it did not admit.
+    let answer = pairing
         .requester
         .execute(session, &operation, OPERATION_LIFETIME_MS)
-    {
-        Ok(outcome) => answer_for(outcome),
-        Err(error) => {
-            log(
-                started,
-                &format!("the phone did not admit the request: {error}"),
-            );
-            SignAnswer::Failed
-        }
-    };
+        .map_or(SignAnswer::Failed, answer_for);
     job.answer(answer);
 }
 

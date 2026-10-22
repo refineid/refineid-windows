@@ -108,6 +108,12 @@ pub fn present_readers() -> Result<Vec<String>, PcscError> {
 /// # Errors
 /// Returns reader, card-classification, trust, certificate, or PC/SC failures.
 pub fn inspect(reader_filter: Option<&ReaderFilter>) -> Result<CardSnapshot, CardPinError> {
+    inspected(reader_filter).inspect_err(|error| {
+        refineid_dev_errors::report!(CardService, "card inspection failed", error);
+    })
+}
+
+fn inspected(reader_filter: Option<&ReaderFilter>) -> Result<CardSnapshot, CardPinError> {
     let context = crate::card_pin::classify_card_for_activation(PcscBackend, reader_filter)?;
     let mut transport = PcscBackend.open_exclusive(&context.reader_id, ReaderAccessCap::Read)?;
     transport
@@ -147,6 +153,15 @@ pub fn inspect(reader_filter: Option<&ReaderFilter>) -> Result<CardSnapshot, Car
 /// Returns reader, PACE, secure-messaging, trust, certificate, or PC/SC
 /// failures.
 pub fn inspect_contactless(
+    reader_filter: Option<&ReaderFilter>,
+    can: Can,
+) -> Result<ContactlessSnapshot, CardPinError> {
+    inspected_contactless(reader_filter, can).inspect_err(|error| {
+        refineid_dev_errors::report!(CardService, "contactless inspection failed", error);
+    })
+}
+
+fn inspected_contactless(
     reader_filter: Option<&ReaderFilter>,
     can: Can,
 ) -> Result<ContactlessSnapshot, CardPinError> {
@@ -284,6 +299,15 @@ pub fn activate(
     reader_filter: Option<&ReaderFilter>,
     options: ActivateOptions,
 ) -> Result<ActivateReport, CardPinError> {
+    activated(expected_serial, reader_filter, options)
+        .inspect_err(|error| refineid_dev_errors::report!(CardService, "activation failed", error))
+}
+
+fn activated(
+    expected_serial: &TokenSerial,
+    reader_filter: Option<&ReaderFilter>,
+    options: ActivateOptions,
+) -> Result<ActivateReport, CardPinError> {
     let context = crate::card_pin::classify_card_for_activation(PcscBackend, reader_filter)?;
     ensure_serial(expected_serial, &context.bound_serial)?;
     crate::card_pin::activate_first(PcscBackend, context, options)
@@ -294,6 +318,14 @@ pub fn activate(
 /// # Errors
 /// Returns trust, card-swap, retry-floor, policy, PC/SC, or card failures.
 pub fn change_pin(
+    expected_serial: &TokenSerial,
+    options: ChangePinOptions,
+) -> Result<ChangePinReport, CardPinError> {
+    changed_pin(expected_serial, options)
+        .inspect_err(|error| refineid_dev_errors::report!(CardService, "PIN change failed", error))
+}
+
+fn changed_pin(
     expected_serial: &TokenSerial,
     options: ChangePinOptions,
 ) -> Result<ChangePinReport, CardPinError> {
@@ -308,6 +340,14 @@ pub fn change_pin(
 /// # Errors
 /// Returns trust, card-swap, policy, PC/SC, or recovery failures.
 pub fn unblock_pin(
+    expected_serial: &TokenSerial,
+    options: UnblockPinOptions,
+) -> Result<UnblockPinReport, CardPinError> {
+    unblocked_pin(expected_serial, options)
+        .inspect_err(|error| refineid_dev_errors::report!(CardService, "PIN unblock failed", error))
+}
+
+fn unblocked_pin(
     expected_serial: &TokenSerial,
     options: UnblockPinOptions,
 ) -> Result<UnblockPinReport, CardPinError> {

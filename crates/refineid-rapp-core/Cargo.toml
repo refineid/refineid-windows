@@ -8,6 +8,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+refineid-dev-errors.workspace = true
 refineid-lib-core.workspace = true
 refineid-rapp.workspace = true
 refineid-remote.workspace = true

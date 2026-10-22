@@ -24,6 +24,7 @@ crate-type = ["cdylib", "rlib"]
 name = "refineid_pkcs11"
 
 [dependencies]
+refineid-dev-errors.workspace = true
 refineid-lib-core.workspace = true
 refineid-lib-pcsc.workspace = true
 refineid-rapp-core.workspace = true
