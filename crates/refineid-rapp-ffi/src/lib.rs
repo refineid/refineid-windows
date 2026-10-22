@@ -90,7 +90,7 @@ const PAIRING_SEARCH_MS: u64 = refineid_rapp::OFFER_TTL_MS;
 const MAX_SESSION_BROWSE_ROUNDS: u32 = 3;
 
 /// Operation expiry sent on the wire; the holder approves within this.
-const OPERATION_EXPIRY_MS: u64 = 120_000;
+const OPERATION_EXPIRY_MS: u64 = 300_000;
 
 /// Longest typed pairing code accepted, in bytes, before normalization.
 const MAX_CODE_BYTES: usize = 64;

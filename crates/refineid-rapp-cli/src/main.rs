@@ -60,7 +60,7 @@ const BROWSE_WINDOW: Duration = Duration::from_secs(3);
 const SESSION_RETRY: Duration = Duration::from_secs(2);
 
 /// Operation expiry sent on the wire; the holder approves within this.
-const OPERATION_EXPIRY_MS: u64 = 120_000;
+const OPERATION_EXPIRY_MS: u64 = 300_000;
 
 /// Visible prefix of a personal identifier in development output.
 const PERSON_ID_VISIBLE_CHARS: usize = 6;

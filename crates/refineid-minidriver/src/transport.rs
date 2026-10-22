@@ -260,7 +260,7 @@ const BROWSE_ROUND: Duration = Duration::from_secs(3);
 const BROWSE_ROUNDS: u32 = 3;
 
 /// Operation expiry sent on the wire; the holder approves within this.
-const OPERATION_LIFETIME_MS: u64 = 120_000;
+const OPERATION_LIFETIME_MS: u64 = 300_000;
 
 /// Why a remote operation gave no result.
 #[derive(Debug)]
