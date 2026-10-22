@@ -27,16 +27,6 @@ const RSSI_MAXIMUM_DBM: i16 = 20;
 /// The `RSSI` value meaning that no measurement is available (same section).
 const RSSI_NOT_AVAILABLE: i16 = 127;
 
-/// The proximity threshold RAPP v26.10.18 section 4.4 item 1 requires, in dBm.
-const PROXIMITY_GATE_SPECIFICATION_DBM: i16 = -55;
-/// The weakest threshold section 4.4 item 1 allows, strictly in isolated
-/// development environments, in dBm.
-const PROXIMITY_GATE_DEVELOPMENT_FLOOR_DBM: i16 = -85;
-/// The advertisements a filtered reading needs (section 4.4 item 2).
-pub const PROXIMITY_MINIMUM_SAMPLES: usize = 3;
-/// The hysteresis an admitted advertiser keeps, in dB (section 4.4 item 2).
-const PROXIMITY_HYSTERESIS_DB: i16 = 3;
-
 /// A value from the link that its border refuses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinkValueError {
@@ -46,8 +36,6 @@ pub enum LinkValueError {
     RssiUnavailable,
     /// The signal strength lies outside -127 to +20 dBm.
     RssiOutOfRange,
-    /// A development proximity threshold lies outside -85 to -55 dBm.
-    GateOutOfRange,
     /// The negotiated ATT MTU is below the 512 bytes section 5.2 requires.
     MtuBelowMinimum {
         /// The MTU the two Bluetooth stacks negotiated.
@@ -63,11 +51,6 @@ impl fmt::Display for LinkValueError {
             Self::AddressOutOfRange => write!(formatter, "advertiser address out of range"),
             Self::RssiUnavailable => write!(formatter, "signal strength not available"),
             Self::RssiOutOfRange => write!(formatter, "signal strength out of range"),
-            Self::GateOutOfRange => write!(
-                formatter,
-                "proximity threshold outside {PROXIMITY_GATE_DEVELOPMENT_FLOOR_DBM} to \
-                 {PROXIMITY_GATE_SPECIFICATION_DBM} dBm"
-            ),
             Self::MtuBelowMinimum { negotiated } => write!(
                 formatter,
                 "this computer's Bluetooth link negotiated an ATT MTU of {negotiated} bytes; \
@@ -90,7 +73,7 @@ impl core::error::Error for LinkValueError {
 /// The Bluetooth device address an advertisement came from.
 ///
 /// Phones advertise under a resolvable private address that rotates (RAPP
-/// v26.10.18 section 4.1), so an address names an advertiser for as long as
+/// v26.10.21 section 4.1), so an address names an advertiser for as long as
 /// it is advertised, not a phone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AdvertiserAddress(u64);
@@ -155,82 +138,6 @@ impl Rssi {
     }
 }
 
-/// The filtered signal strength of one advertiser: the median of at least
-/// [`PROXIMITY_MINIMUM_SAMPLES`] measurements (section 4.4 item 2).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ProximityReading(Rssi);
-
-impl ProximityReading {
-    /// The median of `samples`, taking the weaker of the two middle values
-    /// when their count is even.
-    ///
-    /// Returns `None` for fewer than [`PROXIMITY_MINIMUM_SAMPLES`]
-    /// measurements: such an advertiser has no reading yet.
-    #[must_use]
-    pub fn median_of(samples: &[Rssi]) -> Option<Self> {
-        if samples.len() < PROXIMITY_MINIMUM_SAMPLES {
-            return None;
-        }
-        let mut sorted = samples.to_vec();
-        sorted.sort_unstable();
-        sorted.get((sorted.len() - 1) / 2).copied().map(Self)
-    }
-
-    /// The filtered strength.
-    #[must_use]
-    pub const fn rssi(self) -> Rssi {
-        self.0
-    }
-}
-
-/// The advisory proximity gate a requester applies before it connects
-/// (section 4.4 item 1). It is a discovery heuristic, never a proof of
-/// proximity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ProximityGate {
-    threshold: Rssi,
-}
-
-impl ProximityGate {
-    /// The threshold the specification requires: -55 dBm.
-    pub const SPECIFICATION: Self = Self {
-        threshold: Rssi(PROXIMITY_GATE_SPECIFICATION_DBM),
-    };
-
-    /// A weaker threshold for an isolated development environment.
-    ///
-    /// # Errors
-    /// [`LinkValueError::GateOutOfRange`] outside -85 to -55 dBm.
-    pub const fn development(threshold_dbm: i16) -> Result<Self, LinkValueError> {
-        if threshold_dbm < PROXIMITY_GATE_DEVELOPMENT_FLOOR_DBM
-            || threshold_dbm > PROXIMITY_GATE_SPECIFICATION_DBM
-        {
-            return Err(LinkValueError::GateOutOfRange);
-        }
-        Ok(Self {
-            threshold: Rssi(threshold_dbm),
-        })
-    }
-
-    /// The threshold.
-    #[must_use]
-    pub const fn threshold(self) -> Rssi {
-        self.threshold
-    }
-
-    /// Whether an advertiser with `reading` passes. One that passed before
-    /// keeps passing until it falls 3 dB below the threshold.
-    #[must_use]
-    pub const fn admits(self, reading: ProximityReading, admitted_before: bool) -> bool {
-        let threshold = if admitted_before {
-            self.threshold.0 - PROXIMITY_HYSTERESIS_DB
-        } else {
-            self.threshold.0
-        };
-        reading.0.0 >= threshold
-    }
-}
-
 /// An ATT MTU the profile accepts: one the two Bluetooth stacks negotiated
 /// that is at least 512 bytes (section 5.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -291,11 +198,6 @@ mod tests {
     use super::*;
 
     const RANDOM_STATIC_ADDRESS: u64 = 0xC0_11_22_33_44_55;
-    const STRONG_DBM: i16 = -40;
-    const AT_GATE_DBM: i16 = -55;
-    const BELOW_GATE_DBM: i16 = -56;
-    const WITHIN_HYSTERESIS_DBM: i16 = -58;
-    const BEYOND_HYSTERESIS_DBM: i16 = -59;
     const WINDOWS_TYPICAL_MTU: u16 = 527;
     const LE_DEFAULT_ATT_MTU: u16 = 23;
     const LARGEST_FRAGMENT_PAYLOAD: usize = 506;
@@ -339,51 +241,6 @@ mod tests {
         );
         assert_eq!(rssi(RSSI_MINIMUM_DBM).dbm(), RSSI_MINIMUM_DBM);
         assert_eq!(rssi(RSSI_MAXIMUM_DBM).dbm(), RSSI_MAXIMUM_DBM);
-    }
-
-    #[test]
-    fn a_reading_needs_three_samples_and_takes_the_weaker_middle() {
-        assert_eq!(ProximityReading::median_of(&[rssi(STRONG_DBM); 2]), None);
-        let reading = ProximityReading::median_of(&[
-            rssi(STRONG_DBM),
-            rssi(BELOW_GATE_DBM),
-            rssi(AT_GATE_DBM),
-        ])
-        .expect("three samples");
-        assert_eq!(reading.rssi(), rssi(AT_GATE_DBM));
-        let even = ProximityReading::median_of(&[
-            rssi(STRONG_DBM),
-            rssi(AT_GATE_DBM),
-            rssi(BELOW_GATE_DBM),
-            rssi(STRONG_DBM),
-        ])
-        .expect("four samples");
-        assert_eq!(even.rssi(), rssi(AT_GATE_DBM));
-    }
-
-    #[test]
-    fn the_gate_admits_at_the_threshold_and_keeps_a_hysteresis() {
-        let gate = ProximityGate::SPECIFICATION;
-        let reading = |dbm| ProximityReading::median_of(&[rssi(dbm); 3]).expect("reading");
-        assert!(gate.admits(reading(AT_GATE_DBM), false));
-        assert!(!gate.admits(reading(BELOW_GATE_DBM), false));
-        assert!(gate.admits(reading(WITHIN_HYSTERESIS_DBM), true));
-        assert!(!gate.admits(reading(BEYOND_HYSTERESIS_DBM), true));
-    }
-
-    #[test]
-    fn a_development_gate_stays_within_the_allowed_range() {
-        assert_eq!(
-            ProximityGate::development(PROXIMITY_GATE_DEVELOPMENT_FLOOR_DBM - 1),
-            Err(LinkValueError::GateOutOfRange)
-        );
-        assert_eq!(
-            ProximityGate::development(PROXIMITY_GATE_SPECIFICATION_DBM + 1),
-            Err(LinkValueError::GateOutOfRange)
-        );
-        let gate = ProximityGate::development(PROXIMITY_GATE_DEVELOPMENT_FLOOR_DBM)
-            .expect("the floor is allowed");
-        assert_eq!(gate.threshold().dbm(), PROXIMITY_GATE_DEVELOPMENT_FLOOR_DBM);
     }
 
     #[test]

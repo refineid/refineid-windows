@@ -25,14 +25,16 @@
 //! a pairing with the code the phone shows, polls its state, confirms it,
 //! then reads the paired card. Each handle owns one background pairing
 //! thread that finds the phone by its DNS-SD `mode=pairing` record and dials
-//! it (RAPP v26.10.18 section 2.2), and, after pairing, the live `Requester`
+//! it (RAPP v26.10.21 section 2.2), and, after pairing, the live `Requester`
 //! whose device-only credential store persists the pairing so the minidriver
 //! can later load and use it behind this same ABI. After a card read the
 //! handle also holds the offering session of section 8.4 on a watch thread:
 //! the phone's certificate is offered to browsers only while that session
-//! reports a card, and withdrawn the moment it closes, the card leaves, or
-//! the phone announces it forgot this computer. This computer only ever
-//! dials out; it listens on no port.
+//! reports the card whose fingerprint it carries, and withdrawn the moment
+//! the session ends, the card leaves, or the phone closes with
+//! `pairing_revoked`. Forgetting a pairing tells its phone with that same
+//! close (section 4.6). This computer only ever dials out; it listens on no
+//! port.
 
 #![expect(
     unsafe_code,
@@ -49,32 +51,37 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
-use refineid_rapp::ProgressEvent;
+use refineid_lib_core::x509::OwnedCert;
+use refineid_rapp::ProfileName;
 use refineid_rapp_core::engine::{
-    OperationOutcome, PairingError, PeerIntroduction, Requester, RequesterConfig, SessionEnd,
+    OperationOutcome, PairingError, PeerIntroduction, Requester, RequesterConfig, Session,
+    SessionEnd, SessionError,
 };
 use refineid_rapp_core::ids::PairId;
-use refineid_rapp_core::message::CloseReason;
+use refineid_rapp_core::message::{
+    CardStatusMessage, CertificateFingerprint, CloseReason, ProgressEvent, ResultError,
+};
 use refineid_rapp_core::offer::normalize_pairing_code;
-use refineid_rapp_core::operations::{CardOperation, CardOperationResult};
-use refineid_rapp_core::store::{MemoryJournal, PairingDisposition, PairingRecord, PairingStore};
+use refineid_rapp_core::operations::{CardOperation, CardOperationResult, CertificateKind};
+use refineid_rapp_core::store::{PairingRecord, PairingState, PairingStore};
 use refineid_rapp_core::stream::{
     DialPurpose, DiscoveryMode, STREAM_CANDIDATE_ID, StreamError, browse, dial, dial_session,
 };
+use refineid_rapp_core::transport::TcpFrameTransport;
 use refineid_windows_credential_store::{ProtectedPairingStore, delete_pairing_set};
 #[cfg(windows)]
 use refineid_windows_credential_store::{install_browser_certificate, remove_browser_certificates};
 use serde::Serialize;
 
-/// Frame receive deadline on a dialed stream connection.
+/// Frame receive deadline on a dialed pairing connection.
 const RECEIVE_DEADLINE_MS: u64 = 60_000;
 
 /// How long one DNS-SD browse listens for custodian records.
 const BROWSE_WINDOW_MS: u64 = 3_000;
 
-/// Browse rounds a pairing makes before reporting that no phone is in
-/// pairing mode; together they span the 60 s offer lifetime.
-const MAX_PAIRING_BROWSE_ROUNDS: u32 = 20;
+/// How long a pairing looks for a phone in pairing mode: the lifetime of
+/// the phone's offer (section 3.3 item 7).
+const PAIRING_SEARCH_MS: u64 = refineid_rapp::OFFER_TTL_MS;
 
 /// Browse rounds a card read makes before reporting that the paired phone
 /// is not on the network.
@@ -92,17 +99,14 @@ const MAX_NAME_BYTES: usize = 256;
 /// Longest granted-profile JSON array accepted, in bytes.
 const MAX_GRANTED_BYTES: usize = 4_096;
 
-/// Frame receive deadline on the offering session: a liveness answer or a
-/// card status arrives well within it.
-const WATCH_RECEIVE_DEADLINE_MS: u64 = 15_000;
-
-/// Pause between liveness pings on the offering session.
-const LIVENESS_INTERVAL_MS: u64 = 10_000;
-
 /// Pause before the watch dials the phone again after losing it.
 const WATCH_RETRY_MS: u64 = 15_000;
 
-/// How long the forget action browses for the phone to tell it, once.
+/// How often the offering session reads the pairing store again, so a
+/// pairing forgotten meanwhile is closed with its `pairing_revoked` close.
+const STORE_CHECK_INTERVAL_MS: u64 = 10_000;
+
+/// How long telling a forgotten phone browses for it, once.
 const FORGET_BROWSE_WINDOW_MS: u64 = 1_500;
 
 /// Shown while the phone's consent view is on screen.
@@ -110,6 +114,9 @@ const CONSENT_SHOWN_STATUS: &str = "Approve the request on your phone.";
 
 /// Shown while the offering session reports no card on the phone.
 const CARD_ABSENT_STATUS: &str = "The phone has no card.";
+
+/// Shown while the phone's card cannot be confirmed by its certificate.
+const CARD_UNCONFIRMED_STATUS: &str = "The phone's card could not be read.";
 
 /// Shown while the phone cannot be reached and nothing is offered.
 const PHONE_UNREACHABLE_STATUS: &str = "The phone is not reachable.";
@@ -121,8 +128,8 @@ const REVOKED_STATUS: &str = "The phone forgot this computer. Pair again.";
 const NO_PAIRING_STATUS: &str = "No phone is paired with this device.";
 
 /// The requester engine specialised to the device-only credential-store
-/// pairing store and the in-memory operation journal.
-type StreamRequester = Requester<ProtectedPairingStore, MemoryJournal>;
+/// pairing store.
+type StreamRequester = Requester<ProtectedPairingStore>;
 
 #[derive(Debug)]
 struct ApiFailure {
@@ -196,12 +203,11 @@ struct IdentityDto {
 enum Phase {
     Offer,
     AwaitingConfirmation {
-        display_name: String,
-        platform: String,
-        profiles: Vec<String>,
+        peer: PeerIntroduction,
+        profiles: Vec<ProfileName>,
     },
     Paired {
-        pair_id_hex: String,
+        pair_id: PairId,
     },
     Denied,
     Cancelled,
@@ -213,24 +219,20 @@ enum Phase {
 struct Paired {
     requester: StreamRequester,
     pair_id: PairId,
-    pairing: refineid_rapp::PairRecord,
 }
 
 /// State a pairing handle shares across threads.
 struct Shared {
     phase: Phase,
-    decision_tx: Option<Sender<Option<Vec<String>>>>,
+    decision_tx: Option<Sender<Option<Vec<ProfileName>>>>,
     end_requested: bool,
     paired: Option<Paired>,
     /// The phone's card as the offering session last reported it.
-    card_present: Option<bool>,
+    card: Option<CardStatusMessage>,
     /// A line for the user about the phone, or nothing.
     status: Option<String>,
     /// Whether the offering watch thread runs for this handle.
     watching: bool,
-    /// Whether an operation runs on this handle; the watch leaves the
-    /// phone alone while one does.
-    operation_in_flight: bool,
 }
 
 /// One pairing handle: its shared state and the background pairing thread.
@@ -263,69 +265,104 @@ pub unsafe extern "C" fn refineid_rapp_string_free(json: *mut c_char) {
     drop(unsafe { CString::from_raw(json) });
 }
 
-/// Forget every stored pairing, clearing the device-only credential.
+/// Forget every stored pairing (RAPP v26.10.21 section 4.6).
 ///
-/// This is the holder's local forget action: it destroys the stored pair
-/// keys so no session can be opened against them again. It does not notify the
-/// peer, matching the specification's `forget_pairing` rather than
-/// `local_revoke`. Clearing an empty store succeeds, so the action is
-/// idempotent.
+/// This is the holder's local forget action. Each pairing serves nothing
+/// from now on; its phone is told with the `pairing_revoked` close as the
+/// first message of one short session, now if the phone is on the network,
+/// and the keys are then destroyed and the record cleared. A phone not
+/// reached now is told on a later session, for 30 days; until then the
+/// pairing keeps its keys for that close alone. Forgetting an empty store
+/// succeeds, so the action is idempotent.
 #[unsafe(no_mangle)]
 pub extern "C" fn refineid_rapp_forget_pairings() -> *mut c_char {
     reply_json(|| {
         forget_browser_certificates();
-        tell_phones_they_are_forgotten();
-        delete_pairing_set()
-            .map_err(|error| ApiFailure::new("forget_failed", format!("{error}")))?;
+        forget_every_pairing()?;
         Ok(AckDto { ok: true })
     })
 }
 
-/// Tells each paired phone that this computer is forgetting it, over one
-/// short-lived session, before the pairings are deleted (RAPP v26.10.18
-/// section 4.6 item 1). A phone that is not on the network learns nothing
-/// and is forgotten regardless.
-fn tell_phones_they_are_forgotten() {
-    let Ok(store) = ProtectedPairingStore::load() else {
-        return;
-    };
-    let usable = forgettable_pairs(store.records());
-    let mut requester = Requester::new(
+/// Forgets every stored pairing, tells the phones it can reach, and clears
+/// what is left of those it told.
+fn forget_every_pairing() -> Result<(), ApiFailure> {
+    let store = ProtectedPairingStore::load()
+        .map_err(|error| ApiFailure::new("forget_failed", format!("{error}")))?;
+    let mut requester = background_requester(store);
+    for pair_id in requester.store().pair_ids() {
+        requester
+            .forget_pairing(pair_id)
+            .map_err(|error| ApiFailure::new("forget_failed", format!("{error}")))?;
+    }
+    tell_forgotten_phones(&mut requester);
+    for pair_id in requester.store().pair_ids() {
+        let told = requester
+            .store()
+            .get(pair_id)
+            .is_ok_and(|record| matches!(record.state(), PairingState::Revoked { .. }));
+        if told {
+            requester
+                .forget_pairing(pair_id)
+                .map_err(|error| ApiFailure::new("forget_failed", format!("{error}")))?;
+        }
+    }
+    if requester.store().pair_ids().is_empty() {
+        delete_pairing_set()
+            .map_err(|error| ApiFailure::new("forget_failed", format!("{error}")))?;
+    }
+    Ok(())
+}
+
+/// Tells the phone of every pairing forgotten here, over one short session
+/// each, that this computer forgot it: the `pairing_revoked` close is the
+/// session's first and only message, and the keys go once it is sent
+/// (section 4.6 item 2). A phone not on the network is told another time.
+fn tell_forgotten_phones(requester: &mut StreamRequester) {
+    let owed: Vec<PairId> = requester
+        .store()
+        .forgotten_pairings()
+        .map(PairingRecord::pair_id)
+        .collect();
+    for pair_id in owed {
+        let transport = requester
+            .store()
+            .get(pair_id)
+            .ok()
+            .and_then(PairingRecord::pair_record)
+            .and_then(|keys| {
+                dial_session(
+                    keys,
+                    &[],
+                    &[],
+                    std::time::Duration::from_millis(FORGET_BROWSE_WINDOW_MS),
+                )
+                .ok()
+            });
+        if let Some(transport) = transport {
+            let _ = requester.deliver_revocation_notice(pair_id, transport);
+        }
+    }
+}
+
+/// Tells forgotten phones on a thread of its own, so the caller does not
+/// wait for the network.
+fn tell_forgotten_phones_in_background() {
+    std::thread::spawn(|| {
+        if let Ok(store) = ProtectedPairingStore::load() {
+            tell_forgotten_phones(&mut background_requester(store));
+        }
+    });
+}
+
+/// A requester for work no user started from this handle.
+fn background_requester(store: ProtectedPairingStore) -> StreamRequester {
+    Requester::new(
         RequesterConfig {
             display_name: String::new(),
             platform: "Windows".to_owned(),
         },
         store,
-        MemoryJournal::new(),
-    );
-    for (pair_id, pairing) in usable {
-        let transport = dial_session(
-            &pairing,
-            &[],
-            &[],
-            std::time::Duration::from_millis(FORGET_BROWSE_WINDOW_MS),
-            receive_deadline(),
-        )
-        .ok();
-        requester.forget_pairing(pair_id, transport);
-    }
-}
-
-/// The pairings a forget action tells about: every one the phone confirmed
-/// and that still holds keys, not only the one a read would use.
-fn forgettable_pairs(records: &[PairingRecord]) -> Vec<(PairId, refineid_rapp::PairRecord)> {
-    records
-        .iter()
-        .filter(|record| {
-            record.disposition == PairingDisposition::Paired && record.storage_confirmed
-        })
-        .filter_map(|record| {
-            record
-                .to_core_pair_record()
-                .ok()
-                .map(|pairing| (record.pair_id, pairing))
-        })
-        .collect()
+    )
 }
 
 /// Open the pairing this device already holds, without a new ceremony.
@@ -355,7 +392,7 @@ pub unsafe extern "C" fn refineid_rapp_open_pairing(
 /// Begin a pairing with the code the phone shows.
 ///
 /// Returns `{ handle }` immediately, or `invalid_code` when the input is not
-/// a six-character pairing code (RAPP v26.10.10 section 3.1). The background
+/// a six-character pairing code (RAPP v26.10.21 section 3.1). The background
 /// thread finds the phone in pairing mode, dials it, reads its offer, and
 /// runs the pairing handshake; the caller drives confirmation through
 /// [`refineid_rapp_poll_pairing`] and [`refineid_rapp_confirm_pairing`].
@@ -425,16 +462,27 @@ pub unsafe extern "C" fn refineid_rapp_confirm_pairing(
         } else {
             // SAFETY: pointer- and bound-checked before the slice is formed.
             let text = unsafe { copy_utf8(granted, granted_length, MAX_GRANTED_BYTES, "granted") }?;
-            serde_json::from_str::<Vec<String>>(&text).map_err(|_| {
-                ApiFailure::new(
-                    "invalid_granted",
-                    "The granted profiles must be a JSON array of strings.",
-                )
-            })?
+            granted_profiles(&text)?
         };
         deliver_decision(handle, Some(profiles))?;
         Ok(AckDto { ok: true })
     })
+}
+
+/// The profiles a caller grants: a JSON array of registered profile names
+/// (RAPP v26.10.21 section 9), parsed here, at the border.
+fn granted_profiles(text: &str) -> Result<Vec<ProfileName>, ApiFailure> {
+    let invalid = || {
+        ApiFailure::new(
+            "invalid_granted",
+            "The granted profiles must be a JSON array of registered profile names.",
+        )
+    };
+    serde_json::from_str::<Vec<String>>(text)
+        .map_err(|_| invalid())?
+        .iter()
+        .map(|name| ProfileName::parse(name).ok_or_else(invalid))
+        .collect()
 }
 
 /// Deny or cancel a pairing awaiting the caller's decision.
@@ -535,7 +583,6 @@ fn begin_pairing(code: String, name: String) -> Result<BeginPairingDto, ApiFailu
             platform: "Windows".to_owned(),
         },
         pairing_store,
-        MemoryJournal::new(),
     );
 
     let handle_id = register_handle(Shared {
@@ -543,10 +590,9 @@ fn begin_pairing(code: String, name: String) -> Result<BeginPairingDto, ApiFailu
         decision_tx: None,
         end_requested: false,
         paired: None,
-        card_present: None,
+        card: None,
         status: None,
         watching: false,
-        operation_in_flight: false,
     })?;
     // The thread reaches the shared state through the registry by handle id,
     // owning the pieces it moves and locking only briefly each time.
@@ -564,39 +610,28 @@ fn begin_pairing(code: String, name: String) -> Result<BeginPairingDto, ApiFailu
 fn open_pairing(name: String) -> Result<BeginPairingDto, ApiFailure> {
     let pairing_store = ProtectedPairingStore::load()
         .map_err(|error| ApiFailure::new("pairing_store_unavailable", format!("{error}")))?;
-    let record = pairing_store
+    if pairing_store.forgotten_pairings().next().is_some() {
+        tell_forgotten_phones_in_background();
+    }
+    let pair_id = pairing_store
         .usable_pairing()
+        .map(PairingRecord::pair_id)
         .ok_or_else(|| ApiFailure::new("no_pairing", "No phone is paired with this device."))?;
-    let pair_id = record.pair_id;
-    let pairing = record.to_core_pair_record().map_err(|_| {
-        ApiFailure::new(
-            "pairing_unusable",
-            "The stored pairing is unusable; pair the phone again.",
-        )
-    })?;
     let requester = Requester::new(
         RequesterConfig {
             display_name: name,
             platform: "Windows".to_owned(),
         },
         pairing_store,
-        MemoryJournal::new(),
     );
     let handle_id = register_handle(Shared {
-        phase: Phase::Paired {
-            pair_id_hex: hex::encode(pair_id.as_bytes()),
-        },
+        phase: Phase::Paired { pair_id },
         decision_tx: None,
         end_requested: false,
-        paired: Some(Paired {
-            requester,
-            pair_id,
-            pairing,
-        }),
-        card_present: None,
+        paired: Some(Paired { requester, pair_id }),
+        card: None,
         status: None,
         watching: false,
-        operation_in_flight: false,
     })?;
     Ok(BeginPairingDto { handle: handle_id })
 }
@@ -618,7 +653,8 @@ fn register_handle(shared: Shared) -> Result<u64, ApiFailure> {
 /// pairs with the typed code. A phone that cannot be reached is skipped;
 /// a mistyped code or a refused pairing ends the attempt.
 fn pairing_thread(handle_id: u64, mut requester: StreamRequester, code: &str) {
-    for _ in 0..MAX_PAIRING_BROWSE_ROUNDS {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(PAIRING_SEARCH_MS);
+    while std::time::Instant::now() < deadline {
         if ended(handle_id) {
             return;
         }
@@ -634,21 +670,22 @@ fn pairing_thread(handle_id: u64, mut requester: StreamRequester, code: &str) {
             ) else {
                 continue;
             };
-            let (decision_tx, decision_rx) = channel::<Option<Vec<String>>>();
+            let (decision_tx, decision_rx) = channel::<Option<Vec<ProfileName>>>();
             if !publish_decision_sender(handle_id, decision_tx) {
                 return;
             }
-            let confirm = |peer: &PeerIntroduction, offered: &[String]| -> Option<Vec<String>> {
-                set_awaiting(handle_id, peer, offered);
-                match decision_rx.recv() {
-                    Ok(Some(granted)) => Some(if granted.is_empty() {
-                        offered.to_vec()
-                    } else {
-                        granted
-                    }),
-                    Ok(None) | Err(_) => None,
-                }
-            };
+            let confirm =
+                |peer: &PeerIntroduction, offered: &[ProfileName]| -> Option<Vec<ProfileName>> {
+                    set_awaiting(handle_id, peer, offered);
+                    match decision_rx.recv() {
+                        Ok(Some(granted)) => Some(if granted.is_empty() {
+                            offered.to_vec()
+                        } else {
+                            granted
+                        }),
+                        Ok(None) | Err(_) => None,
+                    }
+                };
             match requester.pair_with_code(code, transport, confirm) {
                 Ok(pair_id) => {
                     finish_pairing(handle_id, requester, pair_id);
@@ -670,8 +707,9 @@ fn pairing_thread(handle_id: u64, mut requester: StreamRequester, code: &str) {
 
 fn finish_pairing(handle_id: u64, mut requester: StreamRequester, pair_id: PairId) {
     // This device holds one phone. A pairing made afresh replaces whatever
-    // was stored before, dead or alive, together with the certificate the
-    // old phone left for browsers; the first read places the new one.
+    // was stored before, together with the certificate the old phone left
+    // for browsers; the first read places the new one. The old pairing is
+    // forgotten, so its phone is told (section 4.6).
     let stale: Vec<PairId> = requester
         .store()
         .pair_ids()
@@ -681,51 +719,38 @@ fn finish_pairing(handle_id: u64, mut requester: StreamRequester, pair_id: PairI
     if !stale.is_empty() {
         forget_browser_certificates();
         for stored in stale {
-            let _ = requester.store_mut().remove(stored);
+            let _ = requester.forget_pairing(stored);
         }
+        tell_forgotten_phones_in_background();
     }
-    let Ok(record) = requester.store().get(pair_id) else {
+    if !requester
+        .store()
+        .get(pair_id)
+        .is_ok_and(PairingRecord::serves)
+    {
         set_phase(
             handle_id,
             Phase::Failed("The stored pairing could not be read.".to_owned()),
         );
         return;
-    };
-    let Ok(pairing) = record.to_core_pair_record() else {
-        set_phase(
-            handle_id,
-            Phase::Failed("The stored pairing could not be read.".to_owned()),
-        );
-        return;
-    };
-    let pair_id_hex = hex::encode(pair_id.as_bytes());
+    }
     // If the handle is gone, the closure is never run and the moved
     // requester is dropped here instead.
     let _stored = registry_entry_apply(handle_id, move |shared| {
         shared.decision_tx = None;
-        shared.phase = Phase::Paired { pair_id_hex };
-        shared.paired = Some(Paired {
-            requester,
-            pair_id,
-            pairing,
-        });
+        shared.phase = Phase::Paired { pair_id };
+        shared.paired = Some(Paired { requester, pair_id });
     });
 }
 
 fn read_paired_card(handle_id: u64, paired: &mut Paired) -> Result<CardReadDto, ApiFailure> {
     let mut outcome = Err(StreamError::Unreachable);
     for _ in 0..MAX_SESSION_BROWSE_ROUNDS {
-        outcome = dial_session(
-            &paired.pairing,
-            &[],
-            &[],
-            browse_window(),
-            receive_deadline(),
-        );
-        if matches!(
-            outcome,
-            Ok(_) | Err(StreamError::Withdrawn | StreamError::Revoked)
-        ) {
+        let Some(keys) = serving_keys(&paired.requester, paired.pair_id) else {
+            return Err(ApiFailure::new("no_pairing", NO_PAIRING_STATUS));
+        };
+        outcome = dial_session(keys, &[], &[], browse_window());
+        if matches!(outcome, Ok(_) | Err(StreamError::Withdrawn)) {
             break;
         }
     }
@@ -733,36 +758,39 @@ fn read_paired_card(handle_id: u64, paired: &mut Paired) -> Result<CardReadDto, 
         StreamError::Withdrawn => {
             ApiFailure::new("withdrawn", "The paired phone turned remote access off.")
         }
-        StreamError::Revoked => {
-            paired.requester.apply_verified_revocation(paired.pair_id);
-            forget_browser_certificates();
-            ApiFailure::new("revoked", REVOKED_STATUS)
-        }
         _ => ApiFailure::new(
             "no_session",
             "The paired phone was not found on this network.",
         ),
     })?;
 
-    let mut session = paired
-        .requester
-        .connect(paired.pair_id, session_transport)
-        .map_err(|error| ApiFailure::new("session_failed", format!("{error:?}")))?;
+    let mut session = match paired.requester.connect(paired.pair_id, session_transport) {
+        Ok(session) => session,
+        Err(SessionError::ClosedByPeer(CloseReason::PairingRevoked)) => {
+            // The engine revoked the pairing in the store (section 4.6
+            // item 4); what it offered goes with it.
+            forget_browser_certificates();
+            return Err(ApiFailure::new("revoked", REVOKED_STATUS));
+        }
+        Err(error) => return Err(ApiFailure::new("session_failed", format!("{error}"))),
+    };
 
     // The requester screen shows only the holder identity, so the read is one
     // operation and the phone reads the card once. The answer carries the
-    // authentication certificate, which browsers need through the key
-    // storage provider: on the pairing record for signing, and, once the
-    // offering session reports the card, in the user's certificate store so
-    // Edge and Chrome offer it.
+    // authentication certificate, the one whose fingerprint the session's
+    // card status names (section 8.4 item 2), which browsers need through
+    // the key storage provider: on the pairing record for signing, and, once
+    // the offering session reports the card, in the user's certificate
+    // store so Edge and Chrome offer it.
     let (identity, certificate) = match run_operation(
         handle_id,
         paired,
         &mut session,
         &CardOperation::ReadIdentity,
     )? {
-        CardOperationResult::Identity(mut identity) => {
-            let certificate = identity.certificates.drain(..).next();
+        CardOperationResult::Identity(identity) => {
+            let certificate =
+                authentication_certificate(session.card_status(), identity.certificates);
             (
                 IdentityDto {
                     display_name: identity.holder_name,
@@ -784,7 +812,7 @@ fn read_paired_card(handle_id: u64, paired: &mut Paired) -> Result<CardReadDto, 
             "The phone sent no certificate with the identity.",
         )
     })?;
-    remember_certificate(paired, &certificate);
+    remember_certificate(&mut paired.requester, paired.pair_id, &certificate);
 
     Ok(CardReadDto { identity })
 }
@@ -803,102 +831,203 @@ fn start_offering_watch(handle_id: u64) {
 
 /// The offering session of section 8.4: holds a session to the paired phone
 /// for as long as the handle lives, offers the phone's certificate to
-/// browsers while that session reports a card, and withdraws it the moment
-/// the session ends, the card leaves, or the phone announces it forgot this
-/// computer.
+/// browsers while that session reports the card whose fingerprint the
+/// certificate has, and withdraws it the moment the session ends, the card
+/// leaves, or the phone closes with `pairing_revoked`. A pairing the user
+/// forgot meanwhile is closed with its own `pairing_revoked` close (section
+/// 4.6 item 1).
 fn offering_watch(handle_id: u64) {
     let _mark = WatchMark(handle_id);
-    let mut offered = false;
+    let mut offer = Offer::default();
     while !ended(handle_id) {
         let Ok(store) = ProtectedPairingStore::load() else {
-            withdraw_offer(handle_id, &mut offered, PHONE_UNREACHABLE_STATUS);
+            withdraw_offer(handle_id, &mut offer, PHONE_UNREACHABLE_STATUS);
             pause(WATCH_RETRY_MS);
             continue;
         };
-        let Some((pair_id, pairing, certificate)) = store.usable_pairing().and_then(|record| {
-            record
-                .to_core_pair_record()
-                .ok()
-                .map(|pairing| (record.pair_id, pairing, record.auth_cert.clone()))
-        }) else {
-            withdraw_offer(handle_id, &mut offered, NO_PAIRING_STATUS);
+        let Some(pair_id) = store.usable_pairing().map(PairingRecord::pair_id) else {
+            withdraw_offer(handle_id, &mut offer, NO_PAIRING_STATUS);
             return;
         };
-        let mut requester = Requester::new(
-            RequesterConfig {
-                display_name: String::new(),
-                platform: "Windows".to_owned(),
-            },
-            store,
-            MemoryJournal::new(),
-        );
-        let transport = match dial_session(
-            &pairing,
-            &[],
-            &[],
-            browse_window(),
-            std::time::Duration::from_millis(WATCH_RECEIVE_DEADLINE_MS),
-        ) {
-            Ok(transport) => transport,
-            Err(StreamError::Revoked) => {
-                requester.apply_verified_revocation(pair_id);
-                withdraw_offer(handle_id, &mut offered, REVOKED_STATUS);
+        let mut requester = background_requester(store);
+        let transport = serving_keys(&requester, pair_id)
+            .ok_or(StreamError::Unreachable)
+            .and_then(|keys| dial_session(keys, &[], &[], browse_window()));
+        let Ok(transport) = transport else {
+            withdraw_offer(handle_id, &mut offer, PHONE_UNREACHABLE_STATUS);
+            pause(WATCH_RETRY_MS);
+            continue;
+        };
+        let mut session = match requester.connect(pair_id, transport) {
+            Ok(session) => session,
+            Err(SessionError::ClosedByPeer(CloseReason::PairingRevoked)) => {
+                withdraw_offer(handle_id, &mut offer, REVOKED_STATUS);
                 set_phase(handle_id, Phase::Failed(REVOKED_STATUS.to_owned()));
                 return;
             }
             Err(_) => {
-                withdraw_offer(handle_id, &mut offered, PHONE_UNREACHABLE_STATUS);
+                withdraw_offer(handle_id, &mut offer, PHONE_UNREACHABLE_STATUS);
                 pause(WATCH_RETRY_MS);
                 continue;
             }
         };
-        let Ok(mut session) = requester.connect(pair_id, transport) else {
-            withdraw_offer(handle_id, &mut offered, PHONE_UNREACHABLE_STATUS);
-            pause(WATCH_RETRY_MS);
-            continue;
-        };
-        while !ended(handle_id) {
-            // An operation in flight has the phone's attention; a ping it
-            // answers late must not read as the phone leaving.
-            if operation_in_flight(handle_id) {
-                pause(LIVENESS_INTERVAL_MS);
-                continue;
-            }
-            if requester.check_liveness(&mut session).is_err() {
-                break;
-            }
-            let present = session.card_present();
-            registry_entry_apply(handle_id, |shared| shared.card_present = present);
-            match present {
-                Some(true) => {
-                    if !offered
-                        && let Some(certificate) = &certificate
-                        && offer_to_browsers(certificate, pair_id).is_ok()
-                    {
-                        offered = true;
-                    }
-                    clear_watch_status(handle_id);
-                }
-                Some(false) => withdraw_offer(handle_id, &mut offered, CARD_ABSENT_STATUS),
-                None => {}
-            }
-            pause(LIVENESS_INTERVAL_MS);
-        }
-        let revoked = matches!(
-            StreamRequester::session_end(&session),
-            Some(SessionEnd::PeerClose(CloseReason::PairingRevoked))
-        );
-        if revoked {
-            withdraw_offer(handle_id, &mut offered, REVOKED_STATUS);
+        hold_offering_session(handle_id, &mut requester, &mut session, &mut offer);
+        registry_entry_apply(handle_id, |shared| shared.card = None);
+        if session.end() == Some(SessionEnd::PeerClose(CloseReason::PairingRevoked)) {
+            withdraw_offer(handle_id, &mut offer, REVOKED_STATUS);
             set_phase(handle_id, Phase::Failed(REVOKED_STATUS.to_owned()));
             return;
         }
-        withdraw_offer(handle_id, &mut offered, PHONE_UNREACHABLE_STATUS);
+        withdraw_offer(handle_id, &mut offer, PHONE_UNREACHABLE_STATUS);
         if !ended(handle_id) {
             pause(WATCH_RETRY_MS);
         }
     }
-    withdraw_offer(handle_id, &mut offered, PHONE_UNREACHABLE_STATUS);
+    withdraw_offer(handle_id, &mut offer, PHONE_UNREACHABLE_STATUS);
+}
+
+/// What the offering session has offered to browsers.
+#[derive(Default)]
+struct Offer {
+    /// The fingerprint of the card whose certificate is offered.
+    offered: Option<CertificateFingerprint>,
+    /// The fingerprint last acted on, offered or not.
+    checked: Option<CertificateFingerprint>,
+}
+
+/// Keeps the offering session alive and follows its card status until the
+/// session ends or the handle does.
+fn hold_offering_session(
+    handle_id: u64,
+    requester: &mut StreamRequester,
+    session: &mut Session<TcpFrameTransport>,
+    offer: &mut Offer,
+) {
+    let pair_id = session.pair_id();
+    let mut store_checked = std::time::Instant::now();
+    while !ended(handle_id) && requester.keep_alive(session).is_ok() {
+        let card = session.card_status();
+        registry_entry_apply(handle_id, |shared| shared.card = card);
+        match card {
+            Some(CardStatusMessage::Present(fingerprint)) if offer.checked != Some(fingerprint) => {
+                offer.checked = Some(fingerprint);
+                // Another card's certificate is withdrawn before this one is
+                // read: installing adds a certificate beside it.
+                if offer.offered.is_some_and(|offered| offered != fingerprint) {
+                    withdraw_offer(handle_id, offer, CARD_UNCONFIRMED_STATUS);
+                }
+                match confirmed_certificate(requester, session, fingerprint) {
+                    Some(certificate) if offer_to_browsers(&certificate, pair_id).is_ok() => {
+                        offer.offered = Some(fingerprint);
+                        clear_watch_status(handle_id);
+                    }
+                    _ => withdraw_offer(handle_id, offer, CARD_UNCONFIRMED_STATUS),
+                }
+            }
+            Some(CardStatusMessage::Absent) => {
+                offer.checked = None;
+                withdraw_offer(handle_id, offer, CARD_ABSENT_STATUS);
+            }
+            Some(CardStatusMessage::Present(_)) | None => {}
+        }
+        if store_checked.elapsed() >= std::time::Duration::from_millis(STORE_CHECK_INTERVAL_MS) {
+            store_checked = std::time::Instant::now();
+            close_if_forgotten(requester, session);
+        }
+    }
+}
+
+/// The certificate of the card whose fingerprint the session reports (RAPP
+/// v26.10.21 section 8.4 item 2): the one stored for the pairing when its
+/// fingerprint matches, or else read afresh on the session and stored. A
+/// certificate whose fingerprint the phone has not confirmed is not
+/// returned.
+fn confirmed_certificate(
+    requester: &mut StreamRequester,
+    session: &mut Session<TcpFrameTransport>,
+    fingerprint: CertificateFingerprint,
+) -> Option<OwnedCert> {
+    let pair_id = session.pair_id();
+    let stored = requester
+        .store()
+        .get(pair_id)
+        .ok()
+        .and_then(PairingRecord::authentication_certificate)
+        .filter(|certificate| fingerprint_of(certificate) == fingerprint)
+        .cloned();
+    if stored.is_some() {
+        return stored;
+    }
+    let read = requester.execute(
+        session,
+        &CardOperation::ReadCertificate {
+            kind: CertificateKind::Authentication,
+        },
+        OPERATION_EXPIRY_MS,
+    );
+    let Ok(OperationOutcome::Completed(CardOperationResult::Certificate(der))) = read else {
+        return None;
+    };
+    let certificate = OwnedCert::from_der(der)
+        .ok()
+        .filter(|certificate| fingerprint_of(certificate) == fingerprint)?;
+    remember_certificate(requester, pair_id, &certificate);
+    Some(certificate)
+}
+
+/// Closes the session when its pairing no longer serves: one the user
+/// forgot gets the `pairing_revoked` close now and loses its keys (RAPP
+/// v26.10.21 section 4.6 item 1); one already revoked or removed is closed.
+/// A store that cannot be read changes nothing.
+fn close_if_forgotten(requester: &mut StreamRequester, session: &mut Session<TcpFrameTransport>) {
+    if requester.store_mut().refresh().is_err() {
+        return;
+    }
+    let record = requester.store().get(session.pair_id()).ok();
+    if record.is_some_and(PairingRecord::serves) {
+        return;
+    }
+    if record.is_some_and(PairingRecord::owes_revocation_notice) {
+        let _ = requester.forget_pairing_in_session(session);
+    } else {
+        requester.disconnect(session, CloseReason::UserDisconnect);
+    }
+}
+
+/// The fingerprint `card.status` names a certificate by.
+fn fingerprint_of(certificate: &OwnedCert) -> CertificateFingerprint {
+    CertificateFingerprint::of_certificate(certificate.as_der())
+}
+
+/// The engine's record of a pairing that serves.
+fn serving_keys(
+    requester: &StreamRequester,
+    pair_id: PairId,
+) -> Option<&refineid_rapp::PairRecord> {
+    requester
+        .store()
+        .get(pair_id)
+        .ok()
+        .and_then(PairingRecord::serving_record)
+}
+
+/// The authentication certificate among those an identity read answered
+/// with: the one whose fingerprint the session's card status names (RAPP
+/// v26.10.21 section 8.4 item 2), or, before the phone has named one, the
+/// first. Each is parsed here, at the border.
+fn authentication_certificate(
+    card: Option<CardStatusMessage>,
+    certificates: Vec<Vec<u8>>,
+) -> Option<OwnedCert> {
+    let mut parsed = certificates
+        .into_iter()
+        .filter_map(|der| OwnedCert::from_der(der).ok());
+    match card {
+        Some(CardStatusMessage::Present(fingerprint)) => {
+            parsed.find(|certificate| fingerprint_of(certificate) == fingerprint)
+        }
+        Some(CardStatusMessage::Absent) | None => parsed.next(),
+    }
 }
 
 /// Marks the handle as watched for the thread's lifetime; dropping it on
@@ -916,7 +1045,7 @@ impl Drop for WatchMark {
 fn is_watch_status(status: &str) -> bool {
     matches!(
         status,
-        PHONE_UNREACHABLE_STATUS | CARD_ABSENT_STATUS | NO_PAIRING_STATUS
+        PHONE_UNREACHABLE_STATUS | CARD_ABSENT_STATUS | CARD_UNCONFIRMED_STATUS | NO_PAIRING_STATUS
     )
 }
 
@@ -929,15 +1058,10 @@ fn clear_watch_status(handle_id: u64) {
     });
 }
 
-fn operation_in_flight(handle_id: u64) -> bool {
-    registry_entry_apply(handle_id, |shared| shared.operation_in_flight).unwrap_or(false)
-}
-
 /// Withdraws the offer, if one stands, and tells the user why.
-fn withdraw_offer(handle_id: u64, offered: &mut bool, status: &str) {
-    if *offered {
+fn withdraw_offer(handle_id: u64, offer: &mut Offer, status: &str) {
+    if offer.offered.take().is_some() {
         forget_browser_certificates();
-        *offered = false;
     }
     registry_entry_apply(handle_id, |shared| {
         shared.status = Some(status.to_owned());
@@ -950,20 +1074,17 @@ fn pause(milliseconds: u64) {
 
 /// Keeps the authentication certificate on the pairing record, where the
 /// key storage provider reads it when a browser asks for a signature.
-fn remember_certificate(paired: &mut Paired, certificate: &[u8]) {
+fn remember_certificate(requester: &mut StreamRequester, pair_id: PairId, certificate: &OwnedCert) {
     // A refused write only means the next read stores it again.
-    let _ = paired
-        .requester
-        .store_mut()
-        .update(paired.pair_id, &mut |record| {
-            record.auth_cert = Some(certificate.to_vec());
-        });
+    let _ = requester.store_mut().update(pair_id, &mut |record| {
+        record.remember_authentication_certificate(certificate.clone());
+    });
 }
 
 /// Places the certificate in the user's certificate store, bound to the
 /// `RefineID` key storage provider, so Edge and Chrome offer it.
 #[cfg(windows)]
-fn offer_to_browsers(certificate: &[u8], pair_id: PairId) -> Result<(), ApiFailure> {
+fn offer_to_browsers(certificate: &OwnedCert, pair_id: PairId) -> Result<(), ApiFailure> {
     install_browser_certificate(certificate, pair_id)
         .map_err(|error| ApiFailure::new("certificate_store_failed", format!("{error}")))
 }
@@ -973,7 +1094,7 @@ fn offer_to_browsers(certificate: &[u8], pair_id: PairId) -> Result<(), ApiFailu
     clippy::unnecessary_wraps,
     reason = "the Windows arm fails; this one keeps the caller's signature"
 )]
-const fn offer_to_browsers(_certificate: &[u8], _pair_id: PairId) -> Result<(), ApiFailure> {
+const fn offer_to_browsers(_certificate: &OwnedCert, _pair_id: PairId) -> Result<(), ApiFailure> {
     Ok(())
 }
 
@@ -991,12 +1112,9 @@ const fn forget_browser_certificates() {}
 fn run_operation(
     handle_id: u64,
     paired: &mut Paired,
-    session: &mut refineid_rapp_core::engine::Session<
-        refineid_rapp_core::transport::TcpFrameTransport,
-    >,
+    session: &mut Session<TcpFrameTransport>,
     operation: &CardOperation,
 ) -> Result<CardOperationResult, ApiFailure> {
-    registry_entry_apply(handle_id, |shared| shared.operation_in_flight = true);
     let outcome =
         paired
             .requester
@@ -1007,33 +1125,30 @@ fn run_operation(
                     });
                 }
             });
-    registry_entry_apply(handle_id, |shared| {
-        shared.operation_in_flight = false;
-        shared.status = None;
-    });
+    registry_entry_apply(handle_id, |shared| shared.status = None);
     let outcome =
-        outcome.map_err(|error| ApiFailure::new("operation_not_admitted", format!("{error:?}")))?;
+        outcome.map_err(|error| ApiFailure::new("operation_not_admitted", format!("{error}")))?;
     match outcome {
         OperationOutcome::Completed(result) => Ok(result),
-        OperationOutcome::Denied => Err(ApiFailure::new(
+        OperationOutcome::Rejected(ResultError::UserCancelled) => Err(ApiFailure::new(
             "denied",
             "The holder denied the request on the phone.",
         )),
-        OperationOutcome::Cancelled => Err(ApiFailure::new(
-            "cancelled",
-            "The request was cancelled or expired.",
-        )),
-        OperationOutcome::Rejected(reason) => Err(ApiFailure::new(
+        OperationOutcome::Rejected(error) => Err(ApiFailure::new(
             "rejected",
-            reason.unwrap_or_else(|| "The request was rejected.".to_owned()),
+            format!("The phone refused the request: {}.", error.as_str()),
         )),
-        OperationOutcome::CredentialRejected => Err(ApiFailure::new(
-            "credential_rejected",
-            "A credential was rejected; the pairing is revoked on both devices.",
+        OperationOutcome::Cancelled(_) => Err(ApiFailure::new(
+            "cancelled",
+            "The request expired before the phone answered.",
         )),
-        OperationOutcome::Ambiguous => Err(ApiFailure::new(
-            "ambiguous",
-            "The card result is unproven and will not be retried.",
+        OperationOutcome::Refused(error) => Err(ApiFailure::new(
+            "refused",
+            format!("The phone refused the request: {}.", error.as_str()),
+        )),
+        OperationOutcome::Lost => Err(ApiFailure::new(
+            "lost",
+            "The connection to the phone ended before it answered.",
         )),
     }
 }
@@ -1049,7 +1164,9 @@ fn unexpected_result(action: &str) -> ApiFailure {
 /// has been read, what the offering session says about the phone.
 fn handle_state(shared: &Shared) -> PairingStateDto {
     let mut dto = state_dto(&shared.phase);
-    dto.card_present = shared.card_present;
+    dto.card_present = shared
+        .card
+        .map(|card| matches!(card, CardStatusMessage::Present(_)));
     if dto.message.is_none() {
         dto.message.clone_from(&shared.status);
     }
@@ -1065,25 +1182,24 @@ fn state_dto(phase: &Phase) -> PairingStateDto {
             message: None,
             card_present: None,
         },
-        Phase::AwaitingConfirmation {
-            display_name,
-            platform,
-            profiles,
-        } => PairingStateDto {
+        Phase::AwaitingConfirmation { peer, profiles } => PairingStateDto {
             state: "awaiting_confirmation",
             peer: Some(PeerDto {
-                display_name: display_name.clone(),
-                platform: platform.clone(),
-                profiles: profiles.clone(),
+                display_name: peer.display_name.clone(),
+                platform: peer.platform.clone(),
+                profiles: profiles
+                    .iter()
+                    .map(|profile| profile.as_str().to_owned())
+                    .collect(),
             }),
             pair_id_hex: None,
             message: None,
             card_present: None,
         },
-        Phase::Paired { pair_id_hex } => PairingStateDto {
+        Phase::Paired { pair_id } => PairingStateDto {
             state: "paired",
             peer: None,
-            pair_id_hex: Some(pair_id_hex.clone()),
+            pair_id_hex: Some(hex::encode(pair_id.as_bytes())),
             message: None,
             card_present: None,
         },
@@ -1115,7 +1231,7 @@ fn state_dto(phase: &Phase) -> PairingStateDto {
     clippy::significant_drop_tightening,
     reason = "the guard yields a borrow that must outlive it in this lock chain"
 )]
-fn deliver_decision(handle: u64, decision: Option<Vec<String>>) -> Result<(), ApiFailure> {
+fn deliver_decision(handle: u64, decision: Option<Vec<ProfileName>>) -> Result<(), ApiFailure> {
     let registry = lock_registry()?;
     let entry = registry
         .get(&handle)
@@ -1140,11 +1256,10 @@ fn deliver_decision(handle: u64, decision: Option<Vec<String>>) -> Result<(), Ap
     Ok(())
 }
 
-fn set_awaiting(handle_id: u64, peer: &PeerIntroduction, offered: &[String]) {
+fn set_awaiting(handle_id: u64, peer: &PeerIntroduction, offered: &[ProfileName]) {
     registry_entry_apply(handle_id, |shared| {
         shared.phase = Phase::AwaitingConfirmation {
-            display_name: peer.display_name.clone(),
-            platform: peer.platform.clone(),
+            peer: peer.clone(),
             profiles: offered.to_vec(),
         };
     });
@@ -1156,7 +1271,7 @@ fn set_phase(handle_id: u64, phase: Phase) {
     });
 }
 
-fn publish_decision_sender(handle_id: u64, decision_tx: Sender<Option<Vec<String>>>) -> bool {
+fn publish_decision_sender(handle_id: u64, decision_tx: Sender<Option<Vec<ProfileName>>>) -> bool {
     registry_entry_apply(handle_id, move |shared| {
         shared.decision_tx = Some(decision_tx);
     })
@@ -1319,14 +1434,22 @@ fn serialize_envelope<T: Serialize>(envelope: &ApiEnvelope<'_, T>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CARD_ABSENT_STATUS, CONSENT_SHOWN_STATUS, NO_PAIRING_STATUS, PHONE_UNREACHABLE_STATUS,
-        Phase, REVOKED_STATUS, is_watch_status, state_dto,
+        CARD_ABSENT_STATUS, CARD_UNCONFIRMED_STATUS, CONSENT_SHOWN_STATUS, NO_PAIRING_STATUS,
+        PHONE_UNREACHABLE_STATUS, Phase, REVOKED_STATUS, granted_profiles, is_watch_status,
+        state_dto,
     };
+    use refineid_rapp::ProfileName;
+    use refineid_rapp_core::engine::PeerIntroduction;
+    use refineid_rapp_core::ids::PairId;
+
+    /// A synthetic pair identifier.
+    const PAIR: PairId = PairId::from_array(*b"synthetic pair 1");
 
     #[test]
     fn the_watch_clears_only_its_own_lines() {
         assert!(is_watch_status(PHONE_UNREACHABLE_STATUS));
         assert!(is_watch_status(CARD_ABSENT_STATUS));
+        assert!(is_watch_status(CARD_UNCONFIRMED_STATUS));
         assert!(is_watch_status(NO_PAIRING_STATUS));
         assert!(!is_watch_status(CONSENT_SHOWN_STATUS));
         assert!(!is_watch_status(REVOKED_STATUS));
@@ -1337,25 +1460,36 @@ mod tests {
         assert_eq!(state_dto(&Phase::Offer).state, "offer");
         assert_eq!(state_dto(&Phase::Denied).state, "denied");
         assert_eq!(state_dto(&Phase::Cancelled).state, "cancelled");
-        assert_eq!(
-            state_dto(&Phase::Paired {
-                pair_id_hex: "00".to_owned()
-            })
-            .state,
-            "paired"
-        );
+        assert_eq!(state_dto(&Phase::Paired { pair_id: PAIR }).state, "paired");
     }
 
     #[test]
     fn awaiting_state_carries_the_peer() {
         let dto = state_dto(&Phase::AwaitingConfirmation {
-            display_name: "iPhone".to_owned(),
-            platform: "iOS".to_owned(),
-            profiles: vec!["fi.refineid.card-status.v1".to_owned()],
+            peer: PeerIntroduction {
+                display_name: "iPhone".to_owned(),
+                platform: "iOS".to_owned(),
+            },
+            profiles: vec![ProfileName::CardStatus],
         });
         assert_eq!(dto.state, "awaiting_confirmation");
         let peer = dto.peer.expect("peer present");
         assert_eq!(peer.display_name, "iPhone");
-        assert_eq!(peer.profiles.len(), 1);
+        assert_eq!(peer.profiles, [ProfileName::CardStatus.as_str()]);
+    }
+
+    #[test]
+    fn granted_profiles_are_registered_names() {
+        let granted = format!(
+            "[\"{}\", \"{}\"]",
+            ProfileName::CardStatus.as_str(),
+            ProfileName::Authentication.as_str()
+        );
+        assert_eq!(
+            granted_profiles(&granted).ok(),
+            Some(vec![ProfileName::CardStatus, ProfileName::Authentication])
+        );
+        assert!(granted_profiles("[\"fi.refineid.unknown\"]").is_err());
+        assert!(granted_profiles("not json").is_err());
     }
 }

@@ -47,7 +47,7 @@ use refineid_agent_pipe::{PipeError, SIGNATURE_DEADLINE};
 use refineid_lib_core::x509::{EcCurve, OwnedCert, PublicKeyAlgorithm, extract_rsa_public_key};
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::operations::{KeyProfile, SignatureAlgorithm};
-use refineid_rapp_core::store::{PairingDisposition, PairingRecord};
+use refineid_rapp_core::store::PairingRecord;
 use refineid_windows_credential_store::{
     KEY_STORAGE_PROVIDER, ProtectedPairingStore, browser_key_name, browser_key_pair_id,
 };
@@ -86,7 +86,7 @@ const ALGORITHMS: [&str; 3] = ["ECDSA_P256", "ECDSA_P384", "RSA"];
 struct OpenKey {
     name: String,
     pair_id: PairId,
-    certificate: Vec<u8>,
+    certificate: OwnedCert,
     kind: KeyKind,
 }
 
@@ -123,9 +123,8 @@ fn opened_key(handle: NCRYPT_KEY_HANDLE) -> Option<OpenKey> {
 
 /// The key kind a certificate's public key implies, if this provider can
 /// sign with it.
-fn key_kind(certificate: &[u8]) -> Option<KeyKind> {
-    let cert = OwnedCert::from_der(certificate).ok()?;
-    match cert.view().spki.algorithm() {
+fn key_kind(certificate: &OwnedCert) -> Option<KeyKind> {
+    match certificate.view().spki.algorithm() {
         PublicKeyAlgorithm::Rsa { modulus_bits } => Some(KeyKind::Rsa { bits: modulus_bits }),
         PublicKeyAlgorithm::Ec(EcCurve::Secp256r1) => Some(KeyKind::EcP256),
         PublicKeyAlgorithm::Ec(EcCurve::Secp384r1) => Some(KeyKind::EcP384),
@@ -133,17 +132,17 @@ fn key_kind(certificate: &[u8]) -> Option<KeyKind> {
     }
 }
 
-/// The key of a pairing whose storage both sides confirmed, like the
-/// store's own usable pairing.
+/// The key of a pairing that serves (confirmed by both sides, neither
+/// revoked nor forgotten), like the store's own usable pairing.
 fn key_from_record(record: &PairingRecord) -> Option<OpenKey> {
-    if record.disposition != PairingDisposition::Paired || !record.storage_confirmed {
+    if !record.serves() {
         return None;
     }
-    let certificate = record.auth_cert.clone()?;
+    let certificate = record.authentication_certificate()?.clone();
     let kind = key_kind(&certificate)?;
     Some(OpenKey {
-        name: browser_key_name(record.pair_id),
-        pair_id: record.pair_id,
+        name: browser_key_name(record.pair_id()),
+        pair_id: record.pair_id(),
         certificate,
         kind,
     })
@@ -167,8 +166,7 @@ fn usable_keys() -> Vec<OpenKey> {
 
 /// The CNG public key blob for the opened key.
 fn public_blob(key: &OpenKey) -> Option<Vec<u8>> {
-    let cert = OwnedCert::from_der(&key.certificate).ok()?;
-    let view = cert.view();
+    let view = key.certificate.view();
     match key.kind {
         KeyKind::EcP256 | KeyKind::EcP384 => {
             ecc_public_blob(view.spki.ec_public_key_point()?.as_bytes())
@@ -366,7 +364,7 @@ unsafe extern "system" fn GetKeyProperty(
         "Export Policy" | "Key Type" => dword(0),
         "Name" | "Unique Name" => wide_bytes(&key.name),
         "Provider Handle" => hProvider.to_ne_bytes().to_vec(),
-        "SmartCardKeyCertificate" => key.certificate,
+        "SmartCardKeyCertificate" => key.certificate.into_der(),
         "Impl Type" => dword(IMPL_TYPE),
         "Version" => dword(PROVIDER_VERSION),
         _ => return NTE_NOT_SUPPORTED,
@@ -760,7 +758,7 @@ unsafe extern "system" fn SignHash(
     };
     // W-R-5: only a signature that verifies against the opened certificate
     // reaches the caller.
-    if !verifies(&key.certificate, algorithm, hash, &encoded) {
+    if !verifies(key.certificate.as_der(), algorithm, hash, &encoded) {
         Log::dbg("KSP: SignHash: the signature does not verify against the certificate");
         return NTE_BAD_SIGNATURE;
     }

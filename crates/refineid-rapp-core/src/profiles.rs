@@ -1,15 +1,13 @@
-//! The credential-profile registry (RAPP v26.10.18 section 9).
+//! The credential-profile registry (RAPP v26.10.21 section 9).
 //!
-//! The names reserve design space; the card-specific payload schemas need a
-//! separate reviewed profile specification, so this module carries only
-//! what the core protocol requires of a profile: its name and whether its
-//! actions culminate in a consequential credential command.
+//! The names come from `refineid_rapp`; this module names them for callers
+//! that hold a profile as text, such as a stored grant.
 
 pub use refineid_rapp::ProfileName;
 
-/// Inspect supported card and retry state. No consequential command.
-pub const PROFILE_CARD_STATUS: &str = "fi.refineid.card-status.v1";
+/// Card status, identity, and certificates: reads only.
+pub const PROFILE_CARD_STATUS: &str = ProfileName::CardStatus.as_str();
 /// Browser or application authentication: PIN 1 verify and key operation.
-pub const PROFILE_AUTHENTICATION: &str = "fi.refineid.authentication.v1";
+pub const PROFILE_AUTHENTICATION: &str = ProfileName::Authentication.as_str();
 /// Sign a document digest: PIN 2 verify and key operation.
-pub const PROFILE_DOCUMENT_SIGNING: &str = "fi.refineid.document-signing.v1";
+pub const PROFILE_DOCUMENT_SIGNING: &str = ProfileName::DocumentSigning.as_str();

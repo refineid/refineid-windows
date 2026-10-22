@@ -15,7 +15,7 @@
 //! Durable pairing storage, protected to the Windows user by DPAPI.
 //!
 //! RAPP requires the pair keys to live in device-only, non-migrating secret
-//! storage (RAPP v26.10.18 section 4.3 item 4). The whole pairing set is
+//! storage (RAPP v26.10.21 section 4.3 item 4). The whole pairing set is
 //! serialized by [`refineid_rapp_core::persistence`], protected with
 //! `CryptProtectData` to the current user under a purpose entropy, and
 //! written as one file in the user's local application data, through a
@@ -40,7 +40,8 @@ use std::path::{Path, PathBuf};
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::persistence::{decode_pairing_records, encode_pairing_records};
 use refineid_rapp_core::store::{
-    PairingDisposition, PairingRecord, PairingStore, StoreError, revoke_unconfirmed,
+    PairingRecord, PairingStore, StoreError, expire_revocation_notices, remove_unconfirmed,
+    revoke_pairing,
 };
 use zeroize::Zeroizing;
 
@@ -62,8 +63,11 @@ impl ProtectedPairingStore {
     /// exists yet, after deleting every unprotected copy of a set.
     ///
     /// A record whose peer never confirmed its storage was written inside a
-    /// pairing this computer did not complete; it is revoked here, at the
-    /// first load after that pairing (RAPP v26.10.18 section 4.3 item 4).
+    /// pairing this computer did not complete; it is removed with its keys
+    /// here, at the first load after that pairing (RAPP v26.10.21 section
+    /// 4.3 item 4). A forgotten pairing whose `pairing_revoked` close was
+    /// not delivered within 30 days loses its keys untold (section 4.6
+    /// item 3).
     ///
     /// # Errors
     ///
@@ -83,9 +87,12 @@ impl ProtectedPairingStore {
             None => Vec::new(),
         };
         let mut store = Self { records, directory };
-        // Each revocation is written as it is made; one that could not be
+        // Each change is written as it is made; one that could not be
         // written stands in memory and is written here.
-        if !revoke_unconfirmed(&mut store).is_empty() {
+        let removed = remove_unconfirmed(&mut store);
+        let expired =
+            expire_revocation_notices(&mut store, refineid_rapp_core::clock::unix_time_ms());
+        if !removed.is_empty() || !expired.is_empty() {
             store.persist()?;
         }
         Ok(store)
@@ -103,16 +110,23 @@ impl ProtectedPairingStore {
         self.records.is_empty()
     }
 
-    /// The most recently stored usable pairing, if any: one neither revoked
-    /// nor awaiting the peer's storage confirmation.
+    /// The most recently stored usable pairing, if any: one that serves
+    /// (neither revoked, nor forgotten, nor awaiting the peer's storage
+    /// confirmation).
     ///
     /// A caller that reconnects to a stored pairing needs its `pair_id` and
     /// keys without having kept them from the pairing ceremony.
     #[must_use]
     pub fn usable_pairing(&self) -> Option<&PairingRecord> {
-        self.records.iter().rfind(|record| {
-            record.disposition == PairingDisposition::Paired && record.storage_confirmed
-        })
+        self.records.iter().rfind(|record| record.serves())
+    }
+
+    /// The pairings forgotten here whose `pairing_revoked` close is still
+    /// owed to the phone (RAPP v26.10.21 section 4.6 item 2).
+    pub fn forgotten_pairings(&self) -> impl Iterator<Item = &PairingRecord> {
+        self.records
+            .iter()
+            .filter(|record| record.owes_revocation_notice())
     }
 
     /// All stored pairing records.
@@ -121,32 +135,30 @@ impl ProtectedPairingStore {
         &self.records
     }
 
-    /// Records that the phone announced it forgot `pair_id` (RAPP v26.10.18
-    /// section 4.6 item 5): the keys are destroyed and the record stays as
-    /// the tombstone the user is told about.
+    /// Records that the phone revoked `pair_id` with its `pairing_revoked`
+    /// close (RAPP v26.10.21 section 4.6 item 4): the keys are destroyed and
+    /// the record stays so the user is told.
     ///
     /// # Errors
     ///
     /// Fails when no such pairing is stored, the stored set cannot be read,
     /// or the set cannot be written.
-    pub fn forget_after_revocation(&mut self, pair_id: PairId) -> Result<(), StoreError> {
-        self.update(pair_id, &mut |record| {
-            record.disposition = PairingDisposition::Revoked;
-            record.peer_initiated_termination = true;
-            record.local_private = Zeroizing::new(Vec::new());
-            record.peer_public = Vec::new();
-        })
+    pub fn revoke_by_peer(&mut self, pair_id: PairId) -> Result<(), StoreError> {
+        revoke_pairing(self, pair_id, true)
     }
 
     /// Replaces the records held here with the stored set as it is now, so
     /// a change applies to what is stored and not to the copy this value was
-    /// loaded with: another store instance may have revoked a pairing or
-    /// deleted the set in the meantime. A set that is gone leaves the
-    /// records empty.
+    /// loaded with: another store instance, in this process or another, may
+    /// have forgotten or revoked a pairing or deleted the set in the
+    /// meantime. A set that is gone leaves the records empty.
     ///
-    /// A set that cannot be read stops the change: written over, it would
-    /// be lost.
-    fn refresh_from_storage(&mut self) -> Result<(), StoreError> {
+    /// # Errors
+    ///
+    /// [`StoreError::Unreadable`] when the set cannot be read; the records
+    /// held here stay as they were, and a change written over a set that
+    /// could not be read would lose it.
+    pub fn refresh(&mut self) -> Result<(), StoreError> {
         match read_pairing_set(&self.directory) {
             Ok(Some(blob)) => {
                 self.records =
@@ -163,7 +175,8 @@ impl ProtectedPairingStore {
 
     /// Writes the current record set through to the protected file.
     fn persist(&self) -> Result<(), CredentialStoreError> {
-        let blob = encode_pairing_records(&self.records);
+        let blob = encode_pairing_records(self.records.iter())
+            .map_err(|_error| CredentialStoreError::PairingNotEncodable)?;
         write_pairing_set(&self.directory, &blob)
     }
 
@@ -172,7 +185,7 @@ impl ProtectedPairingStore {
         &mut self,
         change: impl FnOnce(&mut Vec<PairingRecord>) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
-        self.refresh_from_storage()?;
+        self.refresh()?;
         change(&mut self.records)?;
         self.persist().map_err(|_error| StoreError::WriteRefused)
     }
@@ -181,7 +194,8 @@ impl ProtectedPairingStore {
 impl PairingStore for ProtectedPairingStore {
     fn insert(&mut self, record: PairingRecord) -> Result<(), StoreError> {
         self.change(|records| {
-            records.retain(|entry| entry.pair_id != record.pair_id);
+            let pair_id = record.pair_id();
+            records.retain(|entry| entry.pair_id() != pair_id);
             records.push(record);
             Ok(())
         })
@@ -190,7 +204,7 @@ impl PairingStore for ProtectedPairingStore {
     fn get(&self, pair_id: PairId) -> Result<&PairingRecord, StoreError> {
         self.records
             .iter()
-            .find(|entry| entry.pair_id == pair_id)
+            .find(|entry| entry.pair_id() == pair_id)
             .ok_or(StoreError::Unknown)
     }
 
@@ -202,7 +216,7 @@ impl PairingStore for ProtectedPairingStore {
         self.change(|records| {
             let record = records
                 .iter_mut()
-                .find(|entry| entry.pair_id == pair_id)
+                .find(|entry| entry.pair_id() == pair_id)
                 .ok_or(StoreError::Unknown)?;
             change(record);
             Ok(())
@@ -213,14 +227,14 @@ impl PairingStore for ProtectedPairingStore {
         self.records
             .iter()
             .rev()
-            .map(|entry| entry.pair_id)
+            .map(PairingRecord::pair_id)
             .collect()
     }
 
     fn remove(&mut self, pair_id: PairId) -> Result<(), StoreError> {
         self.change(|records| {
             let before = records.len();
-            records.retain(|entry| entry.pair_id != pair_id);
+            records.retain(|entry| entry.pair_id() != pair_id);
             if records.len() == before {
                 return Err(StoreError::Unknown);
             }
@@ -522,22 +536,39 @@ const fn delete_pairing_set_in(_directory: &Path) -> Result<(), CredentialStoreE
 
 #[cfg(all(test, windows))]
 mod tests {
+    use refineid_lib_core::x509::OwnedCert;
+    use refineid_rapp::noise::x25519_public_key;
+    use refineid_rapp::{
+        EndpointRole, PairRecord, ProfileName, X25519_KEY_SIZE, compute_grants_hash,
+    };
+    use refineid_rapp_core::engine::PeerIntroduction;
     use refineid_rapp_core::ids::PairId;
-    use refineid_rapp_core::store::{PairingDisposition, PairingRecord, PairingStore, StoreError};
-    use zeroize::Zeroizing;
+    use refineid_rapp_core::store::{PairingRecord, PairingStore, StoreError};
 
     use super::{
         PAIRING_SET_FILE, ProtectedPairingStore, UNPROTECTED_COPY_FILE, delete_pairing_set_in,
         input_blob, protect, unprotect,
     };
 
-    const KEY_BYTES: usize = 32;
-    const GRANTS_HASH_BYTES: usize = 32;
-    const PAIR_ID_BYTES: usize = 16;
-    /// The length of a DER certificate as large as the cards carry, so the
-    /// set exceeds what one generic credential could hold.
-    const LARGE_CERTIFICATE_BYTES: usize = 1_900;
-    const PRIVATE_KEY_FILL: u8 = 1;
+    /// A synthetic requester static private key.
+    const REQUESTER_PRIVATE: [u8; X25519_KEY_SIZE] = *b"synthetic requester private key.";
+    /// A synthetic custodian static private key.
+    const CUSTODIAN_PRIVATE: [u8; X25519_KEY_SIZE] = *b"synthetic custodian private key.";
+    /// The pairing creation time the fixtures record.
+    const CREATED_AT_MS: u64 = 1_700_000_000_000;
+    /// Two public FINEID intermediate CA certificates, as large as the
+    /// cards' own, so the set exceeds what one generic credential holds
+    /// (`CRED_MAX_CREDENTIAL_BLOB_SIZE`).
+    const LARGE_CERTIFICATE: &[u8] =
+        include_bytes!("../../refineid-pkcs11/ca-certs/fineid-intermediate-02-citizen-g4r.der");
+    const OTHER_LARGE_CERTIFICATE: &[u8] = include_bytes!(
+        "../../refineid-pkcs11/ca-certs/fineid-intermediate-03-organisation-g4r.der"
+    );
+    const FIRST_PAIR: PairId = PairId::from_array(*b"synthetic pair 1");
+    const SECOND_PAIR: PairId = PairId::from_array(*b"synthetic pair 2");
+
+    /// A synthetic payload that is not a DPAPI blob.
+    const NOT_PROTECTED: &[u8] = b"not a DPAPI blob";
 
     /// A directory of its own for one test, removed when the test ends.
     struct TestDirectory(std::path::PathBuf);
@@ -561,24 +592,32 @@ mod tests {
     }
 
     fn record(pair_id: PairId) -> PairingRecord {
-        PairingRecord {
+        let profiles = vec![ProfileName::Authentication];
+        let keys = PairRecord::new(
             pair_id,
-            local_private: Zeroizing::new(vec![PRIVATE_KEY_FILL; KEY_BYTES]),
-            local_public: vec![2; KEY_BYTES],
-            peer_public: vec![3; KEY_BYTES],
-            granted_profiles: vec!["fi.refineid.authentication.v1".into()],
-            grants_hash: [4; GRANTS_HASH_BYTES],
-            peer_display_name: "Phone".into(),
-            peer_platform: "iOS".into(),
-            storage_confirmed: true,
-            disposition: PairingDisposition::Paired,
-            peer_initiated_termination: false,
-            candidate_failures: 0,
-            auth_cert: Some(vec![5; LARGE_CERTIFICATE_BYTES]),
-            signature_cert: Some(vec![6; LARGE_CERTIFICATE_BYTES]),
-            root_ca: None,
-            intermediate_ca: None,
-        }
+            EndpointRole::Requester,
+            REQUESTER_PRIVATE,
+            x25519_public_key(&REQUESTER_PRIVATE),
+            x25519_public_key(&CUSTODIAN_PRIVATE),
+            compute_grants_hash(&profiles).expect("grants hash"),
+            profiles,
+            CREATED_AT_MS,
+        )
+        .expect("record");
+        let mut record = PairingRecord::new(
+            keys,
+            PeerIntroduction {
+                display_name: "Phone".into(),
+                platform: "iOS".into(),
+            },
+        );
+        record.remember_authentication_certificate(
+            OwnedCert::from_der(LARGE_CERTIFICATE).expect("certificate"),
+        );
+        record.remember_signature_certificate(
+            OwnedCert::from_der(OTHER_LARGE_CERTIFICATE).expect("certificate"),
+        );
+        record
     }
 
     #[test]
@@ -596,7 +635,7 @@ mod tests {
 
     #[test]
     fn a_blob_protected_for_another_purpose_does_not_unprotect() {
-        assert!(unprotect(b"not a DPAPI blob").is_err());
+        assert!(unprotect(NOT_PROTECTED).is_err());
     }
 
     #[test]
@@ -609,7 +648,7 @@ mod tests {
     #[test]
     fn a_set_larger_than_a_credential_survives_a_reload_protected() {
         let directory = TestDirectory::new("reload");
-        let pair_id = PairId::from_array([7; PAIR_ID_BYTES]);
+        let pair_id = FIRST_PAIR;
         let mut store = ProtectedPairingStore::load_from(directory.0.clone()).expect("load");
         assert!(store.is_empty());
         store.insert(record(pair_id)).expect("insert");
@@ -618,13 +657,13 @@ mod tests {
         assert!(
             !on_disk
                 .as_slice()
-                .windows(KEY_BYTES)
-                .any(|window| window.iter().all(|&byte| byte == PRIVATE_KEY_FILL))
+                .windows(REQUESTER_PRIVATE.len())
+                .any(|window| window == REQUESTER_PRIVATE)
         );
 
         let mut reloaded = ProtectedPairingStore::load_from(directory.0.clone()).expect("reload");
         assert_eq!(reloaded.len(), 1);
-        assert_eq!(reloaded.get(pair_id).expect("stored").pair_id, pair_id);
+        assert_eq!(reloaded.get(pair_id).expect("stored").pair_id(), pair_id);
         reloaded.remove(pair_id).expect("remove");
         assert!(
             ProtectedPairingStore::load_from(directory.0.clone())
@@ -638,19 +677,16 @@ mod tests {
     #[test]
     fn a_change_is_never_written_over_a_set_that_cannot_be_read() {
         let directory = TestDirectory::new("unreadable");
-        let first = PairId::from_array([7; PAIR_ID_BYTES]);
-        let second = PairId::from_array([8; PAIR_ID_BYTES]);
+        let first = FIRST_PAIR;
+        let second = SECOND_PAIR;
         let mut store = ProtectedPairingStore::load_from(directory.0.clone()).expect("load");
         store.insert(record(first)).expect("insert");
         let stored = directory.0.join(PAIRING_SET_FILE);
         let before = std::fs::read(&stored).expect("stored");
-        std::fs::write(&stored, b"not a DPAPI blob").expect("corrupt");
+        std::fs::write(&stored, NOT_PROTECTED).expect("corrupt");
 
         assert_eq!(store.insert(record(second)), Err(StoreError::Unreadable));
-        assert_eq!(
-            std::fs::read(&stored).expect("still there"),
-            b"not a DPAPI blob"
-        );
+        assert_eq!(std::fs::read(&stored).expect("still there"), NOT_PROTECTED);
         std::fs::write(&stored, before).expect("restore");
     }
 

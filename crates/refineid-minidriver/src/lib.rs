@@ -268,14 +268,12 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
             Log::dbg("CardAcquireContext: no usable pairing found for remote card");
             return SCARD_E_UNKNOWN_CARD;
         };
-        let (auth_der, sig_der) = if let Some(auth_der) = pairing.auth_cert.clone() {
-            let sig_der = pairing
-                .signature_cert
-                .clone()
-                .unwrap_or_else(|| auth_der.clone());
-            (auth_der, sig_der)
+        let pair_id = pairing.pair_id();
+        let (auth_der, sig_der) = if let Some(auth) = pairing.authentication_certificate() {
+            let sig = pairing.signature_certificate().unwrap_or(auth);
+            (auth.as_der().to_vec(), sig.as_der().to_vec())
         } else {
-            let remote_tx = RemoteCardTransport::new(atr.clone(), pairing.pair_id, pairing.clone());
+            let remote_tx = RemoteCardTransport::new(atr.clone(), pair_id);
             let cert_res = match remote_tx.execute_operation(&CardOperation::ReadCertificate {
                 kind: CertificateKind::Authentication,
             }) {
@@ -284,7 +282,7 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
                     Log::dbg(&format!(
                         "CardAcquireContext: remote read_certificate failed: {e}"
                     ));
-                    return SCARD_F_INTERNAL_ERROR;
+                    return e.status();
                 }
             };
             let CardOperationResult::Certificate(der) = cert_res else {
@@ -294,17 +292,19 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
         };
 
         // Cache root/intermediate CA certificates from pairing record if present
-        if let (Some(root), inter) = (&pairing.root_ca, &pairing.intermediate_ca) {
+        if let Some(root) = pairing.root_certificate() {
             let roots = refineid_lib_core::trust_roots::RootCertificates::new(
-                Some(root.clone()),
-                inter.clone(),
+                Some(root.as_der().to_vec()),
+                pairing
+                    .intermediate_certificate()
+                    .map(|certificate| certificate.as_der().to_vec()),
             );
             let bundle = roots.to_pkcs7_bundle();
             msroots::set_root_certificates(bundle);
             let _ = refineid_lib_core::trust_roots::set_root_certificates(roots);
         }
 
-        let remote_tx = RemoteCardTransport::new(atr, pairing.pair_id, pairing.clone());
+        let remote_tx = RemoteCardTransport::new(atr, pair_id);
         (CardSessionTransport::remote(remote_tx), auth_der, sig_der)
     } else {
         let mut raw_transport = WinScardTransport {
@@ -1760,14 +1760,13 @@ unsafe extern "system" fn CardSignData(
     let remote_arm = {
         let tx = lock_transport(&ctx.transport);
         if tx.is_remote() {
-            tx.remote_ref()
-                .map(|r| (r.pair_id, r.pairing_record.clone(), r.atr.clone()))
+            tx.remote_ref().map(|r| (r.pair_id, r.atr.clone()))
         } else {
             None
         }
     };
 
-    if let Some((pair_id, pairing_record, atr)) = remote_arm {
+    if let Some((pair_id, atr)) = remote_arm {
         let (key_profile, algorithm) = match (&container.key_alg, info.dwPaddingType) {
             (KeyAlgorithm::Rsa { bits }, CARD_PADDING_PSS) => {
                 let kp = if *bits <= 2048 {
@@ -1835,12 +1834,12 @@ unsafe extern "system" fn CardSignData(
             }
         };
 
-        let remote_tx = RemoteCardTransport::new(atr, pair_id, pairing_record);
+        let remote_tx = RemoteCardTransport::new(atr, pair_id);
         let result = match remote_tx.execute_operation(&operation) {
             Ok(r) => r,
             Err(err) => {
                 Log::dbg(&format!("CardSignData: remote operation failed: {err}"));
-                return SCARD_F_INTERNAL_ERROR;
+                return err.status();
             }
         };
 

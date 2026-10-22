@@ -1,11 +1,14 @@
 //! Device-local serialization of a pairing record.
 //!
 //! A durable [`PairingStore`](crate::store::PairingStore) — on Windows, the
-//! platform credential store —
-//! needs the record's bytes. This module is the
-//! only serialization boundary for [`PairingRecord`]: a versioned, length-framed
-//! encoding with no external serde surface, so the pair-specific private key is
-//! never handed to a general-purpose serializer or format.
+//! platform credential store — needs the record's bytes. This module is the
+//! only serialization boundary for [`PairingRecord`], and the storage
+//! border it is read back through: a versioned, length-framed encoding with
+//! no external serde surface. The keys travel inside the engine's own
+//! encoding of its record ([`refineid_rapp::encode_pair_record`]), which
+//! [`refineid_rapp::decode_pair_record`] checks back into a record whose
+//! every predicate holds; the cached certificates come back only as
+//! certificates that parse.
 //!
 //! The encoded blob carries the private key, so [`encode_pairing_record`]
 //! returns it inside [`Zeroizing`]; callers hand it straight to device-only
@@ -14,20 +17,26 @@
 //! fails closed rather than yielding a half-built record. Neither direction
 //! ever prints a key.
 
+use refineid_lib_core::x509::OwnedCert;
+use refineid_rapp::{EndpointRole, PAIR_ID_SIZE, PairRecordCodecError};
 use zeroize::Zeroizing;
 
+use crate::engine::PeerIntroduction;
 use crate::ids::PairId;
-use crate::store::{PairingDisposition, PairingRecord};
+use crate::store::{PairingRecord, PairingState};
 
 /// Format tag identifying a `RefineID` pairing-record blob.
 const PAIRING_BLOB_MAGIC: &[u8] = b"RAPP-pair-record";
 
 /// The pairing-record encoding revision.
-const PAIRING_BLOB_VERSION: u8 = 7;
+const PAIRING_BLOB_VERSION: u8 = 8;
 
 /// The highest revision written for an earlier RAPP protocol version. Those
-/// pairings cannot open RAPP v26.10.18 sessions, so they are not loaded.
-const LAST_EARLIER_PROTOCOL_BLOB_VERSION: u8 = 6;
+/// pairings cannot open RAPP v26.10.21 sessions, so they are not loaded.
+const LAST_EARLIER_PROTOCOL_BLOB_VERSION: u8 = 7;
+
+/// The lowest revision ever written.
+const FIRST_BLOB_VERSION: u8 = 1;
 
 /// Format tag identifying a whole stored pairing set.
 const PAIRING_SET_MAGIC: &[u8] = b"RAPP-pair-set";
@@ -35,17 +44,21 @@ const PAIRING_SET_MAGIC: &[u8] = b"RAPP-pair-set";
 /// The pairing-set encoding revision.
 const PAIRING_SET_VERSION: u8 = 1;
 
-/// Disposition tag for a usable pairing.
-const DISPOSITION_PAIRED: u8 = 0;
-/// Disposition tag for a revoked (tombstoned) pairing.
-const DISPOSITION_REVOKED: u8 = 1;
+/// Keys tag: the engine's record, keys held, follows.
+const KEYS_HELD: u8 = 0;
+/// Keys tag: the keys are destroyed; the pair identifier and who revoked
+/// follow.
+const KEYS_REVOKED: u8 = 1;
 
 /// Boolean false on the wire.
 const BOOLEAN_FALSE: u8 = 0;
 /// Boolean true on the wire.
 const BOOLEAN_TRUE: u8 = 1;
 
-/// Why a stored pairing blob could not be decoded.
+/// Bytes of one encoded length.
+const LENGTH_BYTES: usize = size_of::<u32>();
+
+/// Why a stored pairing blob could not be encoded or decoded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PairingCodecError {
     /// The blob did not begin with the pairing-record format tag.
@@ -65,12 +78,20 @@ pub enum PairingCodecError {
     Truncated,
     /// Bytes remained after the last field was read.
     TrailingBytes,
-    /// A disposition tag was neither paired nor revoked.
-    InvalidDisposition,
-    /// A boolean field was neither zero nor one.
+    /// A keys tag was neither held nor revoked.
+    InvalidKeys,
+    /// A boolean or presence field was neither zero nor one.
     InvalidBoolean,
     /// A text field was not valid UTF-8.
     InvalidText,
+    /// A field is longer than a length prefix can state.
+    Oversized,
+    /// The engine refused its record's encoding.
+    PairRecord(PairRecordCodecError),
+    /// The engine's record belongs to a custodian, not to this requester.
+    NotRequester,
+    /// A cached certificate does not parse as an X.509 certificate.
+    InvalidCertificate,
 }
 
 impl core::fmt::Display for PairingCodecError {
@@ -88,11 +109,15 @@ impl core::fmt::Display for PairingCodecError {
             }
             Self::Truncated => formatter.write_str("pairing record ended mid-field"),
             Self::TrailingBytes => formatter.write_str("pairing record had trailing bytes"),
-            Self::InvalidDisposition => {
-                formatter.write_str("pairing record had an unknown disposition")
-            }
+            Self::InvalidKeys => formatter.write_str("pairing record had an unknown keys tag"),
             Self::InvalidBoolean => formatter.write_str("pairing record had a malformed flag"),
             Self::InvalidText => formatter.write_str("pairing record held invalid text"),
+            Self::Oversized => formatter.write_str("pairing record field too long"),
+            Self::PairRecord(error) => write!(formatter, "pairing keys refused: {error}"),
+            Self::NotRequester => formatter.write_str("pairing record is not a requester's"),
+            Self::InvalidCertificate => {
+                formatter.write_str("pairing record held an invalid certificate")
+            }
         }
     }
 }
@@ -104,39 +129,41 @@ impl core::error::Error for PairingCodecError {}
 /// The returned blob contains the pair-specific private key and is therefore
 /// wrapped in [`Zeroizing`]: hand it directly to device-only storage
 /// and never log it.
-#[must_use]
-pub fn encode_pairing_record(record: &PairingRecord) -> Zeroizing<Vec<u8>> {
+///
+/// # Errors
+///
+/// Fails when the engine cannot encode its record or a field is longer than
+/// a length prefix states.
+pub fn encode_pairing_record(
+    record: &PairingRecord,
+) -> Result<Zeroizing<Vec<u8>>, PairingCodecError> {
     let mut out = Zeroizing::new(Vec::new());
     out.extend_from_slice(PAIRING_BLOB_MAGIC);
     out.push(PAIRING_BLOB_VERSION);
-    out.extend_from_slice(record.pair_id.as_bytes());
-    out.extend_from_slice(&record.grants_hash);
-    out.push(disposition_tag(record.disposition));
-    out.push(if record.peer_initiated_termination {
-        BOOLEAN_TRUE
-    } else {
-        BOOLEAN_FALSE
-    });
-    out.push(if record.storage_confirmed {
-        BOOLEAN_TRUE
-    } else {
-        BOOLEAN_FALSE
-    });
-    out.extend_from_slice(&record.candidate_failures.to_be_bytes());
-    put_bytes(&mut out, &record.local_private);
-    put_bytes(&mut out, &record.local_public);
-    put_bytes(&mut out, &record.peer_public);
-    put_length(&mut out, record.granted_profiles.len());
-    for profile in &record.granted_profiles {
-        put_bytes(&mut out, profile.as_bytes());
+    match (record.pair_record(), record.state()) {
+        (Some(keys), _) => {
+            out.push(KEYS_HELD);
+            let encoded = Zeroizing::new(
+                refineid_rapp::encode_pair_record(keys).map_err(PairingCodecError::PairRecord)?,
+            );
+            put_bytes(&mut out, &encoded)?;
+        }
+        (None, state) => {
+            out.push(KEYS_REVOKED);
+            out.extend_from_slice(record.pair_id().as_bytes());
+            out.push(boolean_tag(matches!(
+                state,
+                PairingState::Revoked { by_peer: true }
+            )));
+        }
     }
-    put_bytes(&mut out, record.peer_display_name.as_bytes());
-    put_bytes(&mut out, record.peer_platform.as_bytes());
-    put_optional_bytes(&mut out, record.auth_cert.as_deref());
-    put_optional_bytes(&mut out, record.signature_cert.as_deref());
-    put_optional_bytes(&mut out, record.root_ca.as_deref());
-    put_optional_bytes(&mut out, record.intermediate_ca.as_deref());
-    out
+    put_bytes(&mut out, record.peer().display_name.as_bytes())?;
+    put_bytes(&mut out, record.peer().platform.as_bytes())?;
+    put_optional_certificate(&mut out, record.authentication_certificate())?;
+    put_optional_certificate(&mut out, record.signature_certificate())?;
+    put_optional_certificate(&mut out, record.root_certificate())?;
+    put_optional_certificate(&mut out, record.intermediate_certificate())?;
+    Ok(out)
 }
 
 /// Reconstructs a pairing record from a device-only blob.
@@ -144,7 +171,9 @@ pub fn encode_pairing_record(record: &PairingRecord) -> Zeroizing<Vec<u8>> {
 /// # Errors
 ///
 /// Fails when the blob is not a pairing record, uses an unknown revision, ends
-/// mid-field, carries trailing bytes, or holds a malformed field.
+/// mid-field, carries trailing bytes, or holds a malformed field: keys the
+/// engine refuses, a custodian's record, or a certificate that does not
+/// parse.
 pub fn decode_pairing_record(blob: &[u8]) -> Result<PairingRecord, PairingCodecError> {
     let mut reader = Reader::new(blob);
     if reader.take(PAIRING_BLOB_MAGIC.len())? != PAIRING_BLOB_MAGIC {
@@ -152,54 +181,49 @@ pub fn decode_pairing_record(blob: &[u8]) -> Result<PairingRecord, PairingCodecE
     }
     let version = reader.take_u8()?;
     if version != PAIRING_BLOB_VERSION {
-        if (1..=LAST_EARLIER_PROTOCOL_BLOB_VERSION).contains(&version) {
+        if (FIRST_BLOB_VERSION..=LAST_EARLIER_PROTOCOL_BLOB_VERSION).contains(&version) {
             return Err(PairingCodecError::EarlierProtocol { found: version });
         }
         return Err(PairingCodecError::UnsupportedVersion { found: version });
     }
-
-    let pair_id = PairId::from_array(reader.take_array()?);
-    let grants_hash = reader.take_array()?;
-    let disposition = disposition_from_tag(reader.take_u8()?)?;
-    let peer_initiated_termination = boolean_from_tag(reader.take_u8()?)?;
-    let storage_confirmed = boolean_from_tag(reader.take_u8()?)?;
-    let candidate_failures = u32::from_be_bytes(reader.take_array()?);
-    let local_private = Zeroizing::new(reader.take_length_prefixed()?.to_vec());
-    let local_public = reader.take_length_prefixed()?.to_vec();
-    let peer_public = reader.take_length_prefixed()?.to_vec();
-
-    let profile_count = reader.take_length()?;
-    let mut granted_profiles = Vec::with_capacity(profile_count);
-    for _ in 0..profile_count {
-        granted_profiles.push(reader.take_text()?);
+    let keys = match reader.take_u8()? {
+        KEYS_HELD => {
+            let keys = refineid_rapp::decode_pair_record(reader.take_length_prefixed()?)
+                .map_err(PairingCodecError::PairRecord)?;
+            if keys.role() != EndpointRole::Requester {
+                return Err(PairingCodecError::NotRequester);
+            }
+            Ok(keys)
+        }
+        KEYS_REVOKED => {
+            let pair_id = PairId::from_array(reader.take_array::<PAIR_ID_SIZE>()?);
+            let by_peer = boolean_from_tag(reader.take_u8()?)?;
+            Err((pair_id, by_peer))
+        }
+        _ => return Err(PairingCodecError::InvalidKeys),
+    };
+    let peer = PeerIntroduction {
+        display_name: reader.take_text()?,
+        platform: reader.take_text()?,
+    };
+    let mut record = match keys {
+        Ok(keys) => PairingRecord::new(keys, peer),
+        Err((pair_id, by_peer)) => PairingRecord::revoked(pair_id, by_peer, peer),
+    };
+    if let Some(certificate) = reader.take_optional_certificate()? {
+        record.remember_authentication_certificate(certificate);
     }
-    let peer_display_name = reader.take_text()?;
-    let peer_platform = reader.take_text()?;
-    let auth_cert = reader.take_optional_bytes()?.map(<[u8]>::to_vec);
-    let signature_cert = reader.take_optional_bytes()?.map(<[u8]>::to_vec);
-    let root_ca = reader.take_optional_bytes()?.map(<[u8]>::to_vec);
-    let intermediate_ca = reader.take_optional_bytes()?.map(<[u8]>::to_vec);
-
+    if let Some(certificate) = reader.take_optional_certificate()? {
+        record.remember_signature_certificate(certificate);
+    }
+    if let Some(certificate) = reader.take_optional_certificate()? {
+        record.remember_root_certificate(certificate);
+    }
+    if let Some(certificate) = reader.take_optional_certificate()? {
+        record.remember_intermediate_certificate(certificate);
+    }
     reader.finish()?;
-
-    Ok(PairingRecord {
-        pair_id,
-        local_private,
-        local_public,
-        peer_public,
-        granted_profiles,
-        grants_hash,
-        peer_display_name,
-        peer_platform,
-        storage_confirmed,
-        disposition,
-        peer_initiated_termination,
-        candidate_failures,
-        auth_cert,
-        signature_cert,
-        root_ca,
-        intermediate_ca,
-    })
+    Ok(record)
 }
 
 /// Serializes a whole pairing set as one device-only blob.
@@ -207,16 +231,21 @@ pub fn decode_pairing_record(blob: &[u8]) -> Result<PairingRecord, PairingCodecE
 /// The durable store persists every record together so one atomic credential
 /// write covers an insert, update, or removal. Like [`encode_pairing_record`],
 /// the result carries private keys and is wrapped in [`Zeroizing`].
-#[must_use]
-pub fn encode_pairing_records(records: &[PairingRecord]) -> Zeroizing<Vec<u8>> {
+///
+/// # Errors
+///
+/// Fails when a record cannot be encoded.
+pub fn encode_pairing_records<'record>(
+    records: impl ExactSizeIterator<Item = &'record PairingRecord>,
+) -> Result<Zeroizing<Vec<u8>>, PairingCodecError> {
     let mut out = Zeroizing::new(Vec::new());
     out.extend_from_slice(PAIRING_SET_MAGIC);
     out.push(PAIRING_SET_VERSION);
-    put_length(&mut out, records.len());
+    put_length(&mut out, records.len())?;
     for record in records {
-        put_bytes(&mut out, &encode_pairing_record(record));
+        put_bytes(&mut out, &encode_pairing_record(record)?)?;
     }
-    out
+    Ok(out)
 }
 
 /// Reconstructs a whole pairing set from a device-only blob.
@@ -255,21 +284,9 @@ pub fn decode_pairing_records(blob: &[u8]) -> Result<Vec<PairingRecord>, Pairing
     Ok(records)
 }
 
-/// Maps a disposition to its wire tag.
-const fn disposition_tag(disposition: PairingDisposition) -> u8 {
-    match disposition {
-        PairingDisposition::Paired => DISPOSITION_PAIRED,
-        PairingDisposition::Revoked => DISPOSITION_REVOKED,
-    }
-}
-
-/// Maps a wire tag to a disposition.
-const fn disposition_from_tag(tag: u8) -> Result<PairingDisposition, PairingCodecError> {
-    match tag {
-        DISPOSITION_PAIRED => Ok(PairingDisposition::Paired),
-        DISPOSITION_REVOKED => Ok(PairingDisposition::Revoked),
-        _ => Err(PairingCodecError::InvalidDisposition),
-    }
+/// Maps a boolean to its wire tag.
+const fn boolean_tag(value: bool) -> u8 {
+    if value { BOOLEAN_TRUE } else { BOOLEAN_FALSE }
 }
 
 /// Maps a wire tag to a boolean.
@@ -282,30 +299,30 @@ const fn boolean_from_tag(tag: u8) -> Result<bool, PairingCodecError> {
 }
 
 /// Appends a count as a big-endian `u32`.
-fn put_length(out: &mut Vec<u8>, length: usize) {
-    // Every length here is a key size, a bounded profile name, or a small
-    // count, so it fits a u32; a saturating cast keeps the encoder infallible
-    // without a silent wrap.
-    let bounded = u32::try_from(length).unwrap_or(u32::MAX);
+fn put_length(out: &mut Vec<u8>, length: usize) -> Result<(), PairingCodecError> {
+    let bounded = u32::try_from(length).map_err(|_| PairingCodecError::Oversized)?;
     out.extend_from_slice(&bounded.to_be_bytes());
+    Ok(())
 }
 
 /// Appends a length-prefixed byte string.
-fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
-    put_length(out, bytes.len());
+fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), PairingCodecError> {
+    put_length(out, bytes.len())?;
     out.extend_from_slice(bytes);
+    Ok(())
 }
 
-/// Appends an optional length-prefixed byte string.
-fn put_optional_bytes(out: &mut Vec<u8>, bytes: Option<&[u8]>) {
-    match bytes {
-        Some(b) => {
-            out.push(BOOLEAN_TRUE);
-            put_bytes(out, b);
-        }
-        None => {
-            out.push(BOOLEAN_FALSE);
-        }
+/// Appends an optional certificate as its length-prefixed DER.
+fn put_optional_certificate(
+    out: &mut Vec<u8>,
+    certificate: Option<&OwnedCert>,
+) -> Result<(), PairingCodecError> {
+    if let Some(certificate) = certificate {
+        out.push(BOOLEAN_TRUE);
+        put_bytes(out, certificate.as_der())
+    } else {
+        out.push(BOOLEAN_FALSE);
+        Ok(())
     }
 }
 
@@ -331,7 +348,10 @@ impl<'blob> Reader<'blob> {
 
     /// Takes one byte.
     fn take_u8(&mut self) -> Result<u8, PairingCodecError> {
-        Ok(self.take(1)?[0])
+        self.take(size_of::<u8>())?
+            .first()
+            .copied()
+            .ok_or(PairingCodecError::Truncated)
     }
 
     /// Takes a fixed-size array.
@@ -344,8 +364,8 @@ impl<'blob> Reader<'blob> {
 
     /// Takes a big-endian `u32` length as a `usize`.
     fn take_length(&mut self) -> Result<usize, PairingCodecError> {
-        // A u32 always fits the usize this crate targets (32- and 64-bit).
-        Ok(u32::from_be_bytes(self.take_array()?) as usize)
+        let length = u32::from_be_bytes(self.take_array::<LENGTH_BYTES>()?);
+        usize::try_from(length).map_err(|_| PairingCodecError::Oversized)
     }
 
     /// Takes a length-prefixed byte string.
@@ -362,14 +382,14 @@ impl<'blob> Reader<'blob> {
             .map_err(|_error| PairingCodecError::InvalidText)
     }
 
-    /// Takes an optional length-prefixed byte slice.
-    fn take_optional_bytes(&mut self) -> Result<Option<&'blob [u8]>, PairingCodecError> {
-        let tag = self.take_u8()?;
-        match tag {
-            BOOLEAN_FALSE => Ok(None),
-            BOOLEAN_TRUE => Ok(Some(self.take_length_prefixed()?)),
-            _ => Err(PairingCodecError::InvalidBoolean),
+    /// Takes an optional certificate, parsed at this border.
+    fn take_optional_certificate(&mut self) -> Result<Option<OwnedCert>, PairingCodecError> {
+        if !boolean_from_tag(self.take_u8()?)? {
+            return Ok(None);
         }
+        OwnedCert::from_der(self.take_length_prefixed()?)
+            .map(Some)
+            .map_err(|_error| PairingCodecError::InvalidCertificate)
     }
 
     /// Confirms the blob was consumed exactly.
@@ -388,101 +408,137 @@ impl<'blob> Reader<'blob> {
     reason = "test fixtures are constructed to be infallible"
 )]
 mod tests {
-    use zeroize::Zeroizing;
-
     use super::{
-        PAIRING_BLOB_MAGIC, PAIRING_BLOB_VERSION, PairingCodecError, decode_pairing_record,
-        decode_pairing_records, encode_pairing_record, encode_pairing_records,
+        LAST_EARLIER_PROTOCOL_BLOB_VERSION, PAIRING_BLOB_MAGIC, PAIRING_SET_MAGIC,
+        PAIRING_SET_VERSION, PairingCodecError, decode_pairing_record, decode_pairing_records,
+        encode_pairing_record, encode_pairing_records, put_bytes, put_length,
     };
-    use crate::ids::PairId;
-    use crate::store::{PairingDisposition, PairingRecord};
+    use refineid_lib_core::x509::OwnedCert;
 
+    use crate::store::fixtures::{
+        FIRST_PAIR, SECOND_PAIR, certificate, record, unconfirmed_record,
+    };
+    use crate::store::{
+        MemoryPairingStore, PairingRecord, PairingState, PairingStore, forget_pairing,
+        revoke_pairing,
+    };
+
+    /// The wall-clock time the user forgets a pairing in these tests.
+    const FORGOTTEN_AT_MS: u64 = 1_800_000_000_000;
+    /// A revision newer than any this build writes.
+    const FUTURE_BLOB_VERSION: u8 = u8::MAX;
+
+    /// The full record, certificates included.
     fn sample() -> PairingRecord {
-        PairingRecord {
-            pair_id: PairId::from_array([7; 16]),
-            local_private: Zeroizing::new(vec![1; 32]),
-            local_public: vec![2; 32],
-            peer_public: vec![3; 32],
-            granted_profiles: vec![
-                "fi.refineid.authentication.v1".into(),
-                "fi.refineid.document-signing.v1".into(),
-            ],
-            grants_hash: [4; 32],
-            peer_display_name: "Holder's Phone".into(),
-            peer_platform: "iOS".into(),
-            storage_confirmed: true,
-            disposition: PairingDisposition::Paired,
-            peer_initiated_termination: false,
-            candidate_failures: 2,
-            auth_cert: Some(vec![0x30, 0x82, 0x01, 0x00]),
-            signature_cert: Some(vec![0x30, 0x82, 0x02, 0x00]),
-            root_ca: Some(vec![0x30, 0x82, 0x03, 0x00]),
-            intermediate_ca: Some(vec![0x30, 0x82, 0x04, 0x00]),
-        }
+        let mut sample = record(FIRST_PAIR);
+        sample.remember_authentication_certificate(certificate());
+        sample.remember_signature_certificate(certificate());
+        sample.remember_root_certificate(certificate());
+        sample.remember_intermediate_certificate(certificate());
+        sample
+    }
+
+    fn round_trip(record: &PairingRecord) -> PairingRecord {
+        decode_pairing_record(&encode_pairing_record(record).unwrap()).unwrap()
     }
 
     fn assert_same(left: &PairingRecord, right: &PairingRecord) {
-        assert_eq!(left.pair_id, right.pair_id);
+        assert_eq!(left.pair_id(), right.pair_id());
+        assert_eq!(left.state(), right.state());
+        assert_eq!(left.granted_profiles(), right.granted_profiles());
+        assert_eq!(left.peer(), right.peer());
         assert_eq!(
-            left.local_private.as_slice(),
-            right.local_private.as_slice()
+            left.pair_record()
+                .map(refineid_rapp::PairRecord::local_static_private),
+            right
+                .pair_record()
+                .map(refineid_rapp::PairRecord::local_static_private)
         );
-        assert_eq!(left.local_public, right.local_public);
-        assert_eq!(left.peer_public, right.peer_public);
-        assert_eq!(left.granted_profiles, right.granted_profiles);
-        assert_eq!(left.grants_hash, right.grants_hash);
-        assert_eq!(left.peer_display_name, right.peer_display_name);
-        assert_eq!(left.peer_platform, right.peer_platform);
-        assert_eq!(left.storage_confirmed, right.storage_confirmed);
-        assert_eq!(left.disposition, right.disposition);
         assert_eq!(
-            left.peer_initiated_termination,
-            right.peer_initiated_termination
+            left.pair_record()
+                .map(refineid_rapp::PairRecord::grants_hash),
+            right
+                .pair_record()
+                .map(refineid_rapp::PairRecord::grants_hash)
         );
-        assert_eq!(left.candidate_failures, right.candidate_failures);
-        assert_eq!(left.auth_cert, right.auth_cert);
-        assert_eq!(left.signature_cert, right.signature_cert);
-        assert_eq!(left.root_ca, right.root_ca);
-        assert_eq!(left.intermediate_ca, right.intermediate_ca);
+        assert_eq!(
+            left.authentication_certificate().map(OwnedCert::as_der),
+            right.authentication_certificate().map(OwnedCert::as_der)
+        );
+        assert_eq!(
+            left.signature_certificate().map(OwnedCert::as_der),
+            right.signature_certificate().map(OwnedCert::as_der)
+        );
+        assert_eq!(
+            left.root_certificate().map(OwnedCert::as_der),
+            right.root_certificate().map(OwnedCert::as_der)
+        );
+        assert_eq!(
+            left.intermediate_certificate().map(OwnedCert::as_der),
+            right.intermediate_certificate().map(OwnedCert::as_der)
+        );
+    }
+
+    /// A store holding `record` in the state `prepare` leaves it in.
+    fn stored(
+        record: PairingRecord,
+        prepare: impl FnOnce(&mut MemoryPairingStore),
+    ) -> PairingRecord {
+        let pair_id = record.pair_id();
+        let mut store = MemoryPairingStore::new();
+        store.insert(record).unwrap();
+        prepare(&mut store);
+        round_trip(store.get(pair_id).unwrap())
     }
 
     #[test]
     fn round_trips_every_field() {
         let record = sample();
-        let blob = encode_pairing_record(&record);
-        let decoded = decode_pairing_record(&blob).unwrap();
-        assert_same(&record, &decoded);
+        assert_same(&record, &round_trip(&record));
     }
 
     #[test]
     fn round_trips_an_unconfirmed_record() {
-        let mut record = sample();
-        record.storage_confirmed = false;
-        let decoded = decode_pairing_record(&encode_pairing_record(&record)).unwrap();
+        let record = unconfirmed_record(FIRST_PAIR);
+        let decoded = round_trip(&record);
+        assert_eq!(decoded.state(), PairingState::Unconfirmed);
         assert_same(&record, &decoded);
     }
 
     #[test]
-    fn round_trips_a_revoked_tombstone() {
-        let mut record = sample();
-        record.disposition = PairingDisposition::Revoked;
-        record.peer_initiated_termination = true;
-        record.local_private = Zeroizing::new(Vec::new());
-        record.peer_public = Vec::new();
-        let decoded = decode_pairing_record(&encode_pairing_record(&record)).unwrap();
-        assert_same(&record, &decoded);
+    fn round_trips_a_forgotten_record() {
+        let decoded = stored(sample(), |store| {
+            forget_pairing(store, FIRST_PAIR, FORGOTTEN_AT_MS).unwrap();
+        });
+        assert_eq!(decoded.state(), PairingState::Forgotten);
+        assert_eq!(
+            decoded
+                .pair_record()
+                .and_then(refineid_rapp::PairRecord::forgotten_at_ms),
+            Some(FORGOTTEN_AT_MS)
+        );
+    }
+
+    #[test]
+    fn round_trips_a_revoked_record() {
+        let decoded = stored(sample(), |store| {
+            revoke_pairing(store, FIRST_PAIR, true).unwrap();
+        });
+        assert_eq!(decoded.state(), PairingState::Revoked { by_peer: true });
+        assert_eq!(decoded.pair_id(), FIRST_PAIR);
+        assert!(decoded.pair_record().is_none());
+        assert!(decoded.authentication_certificate().is_none());
     }
 
     #[test]
     fn round_trips_a_multi_record_set() {
-        let mut second = sample();
-        second.pair_id = PairId::from_array([8; 16]);
-        second.peer_display_name = "Holder's Tablet".into();
-        let records = vec![sample(), second];
-        let decoded = decode_pairing_records(&encode_pairing_records(&records)).unwrap();
-        assert_eq!(decoded.len(), 2);
-        assert_same(&records[0], &decoded[0]);
-        assert_same(&records[1], &decoded[1]);
+        let records = [sample(), record(SECOND_PAIR)];
+        let decoded =
+            decode_pairing_records(&encode_pairing_records(records.iter()).unwrap()).unwrap();
+        assert_eq!(decoded.len(), records.len());
+        for (original, decoded) in records.iter().zip(&decoded) {
+            assert_same(original, decoded);
+        }
     }
 
     #[test]
@@ -492,8 +548,9 @@ mod tests {
 
     #[test]
     fn round_trips_an_empty_set() {
+        let none: Vec<PairingRecord> = Vec::new();
         assert!(
-            decode_pairing_records(&encode_pairing_records(&[]))
+            decode_pairing_records(&encode_pairing_records(none.iter()).unwrap())
                 .unwrap()
                 .is_empty()
         );
@@ -509,8 +566,8 @@ mod tests {
 
     #[test]
     fn rejects_a_truncated_blob() {
-        let blob = encode_pairing_record(&sample());
-        let cut = &blob[..blob.len() - 1];
+        let blob = encode_pairing_record(&sample()).unwrap();
+        let cut = blob.split_last().map_or(&[][..], |(_, rest)| rest);
         assert!(matches!(
             decode_pairing_record(cut),
             Err(PairingCodecError::Truncated)
@@ -519,50 +576,58 @@ mod tests {
 
     #[test]
     fn rejects_trailing_bytes() {
-        let mut blob = encode_pairing_record(&sample()).to_vec();
-        blob.push(0);
+        let mut blob = encode_pairing_record(&sample()).unwrap().to_vec();
+        blob.extend_from_slice(b"!");
         assert!(matches!(
             decode_pairing_record(&blob),
             Err(PairingCodecError::TrailingBytes)
         ));
     }
 
+    /// `record`'s blob written under another revision.
+    fn with_version(record: &PairingRecord, version: u8) -> Vec<u8> {
+        let blob = encode_pairing_record(record).unwrap();
+        let after_version = blob
+            .get(PAIRING_BLOB_MAGIC.len() + size_of::<u8>()..)
+            .unwrap();
+        let mut rewritten = PAIRING_BLOB_MAGIC.to_vec();
+        rewritten.push(version);
+        rewritten.extend_from_slice(after_version);
+        rewritten
+    }
+
     #[test]
     fn rejects_an_unknown_revision() {
-        let bogus_version = PAIRING_BLOB_VERSION.wrapping_add(9);
-        let mut blob = encode_pairing_record(&sample()).to_vec();
-        blob[PAIRING_BLOB_MAGIC.len()] = bogus_version;
         assert!(matches!(
-            decode_pairing_record(&blob),
+            decode_pairing_record(&with_version(&sample(), FUTURE_BLOB_VERSION)),
             Err(PairingCodecError::UnsupportedVersion { found })
-                if found == bogus_version
+                if found == FUTURE_BLOB_VERSION
         ));
     }
 
     #[test]
     fn refuses_a_record_of_an_earlier_protocol_version() {
-        let mut blob = encode_pairing_record(&sample()).to_vec();
-        blob[PAIRING_BLOB_MAGIC.len()] = super::LAST_EARLIER_PROTOCOL_BLOB_VERSION;
         assert!(matches!(
-            decode_pairing_record(&blob),
+            decode_pairing_record(&with_version(&sample(), LAST_EARLIER_PROTOCOL_BLOB_VERSION)),
             Err(PairingCodecError::EarlierProtocol { .. })
         ));
     }
 
     #[test]
     fn a_set_leaves_out_records_of_an_earlier_protocol_version() {
-        let mut current = sample();
-        current.pair_id = PairId::from_array([8; 16]);
-        let mut earlier = encode_pairing_record(&sample()).to_vec();
-        earlier[PAIRING_BLOB_MAGIC.len()] = super::LAST_EARLIER_PROTOCOL_BLOB_VERSION;
-        let mut set = Vec::new();
-        set.extend_from_slice(super::PAIRING_SET_MAGIC);
-        set.push(super::PAIRING_SET_VERSION);
-        super::put_length(&mut set, 2);
-        super::put_bytes(&mut set, &earlier);
-        super::put_bytes(&mut set, &encode_pairing_record(&current));
+        let current = record(SECOND_PAIR);
+        let earlier = with_version(&sample(), LAST_EARLIER_PROTOCOL_BLOB_VERSION);
+        let records = [earlier, encode_pairing_record(&current).unwrap().to_vec()];
+        let mut set = PAIRING_SET_MAGIC.to_vec();
+        set.push(PAIRING_SET_VERSION);
+        put_length(&mut set, records.len()).unwrap();
+        for record in &records {
+            put_bytes(&mut set, record).unwrap();
+        }
         let decoded = decode_pairing_records(&set).unwrap();
-        assert_eq!(decoded.len(), 1);
-        assert_same(&current, &decoded[0]);
+        let [only] = decoded.as_slice() else {
+            panic!("expected only the current record");
+        };
+        assert_same(&current, only);
     }
 }

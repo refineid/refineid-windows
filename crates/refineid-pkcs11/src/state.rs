@@ -354,13 +354,36 @@ impl ModuleState {
             return;
         };
         let pairs: Vec<_> = store.usable_pairing().into_iter().collect();
+        // A remote token whose pairing no longer serves (forgotten here or
+        // revoked by the phone) is withdrawn (RAPP v26.10.21 section 4.6).
+        let serving: Vec<String> = pairs
+            .iter()
+            .map(|pair| format!("rapp:{}", hex::encode(pair.pair_id().as_bytes())))
+            .collect();
+        let withdrawn: Vec<CkSlotId> = self
+            .slots
+            .iter_mut()
+            .filter(|slot| {
+                slot.card_present
+                    && slot.reader_name.starts_with("rapp:")
+                    && !serving.contains(&slot.reader_name)
+            })
+            .map(|slot| {
+                slot.card_present = false;
+                slot.id
+            })
+            .collect();
+        for id in withdrawn {
+            self.remote_logged_in.remove(&id);
+            self.invalidate_slot(id);
+        }
         for pair in pairs {
-            let hex_id = hex::encode(pair.pair_id.as_bytes());
+            let hex_id = hex::encode(pair.pair_id().as_bytes());
             let name = format!("rapp:{hex_id}");
             let serial_prefix = hex_id.get(..8).unwrap_or(&hex_id);
             let serial = format!("REMOTE-{serial_prefix}");
-            let parsed_objects = pair.auth_cert.as_ref().and_then(|cert| {
-                crate::token::remote_token_objects(cert.clone(), serial.clone()).ok()
+            let parsed_objects = pair.authentication_certificate().and_then(|cert| {
+                crate::token::remote_token_objects(cert.as_der().to_vec(), serial.clone()).ok()
             });
             let card_present = parsed_objects.is_some();
             if let Some(pos) = self.slots.iter().position(|s| s.reader_name == name) {
@@ -374,10 +397,10 @@ impl ModuleState {
             } else {
                 let id = self.next_slot_id;
                 self.next_slot_id = self.next_slot_id.saturating_add(1);
-                let product_name = if pair.peer_display_name.is_empty() {
+                let product_name = if pair.peer().display_name.is_empty() {
                     "Phone"
                 } else {
-                    &pair.peer_display_name
+                    &pair.peer().display_name
                 };
                 self.slots.push(SlotRecord {
                     id,
@@ -603,15 +626,14 @@ impl ModuleState {
                 let pair = store
                     .records()
                     .iter()
-                    .find(|p| hex::encode(p.pair_id.as_bytes()) == hex_id)
-                    .cloned()
+                    .find(|p| p.serves() && hex::encode(p.pair_id().as_bytes()) == hex_id)
                     .ok_or(CKR_DEVICE_ERROR)?;
 
                 let cert_der = pair
-                    .auth_cert
-                    .as_ref()
+                    .authentication_certificate()
                     .ok_or(crate::ck::CKR_TOKEN_NOT_PRESENT)?
-                    .clone();
+                    .as_der()
+                    .to_vec();
 
                 let serial = format!("REMOTE-{}", &hex_id[..std::cmp::min(8, hex_id.len())]);
                 let objects = crate::token::remote_token_objects(cert_der, serial)?;

@@ -170,11 +170,13 @@ CryptoAPI and CNG. For a mutual-TLS site (such as `https://suomi.fi` or
 `https://card.refineid.fi`) the path to the phone is:
 
 1. **Certificate in the user store**:
-   - The `read_identity` answer carries the authentication certificate. The
-     RefineID app keeps it on the pairing record and adds it to
-     `Cert:\CurrentUser\My` with `CERT_KEY_PROV_INFO` naming the provider
-     `RefineID Key Storage Provider` and the key `rapp:<pair id>`; a store
-     refusal fails the read with `certificate_store_failed`.
+   - The `read_identity` answer carries the authentication certificate: the
+     one whose SHA-256 fingerprint the session's `card.status` names (RAPP
+     v26.10.21 section 8.4). The RefineID app keeps it on the pairing record,
+     and its offering session adds it to `Cert:\CurrentUser\My` with
+     `CERT_KEY_PROV_INFO` naming the provider `RefineID Key Storage Provider`
+     and the key `rapp:<pair id>` while that session reports the same card;
+     the certificate is removed when the session ends or reports no card.
    - Forgetting the pairing removes every certificate bound to the provider.
 2. **Provider registration**:
    - The DLL registers itself through `BCryptRegisterProvider` and
@@ -191,7 +193,8 @@ CryptoAPI and CNG. For a mutual-TLS site (such as `https://suomi.fi` or
    - The browser calls `CryptAcquireCertificatePrivateKey`; `ncrypt.dll` loads the
      DLL into the browser process, resolves `GetKeyStorageInterface`, and opens the
      key. `OpenKey` finds the pairing by its id in the Credential Manager store and
-     fails with `NTE_BAD_KEYSET` unless it is paired and carries the certificate.
+     fails with `NTE_BAD_KEYSET` unless it serves (confirmed by the phone, neither
+     revoked nor forgotten) and carries the certificate.
    - `SignHash` maps the hash and padding to a RAPP signature algorithm
      (ECDSA by digest length; RSA PKCS#1 v1.5 with SHA-256/384/512; RSA-PSS with
      SHA-256), sends `CardOperation::BrowserAuthenticate` to the phone, and

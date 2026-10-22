@@ -10,8 +10,8 @@ below.
 ## Altitude
 
 RAPP is not an APDU tunnel: the proxy rejects arbitrary APDU bytes, and
-every operation is a typed, phone-authorized request (specification
-Section 12.1). The card-protocol stack in `refineid-lib-core` is
+every operation is a typed request from a registered profile, authorized
+on the phone when it uses a key (RAPP v26.10.21 sections 8 and 9). The card-protocol stack in `refineid-lib-core` is
 deliberately the opposite altitude: everything is built over a raw-APDU
 `CardTransport`. A remote card therefore cannot be a `CardTransport`
 implementation, and must not be — that seam exists so a *local* card's
@@ -53,17 +53,18 @@ Hyper-V guest cannot create one.
 ## Staging
 
 1. **Wire path** — done. `refineid-rapp-core` implements the requester
-   role against vendored draft 26.8.17.233 with the conformance corpus
-   replayed; `refineid-rapp pair-demo` proves pairing, sessions, and
-   typed operations against a real phone from a terminal.
+   role of RAPP v26.10.21 through the `refineid_rapp` engine;
+   `refineid-rapp pair-demo` proves pairing, sessions, and typed
+   operations against a real phone from a terminal.
    *Transport & Discovery Model*: Governed normatively by
    [remote-transport-and-discovery-architecture.md](remote-transport-and-discovery-architecture.md).
    Windows operates strictly as an outbound client connecting to the phone's
    ephemeral listener discovered via mDNS/DNS-SD (`Windows.Devices.Enumeration` / Win32 `DnsServiceBrowse`),
    eliminating inbound listening ports, Windows Firewall modifications, and UAC elevation.
 2. **Durable pairing** — next. A `PairingStore` implementation over the
-   Windows credential store (pair keys device-only, never roaming, the
-   revoked record kept as the tombstone), and the pairing ceremony in
+   Windows credential store (pair keys device-only, never roaming; a
+   forgotten pairing keeps its keys only for its `pairing_revoked` close,
+   and a revoked record keeps none), and the pairing ceremony in
    RefineID: code entry, both-device grant confirmation, the
    paired-phones list, forget and revoke.
 3. **Minidriver remote arm** — the `CardSessionTransport::Remote`
@@ -84,8 +85,11 @@ Hyper-V guest cannot create one.
 
 ## What never changes
 
-The requester never renders or collects CAN, PIN, or PUK; a credential
-rejection or an authenticated protocol violation revokes the pairing on
-both peers; an ambiguous operation is never retried; and one pairing
-serves one session at a time. The strictness is the security design:
-when in doubt, the bridge breaks visibly and the holder pairs again.
+The requester never renders or collects CAN, PIN, or PUK. No failure
+revokes a pairing: an authenticated protocol violation closes the session
+with a sealed `protocol_violation` close, and only a user's forget
+revokes, telling the other side with the `pairing_revoked` close. An
+operation lives inside its session and ends with it; a result that never
+came is not waited for on another session. The strictness is the
+security design: when in doubt, the session closes visibly and the
+pairing stays.
