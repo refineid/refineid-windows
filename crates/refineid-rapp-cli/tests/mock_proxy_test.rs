@@ -4,7 +4,8 @@ use p384::ecdsa::signature::hazmat::PrehashVerifier as _;
 use refineid_rapp::{CertificateFingerprint, MINIMUM_REMAINING_ATTEMPTS, ProfileName, ResultError};
 use refineid_rapp_cli::mock_proxy::{MockProxyOptions, serve_mock_proxy};
 use refineid_rapp_core::engine::{
-    OperationOutcome, PairingError, Requester, RequesterConfig, SESSION_RECEIVE_TICK,
+    OpenedConnection, OperationOutcome, PairingSearchError, Requester, RequesterConfig,
+    SESSION_RECEIVE_TICK,
 };
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::message::{CardPresence, CardReader, CardStatusMessage, CloseReason};
@@ -69,13 +70,17 @@ fn paired_session(
         DialPurpose::Pairing,
     )
     .expect("dial pairing");
-    let pair_id = requester
-        .pair_with_code(TEST_CODE, transport, |peer, requested| {
-            assert_eq!(peer.display_name, "RefineID Mock Phone");
-            assert_eq!(peer.platform, "iOS");
-            assert_eq!(requested, ProfileName::ALL);
-            Some(requested.to_vec())
-        })
+    let (pair_id, ()) = requester
+        .pair_with_code(
+            TEST_CODE,
+            &mut OpenedConnection::new(transport),
+            |peer, requested| {
+                assert_eq!(peer.display_name, "RefineID Mock Phone");
+                assert_eq!(peer.platform, "iOS");
+                assert_eq!(requested, ProfileName::ALL);
+                Some(requested.to_vec())
+            },
+        )
         .expect("requester pairing failed");
     let keys = requester
         .store()
@@ -110,15 +115,12 @@ fn a_mistyped_code_is_refused_by_the_custodian() {
         DialPurpose::Pairing,
     )
     .expect("dial pairing");
-    let outcome =
-        requester().pair_with_code("654322", transport, |_, requested| Some(requested.to_vec()));
-    assert!(
-        matches!(
-            outcome,
-            Err(PairingError::CodeMismatch | PairingError::Transport(_))
-        ),
-        "unexpected outcome: {outcome:?}"
+    let outcome = requester().pair_with_code(
+        "654322",
+        &mut OpenedConnection::new(transport),
+        |_, requested| Some(requested.to_vec()),
     );
+    assert_eq!(outcome, Err(PairingSearchError::NotAccepted));
 }
 
 #[test]

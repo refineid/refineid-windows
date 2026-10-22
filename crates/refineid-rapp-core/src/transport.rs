@@ -73,6 +73,14 @@ pub trait FrameTransport {
     /// incoming frame, or the deadline.
     fn receive_frame(&mut self) -> Result<Vec<u8>, TransportError>;
 
+    /// Sets how long each later receive waits, and returns the deadline it
+    /// replaces.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the channel cannot take the deadline.
+    fn set_receive_deadline(&mut self, deadline: Duration) -> Result<Duration, TransportError>;
+
     /// The transport profile name for prologue and parameter echo.
     fn profile(&self) -> &str;
 
@@ -134,6 +142,10 @@ impl FrameTransport for MemoryTransport {
             Err(RecvTimeoutError::Timeout) => Err(TransportError::TimedOut),
             Err(RecvTimeoutError::Disconnected) => Err(TransportError::Eof),
         }
+    }
+
+    fn set_receive_deadline(&mut self, deadline: Duration) -> Result<Duration, TransportError> {
+        Ok(core::mem::replace(&mut self.receive_deadline, deadline))
     }
 
     fn profile(&self) -> &str {
@@ -233,6 +245,18 @@ impl FrameTransport for TcpFrameTransport {
         let mut frame = vec![0u8; length];
         read_exact_classified(&mut self.stream, &mut frame, &mut began)?;
         Ok(frame)
+    }
+
+    fn set_receive_deadline(&mut self, deadline: Duration) -> Result<Duration, TransportError> {
+        let replaced = self
+            .stream
+            .read_timeout()
+            .map_err(|_| TransportError::Failed)?
+            .unwrap_or(deadline);
+        self.stream
+            .set_read_timeout(Some(deadline))
+            .map_err(|_| TransportError::Failed)?;
+        Ok(replaced)
     }
 
     fn profile(&self) -> &str {

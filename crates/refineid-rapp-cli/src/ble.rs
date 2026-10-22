@@ -6,17 +6,16 @@
 //! Nothing personal is printed: a read identity is reported as read, not
 //! shown, and certificates by their size.
 
-use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::time::{Duration, Instant};
 
-use refineid_rapp::{ProfileName, RoutingKey};
+use refineid_rapp::{PairingOffer, ProfileName, RoutingKey};
 use refineid_rapp_ble::gatt::BleLink;
 use refineid_rapp_ble::link::AdvertiserAddress;
 use refineid_rapp_ble::reach::{Attempt, reach_session};
 use refineid_rapp_ble::scan::{ScannedAdvertiser, scan};
 use refineid_rapp_core::engine::{
-    OperationOutcome, PairingError, PeerIntroduction, Requester, RequesterConfig,
+    OperationOutcome, PairingCandidateSource, PeerIntroduction, Requester, RequesterConfig,
 };
 use refineid_rapp_core::message::{CloseReason, ResultError};
 use refineid_rapp_core::offer::normalize_pairing_code;
@@ -27,15 +26,15 @@ use refineid_rapp_core::store::{PairingRecord, PairingStore};
 use refineid_rapp_core::stream::DialPurpose;
 use refineid_windows_credential_store::ProtectedPairingStore;
 
-/// One scan for advertisers before each round of pairing dials.
+/// One scan for advertisers before each round of pairing connections.
 const SCAN_WINDOW: Duration = Duration::from_secs(4);
 /// How long `ble-scan` listens unless told otherwise.
 const DEFAULT_SCAN_SECONDS: u64 = 10;
 /// Frame receive deadline on a pairing link: the user confirms the grants
 /// while it waits.
 const RECEIVE_DEADLINE: Duration = Duration::from_secs(60);
-/// How long the requester keeps trying the code; the custodian's offer
-/// lives this long (section 3.3).
+/// How long the requester keeps looking for a phone in pairing mode; the
+/// custodian's offer lives this long (section 3.3).
 const PAIRING_WINDOW: Duration = Duration::from_millis(refineid_rapp::OFFER_TTL_MS);
 /// How long `ble-session` looks for the stored pairing's phone.
 const SESSION_WINDOW: Duration = Duration::from_secs(60);
@@ -101,14 +100,56 @@ fn requester(name: &str) -> Result<Requester<ProtectedPairingStore>, String> {
     ))
 }
 
-/// The advertisers of one scan, strongest first, that `refused` does not
-/// already name (core STPA R-53).
-fn candidates(refused: &BTreeSet<AdvertiserAddress>) -> Result<Vec<ScannedAdvertiser>, String> {
-    let advertisers = scan(SCAN_WINDOW).map_err(|error| error.to_string())?;
-    Ok(advertisers
-        .into_iter()
-        .filter(|advertiser| !refused.contains(&advertiser.address))
-        .collect())
+/// The RAPP advertisers in range, scanned round by round until the pairing
+/// window passes, strongest first. An advertisement does not show the
+/// mode: a peripheral is in pairing mode when it serves an offer on a
+/// pairing connection (section 4.2, "Trying Each Custodian in Pairing
+/// Mode" item 1).
+struct Advertisers {
+    search_until: Instant,
+    /// Why a scan failed, which ends the search.
+    scan_failure: Option<String>,
+}
+
+impl PairingCandidateSource for Advertisers {
+    type Endpoint = AdvertiserAddress;
+    type Transport = BleLink;
+
+    fn discover(&mut self) -> Option<Vec<AdvertiserAddress>> {
+        if Instant::now() >= self.search_until {
+            return None;
+        }
+        let advertisers = scan(SCAN_WINDOW)
+            .map_err(|error| self.scan_failure = Some(error.to_string()))
+            .ok()?;
+        if advertisers.is_empty() {
+            println!("no RAPP advertiser was seen; keep RefineID open on the phone");
+        }
+        Some(
+            advertisers
+                .into_iter()
+                .map(|advertiser| advertiser.address)
+                .collect(),
+        )
+    }
+
+    fn open(&mut self, address: &AdvertiserAddress) -> Option<(BleLink, PairingOffer)> {
+        println!("connecting to {address}");
+        let link = BleLink::open(*address, DialPurpose::Pairing, RECEIVE_DEADLINE)
+            .inspect_err(|error| println!("  {error}"))
+            .ok()?;
+        println!(
+            "  link up: ATT MTU {} bytes, {} payload bytes per fragment",
+            link.mtu().bytes(),
+            link.capacity().bytes()
+        );
+        let offer = link
+            .read_bootstrap()
+            .inspect_err(|error| println!("  {error}"))
+            .ok()?;
+        println!("  read the pairing offer");
+        Some((link, offer))
+    }
 }
 
 /// `ble-scan`: lists every RAPP advertiser in range with its signal
@@ -131,7 +172,8 @@ pub fn ble_scan(arguments: &[String]) -> Result<(), String> {
 }
 
 /// `ble-pair`: pairs with the phone showing `--code`, trying each
-/// advertiser once per scan, strongest first, and stores the pairing.
+/// advertiser in pairing mode once, strongest first, and stores the
+/// pairing.
 pub fn ble_pair(arguments: &[String]) -> Result<(), String> {
     let options = parse(arguments)?;
     let code = options.code.as_deref().ok_or("--code is required")?;
@@ -150,57 +192,18 @@ pub fn ble_pair(arguments: &[String]) -> Result<(), String> {
         }
     };
 
-    let deadline = Instant::now() + PAIRING_WINDOW;
-    let mut refused: BTreeSet<AdvertiserAddress> = BTreeSet::new();
-    let pair_id = 'search: loop {
-        if Instant::now() >= deadline {
-            return Err("no phone accepted the code; show a new code and try again".into());
-        }
-        let found = candidates(&refused)?;
-        if found.is_empty() {
-            println!("no RAPP advertiser was seen; keep RefineID open on the phone");
-            continue;
-        }
-        for advertiser in found {
-            println!("connecting to {}", describe(&advertiser));
-            let link =
-                match BleLink::open(advertiser.address, DialPurpose::Pairing, RECEIVE_DEADLINE) {
-                    Ok(link) => link,
-                    Err(error) => {
-                        // The link may open on the next scan.
-                        println!("  {error}");
-                        continue;
-                    }
-                };
-            println!(
-                "  link up: ATT MTU {} bytes, {} payload bytes per fragment",
-                link.mtu().bytes(),
-                link.capacity().bytes()
-            );
-            let offer = match link.read_bootstrap() {
-                Ok(offer) => offer,
-                Err(error) => {
-                    println!("  {error}");
-                    refused.insert(advertiser.address);
-                    continue;
-                }
-            };
-            println!("  read the pairing offer");
-            match requester.pair_with_offer(code, offer, link, confirm) {
-                Ok(pair_id) => break 'search pair_id,
-                Err(PairingError::CodeMismatch) => {
-                    // Another phone near by shows another code.
-                    println!("  this phone's offer does not match the code");
-                    refused.insert(advertiser.address);
-                }
-                Err(PairingError::DeniedLocally) => return Err("pairing declined".into()),
-                Err(error) => {
-                    println!("  pairing attempt failed: {error:?}");
-                    refused.insert(advertiser.address);
-                }
-            }
-        }
+    let mut advertisers = Advertisers {
+        search_until: Instant::now() + PAIRING_WINDOW,
+        scan_failure: None,
     };
+    let (pair_id, _) = requester
+        .pair_with_code(code, &mut advertisers, confirm)
+        .map_err(|error| {
+            advertisers
+                .scan_failure
+                .take()
+                .unwrap_or_else(|| crate::pairing_failure(error))
+        })?;
 
     let record = requester
         .store()
