@@ -28,7 +28,8 @@ use refineid_rapp_cli::mock_proxy::{
 };
 use refineid_rapp_core::clock::unix_time_ms;
 use refineid_rapp_core::engine::{
-    OperationOutcome, PairingError, PeerIntroduction, Requester, RequesterConfig,
+    OpenedConnection, OperationOutcome, PairingError, PairingSearchError, PeerIntroduction,
+    Requester, RequesterConfig,
 };
 use refineid_rapp_core::ids::{Challenge, PairId};
 use refineid_rapp_core::message::{CloseReason, ResultError};
@@ -42,14 +43,15 @@ use refineid_rapp_core::store::{
     MemoryPairingStore, PairingRecord, PairingState, PairingStore, forget_pairing,
 };
 use refineid_rapp_core::stream::{
-    DialPurpose, DiscoveryMode, STREAM_CANDIDATE_ID, browse, dial, dial_session,
+    DialPurpose, PairingServices, STREAM_CANDIDATE_ID, StreamError, dial, dial_session,
 };
+use refineid_rapp_core::transport::TcpFrameTransport;
 use refineid_windows_credential_store::ProtectedPairingStore;
 
 /// Frame receive deadline on a dialed pairing connection.
 const RECEIVE_DEADLINE: Duration = Duration::from_mins(3);
 
-/// How long the requester keeps looking for the custodian showing the code;
+/// How long the requester keeps looking for a custodian in pairing mode;
 /// the custodian's offer lives this long (section 3.3).
 const PAIRING_WINDOW: Duration = Duration::from_millis(refineid_rapp::OFFER_TTL_MS);
 
@@ -235,44 +237,26 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
 
     println!("looking for the phone showing the code...");
     flush_now();
-    let deadline = Instant::now() + PAIRING_WINDOW;
-    let pair_id = 'search: loop {
-        if Instant::now() >= deadline {
-            return Err("no phone accepted the code; show a new code and try again".into());
-        }
-        let candidates: Vec<Vec<String>> = options.connect.as_ref().map_or_else(
-            || {
-                browse(DiscoveryMode::Pairing, BROWSE_WINDOW)
-                    .into_iter()
-                    .map(|service| service.endpoints)
-                    .collect()
-            },
-            |endpoint| vec![vec![endpoint.clone()]],
-        );
-        for endpoints in candidates {
-            let Ok(transport) = dial(
-                &endpoints,
-                STREAM_CANDIDATE_ID,
-                RECEIVE_DEADLINE,
-                DialPurpose::Pairing,
-            ) else {
-                continue;
-            };
-            println!("dialed {endpoints:?}");
-            flush_now();
-            match requester.pair_with_code(code, transport, confirm) {
-                Ok(pair_id) => break 'search pair_id,
-                Err(PairingError::CodeMismatch) => {
-                    return Err("the phone refused the code; check it and try again".into());
-                }
-                Err(PairingError::DeniedLocally) => return Err("pairing declined".into()),
-                Err(error) => println!("pairing attempt failed: {error:?}"),
-            }
-        }
-        if options.connect.is_some() {
-            std::thread::sleep(SESSION_RETRY);
-        }
+    let paired = if let Some(endpoint) = options.connect.as_ref() {
+        let transport = dial_for_pairing(
+            std::slice::from_ref(endpoint),
+            RECEIVE_DEADLINE,
+            PAIRING_WINDOW,
+            SESSION_RETRY,
+            || true,
+        )
+        .map_err(|error| format!("cannot reach {endpoint}: {error:?}"))?;
+        requester
+            .pair_with_code(code, &mut OpenedConnection::new(transport), confirm)
+            .map(|(pair_id, ())| pair_id)
+    } else {
+        let mut services =
+            PairingServices::new(PAIRING_WINDOW, BROWSE_WINDOW, RECEIVE_DEADLINE, || false);
+        requester
+            .pair_with_code(code, &mut services, confirm)
+            .map(|(pair_id, _)| pair_id)
     };
+    let pair_id = paired.map_err(pairing_failure)?;
 
     {
         let record = requester
@@ -295,6 +279,39 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
         options.sign_profile,
         options.count,
     )
+}
+
+/// What a typed code that paired with no phone tells the user; it names no
+/// phone, since none has authenticated itself before a code is accepted.
+pub(crate) fn pairing_failure(error: PairingSearchError) -> String {
+    match error {
+        PairingSearchError::Ceremony(PairingError::DeniedLocally) => "pairing declined".to_owned(),
+        error => error.to_string(),
+    }
+}
+
+/// Dials `endpoints` for pairing until one answers or `window` passes,
+/// pausing `pause` between dials while `waiting` holds.
+fn dial_for_pairing(
+    endpoints: &[String],
+    receive_deadline: Duration,
+    window: Duration,
+    pause: Duration,
+    waiting: impl Fn() -> bool,
+) -> Result<TcpFrameTransport, StreamError> {
+    let deadline = Instant::now() + window;
+    loop {
+        match dial(
+            endpoints,
+            STREAM_CANDIDATE_ID,
+            receive_deadline,
+            DialPurpose::Pairing,
+        ) {
+            Ok(transport) => return Ok(transport),
+            Err(_) if Instant::now() < deadline && waiting() => std::thread::sleep(pause),
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Reconnects to a pairing the settings app already stored in the Windows
@@ -662,27 +679,21 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
         store,
     );
 
-    let endpoints = [DEFAULT_LISTEN.to_owned()];
-    let deadline = Instant::now() + MOCK_DIAL_WINDOW;
-    let transport = loop {
-        match dial(
-            &endpoints,
-            STREAM_CANDIDATE_ID,
-            MOCK_DIAL_WINDOW,
-            DialPurpose::Pairing,
-        ) {
-            Ok(transport) => break transport,
-            Err(_) if Instant::now() < deadline && !proxy_handle.is_finished() => {
-                std::thread::sleep(MOCK_DIAL_RETRY);
-            }
-            Err(error) => return Err(format!("cannot reach the mock custodian: {error:?}")),
-        }
-    };
+    let transport = dial_for_pairing(
+        &[DEFAULT_LISTEN.to_owned()],
+        MOCK_DIAL_WINDOW,
+        MOCK_DIAL_WINDOW,
+        MOCK_DIAL_RETRY,
+        || !proxy_handle.is_finished(),
+    )
+    .map_err(|error| format!("cannot reach the mock custodian: {error:?}"))?;
 
-    let pair_id = requester
-        .pair_with_code(MOCK_PAIRING_CODE, transport, |_peer, requested| {
-            Some(requested.to_vec())
-        })
+    let (pair_id, ()) = requester
+        .pair_with_code(
+            MOCK_PAIRING_CODE,
+            &mut OpenedConnection::new(transport),
+            |_peer, requested| Some(requested.to_vec()),
+        )
         .map_err(|e| format!("pairing failed: {e:?}"))?;
 
     requester

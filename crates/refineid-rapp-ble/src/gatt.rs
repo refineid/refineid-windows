@@ -433,6 +433,10 @@ impl FrameTransport for BleLink {
         }
     }
 
+    fn set_receive_deadline(&mut self, deadline: Duration) -> Result<Duration, TransportError> {
+        Ok(core::mem::replace(&mut self.receive_deadline, deadline))
+    }
+
     fn profile(&self) -> &str {
         BLE_PROFILE
     }

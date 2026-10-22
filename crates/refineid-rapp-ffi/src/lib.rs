@@ -55,8 +55,8 @@ use refineid_lib_core::x509::OwnedCert;
 use refineid_rapp::ProfileName;
 use refineid_rapp_core::clock::unix_time_ms;
 use refineid_rapp_core::engine::{
-    OperationOutcome, PairingError, PeerIntroduction, Requester, RequesterConfig, Session,
-    SessionEnd, SessionError,
+    OperationOutcome, PairingError, PairingSearchError, PeerIntroduction, Requester,
+    RequesterConfig, Session, SessionEnd, SessionError,
 };
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::message::{
@@ -66,9 +66,7 @@ use refineid_rapp_core::message::{
 use refineid_rapp_core::offer::normalize_pairing_code;
 use refineid_rapp_core::operations::{CardOperation, CardOperationResult, CertificateKind};
 use refineid_rapp_core::store::{PairingRecord, PairingState, PairingStore, offered_certificate};
-use refineid_rapp_core::stream::{
-    DialPurpose, DiscoveryMode, STREAM_CANDIDATE_ID, StreamError, browse, dial, dial_session,
-};
+use refineid_rapp_core::stream::{PairingServices, StreamError, dial_session};
 use refineid_rapp_core::transport::TcpFrameTransport;
 use refineid_windows_credential_store::{ProtectedPairingStore, delete_pairing_set};
 #[cfg(windows)]
@@ -133,6 +131,19 @@ const PHONE_UNREACHABLE_STATUS: &str = "The phone is not reachable.";
 
 /// Shown once the phone announced it forgot this computer.
 const REVOKED_STATUS: &str = "The phone forgot this computer. Pair again.";
+
+/// Shown for a typed code that is not six characters of the code alphabet.
+const INVALID_CODE_STATUS: &str = "Type the six characters the phone shows.";
+
+/// Shown when a pairing search ended with no phone tried.
+const NONE_IN_PAIRING_MODE_STATUS: &str = "No phone in pairing mode was found on this network.";
+
+/// Shown when every phone tried refused the typed code. It names no phone:
+/// none has authenticated itself before a code is accepted.
+const CODE_NOT_ACCEPTED_STATUS: &str = "The code was not accepted.";
+
+/// Shown when the pairing with the phone that holds the code failed.
+const PAIRING_INCOMPLETE_STATUS: &str = "The pairing did not complete.";
 
 /// Shown when the store holds no confirmed pairing for the watch to serve.
 const NO_PAIRING_STATUS: &str = "No phone is paired with this device.";
@@ -425,10 +436,7 @@ pub unsafe extern "C" fn refineid_rapp_begin_pairing(
         // SAFETY: As above.
         let name = unsafe { copy_utf8(name, name_length, MAX_NAME_BYTES, "name") }?;
         if normalize_pairing_code(&code).is_none() {
-            return Err(ApiFailure::new(
-                "invalid_code",
-                "Type the six characters the phone shows.",
-            ));
+            return Err(ApiFailure::new("invalid_code", INVALID_CODE_STATUS));
         }
         begin_pairing(code, name)
     })
@@ -659,65 +667,45 @@ fn register_handle(shared: Shared) -> Result<u64, ApiFailure> {
     Ok(handle_id)
 }
 
-/// Finds a phone in pairing mode, dials it with the pairing preamble, and
-/// pairs with the typed code. A phone that cannot be reached is skipped;
-/// a mistyped code or a refused pairing ends the attempt.
+/// Tries the typed code with each phone in pairing mode found, dialing
+/// each with the pairing preamble (RAPP v26.10.22 section 4.2, "Trying Each
+/// Custodian in Pairing Mode"), until one pairs, every one tried refuses
+/// the code, the search time passes, or the handle ends.
 fn pairing_thread(handle_id: u64, mut requester: StreamRequester, code: &str) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(PAIRING_SEARCH_MS);
-    while std::time::Instant::now() < deadline {
-        if ended(handle_id) {
-            return;
+    let mut services = PairingServices::new(
+        std::time::Duration::from_millis(PAIRING_SEARCH_MS),
+        browse_window(),
+        receive_deadline(),
+        || ended(handle_id),
+    );
+    let confirm = |peer: &PeerIntroduction, offered: &[ProfileName]| -> Option<Vec<ProfileName>> {
+        let (decision_tx, decision_rx) = channel::<Option<Vec<ProfileName>>>();
+        if !publish_decision_sender(handle_id, decision_tx) {
+            return None;
         }
-        for service in browse(DiscoveryMode::Pairing, browse_window()) {
-            if ended(handle_id) {
-                return;
-            }
-            let Ok(transport) = dial(
-                &service.endpoints,
-                STREAM_CANDIDATE_ID,
-                receive_deadline(),
-                DialPurpose::Pairing,
-            ) else {
-                continue;
-            };
-            let (decision_tx, decision_rx) = channel::<Option<Vec<ProfileName>>>();
-            if !publish_decision_sender(handle_id, decision_tx) {
-                return;
-            }
-            let confirm =
-                |peer: &PeerIntroduction, offered: &[ProfileName]| -> Option<Vec<ProfileName>> {
-                    set_awaiting(handle_id, peer, offered);
-                    match decision_rx.recv() {
-                        Ok(Some(granted)) => Some(if granted.is_empty() {
-                            offered.to_vec()
-                        } else {
-                            granted
-                        }),
-                        Ok(None) | Err(_) => None,
-                    }
+        set_awaiting(handle_id, peer, offered);
+        match decision_rx.recv() {
+            Ok(Some(granted)) => Some(if granted.is_empty() {
+                offered.to_vec()
+            } else {
+                granted
+            }),
+            Ok(None) | Err(_) => None,
+        }
+    };
+    match requester.pair_with_code(code, &mut services, confirm) {
+        Ok((pair_id, _)) => finish_pairing(handle_id, requester, pair_id),
+        Err(error) => {
+            registry_entry_apply(handle_id, |shared| {
+                shared.decision_tx = None;
+                shared.phase = if shared.end_requested {
+                    Phase::Cancelled
+                } else {
+                    search_failure_phase(error)
                 };
-            match requester.pair_with_code(code, transport, confirm) {
-                Ok(pair_id) => {
-                    finish_pairing(handle_id, requester, pair_id);
-                    return;
-                }
-                Err(error) => {
-                    if fail_attempt(handle_id, error) {
-                        return;
-                    }
-                }
-            }
+            });
         }
     }
-    refineid_dev_errors::report!(
-        RappBridge,
-        "pairing failed",
-        "no phone in pairing mode found"
-    );
-    set_phase(
-        handle_id,
-        Phase::Failed("No phone in pairing mode was found on this network.".to_owned()),
-    );
 }
 
 fn finish_pairing(handle_id: u64, mut requester: StreamRequester, pair_id: PairId) {
@@ -1396,27 +1384,20 @@ fn publish_decision_sender(handle_id: u64, decision_tx: Sender<Option<Vec<Profil
     .is_some()
 }
 
-/// Records a failed pairing attempt. Returns whether the attempt ends the
-/// pairing: a refusal, a mistyped code, or an ended handle; a phone that
-/// could not complete the exchange leaves the next one to be tried.
-fn fail_attempt(handle_id: u64, error: PairingError) -> bool {
-    let (ends, phase) = match error {
-        PairingError::DeniedLocally | PairingError::AbortedByPeer => (true, Phase::Denied),
-        PairingError::CodeMismatch => (
-            true,
-            Phase::Failed("The code does not match the one the phone shows.".to_owned()),
-        ),
-        _ => (false, Phase::Offer),
-    };
-    registry_entry_apply(handle_id, |shared| {
-        shared.decision_tx = None;
-        shared.phase = if shared.end_requested {
-            Phase::Cancelled
-        } else {
-            phase
-        };
-    });
-    ends || ended(handle_id)
+/// The phase a pairing search that paired with no phone ends in.
+fn search_failure_phase(error: PairingSearchError) -> Phase {
+    match error {
+        PairingSearchError::Stopped => Phase::Cancelled,
+        PairingSearchError::Ceremony(PairingError::DeniedLocally | PairingError::AbortedByPeer) => {
+            Phase::Denied
+        }
+        PairingSearchError::InvalidCode => Phase::Failed(INVALID_CODE_STATUS.to_owned()),
+        PairingSearchError::NoneInPairingMode => {
+            Phase::Failed(NONE_IN_PAIRING_MODE_STATUS.to_owned())
+        }
+        PairingSearchError::NotAccepted => Phase::Failed(CODE_NOT_ACCEPTED_STATUS.to_owned()),
+        PairingSearchError::Ceremony(_) => Phase::Failed(PAIRING_INCOMPLETE_STATUS.to_owned()),
+    }
 }
 
 /// Applies `update` to a handle's shared state, returning `Some(())` when the
@@ -1558,12 +1539,14 @@ fn serialize_envelope<T: Serialize>(envelope: &ApiEnvelope<'_, T>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CARD_TO_PHONE_STATUS, CARD_TO_READER_STATUS, CARD_UNCONFIRMED_STATUS, CONSENT_SHOWN_STATUS,
-        NO_PAIRING_STATUS, PHONE_UNREACHABLE_STATUS, Phase, REVOKED_STATUS, card_request_status,
-        granted_profiles, is_watch_status, state_dto,
+        CARD_TO_PHONE_STATUS, CARD_TO_READER_STATUS, CARD_UNCONFIRMED_STATUS,
+        CODE_NOT_ACCEPTED_STATUS, CONSENT_SHOWN_STATUS, NO_PAIRING_STATUS,
+        NONE_IN_PAIRING_MODE_STATUS, PAIRING_INCOMPLETE_STATUS, PHONE_UNREACHABLE_STATUS, Phase,
+        REVOKED_STATUS, card_request_status, granted_profiles, is_watch_status,
+        search_failure_phase, state_dto,
     };
     use refineid_rapp::ProfileName;
-    use refineid_rapp_core::engine::PeerIntroduction;
+    use refineid_rapp_core::engine::{PairingError, PairingSearchError, PeerIntroduction};
     use refineid_rapp_core::ids::PairId;
     use refineid_rapp_core::message::CardReader;
 
@@ -1599,6 +1582,34 @@ mod tests {
         assert_eq!(state_dto(&Phase::Denied).state, "denied");
         assert_eq!(state_dto(&Phase::Cancelled).state, "cancelled");
         assert_eq!(state_dto(&Phase::Paired { pair_id: PAIR }).state, "paired");
+    }
+
+    #[test]
+    fn a_search_that_paired_with_no_phone_names_none() {
+        let failed = |error| state_dto(&search_failure_phase(error)).message;
+        assert_eq!(
+            failed(PairingSearchError::NotAccepted).as_deref(),
+            Some(CODE_NOT_ACCEPTED_STATUS)
+        );
+        assert_eq!(
+            failed(PairingSearchError::NoneInPairingMode).as_deref(),
+            Some(NONE_IN_PAIRING_MODE_STATUS)
+        );
+        assert_eq!(
+            failed(PairingSearchError::Ceremony(PairingError::DeadlineExpired)).as_deref(),
+            Some(PAIRING_INCOMPLETE_STATUS)
+        );
+        assert_eq!(
+            state_dto(&search_failure_phase(PairingSearchError::Ceremony(
+                PairingError::DeniedLocally
+            )))
+            .state,
+            "denied"
+        );
+        assert_eq!(
+            state_dto(&search_failure_phase(PairingSearchError::Stopped)).state,
+            "cancelled"
+        );
     }
 
     #[test]

@@ -16,10 +16,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::{Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crate::engine::SESSION_RECEIVE_TICK;
+use crate::engine::{PairingCandidateSource, SESSION_RECEIVE_TICK, read_offer};
 use crate::ids::PairId;
+use crate::offer::PairingOffer;
 use crate::transport::{FrameTransport, TcpFrameTransport, TransportError};
 use refineid_rapp::{
     DiscoveryKey, DiscoveryRecord, InstanceName, PairRecord, RoutingKey, SessionRouting,
@@ -286,7 +287,7 @@ impl StreamListener {
         self.listener
             .set_nonblocking(true)
             .map_err(|_| StreamError::Accept)?;
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         loop {
             match self.listener.accept() {
                 Ok((socket, _peer)) => {
@@ -803,8 +804,6 @@ impl BrowseSockets {
 /// custodian does not answer every single question.
 #[must_use]
 pub fn browse_stream_services(timeout: Duration) -> Vec<StreamService> {
-    use std::time::Instant;
-
     let Some(sockets) = BrowseSockets::open() else {
         return Vec::new();
     };
@@ -866,6 +865,94 @@ pub fn browse(mode: DiscoveryMode, timeout: Duration) -> Vec<StreamService> {
         .into_iter()
         .filter(|service| service.advertises(mode))
         .collect()
+}
+
+/// The custodians in pairing mode on the local network.
+///
+/// They are browsed round by round until the search time is spent or
+/// `stopped` holds, and are the endpoints a typed code is tried with (RAPP
+/// v26.10.22 section 4.2, "Trying Each Custodian in Pairing Mode"). Each is
+/// known by its service instance and dialed at the addresses it last
+/// answered from.
+pub struct PairingServices<Stopped: Fn() -> bool> {
+    found: Vec<StreamService>,
+    search_until: Instant,
+    browse_window: Duration,
+    receive_deadline: Duration,
+    stopped: Stopped,
+}
+
+impl<Stopped: Fn() -> bool> PairingServices<Stopped> {
+    /// Searches for `search`, browsing `browse_window` a round, and opens
+    /// pairing connections whose receives wait `receive_deadline`.
+    pub fn new(
+        search: Duration,
+        browse_window: Duration,
+        receive_deadline: Duration,
+        stopped: Stopped,
+    ) -> Self {
+        Self {
+            found: Vec::new(),
+            search_until: Instant::now() + search,
+            browse_window,
+            receive_deadline,
+            stopped,
+        }
+    }
+}
+
+impl<Stopped: Fn() -> bool> core::fmt::Debug for PairingServices<Stopped> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("PairingServices")
+            .field("found", &self.found.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<Stopped: Fn() -> bool> PairingCandidateSource for PairingServices<Stopped> {
+    type Endpoint = String;
+    type Transport = TcpFrameTransport;
+
+    fn stopped(&self) -> bool {
+        (self.stopped)()
+    }
+
+    fn discover(&mut self) -> Option<Vec<String>> {
+        if Instant::now() >= self.search_until {
+            return None;
+        }
+        let services = browse(DiscoveryMode::Pairing, self.browse_window);
+        let instances = services
+            .iter()
+            .map(|service| service.instance.clone())
+            .collect();
+        for service in services {
+            self.found
+                .retain(|known| known.instance != service.instance);
+            self.found.push(service);
+        }
+        Some(instances)
+    }
+
+    fn open(&mut self, instance: &String) -> Option<(TcpFrameTransport, PairingOffer)> {
+        let service = self
+            .found
+            .iter()
+            .find(|service| &service.instance == instance)?;
+        let mut transport = dial(
+            &service.endpoints,
+            STREAM_CANDIDATE_ID,
+            self.receive_deadline,
+            DialPurpose::Pairing,
+        )
+        .inspect_err(|error| {
+            refineid_dev_errors::report!(Rapp, "pairing connection not opened", error);
+        })
+        .ok()?;
+        let offer = read_offer(&mut transport).ok()?;
+        Some((transport, offer))
+    }
 }
 
 /// Rejected stream-profile bytes, parameters, or connection steps.

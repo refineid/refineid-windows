@@ -59,13 +59,12 @@ use refineid_doc_sign::service::{
 use refineid_lib_core::identity::CommonName;
 use refineid_lib_core::pin::PinBytes;
 use refineid_lib_pcsc::PcscBackend;
-use refineid_rapp_core::engine::{PairingError, Requester, RequesterConfig};
+use refineid_rapp_core::engine::{PairingError, PairingSearchError, Requester, RequesterConfig};
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::limits::OFFER_TTL_MS;
 use refineid_rapp_core::offer::normalize_pairing_code;
 use refineid_rapp_core::store::{PairingRecord, PairingState, PairingStore as _, forget_pairing};
-use refineid_rapp_core::stream::DialPurpose;
-use refineid_rapp_core::transport::FrameTransport;
+use refineid_rapp_core::stream::PairingServices;
 use refineid_windows_credential_store::ProtectedPairingStore;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -75,6 +74,10 @@ use std::time::Duration;
 const TIMER_REFRESH: usize = 1;
 const REFRESH_MS: u32 = 2000;
 const ATR_POLL_MS: u128 = 30_000;
+/// One DNS-SD browse round of the pairing search.
+const PAIRING_BROWSE_WINDOW: Duration = Duration::from_millis(600);
+/// How long a pairing connection waits for each message from the phone.
+const PAIRING_RECEIVE_DEADLINE: Duration = Duration::from_secs(10);
 
 const IDC_TAB: u16 = 10;
 const IDC_STATUSBAR: u16 = 11;
@@ -2258,7 +2261,8 @@ fn start_doc_verify() {
 /// refresh timer picks progress and the outcome up from `INBOX`. The
 /// phone advertises a pairing-mode record over DNS-SD and serves its
 /// offer on the connection (RAPP v26.10.22 section 4.2); this side
-/// browses, dials, and types the code into `CPace`.
+/// browses, dials, and types the code into `CPace` with each phone in
+/// pairing mode in turn.
 fn start_pairing() {
     let snapshot = STATE.with(|cell| {
         cell.borrow()
@@ -2315,12 +2319,11 @@ fn stop_pairing() {
     });
 }
 
-/// Blocking browse-and-dial loop: find a phone in pairing mode and
-/// pair with the typed code, until it pairs, the offer lifetime
-/// passes, or `cancel` trips. Runs on the pairing worker, never on
-/// the UI thread.
+/// Blocking pairing search: try the typed code with each phone in
+/// pairing mode found, until one pairs, every one tried refuses it, the
+/// offer lifetime passes, or `cancel` trips. Runs on the pairing worker,
+/// never on the UI thread.
 fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<String, String> {
-    use std::time::Instant;
     post_pair_status("Looking for the phone…");
     let mut requester = Requester::new(
         RequesterConfig {
@@ -2330,60 +2333,32 @@ fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<S
         ProtectedPairingStore::load()
             .map_err(|error| format!("Cannot open pairing store: {error}"))?,
     );
-    let deadline = Instant::now() + Duration::from_millis(OFFER_TTL_MS);
-    loop {
-        if cancel.load(Ordering::SeqCst) {
-            return Err("Pairing stopped.".to_owned());
-        }
-        if Instant::now() >= deadline {
-            return Err("No phone in pairing mode was found.".to_owned());
-        }
-        for service in refineid_rapp_core::stream::browse(
-            refineid_rapp_core::stream::DiscoveryMode::Pairing,
-            Duration::from_millis(600),
-        ) {
-            if cancel.load(Ordering::SeqCst) {
-                return Err("Pairing stopped.".to_owned());
-            }
-            post_pair_status("Phone found — pairing…");
-            if let Ok(transport) = refineid_rapp_core::stream::dial(
-                &service.endpoints,
-                refineid_rapp_core::stream::STREAM_CANDIDATE_ID,
-                Duration::from_secs(10),
-                DialPurpose::Pairing,
-            ) && let Some(outcome) = attempt_pair(&mut requester, code, transport, main_raw)
-            {
-                return outcome;
-            }
-        }
+    let mut services = PairingServices::new(
+        Duration::from_millis(OFFER_TTL_MS),
+        PAIRING_BROWSE_WINDOW,
+        PAIRING_RECEIVE_DEADLINE,
+        || cancel.load(Ordering::SeqCst),
+    );
+    match requester.pair_with_code(code, &mut services, |peer, requested| {
+        confirm_pairing_dialog(main_raw, &peer.display_name, &peer.platform, requested)
+    }) {
+        Ok((pair_id, _)) => paired_summary(&requester, pair_id),
+        Err(error) => Err(pairing_failure_text(error).to_owned()),
     }
 }
 
-/// One pairing attempt over an established transport. `Some` is
-/// terminal: success, a mistyped code, or a refusal; `None` reposts
-/// a failure that leaves the next phone to be tried.
-fn attempt_pair(
-    requester: &mut Requester<ProtectedPairingStore>,
-    code: &str,
-    transport: impl FrameTransport,
-    main_raw: usize,
-) -> Option<Result<String, String>> {
-    match requester.pair_with_code(code, transport, |peer, requested| {
-        confirm_pairing_dialog(main_raw, &peer.display_name, &peer.platform, requested)
-    }) {
-        Ok(pair_id) => Some(paired_summary(requester, pair_id)),
-        Err(PairingError::CodeMismatch) => Some(Err(
-            "The code does not match the one the phone shows.".to_owned(),
-        )),
-        Err(PairingError::DeniedLocally | PairingError::AbortedByPeer) => {
-            Some(Err("The pairing was declined.".to_owned()))
+/// What a typed code that paired with no phone tells the user. It names
+/// no phone: none has authenticated itself before a code is accepted.
+const fn pairing_failure_text(error: PairingSearchError) -> &'static str {
+    match error {
+        PairingSearchError::Stopped => "Pairing stopped.",
+        PairingSearchError::InvalidCode => "Type the six characters the phone shows.",
+        PairingSearchError::NoneInPairingMode => "No phone in pairing mode was found.",
+        PairingSearchError::NotAccepted => "The code was not accepted.",
+        PairingSearchError::Ceremony(PairingError::DeniedLocally | PairingError::AbortedByPeer) => {
+            "The pairing was declined."
         }
-        Err(error) => {
-            post_pair_status(&format!(
-                "Pairing attempt failed ({error:?}) — still looking for the phone."
-            ));
-            None
-        }
+        PairingSearchError::Ceremony(_) => "The pairing did not complete.",
     }
 }
 
