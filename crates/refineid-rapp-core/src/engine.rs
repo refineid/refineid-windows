@@ -38,7 +38,7 @@ const SESSION_SILENCE_LIMIT: Duration =
     Duration::from_millis(refineid_rapp::SESSION_SILENCE_LIMIT_MS);
 
 use crate::ids::{Challenge, OperationId, PairId, RandomIdExt, SessionId};
-use crate::message::{CardStatusMessage, CloseReason, ResultError, ResultStatus};
+use crate::message::{CardPresence, CardStatusMessage, CloseReason, ResultError, ResultStatus};
 use crate::offer::{OfferError, PairingOffer};
 use crate::operations::{CardOperation, CardOperationError, CardOperationResult};
 use crate::presence::{CardSighting, SIGHTING_REFRESH_MS};
@@ -1063,7 +1063,11 @@ impl<Store: PairingStore> Requester<Store> {
     /// sighting ages out over the grace. A refused write is tried again on
     /// the next event.
     fn record_sighting<Transport: FrameTransport>(&mut self, session: &mut Session<Transport>) {
-        let Some(CardStatusMessage::Present(fingerprint)) = session.card else {
+        let Some(CardStatusMessage {
+            card: CardPresence::Present(fingerprint),
+            ..
+        }) = session.card
+        else {
             return;
         };
         if session.end.is_some() {

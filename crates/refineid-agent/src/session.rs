@@ -22,7 +22,7 @@ use refineid_rapp_core::engine::{
 };
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::message::{
-    CardStatusMessage, CertificateFingerprint, CloseReason, ResultError,
+    CardPresence, CardStatusMessage, CertificateFingerprint, CloseReason, ResultError,
 };
 use refineid_rapp_core::operations::{CardOperation, CardOperationResult, CertificateKind};
 use refineid_rapp_core::store::{PairingRecord, PairingStore, offered_certificate};
@@ -434,7 +434,10 @@ fn follow_card(
     offered: &mut Option<Offered>,
     card_checked: &mut Option<CertificateFingerprint>,
 ) {
-    if let Some(CardStatusMessage::Present(fingerprint)) = session.card_status()
+    if let Some(CardStatusMessage {
+        card: CardPresence::Present(fingerprint),
+        ..
+    }) = session.card_status()
         && *card_checked != Some(fingerprint)
     {
         *card_checked = Some(fingerprint);

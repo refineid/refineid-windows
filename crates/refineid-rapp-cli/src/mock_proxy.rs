@@ -17,15 +17,15 @@ use std::time::{Duration, Instant};
 
 use refineid_lib_core::x509::OwnedCert;
 use refineid_rapp::{
-    BinaryFrame, CardIdentity, CardInspection, CardOperation, CardOperationResult,
-    CardStatusMessage, CertificateFingerprint, CpaceKc2Responder, DEFAULT_OPERATION_LIFETIME_MS,
-    EndpointRole, EstablishedSessionRuntime, MAXIMUM_CPACE_ATTEMPTS, OfferId, OperationRequest,
-    OperationResultMessage, OperationViolation, PairRecord, PairingHandshake, PairingOffer,
-    PingChallenge, ProfileName, ProgressEvent, ProxyDispatch, ProxyEngineError, ProxyFailure,
-    ProxyOperationEngine, RetryDecision, RoutingKey, RuntimePoll, RuntimeReceive,
-    SESSION_READY_NONCE_SIZE, SessionHandshake, SignatureAlgorithm, TransportProfile, TypedMessage,
-    UserApproval, decode_pair_record, encode_pair_record, generate_pair_key_material,
-    route_session, standard_pairing_context_v2,
+    BinaryFrame, CardIdentity, CardInspection, CardOperation, CardOperationResult, CardPresence,
+    CardReader, CardStatusMessage, CertificateFingerprint, CpaceKc2Responder,
+    DEFAULT_OPERATION_LIFETIME_MS, EndpointRole, EstablishedSessionRuntime, MAXIMUM_CPACE_ATTEMPTS,
+    OfferId, OperationRequest, OperationResultMessage, OperationViolation, PairRecord,
+    PairingHandshake, PairingOffer, PingChallenge, ProfileName, ProgressEvent, ProxyDispatch,
+    ProxyEngineError, ProxyFailure, ProxyOperationEngine, RetryDecision, RoutingKey, RuntimePoll,
+    RuntimeReceive, SESSION_READY_NONCE_SIZE, SessionHandshake, SignatureAlgorithm,
+    TransportProfile, TypedMessage, UserApproval, decode_pair_record, encode_pair_record,
+    generate_pair_key_material, route_session, standard_pairing_context_v2,
 };
 use refineid_rapp_core::clock::{continuous_ms, unix_time_ms};
 use refineid_rapp_core::engine::SESSION_RECEIVE_TICK;
@@ -134,14 +134,19 @@ impl MockProxyOptions {
         })
     }
 
-    /// The card status every session reports.
+    /// The card status every session reports. The mock phone reads cards
+    /// over NFC only, so it reports no card reader (section 8.4 item 1).
     fn card_status(&self) -> CardStatusMessage {
-        if self.card_absent {
-            CardStatusMessage::Absent
+        let card = if self.card_absent {
+            CardPresence::Absent
         } else {
-            CardStatusMessage::Present(CertificateFingerprint::of_certificate(
+            CardPresence::Present(CertificateFingerprint::of_certificate(
                 self.certificate.as_der(),
             ))
+        };
+        CardStatusMessage {
+            card,
+            reader: CardReader::Absent,
         }
     }
 }
