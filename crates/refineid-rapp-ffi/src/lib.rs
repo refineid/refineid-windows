@@ -60,7 +60,8 @@ use refineid_rapp_core::engine::{
 };
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::message::{
-    CardStatusMessage, CertificateFingerprint, CloseReason, ProgressEvent, ResultError,
+    CardPresence, CardReader, CardStatusMessage, CertificateFingerprint, CloseReason,
+    ProgressEvent, ResultError,
 };
 use refineid_rapp_core::offer::normalize_pairing_code;
 use refineid_rapp_core::operations::{CardOperation, CardOperationResult, CertificateKind};
@@ -116,8 +117,13 @@ const FORGET_BROWSE_WINDOW_MS: u64 = 1_500;
 /// Shown while the phone's PIN prompt is on screen.
 const CONSENT_SHOWN_STATUS: &str = "Enter the PIN on your phone.";
 
-/// Shown while the offering session reports no card on the phone.
-const CARD_ABSENT_STATUS: &str = "The phone has no card.";
+/// Shown while the offering session reports no card on the phone and a
+/// card reader attached to it.
+const CARD_TO_READER_STATUS: &str = "Insert the card into the phone's card reader.";
+
+/// Shown while the offering session reports no card on the phone and no
+/// card reader attached to it.
+const CARD_TO_PHONE_STATUS: &str = "Present the card to the phone.";
 
 /// Shown while the phone's card cannot be confirmed by its certificate.
 const CARD_UNCONFIRMED_STATUS: &str = "The phone's card could not be read.";
@@ -988,7 +994,10 @@ fn hold_offering_session(
         let card = session.card_status();
         registry_entry_apply(handle_id, |shared| shared.card = card);
         match card {
-            Some(CardStatusMessage::Present(fingerprint)) if offer.checked != Some(fingerprint) => {
+            Some(CardStatusMessage {
+                card: CardPresence::Present(fingerprint),
+                ..
+            }) if offer.checked != Some(fingerprint) => {
                 offer.checked = Some(fingerprint);
                 // The session recorded the card it hears, so another card's
                 // offer goes before this one's certificate is read.
@@ -999,18 +1008,35 @@ fn hold_offering_session(
                     set_watch_status(handle_id, CARD_UNCONFIRMED_STATUS);
                 }
             }
-            Some(CardStatusMessage::Absent) => {
+            Some(CardStatusMessage {
+                card: CardPresence::Absent,
+                reader,
+            }) => {
                 // The offer stands through the grace (section 8.4 item 3).
                 offer.checked = None;
-                set_watch_status(handle_id, CARD_ABSENT_STATUS);
+                set_watch_status(handle_id, card_request_status(reader));
             }
-            Some(CardStatusMessage::Present(_)) | None => {}
+            Some(CardStatusMessage {
+                card: CardPresence::Present(_),
+                ..
+            })
+            | None => {}
         }
         if store_checked.elapsed() >= std::time::Duration::from_millis(STORE_CHECK_INTERVAL_MS) {
             store_checked = std::time::Instant::now();
             close_if_forgotten(requester, session);
         }
         sync_offer(requester, pair_id, offer);
+    }
+}
+
+/// What the user is asked while the phone reports no card: the phone's card
+/// reader is named only while the phone reports one attached (RAPP
+/// v26.10.22 section 8.4 item 6).
+const fn card_request_status(reader: CardReader) -> &'static str {
+    match reader {
+        CardReader::Attached => CARD_TO_READER_STATUS,
+        CardReader::Absent => CARD_TO_PHONE_STATUS,
     }
 }
 
@@ -1101,10 +1127,15 @@ fn authentication_certificate(
         .into_iter()
         .filter_map(|der| OwnedCert::from_der(der).ok());
     match card {
-        Some(CardStatusMessage::Present(fingerprint)) => {
-            parsed.find(|certificate| fingerprint_of(certificate) == fingerprint)
-        }
-        Some(CardStatusMessage::Absent) | None => parsed.next(),
+        Some(CardStatusMessage {
+            card: CardPresence::Present(fingerprint),
+            ..
+        }) => parsed.find(|certificate| fingerprint_of(certificate) == fingerprint),
+        Some(CardStatusMessage {
+            card: CardPresence::Absent,
+            ..
+        })
+        | None => parsed.next(),
     }
 }
 
@@ -1123,7 +1154,11 @@ impl Drop for WatchMark {
 fn is_watch_status(status: &str) -> bool {
     matches!(
         status,
-        PHONE_UNREACHABLE_STATUS | CARD_ABSENT_STATUS | CARD_UNCONFIRMED_STATUS | NO_PAIRING_STATUS
+        PHONE_UNREACHABLE_STATUS
+            | CARD_TO_READER_STATUS
+            | CARD_TO_PHONE_STATUS
+            | CARD_UNCONFIRMED_STATUS
+            | NO_PAIRING_STATUS
     )
 }
 
@@ -1249,7 +1284,7 @@ fn handle_state(shared: &Shared) -> PairingStateDto {
     let mut dto = state_dto(&shared.phase);
     dto.card_present = shared
         .card
-        .map(|card| matches!(card, CardStatusMessage::Present(_)));
+        .map(|status| matches!(status.card, CardPresence::Present(_)));
     if dto.message.is_none() {
         dto.message.clone_from(&shared.status);
     }
@@ -1523,13 +1558,14 @@ fn serialize_envelope<T: Serialize>(envelope: &ApiEnvelope<'_, T>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CARD_ABSENT_STATUS, CARD_UNCONFIRMED_STATUS, CONSENT_SHOWN_STATUS, NO_PAIRING_STATUS,
-        PHONE_UNREACHABLE_STATUS, Phase, REVOKED_STATUS, granted_profiles, is_watch_status,
-        state_dto,
+        CARD_TO_PHONE_STATUS, CARD_TO_READER_STATUS, CARD_UNCONFIRMED_STATUS, CONSENT_SHOWN_STATUS,
+        NO_PAIRING_STATUS, PHONE_UNREACHABLE_STATUS, Phase, REVOKED_STATUS, card_request_status,
+        granted_profiles, is_watch_status, state_dto,
     };
     use refineid_rapp::ProfileName;
     use refineid_rapp_core::engine::PeerIntroduction;
     use refineid_rapp_core::ids::PairId;
+    use refineid_rapp_core::message::CardReader;
 
     /// A synthetic pair identifier.
     const PAIR: PairId = PairId::from_array(*b"synthetic pair 1");
@@ -1537,11 +1573,24 @@ mod tests {
     #[test]
     fn the_watch_clears_only_its_own_lines() {
         assert!(is_watch_status(PHONE_UNREACHABLE_STATUS));
-        assert!(is_watch_status(CARD_ABSENT_STATUS));
+        assert!(is_watch_status(CARD_TO_READER_STATUS));
+        assert!(is_watch_status(CARD_TO_PHONE_STATUS));
         assert!(is_watch_status(CARD_UNCONFIRMED_STATUS));
         assert!(is_watch_status(NO_PAIRING_STATUS));
         assert!(!is_watch_status(CONSENT_SHOWN_STATUS));
         assert!(!is_watch_status(REVOKED_STATUS));
+    }
+
+    #[test]
+    fn the_phones_reader_is_named_only_while_one_is_attached() {
+        assert_eq!(
+            card_request_status(CardReader::Attached),
+            CARD_TO_READER_STATUS
+        );
+        assert_eq!(
+            card_request_status(CardReader::Absent),
+            CARD_TO_PHONE_STATUS
+        );
     }
 
     #[test]

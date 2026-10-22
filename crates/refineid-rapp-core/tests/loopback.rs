@@ -23,12 +23,12 @@ use std::time::{Duration, Instant};
 
 use refineid_rapp::{
     BinaryFrame, CardInspection, CardKeyProfile as KeyProfile, CardOperation, CardOperationResult,
-    CardStatusMessage, CertificateFingerprint, CloseReason, CpaceKc2Responder, EndpointRole,
-    EstablishedEndpoint, LIVENESS_PING_AFTER_SILENCE_MS, OperationId, OperationProgressMessage,
-    OperationResultMessage, PairRecord, PairingHandshake, ProfileName, ProgressEvent,
-    ProtocolErrorMessage, ProxyFailure, ReceiveOutcome, ResultError, SESSION_READY_NONCE_SIZE,
-    SessionCloseMessage, SessionHandshake, SignatureAlgorithm, TransportProfile, TypedMessage,
-    generate_pair_key_material, standard_pairing_context_v2,
+    CardPresence, CardReader, CardStatusMessage, CertificateFingerprint, CloseReason,
+    CpaceKc2Responder, EndpointRole, EstablishedEndpoint, LIVENESS_PING_AFTER_SILENCE_MS,
+    OperationId, OperationProgressMessage, OperationResultMessage, PairRecord, PairingHandshake,
+    ProfileName, ProgressEvent, ProtocolErrorMessage, ProxyFailure, ReceiveOutcome, ResultError,
+    SESSION_READY_NONCE_SIZE, SessionCloseMessage, SessionHandshake, SignatureAlgorithm,
+    TransportProfile, TypedMessage, generate_pair_key_material, standard_pairing_context_v2,
 };
 use refineid_rapp_core::engine::{
     OperationOutcome, PairingError, Requester, RequesterConfig, SessionEnd, SessionError,
@@ -90,6 +90,24 @@ fn test_requester() -> TestRequester {
 /// The fingerprint of the scripted card.
 fn card_fingerprint() -> CertificateFingerprint {
     CertificateFingerprint::of_certificate(CARD_CERTIFICATE)
+}
+
+/// The custodian's report of the scripted card, read over NFC with no card
+/// reader attached.
+fn card_present() -> CardStatusMessage {
+    CardStatusMessage {
+        card: CardPresence::Present(card_fingerprint()),
+        reader: CardReader::Absent,
+    }
+}
+
+/// The custodian's report of no card, with `reader` as its card reader
+/// stands.
+const fn card_absent(reader: CardReader) -> CardStatusMessage {
+    CardStatusMessage {
+        card: CardPresence::Absent,
+        reader,
+    }
 }
 
 /// A registered consequential operation for the authentication tests.
@@ -281,11 +299,7 @@ fn proxy_accept_session<T: FrameTransport>(
     pair_record: &PairRecord,
     transport: T,
 ) -> ProxySession<T> {
-    proxy_accept_session_with_card(
-        pair_record,
-        transport,
-        CardStatusMessage::Present(card_fingerprint()),
-    )
+    proxy_accept_session_with_card(pair_record, transport, card_present())
 }
 
 /// Pairs a fresh requester with a custodian thread and returns both halves.
@@ -345,18 +359,20 @@ fn the_card_status_is_noted_on_the_session() {
         let mut session = proxy_accept_session_with_card(
             &proxy_pairing,
             proxy_transport,
-            CardStatusMessage::Absent,
+            card_absent(CardReader::Absent),
         );
-        session.send(&TypedMessage::CardStatus(CardStatusMessage::Present(
-            card_fingerprint(),
-        )));
+        session.send(&TypedMessage::CardStatus(card_absent(CardReader::Attached)));
+        session.send(&TypedMessage::CardStatus(card_present()));
         session
     });
     let mut session = requester.connect(pair_id, requester_transport).unwrap();
     assert_eq!(session.card_status(), None);
+    // A reader attached to the phone is a report of its own (section 8.4
+    // item 1).
     let expected = [
-        CardStatusMessage::Absent,
-        CardStatusMessage::Present(card_fingerprint()),
+        card_absent(CardReader::Absent),
+        card_absent(CardReader::Attached),
+        card_present(),
     ];
     let mut seen = Vec::new();
     for _ in 0..KEEP_ALIVE_ROUNDS {
@@ -395,14 +411,18 @@ fn a_card_reported_absent_leaves_the_last_sighting_as_it_was() {
         .unwrap();
     let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
     let proxy = std::thread::spawn(move || {
-        proxy_accept_session_with_card(&proxy_pairing, proxy_transport, CardStatusMessage::Absent)
+        proxy_accept_session_with_card(
+            &proxy_pairing,
+            proxy_transport,
+            card_absent(CardReader::Absent),
+        )
     });
     let mut session = requester.connect(pair_id, requester_transport).unwrap();
     while session.card_status().is_none() {
         requester.keep_alive(&mut session).unwrap();
     }
     let _proxy_session = proxy.join().unwrap();
-    assert_eq!(session.card_status(), Some(CardStatusMessage::Absent));
+    assert_eq!(session.card_status(), Some(card_absent(CardReader::Absent)));
     // Absence is never recorded: the offer ages out over the grace from the
     // last time the card was heard (section 8.4 item 3).
     assert_eq!(requester.store().card_sighting(pair_id), Some(earlier));
@@ -475,10 +495,7 @@ fn the_pin_prompt_is_reported_while_a_request_waits() {
         OperationOutcome::Rejected(ResultError::UserCancelled)
     );
     assert_eq!(seen, [ProgressEvent::ConsentShown]);
-    assert_eq!(
-        session.card_status(),
-        Some(CardStatusMessage::Present(card_fingerprint()))
-    );
+    assert_eq!(session.card_status(), Some(card_present()));
 }
 
 #[test]

@@ -7,7 +7,7 @@ use refineid_rapp_core::engine::{
     OperationOutcome, PairingError, Requester, RequesterConfig, SESSION_RECEIVE_TICK,
 };
 use refineid_rapp_core::ids::PairId;
-use refineid_rapp_core::message::{CardStatusMessage, CloseReason};
+use refineid_rapp_core::message::{CardPresence, CardReader, CardStatusMessage, CloseReason};
 use refineid_rapp_core::operations::{
     CardOperation, CardOperationResult, CertificateKind, KeyProfile, SignatureAlgorithm,
 };
@@ -173,9 +173,10 @@ fn test_mock_proxy_pairing_and_card_operations() {
     };
     assert_eq!(
         session.card_status(),
-        Some(CardStatusMessage::Present(
-            CertificateFingerprint::of_certificate(&der)
-        ))
+        Some(CardStatusMessage {
+            card: CardPresence::Present(CertificateFingerprint::of_certificate(&der)),
+            reader: CardReader::Absent,
+        })
     );
 
     // 3b. ReadCertificate (Signature)
@@ -275,7 +276,13 @@ fn an_absent_card_answers_card_error() {
         )
         .expect("execute read_certificate");
     assert_eq!(read, OperationOutcome::Rejected(ResultError::CardError));
-    assert_eq!(session.card_status(), Some(CardStatusMessage::Absent));
+    assert_eq!(
+        session.card_status(),
+        Some(CardStatusMessage {
+            card: CardPresence::Absent,
+            reader: CardReader::Absent,
+        })
+    );
     let signed = requester
         .execute(
             &mut session,
