@@ -42,7 +42,7 @@ pub const AGENT_MUTEX_PREFIX: &str = r"Local\RefineID.Agent.";
 
 /// How long an operation lives on the phone: the holder approves within it
 /// (RAPP section 8.2 item 1).
-pub const OPERATION_LIFETIME: Duration = Duration::from_secs(60);
+pub const OPERATION_LIFETIME: Duration = Duration::from_secs(300);
 /// How long the agent looks for the phone when a signature arrives with no
 /// session open.
 pub const REACH_WINDOW: Duration = Duration::from_secs(15);
