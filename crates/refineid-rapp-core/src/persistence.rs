@@ -16,6 +16,12 @@
 //! every field and rejects trailing bytes, so a truncated or tampered blob
 //! fails closed rather than yielding a half-built record. Neither direction
 //! ever prints a key.
+//!
+//! Stored records are not migrated. A record written for an earlier RAPP
+//! protocol version, or one whose engine record is in a format the engine
+//! does not read, is refused: [`decode_pairing_records`] leaves it out of
+//! the set and counts it, so the store that writes the set back drops it
+//! for good and its peer pairs again.
 
 use refineid_lib_core::x509::OwnedCert;
 use refineid_rapp::{EndpointRole, PAIR_ID_SIZE, PairRecordCodecError};
@@ -248,20 +254,40 @@ pub fn encode_pairing_records<'record>(
     Ok(out)
 }
 
+/// A stored pairing set as this build reads it.
+#[derive(Debug, Default)]
+pub struct PairingSet {
+    /// The records this build reads, in stored order.
+    pub records: Vec<PairingRecord>,
+    /// How many stored records were refused and left out of
+    /// [`Self::records`]: written for an earlier RAPP protocol version, or
+    /// holding an engine record in a format the engine does not read.
+    pub refused: usize,
+}
+
+/// Whether `error` refuses one stored record under the no-migration rule,
+/// so the record is left out of its set and its peer pairs again.
+const fn is_refused_record(error: PairingCodecError) -> bool {
+    matches!(
+        error,
+        PairingCodecError::EarlierProtocol { .. }
+            | PairingCodecError::PairRecord(PairRecordCodecError::UnsupportedVersion)
+    )
+}
+
 /// Reconstructs a whole pairing set from a device-only blob.
 ///
 /// An empty slice decodes to an empty set, so a store whose credential does not
-/// yet exist starts clean.
+/// yet exist starts clean. A refused record is left out and counted in
+/// [`PairingSet::refused`]; development builds report each one.
 ///
 /// # Errors
 ///
 /// Fails when the blob is not a pairing set, uses an unknown revision, ends
-/// mid-field, carries trailing bytes, or holds a malformed record. Records
-/// written for an earlier RAPP protocol version are left out: their peers
-/// must pair again.
-pub fn decode_pairing_records(blob: &[u8]) -> Result<Vec<PairingRecord>, PairingCodecError> {
+/// mid-field, carries trailing bytes, or holds a malformed record.
+pub fn decode_pairing_records(blob: &[u8]) -> Result<PairingSet, PairingCodecError> {
     if blob.is_empty() {
-        return Ok(Vec::new());
+        return Ok(PairingSet::default());
     }
     let mut reader = Reader::new(blob);
     if reader.take(PAIRING_SET_MAGIC.len())? != PAIRING_SET_MAGIC {
@@ -272,16 +298,19 @@ pub fn decode_pairing_records(blob: &[u8]) -> Result<Vec<PairingRecord>, Pairing
         return Err(PairingCodecError::UnsupportedVersion { found: version });
     }
     let count = reader.take_length()?;
-    let mut records = Vec::new();
+    let mut set = PairingSet::default();
     for _ in 0..count {
         match decode_pairing_record(reader.take_length_prefixed()?) {
-            Ok(record) => records.push(record),
-            Err(PairingCodecError::EarlierProtocol { .. }) => {}
+            Ok(record) => set.records.push(record),
+            Err(error) if is_refused_record(error) => {
+                refineid_dev_errors::report!(Rapp, "stored pairing refused", error);
+                set.refused += 1;
+            }
             Err(error) => return Err(error),
         }
     }
     reader.finish()?;
-    Ok(records)
+    Ok(set)
 }
 
 /// Maps a boolean to its wire tag.
@@ -410,10 +439,15 @@ impl<'blob> Reader<'blob> {
 mod tests {
     use super::{
         LAST_EARLIER_PROTOCOL_BLOB_VERSION, PAIRING_BLOB_MAGIC, PAIRING_SET_MAGIC,
-        PAIRING_SET_VERSION, PairingCodecError, decode_pairing_record, decode_pairing_records,
-        encode_pairing_record, encode_pairing_records, put_bytes, put_length,
+        PAIRING_SET_VERSION, PairingCodecError, Reader, decode_pairing_record,
+        decode_pairing_records, encode_pairing_record, encode_pairing_records, put_bytes,
+        put_length,
     };
     use refineid_lib_core::x509::OwnedCert;
+    use refineid_rapp::{
+        PAIR_RECORD_FORMAT_VERSION, PairRecordCodecError, WireValue, decode_deterministic_cbor,
+        encode_deterministic_cbor,
+    };
 
     use crate::store::fixtures::{
         FIRST_PAIR, SECOND_PAIR, certificate, record, unconfirmed_record,
@@ -427,6 +461,13 @@ mod tests {
     const FORGOTTEN_AT_MS: u64 = 1_800_000_000_000;
     /// A revision newer than any this build writes.
     const FUTURE_BLOB_VERSION: u8 = u8::MAX;
+    /// The engine's record format before the current one.
+    const EARLIER_KEYS_FORMAT: u64 = PAIR_RECORD_FORMAT_VERSION - 1;
+    /// The field of the engine's record encoding that holds its format.
+    const KEYS_FORMAT_FIELD: &str = "format_version";
+    /// The field the engine's current record format added: the latest time
+    /// a session to the pairing was established.
+    const LAST_SESSION_FIELD: &str = "last_session_at_ms";
 
     /// The full record, certificates included.
     fn sample() -> PairingRecord {
@@ -533,8 +574,9 @@ mod tests {
     #[test]
     fn round_trips_a_multi_record_set() {
         let records = [sample(), record(SECOND_PAIR)];
-        let decoded =
-            decode_pairing_records(&encode_pairing_records(records.iter()).unwrap()).unwrap();
+        let decoded = decode_pairing_records(&encode_pairing_records(records.iter()).unwrap())
+            .unwrap()
+            .records;
         assert_eq!(decoded.len(), records.len());
         for (original, decoded) in records.iter().zip(&decoded) {
             assert_same(original, decoded);
@@ -543,7 +585,7 @@ mod tests {
 
     #[test]
     fn an_empty_blob_is_an_empty_set() {
-        assert!(decode_pairing_records(&[]).unwrap().is_empty());
+        assert!(decode_pairing_records(&[]).unwrap().records.is_empty());
     }
 
     #[test]
@@ -552,6 +594,7 @@ mod tests {
         assert!(
             decode_pairing_records(&encode_pairing_records(none.iter()).unwrap())
                 .unwrap()
+                .records
                 .is_empty()
         );
     }
@@ -613,21 +656,101 @@ mod tests {
         ));
     }
 
+    /// A stored set of the record blobs `records`.
+    fn set_of(records: &[Vec<u8>]) -> Vec<u8> {
+        let mut set = PAIRING_SET_MAGIC.to_vec();
+        set.push(PAIRING_SET_VERSION);
+        put_length(&mut set, records.len()).unwrap();
+        for record in records {
+            put_bytes(&mut set, record).unwrap();
+        }
+        set
+    }
+
+    /// `record`'s blob with the engine's record inside it in the engine's
+    /// earlier format, as a build before the current format stored it.
+    fn with_earlier_keys_format(record: &PairingRecord) -> Vec<u8> {
+        let keys = refineid_rapp::encode_pair_record(record.pair_record().unwrap()).unwrap();
+        let WireValue::Map(mut fields) = decode_deterministic_cbor(&keys).unwrap() else {
+            panic!("an encoded pair record is a map");
+        };
+        fields.insert(
+            KEYS_FORMAT_FIELD.to_owned(),
+            WireValue::Unsigned(EARLIER_KEYS_FORMAT),
+        );
+        fields.remove(LAST_SESSION_FIELD);
+        let earlier = encode_deterministic_cbor(&WireValue::Map(fields)).unwrap();
+
+        let blob = encode_pairing_record(record).unwrap();
+        let mut reader = Reader::new(&blob);
+        reader.take(PAIRING_BLOB_MAGIC.len()).unwrap();
+        let revision = reader.take_u8().unwrap();
+        let keys_tag = reader.take_u8().unwrap();
+        reader.take_length_prefixed().unwrap();
+        let mut rewritten = PAIRING_BLOB_MAGIC.to_vec();
+        rewritten.push(revision);
+        rewritten.push(keys_tag);
+        put_bytes(&mut rewritten, &earlier).unwrap();
+        rewritten.extend_from_slice(reader.remaining);
+        rewritten
+    }
+
     #[test]
     fn a_set_leaves_out_records_of_an_earlier_protocol_version() {
         let current = record(SECOND_PAIR);
         let earlier = with_version(&sample(), LAST_EARLIER_PROTOCOL_BLOB_VERSION);
-        let records = [earlier, encode_pairing_record(&current).unwrap().to_vec()];
-        let mut set = PAIRING_SET_MAGIC.to_vec();
-        set.push(PAIRING_SET_VERSION);
-        put_length(&mut set, records.len()).unwrap();
-        for record in &records {
-            put_bytes(&mut set, record).unwrap();
-        }
-        let decoded = decode_pairing_records(&set).unwrap();
-        let [only] = decoded.as_slice() else {
+        let decoded = decode_pairing_records(&set_of(&[
+            earlier,
+            encode_pairing_record(&current).unwrap().to_vec(),
+        ]))
+        .unwrap();
+        assert_eq!(decoded.refused, 1);
+        let [only] = decoded.records.as_slice() else {
             panic!("expected only the current record");
         };
         assert_same(&current, only);
+    }
+
+    #[test]
+    fn a_record_whose_keys_are_in_an_earlier_format_is_refused() {
+        assert!(matches!(
+            decode_pairing_record(&with_earlier_keys_format(&record(FIRST_PAIR))),
+            Err(PairingCodecError::PairRecord(
+                PairRecordCodecError::UnsupportedVersion
+            ))
+        ));
+    }
+
+    #[test]
+    fn a_set_leaves_out_and_counts_records_whose_keys_are_in_an_earlier_format() {
+        let current = record(SECOND_PAIR);
+        let decoded = decode_pairing_records(&set_of(&[
+            with_earlier_keys_format(&record(FIRST_PAIR)),
+            encode_pairing_record(&current).unwrap().to_vec(),
+        ]))
+        .unwrap();
+        assert_eq!(decoded.refused, 1);
+        let [only] = decoded.records.as_slice() else {
+            panic!("expected only the current record");
+        };
+        assert_same(&current, only);
+    }
+
+    #[test]
+    fn a_set_of_current_records_refuses_none() {
+        let records = [sample(), record(SECOND_PAIR)];
+        let decoded =
+            decode_pairing_records(&encode_pairing_records(records.iter()).unwrap()).unwrap();
+        assert_eq!(decoded.refused, 0);
+    }
+
+    #[test]
+    fn a_malformed_record_fails_the_whole_set() {
+        let mut truncated = encode_pairing_record(&record(FIRST_PAIR)).unwrap().to_vec();
+        truncated.pop();
+        assert!(matches!(
+            decode_pairing_records(&set_of(&[truncated])),
+            Err(PairingCodecError::Truncated)
+        ));
     }
 }
