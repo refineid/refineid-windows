@@ -125,7 +125,7 @@ RefineID app places a paired phone's authentication certificate in
 `Cert:\CurrentUser\My` bound to that provider, so Edge, Chrome and Schannel
 sign through `SignHash`, which runs `BrowserAuthenticate` over RAPP. No reader
 or driver is involved; see
-[browser-architecture-and-rapp.md](../../docs/browser-architecture-and-rapp.md)
+[browser-architecture-and-rapp.md](../../doc/browser-architecture-and-rapp.md)
 section 6. The provider answers `NTE_BAD_KEYSET` for a key whose pairing is
 gone, serves nothing (forgotten or revoked), or has no cached certificate, `NTE_USER_CANCELLED` when the holder
 declines on the phone, and `NTE_NOT_SUPPORTED` for everything but opening,

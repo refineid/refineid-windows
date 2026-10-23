@@ -109,10 +109,10 @@ Install all of them, or update them to their latest releases, with:
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-dev-tools.ps1
 ```
 
-See [docs/toolchain.md](docs/toolchain.md) for what the script installs, the
+See [doc/toolchain.md](doc/toolchain.md) for what the script installs, the
 architecture-specific tool requirements, and cross-building the Windows target
 from macOS or Linux, and
-[docs/store-and-driver-distribution.md](docs/store-and-driver-distribution.md)
+[doc/store-and-driver-distribution.md](doc/store-and-driver-distribution.md)
 for how the Store MSIX and the pkg.refineid.fi driver installer split up.
 
 Build the development Card Module for both supported architectures:
@@ -258,7 +258,7 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 
 `crates/refineid-rapp-core` implements the requester role of the Remote
 Authorization Proxy Protocol, RAPP v26.10.22 (specified in refineid-core
-`docs/protocols/rapp-v26.10.22.md`), through the `refineid_rapp` engine.
+`doc/protocols/rapp-v26.10.22.md`), through the `refineid_rapp` engine.
 RAPP lets this Windows machine use an identity card held by the holder's
 phone: pairing takes the six-character code the phone shows (`CPace`,
 then `Noise_XXpsk3`), every session is a mutually authenticated
@@ -282,7 +282,7 @@ Windows Accessibility support through Microsoft UI Automation (UIA) and WinUI 3
 `AutomationProperties` (`HeadingLevel`, `AutomationId`, `Name`, `HelpText`). This
 provides accessible semantics for screen readers (such as Windows Narrator) and
 serves as assistive technology for autonomous AI agents navigating the desktop
-deterministically. See [docs/accessibility-and-ui-automation.md](docs/accessibility-and-ui-automation.md)
+deterministically. See [doc/accessibility-and-ui-automation.md](doc/accessibility-and-ui-automation.md)
 for architecture details.
 
 ## Security boundary
