@@ -26,7 +26,7 @@
 - No Magic Codes - define everything (see [Types and numbers](#types-and-numbers)).
 - Verify claims from Microsoft, DVV, ICAO, eIDAS, or another primary source.
 - On Windows, run `scripts/setup-dev-tools.ps1` before building (see
-  `docs/toolchain.md`). It installs the toolchain and keeps Visual Studio and
+  `doc/toolchain.md`). It installs the toolchain and keeps Visual Studio and
   every SDK at the latest release. The Rust release is pinned only in
   `rust-toolchain.toml`; never repeat it in prose.
 - Always run formatting (`cargo fmt`, `csharpier`), clippy (`-D warnings` on both host and Windows targets), and unit tests before committing (`.githooks/pre-commit` enforces this). `Cargo.lock` must match the manifests (`.githooks/pre-push` enforces this); it may pin an older refineid-core commit, and moving to a newer core is its own pull request. Never bypass verification with `--no-verify`. Hardware claims additionally require a real reader and card.
@@ -44,7 +44,7 @@
   the pull request after mandatory local gates pass and review is complete, then
   remove the worktree and branch and fast-forward `main`. The scheduled/manual
   Windows portability workflow does not gate pull requests. Full workflow:
-  `docs/process/agent-worktrees.md`.
+  `doc/process/agent-worktrees.md`.
 - Do not publish unsigned or test-signed binaries as production releases.
 
 ## Source comments
@@ -112,7 +112,7 @@ and no magic numbers. Define everything.
 Refinement types:
 
 - Read
-  [refinement-types.md](https://github.com/refineid/refineid-core/blob/main/docs/architecture/refinement-types.md)
+  [refinement-types.md](https://github.com/refineid/refineid-core/blob/main/doc/architecture/refinement-types.md)
   and its case study before designing or reviewing a type.
 - A type is a predicate: input from the wire, the card, the platform or
   storage crosses one border, with one constructor that checks every
@@ -139,7 +139,7 @@ No magic numbers:
 ## STPA in design
 
 Every design includes a short System-Theoretic Process Analysis (STPA),
-sized to the change. [stpa-rapp.md](https://github.com/refineid/refineid-core/blob/main/docs/security/stpa-rapp.md) is the worked example and the
+sized to the change. [stpa-rapp.md](https://github.com/refineid/refineid-core/blob/main/doc/security/stpa-rapp.md) is the worked example and the
 record for RAPP and its applications.
 
 - Ground the analysis in the losses (L-n) and hazards (H-n) the record
@@ -180,4 +180,4 @@ record for RAPP and its applications.
 
 ## Working method
 
-Read [docs/process/working-method.md](docs/process/working-method.md) before starting: the roles (front agent, implementation agents), what a brief contains, the feedback loops, and which documentation is kept. The same file is in every RefineID repository.
+Read [doc/process/working-method.md](doc/process/working-method.md) before starting: the roles (front agent, implementation agents), what a brief contains, the feedback loops, and which documentation is kept. The same file is in every RefineID repository.

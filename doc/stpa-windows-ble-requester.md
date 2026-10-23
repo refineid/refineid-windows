@@ -12,7 +12,7 @@ application
 
 ## 1. Purpose and relation to the system analysis
 
-The system-level STPA in refineid-core (`docs/security/stpa-rapp.md`)
+The system-level STPA in refineid-core (`doc/security/stpa-rapp.md`)
 draws the requester as one box. Its section 16 analyses a browser login
 over BLE alone, with a Windows requester and an iPhone custodian whose
 card sits in a wired reader. This document opens the requester box for

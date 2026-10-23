@@ -2,7 +2,7 @@
 # Copyright 2026 Petri Koistinen. Licensed under the Apache License, Version 2.0.
 #
 # Report agent worktree health, and with --clean remove only what is
-# provably done. See docs/process/agent-worktrees.md.
+# provably done. See doc/process/agent-worktrees.md.
 #
 # Usage:
 #

@@ -90,7 +90,7 @@ without any local card driver:
 4. **pkg.refineid.fi initial version**: serve the signed minidriver/PKCS#11
    installer, a `Getting Started` page, and a short "connect the reader"
    walkthrough. Content is unsigned inert download binaries.
-5. **Track inventory**: add a small `docs/adrs/005-store-vs-pkg-split.md`
+5. **Track inventory**: add a small `doc/adrs/005-store-vs-pkg-split.md`
    later when the driver docs landing page is live.
 
 ## Trust / validation summary

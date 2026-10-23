@@ -26,7 +26,7 @@ developer or an agent. The loops are:
   repository's AGENTS.md describes.
 - **STPA** (System-Theoretic Process Analysis) names the feedback each
   controller needs. The record is
-  <https://github.com/refineid/refineid-core/blob/main/docs/security/stpa-rapp.md>.
+  <https://github.com/refineid/refineid-core/blob/main/doc/security/stpa-rapp.md>.
 
 A finding from any loop is either fixed in the current change or filed as
 an issue, with the evidence, in the repository whose code it concerns.
