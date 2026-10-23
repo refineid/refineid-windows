@@ -148,6 +148,11 @@ failing until the browser restarts.
 | W-R-15 | One agent runs per user, enforced by a session-local named mutex taken before the pipe is created. | W-UCA-19 | CC-29 |
 | W-R-16 | Ctrl+C, Ctrl+Break and closing the agent's console window are the user quitting the agent, and quitting withdraws (RAPP §4.5 item 8): the engine closes each open session with `service_withdrawn` within one receive tick (`SESSION_RECEIVE_TICK`, a quarter of the quit bound), ending an operation in flight with it, dials no session or revocation notice after it, and keeps the pairing; the agent waits at most `QUIT_WITHDRAWAL_BOUND_MS` (1 second) for the closes to be written, withdraws the browsers' offer (§8.4 item 3), and exits. A connection whose session is not yet open closes without a notice. Log-off, shutdown, sleep, network loss and a killed process send nothing. | W-UCA-24 | CC-98 |
 
+Residual, accepted (core STPA section 28): a session whose handshake is
+still in flight when the agent quits closes without a notice, as RAPP
+§4.5 item 8 allows, and the phone shows it lost rather than off, as it
+does a close not written within the quit bound.
+
 ## 6. Verification on the first run
 
 The hardware of the first run: this computer's Intel Bluetooth adapter,

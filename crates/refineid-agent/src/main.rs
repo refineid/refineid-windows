@@ -20,6 +20,8 @@
 
 #[cfg(windows)]
 mod console;
+#[cfg(any(windows, test))]
+mod offer_gate;
 #[cfg(windows)]
 mod session;
 

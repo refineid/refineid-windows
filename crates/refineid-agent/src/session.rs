@@ -31,6 +31,7 @@ use refineid_windows_credential_store::{
 };
 
 use crate::console;
+use crate::offer_gate::OfferGate;
 
 /// How long the agent waits before looking for the phone again after a
 /// search found nothing, unless a signature request arrives first.
@@ -56,6 +57,10 @@ const FIRST_CARD_REPORT_WAIT: Duration = Duration::from_secs(5);
 /// written before it exits (RAPP v26.10.22 section 4.5 item 8).
 const QUIT_WITHDRAWAL_BOUND: Duration =
     Duration::from_millis(refineid_rapp::QUIT_WITHDRAWAL_BOUND_MS);
+
+/// The gate every change to the browsers' offer passes through, closed by
+/// the agent's quit.
+static OFFER_GATE: OfferGate = OfferGate::new();
 
 /// A signature request waiting for the phone, and since when.
 struct Waiting {
@@ -189,12 +194,14 @@ struct Pairing {
 /// The user quit the agent (RAPP v26.10.22 section 4.5 item 8): each open
 /// session gets the `service_withdrawn` close, written within the quit
 /// bound or dropped, and the offer to browsers goes, as nothing serves it
-/// after (section 8.4 item 3). The pairing stays.
+/// after (section 8.4 item 3): the offer's gate closes, so the removal runs
+/// after any install under way and no install follows it. The pairing
+/// stays.
 fn quit(withdrawal: &Withdrawal) {
     if !withdrawal.raise_and_wait(QUIT_WITHDRAWAL_BOUND) {
         refineid_dev_errors::report!(Agent, "withdrawal not delivered", "the quit bound passed");
     }
-    remove_offer();
+    OFFER_GATE.close(remove_offer);
 }
 
 fn requester_over(store: ProtectedPairingStore, withdrawal: &Withdrawal) -> AgentRequester {
@@ -256,7 +263,8 @@ fn deliver_revocation_notices(requester: &mut AgentRequester) {
 /// pairing is forgotten or revoked or a session hears another card; another
 /// card's certificate is withdrawn before this one is installed, as
 /// installing adds a certificate beside it. Once the agent withdrew, the
-/// offer is left to its quit, which withdraws it.
+/// offer is left to its quit, which withdraws it; an install that passed
+/// this check runs through the offer's gate, so the quit removes it after.
 fn sync_offer(requester: &AgentRequester, pair_id: PairId, offered: &mut Option<Offered>) {
     if requester.withdrawn() {
         return;
@@ -277,11 +285,12 @@ fn sync_offer(requester: &AgentRequester, pair_id: PairId, offered: &mut Option<
     if offered.is_some() {
         withdraw_certificates(offered);
     }
-    match install_browser_certificate(certificate, pair_id) {
-        Ok(()) => *offered = Some(wanted),
-        Err(error) => {
+    match OFFER_GATE.change(|| install_browser_certificate(certificate, pair_id)) {
+        Some(Ok(())) => *offered = Some(wanted),
+        Some(Err(error)) => {
             refineid_dev_errors::report!(Agent, "certificate not offered to browsers", error);
         }
+        None => {}
     }
 }
 
@@ -309,7 +318,7 @@ fn bounded_by_offer(step: Duration, until_lapse: Option<Duration>) -> Duration {
 }
 
 fn withdraw_certificates(offered: &mut Option<Offered>) {
-    remove_offer();
+    OFFER_GATE.change(remove_offer);
     *offered = None;
 }
 
