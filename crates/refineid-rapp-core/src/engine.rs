@@ -13,8 +13,11 @@
 //! storage provider's agent, the CLI, and the GUI call it from their own
 //! threads. A session transport receives with [`SESSION_RECEIVE_TICK`] as
 //! its deadline, so a session that hears nothing still sends its ping after
-//! 5 seconds of silence and ends after 30.
+//! 5 seconds of silence and ends after 30, and an engine that follows a
+//! raised [`Withdrawal`] closes each open session with `service_withdrawn`
+//! within one tick (section 4.5 item 8).
 
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use zeroize::Zeroizing;
@@ -34,10 +37,19 @@ const CPACE_SCALAR_ENTROPY_BYTES: usize = 64;
 /// Custodian in Pairing Mode" item 4).
 const CPACE_STEP_TWO_WAIT: Duration = Duration::from_millis(refineid_rapp::CPACE_ATTEMPT_WINDOW_MS);
 
+/// Receive ticks within the quit bound of section 4.5 item 8: a withdrawal
+/// is noticed within the first, and the rest of the bound is left for the
+/// `service_withdrawn` close to be written.
+const RECEIVE_TICKS_PER_QUIT_BOUND: u64 = 4;
+
 /// The receive deadline of a session transport: how long one receive waits
-/// before the session's liveness is advanced. Well below the 5-second ping
-/// interval of section 8.3, so a ping goes out on time.
-pub const SESSION_RECEIVE_TICK: Duration = Duration::from_secs(1);
+/// before the session's liveness and the requester's withdrawal are looked
+/// at again.
+///
+/// Well below the 5-second ping interval of section 8.3, so a ping goes out
+/// on time, and a fraction of the quit bound of section 4.5 item 8.
+pub const SESSION_RECEIVE_TICK: Duration =
+    Duration::from_millis(refineid_rapp::QUIT_WITHDRAWAL_BOUND_MS / RECEIVE_TICKS_PER_QUIT_BOUND);
 
 /// How long a session handshake or the Custodian's first message may stay
 /// silent: the silence that ends an established session (section 8.3).
@@ -294,6 +306,10 @@ pub enum SessionError {
     ClosedByPeer(CloseReason),
     /// The session is over.
     Ended(SessionEnd),
+    /// The requester withdrew (section 4.5 item 8): it dials no session,
+    /// and a session whose `session.ready` it verified as it withdrew got
+    /// the `service_withdrawn` close.
+    Withdrawn,
     /// A store operation failed.
     Store(StoreError),
     /// The engine encountered an internal fault.
@@ -313,6 +329,7 @@ impl core::fmt::Display for SessionError {
             Self::Violation(violation) => write!(f, "protocol violation: {violation:?}"),
             Self::ClosedByPeer(reason) => write!(f, "session closed by peer: {reason:?}"),
             Self::Ended(end) => write!(f, "session ended: {end:?}"),
+            Self::Withdrawn => f.write_str("this computer withdrew from remote use"),
             Self::Store(e) => write!(f, "store error: {e:?}"),
             Self::EngineFault => f.write_str("engine fault"),
         }
@@ -404,6 +421,9 @@ pub struct Session<Transport: FrameTransport> {
     /// When, on the continuous clock, this session last recorded the card
     /// it hears present; `None` until it records the present status.
     sighted_at_ms: Option<u64>,
+    /// The session's place among the open sessions of the withdrawal its
+    /// engine follows, held until the session ends.
+    open: Option<OpenSession>,
 }
 
 impl<Transport: FrameTransport> Session<Transport> {
@@ -436,6 +456,7 @@ impl<Transport: FrameTransport> Session<Transport> {
         self.runtime.close_session();
         self.operations.session_closed();
         self.end = Some(end);
+        self.open = None;
     }
 
     /// Sends one sealed frame; a transport that fails ends the session.
@@ -474,17 +495,134 @@ enum Event {
     Ended,
 }
 
+/// A requester's withdrawal (RAPP v26.10.22 section 4.5 item 8), shared
+/// between the engines that follow it and whatever withdraws.
+///
+/// The user turning remote use off, a local card doing so, or the user
+/// quitting raises it, and once raised it stays raised. Suspension, sleep,
+/// network loss and the operating system ending the process are not
+/// withdrawal and raise nothing.
+#[derive(Clone, Debug, Default)]
+pub struct Withdrawal(Arc<WithdrawalShared>);
+
+/// What the clones of one [`Withdrawal`] share.
+#[derive(Debug, Default)]
+struct WithdrawalShared {
+    state: Mutex<WithdrawalState>,
+    /// Signalled whenever an open session ends.
+    session_ended: Condvar,
+}
+
+/// Whether the requester withdrew, and how many sessions of the engines
+/// following it are open.
+#[derive(Debug, Default)]
+struct WithdrawalState {
+    raised: bool,
+    open_sessions: usize,
+}
+
+impl Withdrawal {
+    /// A withdrawal not yet raised.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Withdraws: each open session of the engines following this closes
+    /// with `service_withdrawn` at its next receive, at most one
+    /// [`SESSION_RECEIVE_TICK`] away while the session is driven, and none
+    /// dials after it.
+    pub fn raise(&self) {
+        drop(self.raised_state());
+    }
+
+    /// Withdraws, as [`Self::raise`], and waits at most `bound` for every
+    /// open session to end with its close written: a requester that quits
+    /// passes `QUIT_WITHDRAWAL_BOUND_MS` and exits once it returns. Returns
+    /// whether every session ended within the bound.
+    #[must_use]
+    pub fn raise_and_wait(&self, bound: Duration) -> bool {
+        let (state, waited) = self
+            .0
+            .session_ended
+            .wait_timeout_while(self.raised_state(), bound, |state| state.open_sessions > 0)
+            .unwrap_or_else(PoisonError::into_inner);
+        drop(state);
+        !waited.timed_out()
+    }
+
+    /// Whether the requester withdrew.
+    #[must_use]
+    pub fn is_raised(&self) -> bool {
+        self.state().raised
+    }
+
+    /// Counts a session as open until the returned place is dropped.
+    fn session_opened(&self) -> OpenSession {
+        self.state().open_sessions += 1;
+        OpenSession(self.clone())
+    }
+
+    /// The state, raised, still locked.
+    fn raised_state(&self) -> MutexGuard<'_, WithdrawalState> {
+        let mut state = self.state();
+        state.raised = true;
+        state
+    }
+
+    fn state(&self) -> MutexGuard<'_, WithdrawalState> {
+        self.0.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// One open session counted by its engine's [`Withdrawal`]; dropping it
+/// ends the session's count and wakes a requester waiting to quit.
+#[derive(Debug)]
+struct OpenSession(Withdrawal);
+
+impl Drop for OpenSession {
+    fn drop(&mut self) {
+        let mut state = self.0.state();
+        state.open_sessions = state.open_sessions.saturating_sub(1);
+        drop(state);
+        self.0.0.session_ended.notify_all();
+    }
+}
+
 /// The requester engine over its durable pairing store.
 #[derive(Debug)]
 pub struct Requester<Store: PairingStore> {
     config: RequesterConfig,
     store: Store,
+    /// The withdrawal this engine follows, if any.
+    withdrawal: Option<Withdrawal>,
 }
 
 impl<Store: PairingStore> Requester<Store> {
     /// Creates an engine over its store.
     pub const fn new(config: RequesterConfig, store: Store) -> Self {
-        Self { config, store }
+        Self {
+            config,
+            store,
+            withdrawal: None,
+        }
+    }
+
+    /// Makes the engine follow `withdrawal` (section 4.5 item 8): once it
+    /// is raised, an open session gets the `service_withdrawn` close at its
+    /// next receive, an operation waiting on it ends as
+    /// [`OperationOutcome::Lost`], and neither a session nor a revocation
+    /// notice is dialled. The pairing stays.
+    #[must_use]
+    pub fn following(mut self, withdrawal: Withdrawal) -> Self {
+        self.withdrawal = Some(withdrawal);
+        self
+    }
+
+    /// Whether the withdrawal this engine follows is raised.
+    #[must_use]
+    pub fn withdrawn(&self) -> bool {
+        self.withdrawal.as_ref().is_some_and(Withdrawal::is_raised)
     }
 
     /// The pairing store, for inspection.
@@ -879,18 +1017,23 @@ impl<Store: PairingStore> Requester<Store> {
     /// a `pairing_revoked` close revokes the pairing here (section 4.6 item
     /// 4). A first message that violates the protocol gets the sealed
     /// `protocol_violation` close and the pairing stays (section 10.1).
+    /// After the engine withdrew, the transport is dropped untouched; a
+    /// session whose `session.ready` is verified as the engine withdraws
+    /// gets the `service_withdrawn` close (section 4.5 item 8).
     ///
     /// # Errors
     /// [`SessionError`] on an unknown, revoked, forgotten, or unconfirmed
-    /// pairing, a failed handshake, a transport failure, a violation, or the
-    /// Custodian's close.
+    /// pairing, a failed handshake, a transport failure, a violation, the
+    /// Custodian's close, or the engine's withdrawal.
     pub fn connect<Transport: FrameTransport>(
         &mut self,
         pair_id: PairId,
         transport: Transport,
     ) -> Result<Session<Transport>, SessionError> {
         self.open_session(pair_id, transport).inspect_err(|error| {
-            refineid_dev_errors::report!(Rapp, "phone session not opened", error);
+            if *error != SessionError::Withdrawn {
+                refineid_dev_errors::report!(Rapp, "phone session not opened", error);
+            }
         })
     }
 
@@ -900,6 +1043,9 @@ impl<Store: PairingStore> Requester<Store> {
         pair_id: PairId,
         mut transport: Transport,
     ) -> Result<Session<Transport>, SessionError> {
+        if self.withdrawn() {
+            return Err(SessionError::Withdrawn);
+        }
         let record = self
             .store
             .get(pair_id)
@@ -935,7 +1081,7 @@ impl<Store: PairingStore> Requester<Store> {
         let endpoint = authentication
             .into_established()
             .map_err(|_| SessionError::EngineFault)?;
-        Ok(Session {
+        let mut session = Session {
             transport,
             runtime: EstablishedSessionRuntime::new(endpoint, current_time_ms()),
             operations: RequesterOperationEngine::new(),
@@ -945,7 +1091,13 @@ impl<Store: PairingStore> Requester<Store> {
             end: None,
             card: None,
             sighted_at_ms: None,
-        })
+            open: self.withdrawal.as_ref().map(Withdrawal::session_opened),
+        };
+        if self.withdrawn() {
+            self.disconnect(&mut session, CloseReason::ServiceWithdrawn);
+            return Err(SessionError::Withdrawn);
+        }
+        Ok(session)
     }
 
     /// Delivers the `pairing_revoked` close of a pairing forgotten while no
@@ -954,10 +1106,13 @@ impl<Store: PairingStore> Requester<Store> {
     /// as the session's first and only message. The keys are destroyed once
     /// it is sent (RAPP v26.10.22 section 4.6 items 2 and 3); no card session
     /// starts. A notice past its 30 days is not sent: the keys go untold.
+    /// After the engine withdrew, nothing is sent and the notice stays owed
+    /// (section 4.5 item 8).
     ///
     /// # Errors
-    /// [`SessionError::NotForgotten`] when the pairing owes no notice, and
-    /// the handshake and transport errors of [`Self::connect`].
+    /// [`SessionError::NotForgotten`] when the pairing owes no notice,
+    /// [`SessionError::Withdrawn`] after the engine withdrew, and the
+    /// handshake and transport errors of [`Self::connect`].
     pub fn deliver_revocation_notice<Transport: FrameTransport>(
         &mut self,
         pair_id: PairId,
@@ -965,7 +1120,9 @@ impl<Store: PairingStore> Requester<Store> {
     ) -> Result<(), SessionError> {
         self.revocation_notice(pair_id, transport)
             .inspect_err(|error| {
-                refineid_dev_errors::report!(Rapp, "revocation notice not delivered", error);
+                if *error != SessionError::Withdrawn {
+                    refineid_dev_errors::report!(Rapp, "revocation notice not delivered", error);
+                }
             })
     }
 
@@ -975,6 +1132,9 @@ impl<Store: PairingStore> Requester<Store> {
         pair_id: PairId,
         mut transport: Transport,
     ) -> Result<(), SessionError> {
+        if self.withdrawn() {
+            return Err(SessionError::Withdrawn);
+        }
         expire_revocation_notices(&mut self.store, crate::clock::unix_time_ms());
         let record = self
             .store
@@ -1040,7 +1200,8 @@ impl<Store: PairingStore> Requester<Store> {
     /// Keeps an idle session alive for one receive: answers the peer's
     /// ping, sends ours after 5 seconds of silence, notes `card.status`, and
     /// ends the session after 30 seconds of silence or on the peer's close
-    /// (RAPP v26.10.22 sections 8.3 and 8.4).
+    /// (RAPP v26.10.22 sections 8.3 and 8.4), or with the `service_withdrawn`
+    /// close once the engine withdrew (section 4.5 item 8).
     ///
     /// # Errors
     /// [`SessionError::Ended`] once the session is over.
@@ -1067,6 +1228,14 @@ impl<Store: PairingStore> Requester<Store> {
             let _ = session.transport.send_frame(notice.as_bytes());
         }
         session.finish(SessionEnd::LocalClose);
+    }
+
+    /// Closes an open session with `service_withdrawn` once the engine
+    /// withdrew (section 4.5 item 8); the pairing stays.
+    fn close_if_withdrawn<Transport: FrameTransport>(&mut self, session: &mut Session<Transport>) {
+        if self.withdrawn() {
+            self.disconnect(session, CloseReason::ServiceWithdrawn);
+        }
     }
 
     /// Runs one typed operation to its outcome.
@@ -1117,6 +1286,7 @@ impl<Store: PairingStore> Requester<Store> {
         expires_after_ms: u64,
         observe: &mut dyn FnMut(ProgressEvent),
     ) -> Result<OperationOutcome, AdmissionError> {
+        self.close_if_withdrawn(session);
         if session.end.is_some() {
             return Err(AdmissionError::SessionNotHealthy);
         }
@@ -1252,12 +1422,13 @@ impl<Store: PairingStore> Requester<Store> {
         }
     }
 
-    /// Advances the session by one receive: liveness first, then whatever
-    /// arrived.
+    /// Advances the session by one receive: the engine's withdrawal first,
+    /// then liveness, then whatever arrived.
     fn receive_event<Transport: FrameTransport>(
         &mut self,
         session: &mut Session<Transport>,
     ) -> Event {
+        self.close_if_withdrawn(session);
         if session.end.is_some() {
             return Event::Ended;
         }

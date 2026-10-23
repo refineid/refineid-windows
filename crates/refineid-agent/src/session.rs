@@ -18,7 +18,7 @@ use refineid_rapp_ble::gatt::BleLink;
 use refineid_rapp_ble::reach::{ReachError, reach_revocation_notice, reach_session};
 use refineid_rapp_core::clock::unix_time_ms;
 use refineid_rapp_core::engine::{
-    OperationOutcome, Requester, RequesterConfig, Session, SessionEnd, SessionError,
+    OperationOutcome, Requester, RequesterConfig, Session, SessionEnd, SessionError, Withdrawal,
 };
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::message::{
@@ -29,6 +29,9 @@ use refineid_rapp_core::store::{PairingRecord, PairingStore, offered_certificate
 use refineid_windows_credential_store::{
     ProtectedPairingStore, install_browser_certificate, remove_browser_certificates,
 };
+
+use crate::console;
+use crate::offer_gate::OfferGate;
 
 /// How long the agent waits before looking for the phone again after a
 /// search found nothing, unless a signature request arrives first.
@@ -50,6 +53,14 @@ const OPERATION_LIFETIME_MS: u64 = OPERATION_LIFETIME.as_secs() * 1_000;
 /// a waiting request runs (RAPP v26.10.22 section 8.4 item 1): the phone
 /// sends it right after `session.ready`.
 const FIRST_CARD_REPORT_WAIT: Duration = Duration::from_secs(5);
+/// How long a quitting agent waits for its `service_withdrawn` closes to be
+/// written before it exits (RAPP v26.10.22 section 4.5 item 8).
+const QUIT_WITHDRAWAL_BOUND: Duration =
+    Duration::from_millis(refineid_rapp::QUIT_WITHDRAWAL_BOUND_MS);
+
+/// The gate every change to the browsers' offer passes through, closed by
+/// the agent's quit.
+static OFFER_GATE: OfferGate = OfferGate::new();
 
 /// A signature request waiting for the phone, and since when.
 struct Waiting {
@@ -118,8 +129,13 @@ pub fn run() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let withdrawal = Withdrawal::new();
+    let quitting = withdrawal.clone();
+    if let Err(code) = console::on_quit(move || quit(&quitting)) {
+        refineid_dev_errors::report!(Agent, "quit not handled", status code);
+    }
     let (jobs, inbox) = channel();
-    thread::spawn(move || serve_phone(&inbox));
+    thread::spawn(move || serve_phone(&inbox, &withdrawal));
     let computer = computer_name();
     loop {
         let mut client = match server.accept() {
@@ -175,7 +191,20 @@ struct Pairing {
     key: RoutingKey,
 }
 
-fn requester_over(store: ProtectedPairingStore) -> AgentRequester {
+/// The user quit the agent (RAPP v26.10.22 section 4.5 item 8): each open
+/// session gets the `service_withdrawn` close, written within the quit
+/// bound or dropped, and the offer to browsers goes, as nothing serves it
+/// after (section 8.4 item 3): the offer's gate closes, so the removal runs
+/// after any install under way and no install follows it. The pairing
+/// stays.
+fn quit(withdrawal: &Withdrawal) {
+    if !withdrawal.raise_and_wait(QUIT_WITHDRAWAL_BOUND) {
+        refineid_dev_errors::report!(Agent, "withdrawal not delivered", "the quit bound passed");
+    }
+    OFFER_GATE.close(remove_offer);
+}
+
+fn requester_over(store: ProtectedPairingStore, withdrawal: &Withdrawal) -> AgentRequester {
     Requester::new(
         RequesterConfig {
             display_name: "RefineID Windows".to_owned(),
@@ -183,9 +212,10 @@ fn requester_over(store: ProtectedPairingStore) -> AgentRequester {
         },
         store,
     )
+    .following(withdrawal.clone())
 }
 
-fn load_pairing(offered: &mut Option<Offered>) -> Option<Pairing> {
+fn load_pairing(withdrawal: &Withdrawal, offered: &mut Option<Offered>) -> Option<Pairing> {
     let store = match ProtectedPairingStore::load() {
         Ok(store) => store,
         Err(error) => {
@@ -193,7 +223,7 @@ fn load_pairing(offered: &mut Option<Offered>) -> Option<Pairing> {
             return None;
         }
     };
-    let mut requester = requester_over(store);
+    let mut requester = requester_over(store, withdrawal);
     deliver_revocation_notices(&mut requester);
     let record = requester.store().usable_pairing()?;
     let pair_id = record.pair_id();
@@ -232,8 +262,13 @@ fn deliver_revocation_notices(requester: &mut AgentRequester) {
 /// card a session heard present within the grace, and goes at once when the
 /// pairing is forgotten or revoked or a session hears another card; another
 /// card's certificate is withdrawn before this one is installed, as
-/// installing adds a certificate beside it.
+/// installing adds a certificate beside it. Once the agent withdrew, the
+/// offer is left to its quit, which withdraws it; an install that passed
+/// this check runs through the offer's gate, so the quit removes it after.
 fn sync_offer(requester: &AgentRequester, pair_id: PairId, offered: &mut Option<Offered>) {
+    if requester.withdrawn() {
+        return;
+    }
     let Some(certificate) = offered_certificate(requester.store(), pair_id, unix_time_ms()) else {
         if offered.is_some() {
             withdraw_certificates(offered);
@@ -250,11 +285,12 @@ fn sync_offer(requester: &AgentRequester, pair_id: PairId, offered: &mut Option<
     if offered.is_some() {
         withdraw_certificates(offered);
     }
-    match install_browser_certificate(certificate, pair_id) {
-        Ok(()) => *offered = Some(wanted),
-        Err(error) => {
+    match OFFER_GATE.change(|| install_browser_certificate(certificate, pair_id)) {
+        Some(Ok(())) => *offered = Some(wanted),
+        Some(Err(error)) => {
             refineid_dev_errors::report!(Agent, "certificate not offered to browsers", error);
         }
+        None => {}
     }
 }
 
@@ -282,20 +318,26 @@ fn bounded_by_offer(step: Duration, until_lapse: Option<Duration>) -> Duration {
 }
 
 fn withdraw_certificates(offered: &mut Option<Offered>) {
-    if let Err(error) = remove_browser_certificates() {
-        refineid_dev_errors::report!(Agent, "offered certificates not withdrawn", error);
-    }
+    OFFER_GATE.change(remove_offer);
     *offered = None;
 }
 
-/// The session thread: keeps the phone's session and runs every job.
-fn serve_phone(inbox: &Receiver<Job>) {
+/// Removes every certificate offered to browsers.
+fn remove_offer() {
+    if let Err(error) = remove_browser_certificates() {
+        refineid_dev_errors::report!(Agent, "offered certificates not withdrawn", error);
+    }
+}
+
+/// The session thread: keeps the phone's session and runs every job until
+/// the agent withdraws (RAPP v26.10.22 section 4.5 item 8).
+fn serve_phone(inbox: &Receiver<Job>, withdrawal: &Withdrawal) {
     // W-R-8: certificates offered by an earlier run are purged first.
     let mut offered = None;
     withdraw_certificates(&mut offered);
     let mut pending: Option<Waiting> = None;
-    loop {
-        let Some(mut pairing) = load_pairing(&mut offered) else {
+    while !withdrawal.is_raised() {
+        let Some(mut pairing) = load_pairing(withdrawal, &mut offered) else {
             // W-R-8: no usable pairing, so nothing stays offered.
             if offered.is_some() {
                 withdraw_certificates(&mut offered);
@@ -325,6 +367,7 @@ fn serve_phone(inbox: &Receiver<Job>) {
         );
         let mut session = match reached {
             Ok(session) => session,
+            Err(_) if pairing.requester.withdrawn() => break,
             Err(error) => {
                 match after_failed_search(&error, &pairing, &mut offered, &mut pending, inbox) {
                     AfterSearch::Again => continue,
