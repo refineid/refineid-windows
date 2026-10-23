@@ -10,9 +10,16 @@
 //! pairing's authentication certificate in the user's store while the
 //! pairing is usable, and runs each request as one `browser_authenticate`.
 //!
+//! Ctrl+C, Ctrl+Break or closing its console window quits the agent: it
+//! withdraws (RAPP v26.10.22 section 4.5 item 8), closing its open session
+//! with `service_withdrawn` within `QUIT_WITHDRAWAL_BOUND_MS`, withdraws
+//! the offer to browsers, keeps the pairing, and exits.
+//!
 //! A development build reports the agent's failures to the Windows Event
 //! Log through `refineid-dev-errors`; a release build writes nothing.
 
+#[cfg(windows)]
+mod console;
 #[cfg(windows)]
 mod session;
 

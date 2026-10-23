@@ -46,8 +46,9 @@ pub enum ReachError {
     Scan(ScanError),
     /// No advertiser accepted the session before the window closed.
     NotReached,
-    /// The pairing can open no session: it is unknown, revoked, forgotten,
-    /// unconfirmed, or its phone revoked it on this attempt.
+    /// No session can open: the pairing is unknown, revoked, forgotten or
+    /// unconfirmed, its phone revoked it on this attempt, or the requester
+    /// withdrew (RAPP v26.10.22 section 4.5 item 8).
     Pairing(SessionError),
 }
 
@@ -146,8 +147,8 @@ fn reach<T>(
     Err(ReachError::NotReached)
 }
 
-/// Whether an attempt's failure leaves the pairing unable to open any
-/// session, so no other advertiser is tried.
+/// Whether an attempt's failure leaves no session able to open, so no
+/// other advertiser is tried.
 const fn ends_the_search(error: SessionError) -> bool {
     matches!(
         error,
@@ -156,6 +157,7 @@ const fn ends_the_search(error: SessionError) -> bool {
             | SessionError::Forgotten
             | SessionError::NotForgotten
             | SessionError::StorageUnconfirmed
+            | SessionError::Withdrawn
             | SessionError::ClosedByPeer(CloseReason::PairingRevoked)
     )
 }

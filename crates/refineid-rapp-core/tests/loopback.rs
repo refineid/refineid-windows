@@ -28,13 +28,15 @@ use refineid_rapp::{
     CertificateFingerprint, CloseReason, CpaceKc2Responder, EndpointRole, EstablishedEndpoint,
     LIVENESS_PING_AFTER_SILENCE_MS, OFFER_ID_SIZE, OfferId, OperationId, OperationProgressMessage,
     OperationResultMessage, PAIRING_CANDIDATES_MAX, PairRecord, PairingHandshake, PairingOffer,
-    ProfileName, ProgressEvent, ProtocolErrorMessage, ProxyFailure, ReceiveOutcome, ResultError,
-    SESSION_READY_NONCE_SIZE, SessionCloseMessage, SessionHandshake, SignatureAlgorithm,
-    TransportProfile, TypedMessage, generate_pair_key_material, standard_pairing_context_v2,
+    ProfileName, ProgressEvent, ProtocolErrorMessage, ProxyFailure, QUIT_WITHDRAWAL_BOUND_MS,
+    ReceiveOutcome, ResultError, SESSION_READY_NONCE_SIZE, SessionCloseMessage, SessionHandshake,
+    SignatureAlgorithm, TransportProfile, TypedMessage, generate_pair_key_material,
+    standard_pairing_context_v2,
 };
 use refineid_rapp_core::engine::{
     OpenedConnection, OperationOutcome, PairingCandidateSource, PairingError, PairingSearchError,
-    Requester, RequesterConfig, SessionEnd, SessionError, read_offer,
+    Requester, RequesterConfig, SESSION_RECEIVE_TICK, SessionEnd, SessionError, Withdrawal,
+    read_offer,
 };
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::presence::CardSighting;
@@ -876,6 +878,168 @@ fn a_forgotten_pairing_sends_the_close_as_its_next_sessions_first_message() {
     assert_eq!(
         requester.deliver_revocation_notice(pair_id, requester_transport),
         Err(SessionError::NotForgotten)
+    );
+}
+
+/// The quit bound of RAPP v26.10.22 section 4.5 item 8.
+const QUIT_BOUND: Duration = Duration::from_millis(QUIT_WITHDRAWAL_BOUND_MS);
+
+/// A requester that follows `withdrawal`.
+fn withdrawing_requester(withdrawal: &Withdrawal) -> TestRequester {
+    test_requester().following(withdrawal.clone())
+}
+
+/// Receives the requester's close on the custodian's side of a session.
+fn receive_close<T: FrameTransport>(session: &mut ProxySession<T>) -> CloseReason {
+    let TypedMessage::SessionClose(close) = session.receive() else {
+        panic!("expected the requester's close");
+    };
+    close.reason
+}
+
+#[test]
+fn a_withdrawal_closes_the_open_session_and_keeps_the_pairing() {
+    let withdrawal = Withdrawal::new();
+    let mut requester = withdrawing_requester(&withdrawal);
+    let granted = [ProfileName::CardStatus];
+    let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
+    let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    let proxy = std::thread::spawn(move || {
+        let mut session = proxy_accept_session(&proxy_pairing, proxy_transport);
+        receive_close(&mut session)
+    });
+    let mut session = requester.connect(pair_id, requester_transport).unwrap();
+    withdrawal.raise();
+    assert_eq!(
+        requester.keep_alive(&mut session),
+        Err(SessionError::Ended(SessionEnd::LocalClose))
+    );
+    assert_eq!(proxy.join().unwrap(), CloseReason::ServiceWithdrawn);
+    assert!(requester.store().get(pair_id).unwrap().serves());
+}
+
+#[test]
+fn a_withdrawal_ends_the_operation_whose_prompt_is_up() {
+    let withdrawal = Withdrawal::new();
+    let mut requester = withdrawing_requester(&withdrawal);
+    let granted = [ProfileName::Authentication];
+    let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
+    let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    let proxy = std::thread::spawn(move || {
+        let mut session = proxy_accept_session(&proxy_pairing, proxy_transport);
+        let request = session.receive_request();
+        withdrawal.raise();
+        session.send(&TypedMessage::OperationProgress(OperationProgressMessage {
+            operation_id: request.operation_id,
+            event: ProgressEvent::ConsentShown,
+        }));
+        receive_close(&mut session)
+    });
+    let mut session = requester.connect(pair_id, requester_transport).unwrap();
+    let outcome = requester
+        .execute(
+            &mut session,
+            &authentication_operation(),
+            OPERATION_LIFETIME_MS,
+        )
+        .unwrap();
+    assert_eq!(proxy.join().unwrap(), CloseReason::ServiceWithdrawn);
+    assert_eq!(outcome, OperationOutcome::Lost);
+    assert_eq!(session.end(), Some(SessionEnd::LocalClose));
+    assert!(requester.store().get(pair_id).unwrap().serves());
+}
+
+#[test]
+fn a_quitting_requester_waits_only_until_its_close_is_written() {
+    let withdrawal = Withdrawal::new();
+    let mut requester = withdrawing_requester(&withdrawal);
+    let granted = [ProfileName::CardStatus];
+    let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
+    let (mut requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    let proxy = std::thread::spawn(move || {
+        let mut session = proxy_accept_session(&proxy_pairing, proxy_transport);
+        receive_close(&mut session)
+    });
+    requester_transport
+        .set_receive_deadline(SESSION_RECEIVE_TICK)
+        .unwrap();
+    let mut session = requester.connect(pair_id, requester_transport).unwrap();
+    let holder = std::thread::spawn(move || {
+        while requester.keep_alive(&mut session).is_ok() {}
+        (requester, session.end())
+    });
+    assert!(withdrawal.raise_and_wait(QUIT_BOUND));
+    let (requester, end) = holder.join().unwrap();
+    assert_eq!(end, Some(SessionEnd::LocalClose));
+    assert_eq!(proxy.join().unwrap(), CloseReason::ServiceWithdrawn);
+    assert!(requester.store().get(pair_id).unwrap().serves());
+}
+
+#[test]
+fn a_quitting_requester_with_no_session_open_does_not_wait() {
+    let withdrawal = Withdrawal::new();
+    let started = Instant::now();
+    assert!(withdrawal.raise_and_wait(QUIT_BOUND));
+    assert!(started.elapsed() < QUIT_BOUND);
+    assert!(withdrawal.is_raised());
+}
+
+#[test]
+fn a_session_ready_as_the_requester_withdraws_gets_the_close() {
+    let withdrawal = Withdrawal::new();
+    let mut requester = withdrawing_requester(&withdrawal);
+    let granted = [ProfileName::CardStatus];
+    let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
+    let (requester_transport, mut proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    let proxy = std::thread::spawn(move || {
+        let mut authentication = proxy_handshake(&proxy_pairing, &mut proxy_transport);
+        withdrawal.raise();
+        let ready = authentication.send_ready(READY_NONCE).unwrap();
+        proxy_transport.send_frame(ready.as_bytes()).unwrap();
+        let mut session = ProxySession {
+            endpoint: authentication.into_established().unwrap(),
+            transport: proxy_transport,
+        };
+        receive_close(&mut session)
+    });
+    assert!(matches!(
+        requester.connect(pair_id, requester_transport),
+        Err(SessionError::Withdrawn)
+    ));
+    assert_eq!(proxy.join().unwrap(), CloseReason::ServiceWithdrawn);
+    assert!(requester.store().get(pair_id).unwrap().serves());
+}
+
+#[test]
+fn a_withdrawn_requester_dials_no_session_and_no_revocation_notice() {
+    let withdrawal = Withdrawal::new();
+    let mut requester = withdrawing_requester(&withdrawal);
+    let granted = [ProfileName::CardStatus];
+    let (pair_id, _proxy_pairing) = paired(&mut requester, &granted);
+    withdrawal.raise();
+    assert!(requester.withdrawn());
+
+    let (requester_transport, mut proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    assert!(matches!(
+        requester.connect(pair_id, requester_transport),
+        Err(SessionError::Withdrawn)
+    ));
+    assert_eq!(proxy_transport.receive_frame(), Err(TransportError::Eof));
+    assert!(requester.store().get(pair_id).unwrap().serves());
+
+    requester.forget_pairing(pair_id).unwrap();
+    let (requester_transport, mut proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    assert_eq!(
+        requester.deliver_revocation_notice(pair_id, requester_transport),
+        Err(SessionError::Withdrawn)
+    );
+    assert_eq!(proxy_transport.receive_frame(), Err(TransportError::Eof));
+    assert!(
+        requester
+            .store()
+            .get(pair_id)
+            .unwrap()
+            .owes_revocation_notice()
     );
 }
 
