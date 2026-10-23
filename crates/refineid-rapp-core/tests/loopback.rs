@@ -7,8 +7,9 @@
 //! `CPace` KC2 and `Noise_XXpsk3` with grant agreement and the storage
 //! confirmation, `Noise_KK` sessions with the Custodian's `session.ready`
 //! and card status, operations and their results inside their session,
-//! liveness, revocation in both directions, and the sealed
-//! `protocol_violation` close that leaves the pairing in place.
+//! liveness, revocation in both directions, the sealed
+//! `protocol_violation` close that leaves the pairing in place, and the
+//! session times idle expiry counts from.
 
 #![allow(
     clippy::unwrap_used,
@@ -27,12 +28,13 @@ use refineid_rapp::{
     CardOperation, CardOperationResult, CardPresence, CardReader, CardStatusMessage,
     CertificateFingerprint, CloseReason, CpaceKc2Responder, EndpointRole, EstablishedEndpoint,
     LIVENESS_PING_AFTER_SILENCE_MS, OFFER_ID_SIZE, OfferId, OperationId, OperationProgressMessage,
-    OperationResultMessage, PAIRING_CANDIDATES_MAX, PairRecord, PairingHandshake, PairingOffer,
-    ProfileName, ProgressEvent, ProtocolErrorMessage, ProxyFailure, QUIT_WITHDRAWAL_BOUND_MS,
-    ReceiveOutcome, ResultError, SESSION_READY_NONCE_SIZE, SessionCloseMessage, SessionHandshake,
-    SignatureAlgorithm, TransportProfile, TypedMessage, generate_pair_key_material,
-    standard_pairing_context_v2,
+    OperationResultMessage, PAIRING_CANDIDATES_MAX, PAIRING_IDLE_EXPIRY_MS, PairRecord,
+    PairingHandshake, PairingOffer, ProfileName, ProgressEvent, ProtocolErrorMessage, ProxyFailure,
+    QUIT_WITHDRAWAL_BOUND_MS, ReceiveOutcome, ResultError, SESSION_READY_NONCE_SIZE,
+    SessionCloseMessage, SessionHandshake, SignatureAlgorithm, TransportProfile, TypedMessage,
+    generate_pair_key_material, standard_pairing_context_v2,
 };
+use refineid_rapp_core::clock::unix_time_ms;
 use refineid_rapp_core::engine::{
     OpenedConnection, OperationOutcome, PairingCandidateSource, PairingError, PairingSearchError,
     Requester, RequesterConfig, SESSION_RECEIVE_TICK, SessionEnd, SessionError, Withdrawal,
@@ -40,7 +42,10 @@ use refineid_rapp_core::engine::{
 };
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::presence::CardSighting;
-use refineid_rapp_core::store::{MemoryPairingStore, PairingState, PairingStore};
+use refineid_rapp_core::store::{
+    MemoryPairingStore, PairingRecord, PairingState, PairingStore, StoreError, SweepError,
+    SweepOutcome, sweep_pairings,
+};
 use refineid_rapp_core::stream::{STREAM_CANDIDATE_ID, STREAM_PROFILE};
 use refineid_rapp_core::transport::{FrameTransport, MemoryTransport, TransportError};
 use sha2::{Digest as _, Sha256};
@@ -327,7 +332,10 @@ fn proxy_accept_session<T: FrameTransport>(
 }
 
 /// Pairs a fresh requester with a custodian thread and returns both halves.
-fn paired(requester: &mut TestRequester, granted: &[ProfileName]) -> (PairId, PairRecord) {
+fn paired<Store: PairingStore>(
+    requester: &mut Requester<Store>,
+    granted: &[ProfileName],
+) -> (PairId, PairRecord) {
     let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
     let proxy = std::thread::spawn(move || proxy_pair(proxy_transport, SHOWN_CODE));
     let (pair_id, ()) = requester
@@ -1351,4 +1359,198 @@ fn stream_pairing_and_session_route_only_by_their_preambles() {
         outcome,
         OperationOutcome::Completed(CardOperationResult::Certificate(CARD_CERTIFICATE.to_vec()))
     );
+}
+
+/// The last moment before a limit is reached.
+const JUST_BEFORE_MS: u64 = 1;
+
+/// A pairing store that notes each idle-expiry check made on it, and
+/// refuses them while `refusing`, as a backing store that cannot write
+/// does; everything else is the in-memory store's.
+#[derive(Debug, Default)]
+struct WatchedStore {
+    inner: MemoryPairingStore,
+    /// Each check made: on which pairing, and whether as in session.
+    checks: Vec<(PairId, bool)>,
+    refusing: bool,
+}
+
+impl PairingStore for WatchedStore {
+    fn insert(&mut self, record: PairingRecord) -> Result<(), StoreError> {
+        self.inner.insert(record)
+    }
+
+    fn get(&self, pair_id: PairId) -> Result<&PairingRecord, StoreError> {
+        self.inner.get(pair_id)
+    }
+
+    fn update(
+        &mut self,
+        pair_id: PairId,
+        change: &mut dyn FnMut(&mut PairingRecord),
+    ) -> Result<(), StoreError> {
+        self.inner.update(pair_id, change)
+    }
+
+    fn remove(&mut self, pair_id: PairId) -> Result<(), StoreError> {
+        self.inner.remove(pair_id)
+    }
+
+    fn pair_ids(&self) -> Vec<PairId> {
+        self.inner.pair_ids()
+    }
+
+    fn card_sighting(&self, pair_id: PairId) -> Option<CardSighting> {
+        self.inner.card_sighting(pair_id)
+    }
+
+    fn record_card_sighting(
+        &mut self,
+        pair_id: PairId,
+        sighting: CardSighting,
+    ) -> Result<(), StoreError> {
+        self.inner.record_card_sighting(pair_id, sighting)
+    }
+
+    fn sweep(
+        &mut self,
+        pair_id: PairId,
+        now_ms: u64,
+        session_established: bool,
+    ) -> Result<SweepOutcome, SweepError<StoreError>> {
+        self.checks.push((pair_id, session_established));
+        if self.refusing {
+            return Err(SweepError::Store(StoreError::WriteRefused));
+        }
+        self.inner.sweep(pair_id, now_ms, session_established)
+    }
+}
+
+/// A requester over a [`WatchedStore`].
+fn watched_requester() -> Requester<WatchedStore> {
+    Requester::new(
+        RequesterConfig {
+            display_name: "Workstation".into(),
+            platform: "Linux".into(),
+        },
+        WatchedStore::default(),
+    )
+}
+
+/// The latest time a session to `pair_id` was recorded established.
+fn last_session_at_ms<Store: PairingStore>(
+    requester: &Requester<Store>,
+    pair_id: PairId,
+) -> Option<u64> {
+    requester
+        .store()
+        .get(pair_id)
+        .ok()?
+        .pair_record()?
+        .last_session_at_ms()
+}
+
+#[test]
+fn a_session_records_its_time_when_established_and_when_it_ends() {
+    let mut requester = watched_requester();
+    let (pair_id, proxy_pairing) = paired(&mut requester, &[ProfileName::CardStatus]);
+    assert_eq!(last_session_at_ms(&requester, pair_id), None);
+    let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    let proxy = std::thread::spawn(move || proxy_accept_session(&proxy_pairing, proxy_transport));
+    let before_ms = unix_time_ms();
+    let mut session = requester.connect(pair_id, requester_transport).unwrap();
+    let _custodian = proxy.join().unwrap();
+    assert_eq!(requester.store().checks, [(pair_id, true)]);
+    let established_at_ms = last_session_at_ms(&requester, pair_id).unwrap();
+    assert!(established_at_ms >= before_ms);
+
+    requester.keep_alive(&mut session).unwrap();
+    assert_eq!(
+        requester.store().checks.len(),
+        1,
+        "an open session records again only a day later"
+    );
+
+    requester.disconnect(&mut session, CloseReason::UserDisconnect);
+    assert_eq!(requester.store().checks, [(pair_id, true), (pair_id, true)]);
+    assert!(last_session_at_ms(&requester, pair_id).unwrap() >= established_at_ms);
+    requester.disconnect(&mut session, CloseReason::UserDisconnect);
+    assert_eq!(
+        requester.store().checks.len(),
+        2,
+        "an ended session records its end once"
+    );
+    assert!(requester.store().get(pair_id).unwrap().serves());
+}
+
+#[test]
+fn a_session_lost_with_its_transport_records_its_end() {
+    let mut requester = watched_requester();
+    let (pair_id, proxy_pairing) = paired(&mut requester, &[ProfileName::CardStatus]);
+    let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    let proxy = std::thread::spawn(move || {
+        drop(proxy_accept_session(&proxy_pairing, proxy_transport));
+    });
+    let mut session = requester.connect(pair_id, requester_transport).unwrap();
+    proxy.join().unwrap();
+    for _ in 0..KEEP_ALIVE_ROUNDS {
+        if requester.keep_alive(&mut session).is_err() {
+            break;
+        }
+    }
+    assert_eq!(session.end(), Some(SessionEnd::TransportLoss));
+    assert_eq!(requester.store().checks, [(pair_id, true), (pair_id, true)]);
+}
+
+#[test]
+fn a_session_record_the_store_refused_is_tried_again_on_the_next_event() {
+    let mut requester = watched_requester();
+    let (pair_id, proxy_pairing) = paired(&mut requester, &[ProfileName::CardStatus]);
+    requester.store_mut().refusing = true;
+    let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    let proxy = std::thread::spawn(move || proxy_accept_session(&proxy_pairing, proxy_transport));
+    let mut session = requester.connect(pair_id, requester_transport).unwrap();
+    let _custodian = proxy.join().unwrap();
+    assert_eq!(requester.store().checks, [(pair_id, true)]);
+    assert_eq!(last_session_at_ms(&requester, pair_id), None);
+
+    requester.store_mut().refusing = false;
+    requester.keep_alive(&mut session).unwrap();
+    assert_eq!(requester.store().checks, [(pair_id, true), (pair_id, true)]);
+    assert!(last_session_at_ms(&requester, pair_id).is_some());
+    requester.disconnect(&mut session, CloseReason::UserDisconnect);
+}
+
+#[test]
+fn a_pairing_idle_for_the_limit_expires_silently_and_opens_no_session() {
+    let mut requester = test_requester();
+    let (pair_id, _proxy_pairing) = paired(&mut requester, &[ProfileName::CardStatus]);
+    let created_at_ms = requester
+        .store()
+        .get(pair_id)
+        .unwrap()
+        .pair_record()
+        .unwrap()
+        .created_at_ms();
+    let idle_expired_at_ms = created_at_ms + PAIRING_IDLE_EXPIRY_MS;
+    assert!(
+        sweep_pairings(
+            requester.store_mut(),
+            idle_expired_at_ms - JUST_BEFORE_MS,
+            |_| false
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        sweep_pairings(requester.store_mut(), idle_expired_at_ms, |_| false),
+        vec![pair_id]
+    );
+    let record = requester.store().get(pair_id).unwrap();
+    assert_eq!(record.state(), PairingState::Forgotten);
+    assert!(record.owes_revocation_notice());
+    let (requester_transport, _other) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    assert!(matches!(
+        requester.connect(pair_id, requester_transport),
+        Err(SessionError::Forgotten)
+    ));
 }

@@ -856,7 +856,8 @@ fn import_pairing(arguments: &[String]) -> Result<(), String> {
         .ok_or_else(|| "usage: refineid-rapp import-pairing <path>".to_owned())?;
     let bytes = std::fs::read(in_path).map_err(|e| format!("cannot read {in_path}: {e}"))?;
     let records = decode_pairing_records(&bytes)
-        .map_err(|e| format!("cannot decode pairing records from {in_path}: {e:?}"))?;
+        .map_err(|e| format!("cannot decode pairing records from {in_path}: {e:?}"))?
+        .records;
     let mut store = ProtectedPairingStore::load()
         .map_err(|e| format!("cannot load ProtectedPairingStore: {e}"))?;
     let count = records.len();

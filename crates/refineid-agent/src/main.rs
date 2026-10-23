@@ -9,6 +9,9 @@
 //! alive with liveness checks, opens it again when it is lost, puts the
 //! pairing's authentication certificate in the user's store while the
 //! pairing is usable, and runs each request as one `browser_authenticate`.
+//! It checks every pairing for idle expiry (RAPP v26.10.22 section 4.6 item
+//! 5) each time it reads the pairing store and once a day while it holds a
+//! session.
 //!
 //! Ctrl+C, Ctrl+Break or closing its console window quits the agent: it
 //! withdraws (RAPP v26.10.22 section 4.5 item 8), closing its open session

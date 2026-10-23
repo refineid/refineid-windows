@@ -25,7 +25,7 @@ use refineid_rapp_core::message::{
     CardPresence, CardStatusMessage, CertificateFingerprint, CloseReason, ResultError,
 };
 use refineid_rapp_core::operations::{CardOperation, CardOperationResult, CertificateKind};
-use refineid_rapp_core::store::{PairingRecord, PairingStore, offered_certificate};
+use refineid_rapp_core::store::{PairingRecord, PairingStore, offered_certificate, sweep_pairings};
 use refineid_windows_credential_store::{
     ProtectedPairingStore, install_browser_certificate, remove_browser_certificates,
 };
@@ -57,6 +57,12 @@ const FIRST_CARD_REPORT_WAIT: Duration = Duration::from_secs(5);
 /// written before it exits (RAPP v26.10.22 section 4.5 item 8).
 const QUIT_WITHDRAWAL_BOUND: Duration =
     Duration::from_millis(refineid_rapp::QUIT_WITHDRAWAL_BOUND_MS);
+/// How often the agent checks every pairing for idle expiry while it holds
+/// a session: one day, the least often RAPP v26.10.22 section 4.6 item 5
+/// allows. Between sessions it checks each time it reads the pairing store.
+const IDLE_CHECK_INTERVAL: Duration = Duration::from_millis(
+    refineid_rapp::PAIRING_IDLE_EXPIRY_MS / refineid_rapp::PAIRING_IDLE_EXPIRY_DAYS,
+);
 
 /// The gate every change to the browsers' offer passes through, closed by
 /// the agent's quit.
@@ -224,6 +230,7 @@ fn load_pairing(withdrawal: &Withdrawal, offered: &mut Option<Offered>) -> Optio
         }
     };
     let mut requester = requester_over(store, withdrawal);
+    check_idle_expiry(&mut requester, None, offered);
     deliver_revocation_notices(&mut requester);
     let record = requester.store().usable_pairing()?;
     let pair_id = record.pair_id();
@@ -234,6 +241,25 @@ fn load_pairing(withdrawal: &Withdrawal, offered: &mut Option<Offered>) -> Optio
         pair_id,
         key,
     })
+}
+
+/// Checks every stored pairing for idle expiry (RAPP v26.10.22 section 4.6
+/// item 5), `held` being the pairing whose session the agent holds, if any.
+/// A pairing that expired is forgotten and its identity is offered no
+/// longer, so the browsers' offer of it is withdrawn; nothing is sent to its
+/// phone and nothing is shown. A check the store refused is repeated on the
+/// next one.
+fn check_idle_expiry(
+    requester: &mut AgentRequester,
+    held: Option<PairId>,
+    offered: &mut Option<Offered>,
+) {
+    let expired = sweep_pairings(requester.store_mut(), unix_time_ms(), |pair_id| {
+        Some(pair_id) == held
+    });
+    if offered.is_some_and(|offer| expired.contains(&offer.pair_id)) {
+        withdraw_certificates(offered);
+    }
 }
 
 /// Gives the phone of each pairing the user forgot while it was out of
@@ -505,9 +531,10 @@ fn follow_card(
 /// alive in between (RAPP v26.10.22 section 8.3), reads the certificate
 /// when the phone reports a card whose certificate is not the cached one
 /// (section 8.4 item 2), keeps the offer in line with what the session
-/// hears (section 8.4 item 3), and closes with `pairing_revoked` when the
-/// user forgot the pairing meanwhile (section 4.6 item 1). Returns false
-/// when the pipe is gone and the agent stops.
+/// hears (section 8.4 item 3), closes with `pairing_revoked` when the user
+/// forgot the pairing meanwhile (section 4.6 item 1), and checks every
+/// pairing for idle expiry once a day, the held one as in session (section
+/// 4.6 item 5). Returns false when the pipe is gone and the agent stops.
 fn hold_session(
     pairing: &mut Pairing,
     session: &mut Session<BleLink>,
@@ -516,6 +543,7 @@ fn hold_session(
     mut card_checked: Option<CertificateFingerprint>,
 ) -> bool {
     let mut store_checked = Instant::now();
+    let mut idle_checked = Instant::now();
     while session.end().is_none() {
         match inbox.try_recv() {
             Ok(job) => {
@@ -543,6 +571,10 @@ fn hold_session(
         if store_checked.elapsed() >= STORE_CHECK_INTERVAL {
             store_checked = Instant::now();
             close_if_forgotten(pairing, session, offered);
+        }
+        if idle_checked.elapsed() >= IDLE_CHECK_INTERVAL && session.end().is_none() {
+            idle_checked = Instant::now();
+            check_idle_expiry(&mut pairing.requester, Some(pairing.pair_id), offered);
         }
         follow_card(pairing, session, offered, &mut card_checked);
     }

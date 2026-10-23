@@ -15,7 +15,9 @@
 //! its deadline, so a session that hears nothing still sends its ping after
 //! 5 seconds of silence and ends after 30, and an engine that follows a
 //! raised [`Withdrawal`] closes each open session with `service_withdrawn`
-//! within one tick (section 4.5 item 8).
+//! within one tick (section 4.5 item 8). Each session records on its
+//! pairing that it is established, so no idle-expiry check expires a
+//! pairing in session (section 4.6 item 5).
 
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -56,6 +58,12 @@ pub const SESSION_RECEIVE_TICK: Duration =
 const SESSION_SILENCE_LIMIT: Duration =
     Duration::from_millis(refineid_rapp::SESSION_SILENCE_LIMIT_MS);
 
+/// How often an established session records its time on its pairing
+/// again: one day, the least often an endpoint checks for idle expiry
+/// (RAPP v26.10.22 section 4.6 item 5).
+const SESSION_RECORD_INTERVAL_MS: u64 =
+    refineid_rapp::PAIRING_IDLE_EXPIRY_MS / refineid_rapp::PAIRING_IDLE_EXPIRY_DAYS;
+
 use crate::ids::{Challenge, OperationId, PairId, RandomIdExt, SessionId};
 use crate::message::{CardPresence, CardStatusMessage, CloseReason, ResultError, ResultStatus};
 use crate::offer::{OfferError, PairingOffer};
@@ -71,8 +79,8 @@ use refineid_rapp::{
     ExplicitUserIntent, NextCandidate, OperationRequest, OperationViolation, PairRecord,
     PairingCandidates, PairingHandshake, PairingSecret, PairingStorage, PingChallenge, ProfileName,
     ProgressEvent, ReadyOutcome, RequesterDispatch, RequesterEngineError, RequesterOperationEngine,
-    RuntimePoll, RuntimeReceive, SessionAuthentication, SessionHandshake, TransportProfile,
-    TypedMessage, generate_pair_key_material,
+    RuntimePoll, RuntimeReceive, SessionAuthentication, SessionHandshake, SweepError,
+    TransportProfile, TypedMessage, generate_pair_key_material,
 };
 
 /// Local labels sent inside `pairing.hello`. Labels, not identities.
@@ -421,6 +429,12 @@ pub struct Session<Transport: FrameTransport> {
     /// When, on the continuous clock, this session last recorded the card
     /// it hears present; `None` until it records the present status.
     sighted_at_ms: Option<u64>,
+    /// When, on the continuous clock, this session last recorded on its
+    /// pairing that it is established (section 4.6 item 5); `None` until
+    /// the store accepted a record.
+    recorded_at_ms: Option<u64>,
+    /// Whether the store accepted the record of the session's end.
+    end_recorded: bool,
     /// The session's place among the open sessions of the withdrawal its
     /// engine follows, held until the session ends.
     open: Option<OpenSession>,
@@ -1091,8 +1105,11 @@ impl<Store: PairingStore> Requester<Store> {
             end: None,
             card: None,
             sighted_at_ms: None,
+            recorded_at_ms: None,
+            end_recorded: false,
             open: self.withdrawal.as_ref().map(Withdrawal::session_opened),
         };
+        self.record_session(&mut session);
         if self.withdrawn() {
             self.disconnect(&mut session, CloseReason::ServiceWithdrawn);
             return Err(SessionError::Withdrawn);
@@ -1221,13 +1238,13 @@ impl<Store: PairingStore> Requester<Store> {
         session: &mut Session<Transport>,
         reason: CloseReason,
     ) {
-        if session.end.is_some() {
-            return;
+        if session.end.is_none() {
+            if let Ok(notice) = session.runtime.close_with_reason(reason) {
+                let _ = session.transport.send_frame(notice.as_bytes());
+            }
+            session.finish(SessionEnd::LocalClose);
         }
-        if let Ok(notice) = session.runtime.close_with_reason(reason) {
-            let _ = session.transport.send_frame(notice.as_bytes());
-        }
-        session.finish(SessionEnd::LocalClose);
+        self.record_session(session);
     }
 
     /// Closes an open session with `service_withdrawn` once the engine
@@ -1268,6 +1285,7 @@ impl<Store: PairingStore> Requester<Store> {
         observe: &mut dyn FnMut(ProgressEvent),
     ) -> Result<OperationOutcome, AdmissionError> {
         let outcome = self.run_operation(session, operation, expires_after_ms, observe);
+        self.record_session(session);
         match &outcome {
             Ok(OperationOutcome::Completed(_)) => {}
             Ok(ended) => {
@@ -1384,7 +1402,40 @@ impl<Store: PairingStore> Requester<Store> {
     fn next_event<Transport: FrameTransport>(&mut self, session: &mut Session<Transport>) -> Event {
         let event = self.receive_event(session);
         self.record_sighting(session);
+        self.record_session(session);
         event
+    }
+
+    /// Records on the session's pairing that a session to it is established
+    /// (section 4.6 item 5): when the session is established, again every
+    /// [`SESSION_RECORD_INTERVAL_MS`] while it lasts, and when it ends, so
+    /// no idle-expiry check, in this process or another, expires a pairing
+    /// in session. A refused record changes nothing and is tried again on
+    /// the next event; development builds report it. A pairing removed
+    /// meanwhile has nothing to record.
+    fn record_session<Transport: FrameTransport>(&mut self, session: &mut Session<Transport>) {
+        if session.end_recorded {
+            return;
+        }
+        let now = current_time_ms();
+        let ended = session.end.is_some();
+        if !ended
+            && session
+                .recorded_at_ms
+                .is_some_and(|at| now.saturating_sub(at) < SESSION_RECORD_INTERVAL_MS)
+        {
+            return;
+        }
+        match self
+            .store
+            .sweep(session.pair_id, crate::clock::unix_time_ms(), true)
+        {
+            Ok(_) | Err(SweepError::Store(StoreError::Unknown)) => {
+                session.recorded_at_ms = Some(now);
+                session.end_recorded = ended;
+            }
+            Err(error) => refineid_dev_errors::report!(Rapp, "session time not recorded", error),
+        }
     }
 
     /// Records the card the session hears present in the pairing store, at

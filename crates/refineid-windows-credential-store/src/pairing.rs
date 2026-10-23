@@ -33,7 +33,14 @@
 //! [`ProtectedPairingStore`] keeps the decoded records in memory so it can
 //! satisfy the borrowing [`PairingStore`] contract, and writes the set through
 //! on every change, after re-reading it: a change is never written over a set
-//! that could not be read.
+//! that could not be read. An idle-expiry check (RAPP v26.10.22 section 4.6
+//! item 5) writes the set first and changes the record held here only once
+//! the write succeeded.
+//!
+//! Stored pairings are not migrated: a record the codec refuses, written
+//! for an earlier protocol version or holding an engine record of an
+//! earlier format, is left out at load, and the set is written back
+//! without it, so it is refused once.
 //!
 //! Beside the set, in a directory of plain files, one per pairing, the
 //! store keeps the last card a session heard present (RAPP v26.10.22
@@ -46,11 +53,11 @@
 use std::path::{Path, PathBuf};
 
 use refineid_rapp_core::ids::PairId;
-use refineid_rapp_core::persistence::{decode_pairing_records, encode_pairing_records};
+use refineid_rapp_core::persistence::{PairingSet, decode_pairing_records, encode_pairing_records};
 use refineid_rapp_core::presence::{CardSighting, decode_sighting, encode_sighting};
 use refineid_rapp_core::store::{
-    PairingRecord, PairingStore, StoreError, expire_revocation_notices, remove_unconfirmed,
-    revoke_pairing,
+    PairingRecord, PairingStore, StoreError, SweepError, SweepOutcome, expire_revocation_notices,
+    remove_unconfirmed, revoke_pairing,
 };
 use zeroize::Zeroizing;
 
@@ -77,7 +84,8 @@ impl ProtectedPairingStore {
     /// here, at the first load after that pairing (RAPP v26.10.22 section
     /// 4.3 item 4). A forgotten pairing whose `pairing_revoked` close was
     /// not delivered within 30 days loses its keys untold (section 4.6
-    /// item 3).
+    /// item 3). A record the codec refuses is left out, and the set is
+    /// written back without it.
     ///
     /// # Errors
     ///
@@ -91,23 +99,24 @@ impl ProtectedPairingStore {
     /// Loads the pairing set kept in `directory`.
     fn load_from(directory: PathBuf) -> Result<Self, CredentialStoreError> {
         remove_unprotected_copies(&directory)?;
-        let records = match read_pairing_set(&directory)? {
+        let set = match read_pairing_set(&directory)? {
             Some(blob) => decode_pairing_records(&blob)
                 .map_err(|_error| CredentialStoreError::InvalidStoredPairing)?,
-            None => Vec::new(),
+            None => PairingSet::default(),
         };
         let sightings = read_sightings(&directory);
         let mut store = Self {
-            records,
+            records: set.records,
             sightings,
             directory,
         };
         // Each change is written as it is made; one that could not be
-        // written stands in memory and is written here.
+        // written stands in memory and is written here, as is the set
+        // without its refused records.
         let removed = remove_unconfirmed(&mut store);
         let expired =
             expire_revocation_notices(&mut store, refineid_rapp_core::clock::unix_time_ms());
-        if !removed.is_empty() || !expired.is_empty() {
+        if !removed.is_empty() || !expired.is_empty() || set.refused > 0 {
             store.persist()?;
         }
         Ok(store)
@@ -177,8 +186,9 @@ impl ProtectedPairingStore {
         self.sightings = read_sightings(&self.directory);
         match read_pairing_set(&self.directory) {
             Ok(Some(blob)) => {
-                self.records =
-                    decode_pairing_records(&blob).map_err(|_error| StoreError::Unreadable)?;
+                self.records = decode_pairing_records(&blob)
+                    .map_err(|_error| StoreError::Unreadable)?
+                    .records;
                 Ok(())
             }
             Ok(None) => {
@@ -282,6 +292,36 @@ impl PairingStore for ProtectedPairingStore {
         self.sightings.retain(|(sighted, _)| *sighted != pair_id);
         self.sightings.push((pair_id, sighting));
         Ok(())
+    }
+
+    /// Re-reads the stored set and checks the pairing as it is stored now;
+    /// a change is written as the whole set, with the checked record in its
+    /// place, before the record held here changes.
+    fn sweep(
+        &mut self,
+        pair_id: PairId,
+        now_ms: u64,
+        session_established: bool,
+    ) -> Result<SweepOutcome, SweepError<StoreError>> {
+        self.refresh().map_err(SweepError::Store)?;
+        let index = self
+            .records
+            .iter()
+            .position(|entry| entry.pair_id() == pair_id)
+            .ok_or(SweepError::Store(StoreError::Unknown))?;
+        let (before, from) = self.records.split_at_mut(index);
+        let Some((record, after)) = from.split_first_mut() else {
+            return Err(SweepError::Store(StoreError::Unknown));
+        };
+        let directory = &self.directory;
+        record.sweep(now_ms, session_established, |checked| {
+            let mut set: Vec<&PairingRecord> = before.iter().collect();
+            set.push(checked);
+            set.extend(after.iter());
+            let blob = encode_pairing_records(set.iter().copied())
+                .map_err(|_error| StoreError::WriteRefused)?;
+            write_pairing_set(directory, &blob).map_err(|_error| StoreError::WriteRefused)
+        })
     }
 }
 
@@ -731,11 +771,14 @@ mod tests {
     use refineid_lib_core::x509::OwnedCert;
     use refineid_rapp::noise::x25519_public_key;
     use refineid_rapp::{
-        EndpointRole, PairRecord, ProfileName, X25519_KEY_SIZE, compute_grants_hash,
+        EndpointRole, PAIRING_IDLE_EXPIRY_MS, PairRecord, ProfileName, X25519_KEY_SIZE,
+        compute_grants_hash,
     };
     use refineid_rapp_core::engine::PeerIntroduction;
     use refineid_rapp_core::ids::PairId;
-    use refineid_rapp_core::store::{PairingRecord, PairingStore, StoreError};
+    use refineid_rapp_core::store::{
+        PairingRecord, PairingState, PairingStore, StoreError, SweepError, SweepOutcome,
+    };
 
     use super::{
         PAIRING_SET_FILE, ProtectedPairingStore, UNPROTECTED_COPY_FILE, delete_pairing_set_in,
@@ -748,6 +791,9 @@ mod tests {
     const CUSTODIAN_PRIVATE: [u8; X25519_KEY_SIZE] = *b"synthetic custodian private key.";
     /// The pairing creation time the fixtures record.
     const CREATED_AT_MS: u64 = 1_700_000_000_000;
+    /// The moment the fixtures' pairing has had no session for the idle
+    /// limit, counted from its creation.
+    const IDLE_EXPIRED_AT_MS: u64 = CREATED_AT_MS + PAIRING_IDLE_EXPIRY_MS;
     /// Two public FINEID intermediate CA certificates, as large as the
     /// cards' own, so the set exceeds what one generic credential holds
     /// (`CRED_MAX_CREDENTIAL_BLOB_SIZE`).
@@ -784,6 +830,11 @@ mod tests {
     }
 
     fn record(pair_id: PairId) -> PairingRecord {
+        record_created_at(pair_id, CREATED_AT_MS)
+    }
+
+    /// The fixtures' pairing as created at `created_at_ms`.
+    fn record_created_at(pair_id: PairId, created_at_ms: u64) -> PairingRecord {
         let profiles = vec![ProfileName::Authentication];
         let keys = PairRecord::new(
             pair_id,
@@ -793,7 +844,7 @@ mod tests {
             x25519_public_key(&CUSTODIAN_PRIVATE),
             compute_grants_hash(&profiles).expect("grants hash"),
             profiles,
-            CREATED_AT_MS,
+            created_at_ms,
         )
         .expect("record");
         let mut record = PairingRecord::new(
@@ -880,6 +931,81 @@ mod tests {
         assert_eq!(store.insert(record(second)), Err(StoreError::Unreadable));
         assert_eq!(std::fs::read(&stored).expect("still there"), NOT_PROTECTED);
         std::fs::write(&stored, before).expect("restore");
+    }
+
+    #[test]
+    fn an_expiry_is_stored_with_the_whole_record() {
+        // The pairing expires now, so the reload finds it inside the notice
+        // window of section 4.6 item 3.
+        let expired_at_ms = refineid_rapp_core::clock::unix_time_ms();
+        let directory = TestDirectory::new("expiry");
+        let mut store = ProtectedPairingStore::load_from(directory.0.clone()).expect("load");
+        store
+            .insert(record_created_at(
+                FIRST_PAIR,
+                expired_at_ms - PAIRING_IDLE_EXPIRY_MS,
+            ))
+            .expect("insert");
+        assert_eq!(
+            store.sweep(FIRST_PAIR, expired_at_ms, false),
+            Ok(SweepOutcome::Expired)
+        );
+        assert_eq!(
+            store.get(FIRST_PAIR).expect("held").state(),
+            PairingState::Forgotten
+        );
+        let reloaded = ProtectedPairingStore::load_from(directory.0.clone()).expect("reload");
+        let stored = reloaded.get(FIRST_PAIR).expect("stored");
+        assert_eq!(stored.state(), PairingState::Forgotten);
+        assert!(stored.authentication_certificate().is_some());
+        assert!(stored.signature_certificate().is_some());
+    }
+
+    #[test]
+    fn a_session_record_keeps_every_other_record_in_its_place() {
+        let directory = TestDirectory::new("session-record");
+        let mut store = ProtectedPairingStore::load_from(directory.0.clone()).expect("load");
+        store.insert(record(FIRST_PAIR)).expect("insert");
+        store.insert(record(SECOND_PAIR)).expect("insert");
+        assert_eq!(
+            store.sweep(FIRST_PAIR, IDLE_EXPIRED_AT_MS, true),
+            Ok(SweepOutcome::Recorded)
+        );
+        let reloaded = ProtectedPairingStore::load_from(directory.0.clone()).expect("reload");
+        assert_eq!(reloaded.pair_ids(), vec![SECOND_PAIR, FIRST_PAIR]);
+        let last_session = |pair_id| {
+            reloaded
+                .get(pair_id)
+                .expect("stored")
+                .pair_record()
+                .expect("keys")
+                .last_session_at_ms()
+        };
+        assert_eq!(last_session(FIRST_PAIR), Some(IDLE_EXPIRED_AT_MS));
+        assert_eq!(last_session(SECOND_PAIR), None);
+    }
+
+    #[test]
+    fn a_sweep_over_a_set_that_cannot_be_read_changes_nothing_and_is_repeated() {
+        let directory = TestDirectory::new("sweep-unreadable");
+        let mut store = ProtectedPairingStore::load_from(directory.0.clone()).expect("load");
+        store.insert(record(FIRST_PAIR)).expect("insert");
+        let stored = directory.0.join(PAIRING_SET_FILE);
+        let before = std::fs::read(&stored).expect("stored");
+        std::fs::write(&stored, NOT_PROTECTED).expect("corrupt");
+
+        assert_eq!(
+            store.sweep(FIRST_PAIR, IDLE_EXPIRED_AT_MS, false),
+            Err(SweepError::Store(StoreError::Unreadable))
+        );
+        assert!(store.get(FIRST_PAIR).expect("held").serves());
+        assert_eq!(std::fs::read(&stored).expect("still there"), NOT_PROTECTED);
+
+        std::fs::write(&stored, before).expect("restore");
+        assert_eq!(
+            store.sweep(FIRST_PAIR, IDLE_EXPIRED_AT_MS, false),
+            Ok(SweepOutcome::Expired)
+        );
     }
 
     #[test]

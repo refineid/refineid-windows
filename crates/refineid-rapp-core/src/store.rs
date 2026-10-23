@@ -18,6 +18,12 @@
 //! revoked record keeps no keys and no certificates; it stays only so the
 //! user is told, until the user forgets it too.
 //!
+//! A pairing that has had no established session for 30 days expires
+//! (section 4.6 item 5): the engine's record keeps the latest time a
+//! session to it was established, and [`PairingStore::sweep`] checks it,
+//! storing the change before it is made. An expired pairing is forgotten
+//! as if its user had forgotten it, silently.
+//!
 //! The store also keeps, per pairing, the last [`CardSighting`]: the card a
 //! session on this computer last heard present, which bounds the identity
 //! every local consumer is offered (section 8.4 item 3,
@@ -29,7 +35,12 @@
 //! live in the engine's record, which is neither.
 
 use refineid_lib_core::x509::OwnedCert;
-use refineid_rapp::{ActivePairing, PairRecord, PairingError, ProfileName};
+use refineid_rapp::{
+    ActivePairing, PairRecord, PairRecordCodecError, PairingError, ProfileName, decode_pair_record,
+};
+/// What an idle-expiry check did, and why it changed nothing, as
+/// [`PairingStore::sweep`] answers.
+pub use refineid_rapp::{SweepError, SweepOutcome};
 
 use crate::engine::PeerIntroduction;
 use crate::ids::PairId;
@@ -76,6 +87,7 @@ pub struct PairingRecord {
 
 /// The certificates a pairing's card answered with, and the chain a
 /// development custodian is installed with.
+#[derive(Clone)]
 struct Certificates {
     authentication: Option<OwnedCert>,
     signature: Option<OwnedCert>,
@@ -293,6 +305,59 @@ impl PairingRecord {
         };
         self.certificates = Certificates::NONE;
     }
+
+    /// One idle-expiry check of the pairing at `now_ms`, milliseconds since
+    /// the Unix epoch (section 4.6 item 5); `session_established` says
+    /// whether a session to it is established now. The engine's record
+    /// decides ([`PairRecord::sweep`]): with a session it records the time
+    /// and the pairing stays; without one the pairing expires once it has
+    /// had no session for 30 days, and is then forgotten as at a forget
+    /// (section 4.6 item 2), with nothing sent.
+    ///
+    /// The change is stored before it is made: `store` receives the record
+    /// as the check leaves it, and this record changes only once `store`
+    /// accepted it. A check that changes nothing, and a record whose keys
+    /// are destroyed, call nothing.
+    ///
+    /// # Errors
+    /// [`SweepError::Store`] with `store`'s error, and
+    /// [`SweepError::Encoding`] when the checked record does not encode;
+    /// the record is unchanged in both.
+    pub fn sweep<E>(
+        &mut self,
+        now_ms: u64,
+        session_established: bool,
+        store: impl FnOnce(&Self) -> Result<(), E>,
+    ) -> Result<SweepOutcome, SweepError<E>> {
+        let Keys::Held(keys) = &mut self.keys else {
+            return Ok(SweepOutcome::Kept);
+        };
+        let (peer, certificates) = (&self.peer, &self.certificates);
+        keys.sweep(now_ms, session_established, |encoded| {
+            let checked = decode_pair_record(encoded.as_bytes()).map_err(CheckedWrite::Encoding)?;
+            store(&Self {
+                keys: Keys::Held(checked),
+                peer: peer.clone(),
+                certificates: certificates.clone(),
+            })
+            .map_err(CheckedWrite::Store)
+        })
+        .map_err(|error| match error {
+            SweepError::Encoding(error) | SweepError::Store(CheckedWrite::Encoding(error)) => {
+                SweepError::Encoding(error)
+            }
+            SweepError::Store(CheckedWrite::Store(error)) => SweepError::Store(error),
+        })
+    }
+}
+
+/// Why the record a sweep left was not handed to the store, or what the
+/// store answered.
+enum CheckedWrite<E> {
+    /// The engine's encoding of the checked record did not decode back.
+    Encoding(PairRecordCodecError),
+    /// The store refused the checked record.
+    Store(E),
 }
 
 /// Why a store operation failed.
@@ -359,6 +424,24 @@ pub trait PairingStore {
         pair_id: PairId,
         sighting: CardSighting,
     ) -> Result<(), StoreError>;
+
+    /// The idle-expiry check of RAPP v26.10.22 section 4.6 item 5 on one
+    /// pairing at `now_ms` ([`PairingRecord::sweep`]), its change written
+    /// through before it is made.
+    ///
+    /// # Errors
+    ///
+    /// [`SweepError::Store`] with [`StoreError::Unknown`] when no record
+    /// exists, or with the backing store's refusal, and
+    /// [`SweepError::Encoding`] when the checked record does not encode.
+    /// The record is unchanged in every case, so the next check repeats
+    /// the whole step.
+    fn sweep(
+        &mut self,
+        pair_id: PairId,
+        now_ms: u64,
+        session_established: bool,
+    ) -> Result<SweepOutcome, SweepError<StoreError>>;
 }
 
 /// The certificate a pairing's identity is offered to local consumers on at
@@ -473,6 +556,37 @@ pub fn expire_revocation_notices<S: PairingStore + ?Sized>(
     expired
 }
 
+/// The idle-expiry check of RAPP v26.10.22 section 4.6 item 5 on every
+/// stored pairing.
+///
+/// `now_ms` is milliseconds since the Unix epoch. `in_session` says whether
+/// a session to a pairing is established now; such a pairing has the time
+/// recorded and stays.
+///
+/// Returns the pairings that expired: each is forgotten, serves nothing
+/// and offers no identity from now on, and nothing is sent or shown. A
+/// pairing whose change the store refused is unchanged and is checked
+/// again on the next sweep; development builds report the refusal. A
+/// pairing removed meanwhile has nothing to check.
+pub fn sweep_pairings<S: PairingStore + ?Sized>(
+    store: &mut S,
+    now_ms: u64,
+    in_session: impl Fn(PairId) -> bool,
+) -> Vec<PairId> {
+    let mut expired = Vec::new();
+    for pair_id in store.pair_ids() {
+        match store.sweep(pair_id, now_ms, in_session(pair_id)) {
+            Ok(SweepOutcome::Expired) => expired.push(pair_id),
+            Ok(SweepOutcome::Recorded | SweepOutcome::Kept)
+            | Err(SweepError::Store(StoreError::Unknown)) => {}
+            Err(error) => {
+                refineid_dev_errors::report!(Rapp, "pairing idle check not stored", error);
+            }
+        }
+    }
+    expired
+}
+
 /// An in-memory pairing store for tests and composition.
 #[derive(Debug, Default)]
 pub struct MemoryPairingStore {
@@ -551,6 +665,19 @@ impl PairingStore for MemoryPairingStore {
         self.sightings.push((pair_id, sighting));
         Ok(())
     }
+
+    fn sweep(
+        &mut self,
+        pair_id: PairId,
+        now_ms: u64,
+        session_established: bool,
+    ) -> Result<SweepOutcome, SweepError<StoreError>> {
+        self.records
+            .iter_mut()
+            .find(|entry| entry.pair_id() == pair_id)
+            .ok_or(SweepError::Store(StoreError::Unknown))?
+            .sweep(now_ms, session_established, |_| Ok(()))
+    }
 }
 
 /// Records built from synthetic keys for this crate's tests.
@@ -580,7 +707,7 @@ pub(crate) mod fixtures {
     pub const MOCK_CERTIFICATE_DER: &[u8] =
         include_bytes!("../../refineid-rapp-cli/src/mock_cert.der");
     /// The pairing creation time the fixtures record.
-    const CREATED_AT_MS: u64 = 1_700_000_000_000;
+    pub const CREATED_AT_MS: u64 = 1_700_000_000_000;
 
     /// A synthetic pair identifier.
     pub const FIRST_PAIR: PairId = PairId::from_array(*b"synthetic pair 1");
@@ -651,13 +778,20 @@ pub(crate) mod fixtures {
     reason = "test fixtures are constructed to be infallible"
 )]
 mod tests {
-    use super::fixtures::{FIRST_PAIR, SECOND_PAIR, certificate, record, unconfirmed_record};
-    use super::{
-        MemoryPairingStore, PairingState, PairingStore, StoreError, expire_revocation_notices,
-        forget_pairing, offered_certificate, remove_unconfirmed, revoke_pairing,
+    use super::fixtures::{
+        CREATED_AT_MS, FIRST_PAIR, SECOND_PAIR, certificate, phone, record, unconfirmed_record,
     };
+    use super::{
+        MemoryPairingStore, PairingRecord, PairingState, PairingStore, StoreError,
+        expire_revocation_notices, forget_pairing, offered_certificate, remove_unconfirmed,
+        revoke_pairing, sweep_pairings,
+    };
+    use crate::ids::PairId;
     use crate::presence::CardSighting;
-    use refineid_rapp::{CertificateFingerprint, IDENTITY_OFFER_GRACE_MS, REVOCATION_NOTICE_MS};
+    use refineid_rapp::{
+        CertificateFingerprint, IDENTITY_OFFER_GRACE_MS, PAIRING_IDLE_EXPIRY_MS,
+        REVOCATION_NOTICE_MS, SweepError, SweepOutcome,
+    };
 
     /// The wall-clock time the user forgets a pairing in these tests.
     const FORGOTTEN_AT_MS: u64 = 1_800_000_000_000;
@@ -775,6 +909,12 @@ mod tests {
     /// A store holding a confirmed pairing whose certificate is cached and
     /// whose card a session heard at [`HEARD_AT_MS`].
     fn offering_store() -> MemoryPairingStore {
+        offering_store_heard_at(HEARD_AT_MS)
+    }
+
+    /// A store holding a confirmed pairing whose certificate is cached and
+    /// whose card a session heard at `heard_at_ms`.
+    fn offering_store_heard_at(heard_at_ms: u64) -> MemoryPairingStore {
         let mut store = MemoryPairingStore::new();
         store.insert(record(FIRST_PAIR)).unwrap();
         store
@@ -787,7 +927,7 @@ mod tests {
                 FIRST_PAIR,
                 CardSighting::new(
                     CertificateFingerprint::of_certificate(certificate().as_der()),
-                    HEARD_AT_MS,
+                    heard_at_ms,
                 ),
             )
             .unwrap();
@@ -832,6 +972,241 @@ mod tests {
             )
             .unwrap();
         assert!(offered_certificate(&store, FIRST_PAIR, HEARD_AT_MS).is_none());
+    }
+
+    /// The moment the fixtures' pairing has had no session for the idle
+    /// limit, counted from its creation.
+    const IDLE_EXPIRED_AT_MS: u64 = CREATED_AT_MS + PAIRING_IDLE_EXPIRY_MS;
+
+    /// A store that refuses every idle-expiry write while `refusing`, as a
+    /// backing store that cannot write does; everything else is the
+    /// in-memory store's.
+    struct RefusingStore {
+        inner: MemoryPairingStore,
+        refusing: bool,
+    }
+
+    impl PairingStore for RefusingStore {
+        fn insert(&mut self, record: PairingRecord) -> Result<(), StoreError> {
+            self.inner.insert(record)
+        }
+
+        fn get(&self, pair_id: PairId) -> Result<&PairingRecord, StoreError> {
+            self.inner.get(pair_id)
+        }
+
+        fn update(
+            &mut self,
+            pair_id: PairId,
+            change: &mut dyn FnMut(&mut PairingRecord),
+        ) -> Result<(), StoreError> {
+            self.inner.update(pair_id, change)
+        }
+
+        fn remove(&mut self, pair_id: PairId) -> Result<(), StoreError> {
+            self.inner.remove(pair_id)
+        }
+
+        fn pair_ids(&self) -> Vec<PairId> {
+            self.inner.pair_ids()
+        }
+
+        fn card_sighting(&self, pair_id: PairId) -> Option<CardSighting> {
+            self.inner.card_sighting(pair_id)
+        }
+
+        fn record_card_sighting(
+            &mut self,
+            pair_id: PairId,
+            sighting: CardSighting,
+        ) -> Result<(), StoreError> {
+            self.inner.record_card_sighting(pair_id, sighting)
+        }
+
+        fn sweep(
+            &mut self,
+            pair_id: PairId,
+            now_ms: u64,
+            session_established: bool,
+        ) -> Result<SweepOutcome, SweepError<StoreError>> {
+            let refusing = self.refusing;
+            self.inner
+                .records
+                .iter_mut()
+                .find(|entry| entry.pair_id() == pair_id)
+                .ok_or(SweepError::Store(StoreError::Unknown))?
+                .sweep(now_ms, session_established, |_| {
+                    if refusing {
+                        Err(StoreError::WriteRefused)
+                    } else {
+                        Ok(())
+                    }
+                })
+        }
+    }
+
+    #[test]
+    fn a_pairing_idle_for_the_limit_expires_and_its_identity_is_withdrawn() {
+        let mut store = offering_store_heard_at(IDLE_EXPIRED_AT_MS);
+        assert!(
+            sweep_pairings(&mut store, IDLE_EXPIRED_AT_MS - JUST_BEFORE_MS, |_| false).is_empty()
+        );
+        assert!(offered_certificate(&store, FIRST_PAIR, IDLE_EXPIRED_AT_MS).is_some());
+        assert_eq!(
+            sweep_pairings(&mut store, IDLE_EXPIRED_AT_MS, |_| false),
+            vec![FIRST_PAIR]
+        );
+        let expired = store.get(FIRST_PAIR).unwrap();
+        assert_eq!(expired.state(), PairingState::Forgotten);
+        assert!(!expired.serves());
+        assert!(expired.owes_revocation_notice());
+        assert!(offered_certificate(&store, FIRST_PAIR, IDLE_EXPIRED_AT_MS).is_none());
+    }
+
+    #[test]
+    fn a_pairing_in_session_never_expires() {
+        let long_past_the_limit_ms = IDLE_EXPIRED_AT_MS + PAIRING_IDLE_EXPIRY_MS;
+        let mut store = offering_store_heard_at(long_past_the_limit_ms);
+        assert!(
+            sweep_pairings(&mut store, long_past_the_limit_ms, |pair_id| {
+                pair_id == FIRST_PAIR
+            })
+            .is_empty()
+        );
+        let kept = store.get(FIRST_PAIR).unwrap();
+        assert!(kept.serves());
+        assert_eq!(
+            kept.pair_record().unwrap().last_session_at_ms(),
+            Some(long_past_the_limit_ms)
+        );
+        assert!(offered_certificate(&store, FIRST_PAIR, long_past_the_limit_ms).is_some());
+        assert!(
+            sweep_pairings(
+                &mut store,
+                long_past_the_limit_ms + PAIRING_IDLE_EXPIRY_MS - JUST_BEFORE_MS,
+                |_| false
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn only_the_idle_pairing_expires() {
+        let mut store = MemoryPairingStore::new();
+        store.insert(record(FIRST_PAIR)).unwrap();
+        store.insert(record(SECOND_PAIR)).unwrap();
+        assert_eq!(
+            sweep_pairings(&mut store, IDLE_EXPIRED_AT_MS, |pair_id| {
+                pair_id == SECOND_PAIR
+            }),
+            vec![FIRST_PAIR]
+        );
+        assert_eq!(
+            store.get(FIRST_PAIR).unwrap().state(),
+            PairingState::Forgotten
+        );
+        assert!(store.get(SECOND_PAIR).unwrap().serves());
+    }
+
+    #[test]
+    fn an_expiry_the_store_refused_is_repeated_on_the_next_sweep() {
+        let mut store = RefusingStore {
+            inner: offering_store_heard_at(IDLE_EXPIRED_AT_MS),
+            refusing: true,
+        };
+        assert!(sweep_pairings(&mut store, IDLE_EXPIRED_AT_MS, |_| false).is_empty());
+        assert!(store.get(FIRST_PAIR).unwrap().serves());
+        assert!(offered_certificate(&store, FIRST_PAIR, IDLE_EXPIRED_AT_MS).is_some());
+        store.refusing = false;
+        assert_eq!(
+            sweep_pairings(&mut store, IDLE_EXPIRED_AT_MS, |_| false),
+            vec![FIRST_PAIR]
+        );
+        assert!(offered_certificate(&store, FIRST_PAIR, IDLE_EXPIRED_AT_MS).is_none());
+    }
+
+    #[test]
+    fn a_session_record_the_store_refused_is_repeated_on_the_next_sweep() {
+        let mut store = RefusingStore {
+            inner: MemoryPairingStore::new(),
+            refusing: true,
+        };
+        store.insert(record(FIRST_PAIR)).unwrap();
+        assert_eq!(
+            store.sweep(FIRST_PAIR, HEARD_AT_MS, true),
+            Err(SweepError::Store(StoreError::WriteRefused))
+        );
+        let last_session = |store: &RefusingStore| {
+            store
+                .get(FIRST_PAIR)
+                .unwrap()
+                .pair_record()
+                .unwrap()
+                .last_session_at_ms()
+        };
+        assert_eq!(last_session(&store), None);
+        store.refusing = false;
+        assert_eq!(
+            store.sweep(FIRST_PAIR, HEARD_AT_MS, true),
+            Ok(SweepOutcome::Recorded)
+        );
+        assert_eq!(last_session(&store), Some(HEARD_AT_MS));
+    }
+
+    #[test]
+    fn the_store_receives_the_whole_record_as_the_check_leaves_it() {
+        let mut checked = record(FIRST_PAIR);
+        checked.remember_authentication_certificate(certificate());
+        let mut stored = None;
+        assert_eq!(
+            checked.sweep(IDLE_EXPIRED_AT_MS, false, |swept| {
+                stored = Some((
+                    swept.state(),
+                    swept.peer().clone(),
+                    swept.authentication_certificate().is_some(),
+                ));
+                Err(StoreError::WriteRefused)
+            }),
+            Err(SweepError::Store(StoreError::WriteRefused))
+        );
+        assert_eq!(
+            stored,
+            Some((PairingState::Forgotten, phone(), true)),
+            "the store saw the expired record, labels and certificate included"
+        );
+        assert_eq!(
+            checked.state(),
+            PairingState::Serving,
+            "a refused store leaves the record as it was"
+        );
+    }
+
+    #[test]
+    fn a_check_that_changes_nothing_stores_nothing() {
+        let mut fresh = record(FIRST_PAIR);
+        assert_eq!(
+            fresh.sweep(CREATED_AT_MS, false, |_| -> Result<(), StoreError> {
+                panic!("nothing changed, so nothing is stored")
+            }),
+            Ok(SweepOutcome::Kept)
+        );
+        let mut store = MemoryPairingStore::new();
+        store.insert(record(SECOND_PAIR)).unwrap();
+        revoke_pairing(&mut store, SECOND_PAIR, true).unwrap();
+        assert!(sweep_pairings(&mut store, IDLE_EXPIRED_AT_MS, |_| false).is_empty());
+        assert_eq!(
+            store.get(SECOND_PAIR).unwrap().state(),
+            PairingState::Revoked { by_peer: true }
+        );
+    }
+
+    #[test]
+    fn a_pairing_unknown_to_the_store_has_nothing_to_check() {
+        let mut store = MemoryPairingStore::new();
+        assert_eq!(
+            store.sweep(FIRST_PAIR, IDLE_EXPIRED_AT_MS, false),
+            Err(SweepError::Store(StoreError::Unknown))
+        );
     }
 
     #[test]
