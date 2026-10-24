@@ -1553,7 +1553,7 @@ pub(super) fn card_login(
 /// `CKR_PIN_LOCKED`; a counter the card did not report answers
 /// `CKR_DEVICE_ERROR`.
 fn pin1_verify_guard(status: PinStatus) -> Result<(), CkRv> {
-    check_retry_floor(PinSlot::Pin1, status).map_err(|refusal| match refusal {
+    check_retry_floor(PinSlot::Pin1.into(), status).map_err(|refusal| match refusal {
         RetryFloorRefusal::TriesBelowFloor { .. } | RetryFloorRefusal::Blocked { .. } => {
             refineid_dev_errors::report!(
                 Pkcs11,
