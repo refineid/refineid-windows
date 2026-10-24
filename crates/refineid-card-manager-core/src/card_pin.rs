@@ -38,7 +38,7 @@ use refineid_lib_core::backend::{
 use refineid_lib_core::crypto::digest::Sha256;
 use refineid_lib_core::fineid_card::{CardClassificationError, FineidCardModel};
 use refineid_lib_core::pin::{ActivationCode, PinBytes, Puk};
-use refineid_lib_core::pin_retry_risk::PinRetryRisk;
+use refineid_lib_core::pin_retry_risk::{RetryFloorRefusal, check_retry_floor};
 use refineid_lib_core::pkcs15::{
     CardGeneration, CertSlot, FineidReaderPick, classify_card_generation,
     classify_card_generation_by_issuance,
@@ -259,14 +259,10 @@ pub enum CardPinError {
         /// itself failed to return a status word.
         probe: Option<PinStatus>,
     },
-    /// A consumer UI refused a PIN change to preserve attempts for expert
-    /// recovery. The CLI deliberately does not apply this floor.
-    ConsumerRetryFloor {
-        /// PIN slot protected by the consumer floor.
-        slot: PinManageSlot,
-        /// Live, side-effect-free status that triggered the refusal.
-        probe: PinStatus,
-    },
+    /// The retry floor refused a command that would spend a PIN attempt:
+    /// the card reports two, one or no tries left, the PIN blocked, or no
+    /// readable counter. Nothing was sent.
+    RetryFloor(RetryFloorRefusal),
 }
 
 impl fmt::Display for CardPinError {
@@ -320,13 +316,7 @@ impl fmt::Display for CardPinError {
                     slot.label()
                 )
             }
-            Self::ConsumerRetryFloor { slot, probe } => write!(
-                f,
-                "{} retry safety floor reached ({probe:?}); the graphical Card Manager will not \
-                 send a PIN-bearing command. Use the expert CLI only after verifying the card and \
-                 retry risk.",
-                slot.label()
-            ),
+            Self::RetryFloor(refusal) => write!(f, "{refusal}"),
         }
     }
 }
@@ -603,17 +593,6 @@ const fn pin_looks_activated(probe: Option<&PinStatus>) -> bool {
     )
 }
 
-const fn card_manager_pin_change_available(probe: Option<&PinStatus>) -> bool {
-    match probe {
-        Some(PinStatus::Remaining(retries)) => match PinRetryRisk::from_retries(*retries) {
-            Some(risk) => risk.permits_consumer(),
-            None => false,
-        },
-        Some(PinStatus::Verified) => true,
-        Some(PinStatus::Locked | PinStatus::NoInfo | PinStatus::Other(_)) | None => false,
-    }
-}
-
 /// Rotate the PIN in `options.slot`. The card's own outcome
 /// (wrong-current-PIN with retries-left, locked, etc.) is
 /// surfaced via [`ChangePinReport::outcome`], not as an error.
@@ -650,20 +629,16 @@ pub fn change_pin_first(
     // MultiApp v5.0.
     let slot = options.slot.as_pin_slot();
     let probe = transport.pin_status(slot).ok();
-    if !pin_looks_activated(probe.as_ref()) {
-        return Err(CardPinError::CardLooksUnactivated {
-            slot: options.slot,
-            probe,
-        });
-    }
-    if !card_manager_pin_change_available(probe.as_ref())
-        && let Some(probe) = probe
-    {
-        return Err(CardPinError::ConsumerRetryFloor {
-            slot: options.slot,
-            probe,
-        });
-    }
+    let status = match probe {
+        Some(status) if pin_looks_activated(Some(&status)) => status,
+        _ => {
+            return Err(CardPinError::CardLooksUnactivated {
+                slot: options.slot,
+                probe,
+            });
+        }
+    };
+    check_retry_floor(slot, status).map_err(CardPinError::RetryFloor)?;
 
     re_verify_session(&mut transport, ctx.bound_serial())?;
 
@@ -1255,7 +1230,8 @@ const fn change_to_unblock(o: ChangePinOutcome) -> UnblockOutcome {
 /// instances drop (and zeroize) when this returns.
 /// Per-slot setup for [`activate_first`]: dispatch the
 /// generation-appropriate APDU (`CHANGE REFERENCE DATA` for newer
-/// cards, `RESET RETRY COUNTER` for older) and return the typed
+/// cards, behind the retry floor; `RESET RETRY COUNTER` for older,
+/// where the activation PIN acts as the PUK) and return the typed
 /// [`UnblockOutcome`].
 ///
 /// `activation_pin_bytes` and `new_pin` are consumed by value so
@@ -1268,10 +1244,16 @@ fn activate_slot_setup<T: refineid_lib_core::transport::CardTransport>(
     new_pin: PinBytes,
 ) -> Result<UnblockOutcome, CardPinError> {
     match generation {
-        CardGeneration::Newer => transport
-            .change_pin(slot, activation_pin_bytes, new_pin)
-            .map(change_to_unblock)
-            .map_err(auth_to_card_pin),
+        CardGeneration::Newer => {
+            // The activation PIN is the slot's current PIN: a wrong one
+            // spends that slot's tries, so the retry floor applies.
+            let status = transport.pin_status(slot).map_err(auth_to_card_pin)?;
+            check_retry_floor(slot, status).map_err(CardPinError::RetryFloor)?;
+            transport
+                .change_pin(slot, activation_pin_bytes, new_pin)
+                .map(change_to_unblock)
+                .map_err(auth_to_card_pin)
+        }
         CardGeneration::Older => transport
             .reset_retry_counter(slot, activation_pin_bytes, new_pin)
             .map_err(auth_to_card_pin),
@@ -1530,27 +1512,152 @@ impl CardPinHelpers {
 
 #[cfg(test)]
 mod activate_tests {
-    use refineid_lib_core::apdu::status_word::PinRetries;
+    use refineid_lib_core::apdu::status_word::{PinRetries, StatusWord};
+    use refineid_lib_core::atr::{Atr, AtrError, MINIMAL_DIRECT_ATR};
+    use refineid_lib_core::pin::PinBytes;
+    use refineid_lib_core::transport::{
+        CardTransport, CommandApdu, ResponseApdu, TransportOutcome,
+    };
 
     use super::{
-        ActivatePreflightOutcome, CardGeneration, ChangePinOutcome, PinStatus, UnblockOutcome,
-        activation_continues_after_pin1, card_manager_pin_change_available, change_to_unblock,
-        classify_preflight,
+        ActivatePreflightOutcome, CardGeneration, CardPinError, ChangePinOutcome, PinSlot,
+        PinStatus, RetryFloorRefusal, UnblockOutcome, activate_slot_setup,
+        activation_continues_after_pin1, change_to_unblock, classify_preflight,
     };
     use crate::test_util::{TestResult, check_true};
 
+    /// Tries left at which a PIN attempt is served.
+    const SERVED: [u8; 3] = [5, 4, 3];
+    /// Tries left at which a PIN attempt is refused.
+    const REFUSED: [u8; 3] = [2, 1, 0];
+    /// APDUs a served newer-card activation sends: the status probe and
+    /// `CHANGE REFERENCE DATA`.
+    const PROBE_AND_CHANGE: usize = 2;
+    /// APDUs a refused newer-card activation sends: the status probe only.
+    const PROBE_ONLY: usize = 1;
+    /// APDUs an older-card activation sends: `RESET RETRY COUNTER` only.
+    const RESET_ONLY: usize = 1;
+    /// Synthetic seven-digit activation code.
+    const ACTIVATION_CODE: &[u8] = b"0000000";
+    /// Synthetic new PIN.
+    const NEW_PIN: &[u8] = b"0000";
+
+    /// Answers every command with one status word and counts them.
+    struct FixedStatusTransport {
+        status: StatusWord,
+        sent: usize,
+    }
+
+    impl FixedStatusTransport {
+        const fn new(status: StatusWord) -> Self {
+            Self { status, sent: 0 }
+        }
+    }
+
+    impl CardTransport for FixedStatusTransport {
+        type Error = String;
+
+        fn transmit_outcome(
+            &mut self,
+            _apdu: &CommandApdu,
+        ) -> Result<TransportOutcome, Self::Error> {
+            self.sent = self.sent.saturating_add(1);
+            let [sw1, sw2] = self.status.as_u16().to_be_bytes();
+            Ok(TransportOutcome::Response(ResponseApdu {
+                body: Vec::new(),
+                sw1,
+                sw2,
+            }))
+        }
+
+        fn atr(&self) -> Result<Atr, AtrError> {
+            Atr::new(MINIMAL_DIRECT_ATR)
+        }
+    }
+
+    fn tries(count: u8) -> Result<StatusWord, String> {
+        let retries = PinRetries::from_nibble(count).ok_or("retry count fits a nibble")?;
+        Ok(StatusWord::PinIncorrect { retries })
+    }
+
+    fn setup(
+        transport: &mut FixedStatusTransport,
+        generation: CardGeneration,
+    ) -> Result<Result<UnblockOutcome, CardPinError>, Box<dyn core::error::Error>> {
+        let code = PinBytes::new(ACTIVATION_CODE.to_vec())?;
+        let new_pin = PinBytes::new(NEW_PIN.to_vec())?;
+        Ok(activate_slot_setup(
+            transport,
+            PinSlot::Pin1,
+            generation,
+            code,
+            new_pin,
+        ))
+    }
+
     #[test]
-    fn card_manager_allows_three_attempts_but_reserves_two() -> TestResult {
-        let three = PinRetries::from_nibble(3).ok_or("PinRetries::from_nibble(3)")?;
-        let two = PinRetries::from_nibble(2).ok_or("PinRetries::from_nibble(2)")?;
-        check_true(
-            card_manager_pin_change_available(Some(&PinStatus::Remaining(three))),
-            "three attempts remain available to Card Manager",
-        )?;
-        check_true(
-            !card_manager_pin_change_available(Some(&PinStatus::Remaining(two))),
-            "two attempts remain reserved for expert recovery",
-        )
+    fn newer_activation_is_served_at_five_four_and_three_tries() -> TestResult {
+        for count in SERVED {
+            let mut transport = FixedStatusTransport::new(tries(count)?);
+            let outcome = setup(&mut transport, CardGeneration::Newer)?;
+            check_true(outcome.is_ok(), "activation served above the floor")?;
+            check_true(
+                transport.sent == PROBE_AND_CHANGE,
+                "probe and change sent above the floor",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn newer_activation_is_refused_at_two_one_and_zero_tries() -> TestResult {
+        for count in REFUSED {
+            let mut transport = FixedStatusTransport::new(tries(count)?);
+            let outcome = setup(&mut transport, CardGeneration::Newer)?;
+            check_true(
+                matches!(
+                    outcome,
+                    Err(CardPinError::RetryFloor(
+                        RetryFloorRefusal::TriesBelowFloor { .. }
+                    ))
+                ),
+                "activation refused below the floor",
+            )?;
+            check_true(
+                transport.sent == PROBE_ONLY,
+                "only the counter-safe probe sent below the floor",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn older_activation_with_the_puk_is_not_floored() -> TestResult {
+        for count in REFUSED {
+            let mut transport = FixedStatusTransport::new(tries(count)?);
+            let outcome = setup(&mut transport, CardGeneration::Older)?;
+            check_true(outcome.is_ok(), "PUK-driven reset served below the floor")?;
+            check_true(
+                transport.sent == RESET_ONLY,
+                "RESET RETRY COUNTER sent without a floor probe",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_floor_refusal_names_the_pin_the_tries_left_and_the_puk() -> TestResult {
+        for count in REFUSED {
+            let mut transport = FixedStatusTransport::new(tries(count)?);
+            let Err(error) = setup(&mut transport, CardGeneration::Newer)? else {
+                return Err("activation refused below the floor".into());
+            };
+            let text = error.to_string();
+            check_true(text.contains("PIN 1"), "refusal names the PIN")?;
+            check_true(text.contains(&count.to_string()), "refusal names the tries")?;
+            check_true(text.contains("PUK"), "refusal names the PUK")?;
+        }
+        Ok(())
     }
 
     /// New-scheme preflight (S4-1 v4.2 §4.6.2) with the DF2F

@@ -40,7 +40,9 @@ use refineid_lib_core::crypto::digest::{Sha1, Sha224, Sha256, Sha384, Sha512};
 use refineid_lib_core::identity::{TokenSerial, derive_printed_serial, render_token_serial};
 use refineid_lib_core::pin::PinBytes;
 use refineid_lib_core::pin_cache::PinSafetyCache;
-use refineid_lib_core::pin_retry_risk::{PinRetryRisk, pin1_status_permits_reusable_cache};
+use refineid_lib_core::pin_retry_risk::{
+    RetryFloorRefusal, check_retry_floor, pin1_status_permits_reusable_cache,
+};
 use refineid_lib_core::pkcs15::{CertSlot, Pkcs15Ops as _};
 use refineid_lib_core::x509::{EcCurve, OwnedCert, PublicKeyAlgorithm, extract_rsa_public_key};
 use refineid_lib_pcsc::{PcscBackend, PcscCard};
@@ -1546,22 +1548,29 @@ pub(super) fn card_login(
     }
 }
 
-/// Refuse every PIN-bearing APDU once fewer than three attempts remain.
-/// Firefox does not surface retry warnings, so the module may consume
-/// attempts down to two remaining and no further: a near-last attempt is
-/// never `RefineID`'s to spend, and only another middleware locks the card.
-/// Mirrors the `CryptoTokenKit` adapter's retry floor of three.
-const fn pin1_verify_guard(status: PinStatus) -> Result<(), CkRv> {
-    match status {
-        PinStatus::Remaining(retries) => match PinRetryRisk::from_retries(retries) {
-            Some(risk) if risk.permits_pkcs11() => Ok(()),
-            Some(_) => Err(CKR_PIN_LOCKED),
-            None => Err(CKR_DEVICE_ERROR),
-        },
-        PinStatus::Locked => Err(CKR_PIN_LOCKED),
-        PinStatus::Verified => Ok(()),
-        PinStatus::NoInfo | PinStatus::Other(_) => Err(CKR_DEVICE_ERROR),
-    }
+/// Apply the retry floor to PIN 1 before any command that can spend a
+/// PIN 1 attempt. A refusal below the floor or at a blocked PIN answers
+/// `CKR_PIN_LOCKED`; a counter the card did not report answers
+/// `CKR_DEVICE_ERROR`.
+fn pin1_verify_guard(status: PinStatus) -> Result<(), CkRv> {
+    check_retry_floor(PinSlot::Pin1, status).map_err(|refusal| match refusal {
+        RetryFloorRefusal::TriesBelowFloor { .. } | RetryFloorRefusal::Blocked { .. } => {
+            refineid_dev_errors::report!(
+                Pkcs11,
+                "PIN 1 not tried",
+                "the retry counter is below its floor"
+            );
+            CKR_PIN_LOCKED
+        }
+        RetryFloorRefusal::CounterUnreadable { .. } => {
+            refineid_dev_errors::report!(
+                Pkcs11,
+                "PIN 1 not tried",
+                "the retry counter is unreadable"
+            );
+            CKR_DEVICE_ERROR
+        }
+    })
 }
 
 fn live_token_serial(card: &mut PcscCard) -> Result<TokenSerial, CkRv> {
@@ -1620,7 +1629,7 @@ pub(super) fn card_change_pin1(
     card.select_pkcs15_application()
         .map_err(|_select_err| CKR_DEVICE_ERROR)?;
     // The empty-body VERIFY probe consumes no retry. Apply the same
-    // consumer floor as login and signing before CHANGE REFERENCE DATA.
+    // retry floor as login and signing before CHANGE REFERENCE DATA.
     let status = card
         .pin_status(PinSlot::Pin1)
         .map_err(|_probe_err| CKR_DEVICE_ERROR)?;
@@ -1661,28 +1670,31 @@ mod tests {
     use crate::ck::{CKR_DEVICE_ERROR, CKR_PIN_LOCKED};
 
     #[test]
-    fn pin1_verify_guard_blocks_only_one_and_two_attempts() {
+    fn pin1_verify_guard_serves_five_four_three_and_refuses_the_rest() {
+        const SERVED: [u8; 3] = [5, 4, 3];
+        const REFUSED: [u8; 3] = [2, 1, 0];
+        const UNMODELED_SW: u16 = 0x6F00;
         let retries = |count| {
             PinRetries::from_nibble(count).expect("test retry count fits the status-word nibble")
         };
 
-        assert_eq!(pin1_verify_guard(PinStatus::Remaining(retries(5))), Ok(()));
-        assert_eq!(pin1_verify_guard(PinStatus::Remaining(retries(4))), Ok(()));
-        assert_eq!(pin1_verify_guard(PinStatus::Remaining(retries(3))), Ok(()));
-        assert_eq!(
-            pin1_verify_guard(PinStatus::Remaining(retries(2))),
-            Err(CKR_PIN_LOCKED)
-        );
-        assert_eq!(
-            pin1_verify_guard(PinStatus::Remaining(retries(1))),
-            Err(CKR_PIN_LOCKED)
-        );
-        // Zero attempts passes the floor; the card itself then reports locked.
-        assert_eq!(pin1_verify_guard(PinStatus::Remaining(retries(0))), Ok(()));
+        for count in SERVED {
+            assert_eq!(
+                pin1_verify_guard(PinStatus::Remaining(retries(count))),
+                Ok(())
+            );
+        }
+        for count in REFUSED {
+            assert_eq!(
+                pin1_verify_guard(PinStatus::Remaining(retries(count))),
+                Err(CKR_PIN_LOCKED)
+            );
+        }
+        assert_eq!(pin1_verify_guard(PinStatus::Verified), Ok(()));
         assert_eq!(pin1_verify_guard(PinStatus::Locked), Err(CKR_PIN_LOCKED));
         assert_eq!(pin1_verify_guard(PinStatus::NoInfo), Err(CKR_DEVICE_ERROR));
         assert_eq!(
-            pin1_verify_guard(PinStatus::Other(1)),
+            pin1_verify_guard(PinStatus::Other(UNMODELED_SW)),
             Err(CKR_DEVICE_ERROR)
         );
     }

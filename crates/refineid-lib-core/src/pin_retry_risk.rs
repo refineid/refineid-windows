@@ -12,101 +12,199 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Refined FINEID PIN retry-risk states and consumer safety floors.
+//! FINEID PIN retry-risk states and the retry floor.
+//!
+//! FINEID PINs allow five attempts before locking. The risk states below
+//! map the live retry counter to a severity, and [`check_retry_floor`] is
+//! the one floor every surface applies before it sends anything that can
+//! spend a PIN 1 or PIN 2 attempt: the attempt is served only while the
+//! card reports five, four or three tries left. At two, one or none, at a
+//! blocked PIN, and at a counter the card did not report, nothing is
+//! sent, so this software never spends the next-to-last or last attempt
+//! and a lockout is never its doing. Setting a new PIN with the PUK is
+//! not a PIN attempt and is not subject to this floor. Arming a reusable
+//! authentication cache is separate and stricter: it requires a pristine
+//! five-attempt state.
+
+use core::fmt;
 
 use crate::apdu::status_word::PinRetries;
-use crate::auth::PinStatus;
+use crate::auth::{PinSlot, PinStatus};
 
-/// Security severity derived from the FINEID five-attempt PIN counter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// Retry count of a pristine FINEID PIN.
+const RETRIES_PRISTINE: u8 = 5;
+/// Retry count after one wrong attempt.
+const RETRIES_ONE_SPENT: u8 = 4;
+/// Lowest retry count at which a PIN attempt is served.
+const RETRIES_FLOOR: u8 = 3;
+/// Highest retry count below the floor.
+const RETRIES_BELOW_FLOOR: u8 = 2;
+/// Retry count at which credential lockout is one wrong try away.
+const RETRIES_LOCKDOWN_IMMINENT: u8 = 1;
+/// Retry count after the credential is exhausted.
+const RETRIES_EXHAUSTED: u8 = 0;
+
+/// Severity derived from the FINEID five-attempt PIN counter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PinRetryRisk {
     /// Five attempts remain: normal operating conditions.
     NormalOperatingConditions,
     /// Four attempts remain: a disturbance was detected.
     DisturbanceDetected,
-    /// Three attempts remain: a security incident is declared.
+    /// Three attempts remain: a security incident is declared; the last
+    /// attempt this software serves.
     SecurityIncidentDeclared,
-    /// Two attempts remain: only an explicitly authorized expert may proceed.
+    /// Two attempts remain: below the floor, no PIN is spent here.
     CriticalThreatLevel,
-    /// One attempt remains: card credential lockout is imminent.
+    /// One attempt remains: a credential lockout is imminent.
     LockdownImminent,
-    /// No attempts remain: the card credential is locked.
+    /// No attempts remain: the credential is locked.
     DefencesFallen,
 }
 
 impl PinRetryRisk {
-    /// Classify a FINEID retry counter. Values above the DVV limit of five are
-    /// rejected rather than assigned a misleading risk state.
+    /// Classify a FINEID retry counter. A value above the five-attempt
+    /// limit is rejected rather than assigned a misleading state.
     #[must_use]
     pub const fn from_retries(retries: PinRetries) -> Option<Self> {
         match retries.get() {
-            5 => Some(Self::NormalOperatingConditions),
-            4 => Some(Self::DisturbanceDetected),
-            3 => Some(Self::SecurityIncidentDeclared),
-            2 => Some(Self::CriticalThreatLevel),
-            1 => Some(Self::LockdownImminent),
-            0 => Some(Self::DefencesFallen),
+            RETRIES_PRISTINE => Some(Self::NormalOperatingConditions),
+            RETRIES_ONE_SPENT => Some(Self::DisturbanceDetected),
+            RETRIES_FLOOR => Some(Self::SecurityIncidentDeclared),
+            RETRIES_BELOW_FLOOR => Some(Self::CriticalThreatLevel),
+            RETRIES_LOCKDOWN_IMMINENT => Some(Self::LockdownImminent),
+            RETRIES_EXHAUSTED => Some(Self::DefencesFallen),
             _ => None,
         }
     }
 
-    /// The one blocked band is one or two attempts remaining. Every other
-    /// state passes: pristine, disturbed, security-incident, and even
-    /// already-locked. Refusing exactly `{1, 2}` is what keeps this software
-    /// from ever spending the next-to-last or last attempt, so a lockout is
-    /// never its doing; a zero-attempt card is let through to surface its
-    /// locked state or route to an unblock, with nothing left to protect.
-    #[must_use]
-    pub const fn permits_pkcs11(self) -> bool {
-        !matches!(self, Self::CriticalThreatLevel | Self::LockdownImminent)
+    /// Whether a PIN attempt is served at this state: five, four or three
+    /// tries left.
+    const fn is_above_floor(self) -> bool {
+        matches!(
+            self,
+            Self::NormalOperatingConditions
+                | Self::DisturbanceDetected
+                | Self::SecurityIncidentDeclared
+        )
     }
 
-    /// Ordinary graphical and system interfaces block the same one-or-two
-    /// band and pass everything else. See [`Self::permits_pkcs11`].
-    #[must_use]
-    pub const fn permits_consumer(self) -> bool {
-        !matches!(self, Self::CriticalThreatLevel | Self::LockdownImminent)
-    }
-
-    /// Reusable PIN1 caching requires a pristine five-attempt state. This is a
-    /// separate, stricter gate for *arming* the cache, not the operate floor.
+    /// A reusable authentication cache requires a pristine five-attempt
+    /// state -- a separate, stricter gate for arming the cache, not the
+    /// retry floor.
     #[must_use]
     pub const fn permits_reusable_cache(self) -> bool {
         matches!(self, Self::NormalOperatingConditions)
     }
+}
 
-    /// SCS terminates rather than operate in the blocked one-or-two band,
-    /// matching the repo-wide floor.
+/// Why this software refuses to send a PIN 1 or PIN 2 attempt.
+///
+/// Carries the PIN and the state the card reported, never candidate PIN
+/// data. Each variant except [`Self::CounterUnreadable`] leaves the PUK
+/// path open: the PUK sets a new PIN and restores its tries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryFloorRefusal {
+    /// The card reports two, one or no tries left for the PIN.
+    TriesBelowFloor {
+        /// The PIN whose attempt was refused.
+        slot: PinSlot,
+        /// The tries the card reports left.
+        remaining: PinRetries,
+    },
+    /// The card reports the PIN blocked.
+    Blocked {
+        /// The PIN whose attempt was refused.
+        slot: PinSlot,
+    },
+    /// The card did not report how many tries are left.
+    CounterUnreadable {
+        /// The PIN whose attempt was refused.
+        slot: PinSlot,
+    },
+}
+
+impl RetryFloorRefusal {
+    /// The PIN whose attempt was refused.
     #[must_use]
-    pub const fn requires_scs_shutdown(self) -> bool {
-        matches!(self, Self::CriticalThreatLevel | Self::LockdownImminent)
+    pub const fn slot(self) -> PinSlot {
+        match self {
+            Self::TriesBelowFloor { slot, .. }
+            | Self::Blocked { slot }
+            | Self::CounterUnreadable { slot } => slot,
+        }
     }
 }
 
-/// Whether a live PIN1 retry result permits an ordinary consumer
-/// authentication operation.
-///
-/// PIN2 and PUK are intentionally absent: authentication cannot consume
-/// either credential, so their state must not block PIN1. Unknown, malformed,
-/// and locked states fail closed. `Verified` is safe because the card has
-/// already accepted PIN1 in the current security context.
-#[must_use]
-pub const fn pin1_status_permits_consumer_authentication(pin1: PinStatus) -> bool {
-    match pin1 {
-        PinStatus::Verified => true,
-        PinStatus::Remaining(retries) => matches!(
-            PinRetryRisk::from_retries(retries),
-            Some(risk) if risk.permits_consumer()
-        ),
-        PinStatus::Locked | PinStatus::NoInfo | PinStatus::Other(_) => false,
+const fn slot_name(slot: PinSlot) -> &'static str {
+    match slot {
+        PinSlot::Pin1 => "PIN 1",
+        PinSlot::Pin2 => "PIN 2",
     }
 }
 
-/// Whether PIN1 may be retained for reusable authentication.
+impl fmt::Display for RetryFloorRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let pin = slot_name(self.slot());
+        match self {
+            Self::TriesBelowFloor { remaining, .. } => {
+                let count = remaining.get();
+                let noun = if count == RETRIES_LOCKDOWN_IMMINENT {
+                    "try"
+                } else {
+                    "tries"
+                };
+                write!(
+                    f,
+                    "RefineID does not try {pin}: the card has {count} {noun} left, and \
+                     RefineID never spends the last two. The PUK can set a new {pin}."
+                )
+            }
+            Self::Blocked { .. } => write!(
+                f,
+                "RefineID does not try {pin}: the card reports it blocked. The PUK can \
+                 set a new {pin}."
+            ),
+            Self::CounterUnreadable { .. } => write!(
+                f,
+                "RefineID does not try {pin}: the card did not report how many tries \
+                 remain."
+            ),
+        }
+    }
+}
+
+impl core::error::Error for RetryFloorRefusal {}
+
+/// The retry floor: whether a command that can spend a `slot` attempt
+/// may be sent, given the counter-safe status the card reported for that
+/// PIN.
 ///
-/// Only PIN1 is relevant. Four remaining attempts may still permit a
-/// one-shot operation in adapters with an explicit retry floor, but not a
-/// reusable cache entry.
+/// Served at five, four or three tries left, and when the card reports
+/// the PIN verified in the current security context -- a successful
+/// verification resets the counter to its maximum. Refused at two, one
+/// or no tries left, at a blocked PIN, and at any status that carries no
+/// readable counter.
+///
+/// # Errors
+///
+/// [`RetryFloorRefusal`] naming the PIN and the state that refused it.
+pub const fn check_retry_floor(slot: PinSlot, status: PinStatus) -> Result<(), RetryFloorRefusal> {
+    match status {
+        PinStatus::Verified => Ok(()),
+        PinStatus::Remaining(remaining) => match PinRetryRisk::from_retries(remaining) {
+            Some(risk) if risk.is_above_floor() => Ok(()),
+            Some(_) => Err(RetryFloorRefusal::TriesBelowFloor { slot, remaining }),
+            None => Err(RetryFloorRefusal::CounterUnreadable { slot }),
+        },
+        PinStatus::Locked => Err(RetryFloorRefusal::Blocked { slot }),
+        PinStatus::NoInfo | PinStatus::Other(_) => {
+            Err(RetryFloorRefusal::CounterUnreadable { slot })
+        }
+    }
+}
+
+/// Whether PIN1 may be retained in a reusable authentication cache.
 #[must_use]
 pub const fn pin1_status_permits_reusable_cache(pin1: PinStatus) -> bool {
     matches!(
@@ -121,99 +219,151 @@ pub const fn pin1_status_permits_reusable_cache(pin1: PinStatus) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        PinRetryRisk, PinSlot, PinStatus, RETRIES_BELOW_FLOOR, RETRIES_EXHAUSTED, RETRIES_FLOOR,
+        RETRIES_LOCKDOWN_IMMINENT, RETRIES_ONE_SPENT, RETRIES_PRISTINE, RetryFloorRefusal,
+        check_retry_floor, pin1_status_permits_reusable_cache,
+    };
+    use crate::apdu::status_word::PinRetries;
 
-    fn risk(retries: u8) -> Option<PinRetryRisk> {
-        PinRetries::from_nibble(retries).and_then(PinRetryRisk::from_retries)
+    /// One above the five-attempt limit, for the rejection test.
+    const ABOVE_LIMIT: u8 = 6;
+    /// A status word outside the modeled set.
+    const UNMODELED_SW: u16 = 0x6F00;
+    /// Both PINs the floor guards.
+    const SLOTS: &[PinSlot] = &[PinSlot::Pin1, PinSlot::Pin2];
+    /// The counts at which an attempt is served.
+    const SERVED: &[u8] = &[RETRIES_PRISTINE, RETRIES_ONE_SPENT, RETRIES_FLOOR];
+    /// The counts at which an attempt is refused.
+    const REFUSED: &[u8] = &[
+        RETRIES_BELOW_FLOOR,
+        RETRIES_LOCKDOWN_IMMINENT,
+        RETRIES_EXHAUSTED,
+    ];
+
+    fn retries(count: u8) -> PinRetries {
+        PinRetries::from_nibble(count).expect("fits a nibble")
+    }
+
+    fn risk(count: u8) -> Option<PinRetryRisk> {
+        PinRetries::from_nibble(count).and_then(PinRetryRisk::from_retries)
+    }
+
+    fn remaining(count: u8) -> PinStatus {
+        PinStatus::Remaining(retries(count))
     }
 
     #[test]
-    fn five_attempt_risk_ladder_is_total_and_ordered() {
-        assert_eq!(risk(5), Some(PinRetryRisk::NormalOperatingConditions));
-        assert_eq!(risk(4), Some(PinRetryRisk::DisturbanceDetected));
-        assert_eq!(risk(3), Some(PinRetryRisk::SecurityIncidentDeclared));
-        assert_eq!(risk(2), Some(PinRetryRisk::CriticalThreatLevel));
-        assert_eq!(risk(1), Some(PinRetryRisk::LockdownImminent));
-        assert_eq!(risk(0), Some(PinRetryRisk::DefencesFallen));
-        assert_eq!(risk(6), None);
+    fn the_five_attempt_ladder_is_total() {
+        assert_eq!(
+            risk(RETRIES_PRISTINE),
+            Some(PinRetryRisk::NormalOperatingConditions)
+        );
+        assert_eq!(
+            risk(RETRIES_ONE_SPENT),
+            Some(PinRetryRisk::DisturbanceDetected)
+        );
+        assert_eq!(
+            risk(RETRIES_FLOOR),
+            Some(PinRetryRisk::SecurityIncidentDeclared)
+        );
+        assert_eq!(
+            risk(RETRIES_BELOW_FLOOR),
+            Some(PinRetryRisk::CriticalThreatLevel)
+        );
+        assert_eq!(
+            risk(RETRIES_LOCKDOWN_IMMINENT),
+            Some(PinRetryRisk::LockdownImminent)
+        );
+        assert_eq!(risk(RETRIES_EXHAUSTED), Some(PinRetryRisk::DefencesFallen));
+        assert_eq!(risk(ABOVE_LIMIT), None);
     }
 
     #[test]
-    fn floors_block_only_one_and_two_attempts() {
-        // Reusable caching stays stricter: a pristine five is required to arm.
-        assert!(PinRetryRisk::NormalOperatingConditions.permits_reusable_cache());
-        assert!(!PinRetryRisk::DisturbanceDetected.permits_reusable_cache());
-
-        // The operate floor passes every state except one or two attempts,
-        // including an already-locked card.
-        for permitted in [
-            PinRetryRisk::NormalOperatingConditions,
-            PinRetryRisk::DisturbanceDetected,
-            PinRetryRisk::SecurityIncidentDeclared,
-            PinRetryRisk::DefencesFallen,
-        ] {
-            assert!(permitted.permits_pkcs11(), "{permitted:?} permits pkcs11");
-            assert!(
-                permitted.permits_consumer(),
-                "{permitted:?} permits consumer"
-            );
-            assert!(
-                !permitted.requires_scs_shutdown(),
-                "{permitted:?} keeps SCS up"
-            );
+    fn five_four_and_three_tries_are_served_for_both_pins() {
+        for &slot in SLOTS {
+            for &count in SERVED {
+                assert_eq!(check_retry_floor(slot, remaining(count)), Ok(()));
+            }
         }
-        for blocked in [
-            PinRetryRisk::CriticalThreatLevel,
-            PinRetryRisk::LockdownImminent,
-        ] {
-            assert!(!blocked.permits_pkcs11(), "{blocked:?} blocks pkcs11");
-            assert!(!blocked.permits_consumer(), "{blocked:?} blocks consumer");
-            assert!(
-                blocked.requires_scs_shutdown(),
-                "{blocked:?} shuts SCS down"
-            );
+    }
+
+    #[test]
+    fn two_one_and_zero_tries_are_refused_for_both_pins() {
+        for &slot in SLOTS {
+            for &count in REFUSED {
+                assert_eq!(
+                    check_retry_floor(slot, remaining(count)),
+                    Err(RetryFloorRefusal::TriesBelowFloor {
+                        slot,
+                        remaining: retries(count),
+                    })
+                );
+            }
         }
     }
 
     #[test]
-    fn consumer_pin1_authentication_depends_only_on_pin1_retry_floor() {
-        let remaining = |count| {
-            PinStatus::Remaining(
-                PinRetries::from_nibble(count).expect("test retry count fits one nibble"),
-            )
-        };
-        assert!(pin1_status_permits_consumer_authentication(remaining(5)));
-        assert!(pin1_status_permits_consumer_authentication(remaining(4)));
-        assert!(pin1_status_permits_consumer_authentication(remaining(3)));
-        assert!(!pin1_status_permits_consumer_authentication(remaining(2)));
-        assert!(!pin1_status_permits_consumer_authentication(remaining(1)));
-        // Zero attempts passes the floor -- nothing left to protect; the card
-        // surfaces its locked state or a recovery routes to an unblock.
-        assert!(pin1_status_permits_consumer_authentication(remaining(0)));
-        assert!(pin1_status_permits_consumer_authentication(
-            PinStatus::Verified
-        ));
-        assert!(!pin1_status_permits_consumer_authentication(
-            PinStatus::Locked
-        ));
-        assert!(!pin1_status_permits_consumer_authentication(
-            PinStatus::NoInfo
-        ));
-        assert!(!pin1_status_permits_consumer_authentication(
-            PinStatus::Other(0x63_00)
-        ));
+    fn a_verified_pin_is_served_and_states_without_a_counter_are_refused() {
+        for &slot in SLOTS {
+            assert_eq!(check_retry_floor(slot, PinStatus::Verified), Ok(()));
+            assert_eq!(
+                check_retry_floor(slot, PinStatus::Locked),
+                Err(RetryFloorRefusal::Blocked { slot })
+            );
+            for status in [
+                PinStatus::NoInfo,
+                PinStatus::Other(UNMODELED_SW),
+                remaining(ABOVE_LIMIT),
+            ] {
+                assert_eq!(
+                    check_retry_floor(slot, status),
+                    Err(RetryFloorRefusal::CounterUnreadable { slot })
+                );
+            }
+        }
     }
 
     #[test]
-    fn reusable_pin1_cache_requires_only_pin1_at_five() {
-        let remaining = |count| {
-            PinStatus::Remaining(
-                PinRetries::from_nibble(count).expect("test retry count fits one nibble"),
-            )
-        };
-        assert!(pin1_status_permits_reusable_cache(remaining(5)));
-        assert!(!pin1_status_permits_reusable_cache(remaining(4)));
-        assert!(!pin1_status_permits_reusable_cache(remaining(3)));
+    fn a_refusal_names_the_pin_the_tries_left_and_the_puk() {
+        for &slot in SLOTS {
+            for &count in REFUSED {
+                let text = check_retry_floor(slot, remaining(count))
+                    .expect_err("below the floor")
+                    .to_string();
+                assert!(text.contains(super::slot_name(slot)), "{text}");
+                assert!(text.contains(&count.to_string()), "{text}");
+                assert!(text.contains("PUK"), "{text}");
+            }
+            let blocked = check_retry_floor(slot, PinStatus::Locked)
+                .expect_err("blocked")
+                .to_string();
+            assert!(blocked.contains(super::slot_name(slot)), "{blocked}");
+            assert!(blocked.contains("PUK"), "{blocked}");
+        }
+    }
+
+    #[test]
+    fn a_reusable_cache_requires_a_pristine_pin1() {
+        assert!(pin1_status_permits_reusable_cache(remaining(
+            RETRIES_PRISTINE
+        )));
+        assert!(!pin1_status_permits_reusable_cache(remaining(
+            RETRIES_ONE_SPENT
+        )));
+        assert!(!pin1_status_permits_reusable_cache(remaining(
+            RETRIES_FLOOR
+        )));
         assert!(!pin1_status_permits_reusable_cache(PinStatus::Verified));
+    }
+
+    #[test]
+    fn the_reusable_cache_is_never_looser_than_the_floor() {
+        for &count in REFUSED.iter().chain(&[ABOVE_LIMIT]) {
+            assert!(!pin1_status_permits_reusable_cache(remaining(count)));
+        }
+        for status in [PinStatus::Locked, PinStatus::NoInfo] {
+            assert!(!pin1_status_permits_reusable_cache(status));
+        }
     }
 }
