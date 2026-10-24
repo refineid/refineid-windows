@@ -8,6 +8,8 @@
 #
 # Formatting, clippy lints (both host and Windows cross-target), and unit tests
 # run on commit so that bad quality code is caught before pushing to GitHub.
+# Markdown links must stay inside the repository: a link into a sibling
+# checkout resolves only on a developer's disk and is broken on GitHub.
 
 set -e
 
@@ -32,6 +34,32 @@ if [ "$current" != "$today" ]; then
     cargo check --workspace --quiet
     git add "$manifest" "$root/Cargo.lock"
     echo "pre-commit: workspace version $current -> $today (UTC day change)"
+fi
+
+# A relative link escapes the repository when it climbs more directories
+# than its file is deep. Cross-repository references use the GitHub URL.
+echo "pre-commit: markdown links stay inside the repository"
+link_open='](' # markdown inline link opener preceding the target
+parent_dir='../'
+escaping=$(git ls-files -z -- '*.md' | xargs -0 awk \
+    -v open_len="${#link_open}" -v parent_len="${#parent_dir}" '
+    FNR == 1 { depth = gsub("/", "/", FILENAME) }
+    {
+        line = $0
+        while (match(line, /\]\((\.\.\/)+/)) {
+            climb = (RLENGTH - open_len) / parent_len
+            if (climb > depth) {
+                target = substr(line, RSTART + open_len)
+                sub(/\).*$/, "", target)
+                print FILENAME ":" FNR ": " target
+            }
+            line = substr(line, RSTART + RLENGTH)
+        }
+    }')
+if [ -n "$escaping" ]; then
+    echo "pre-commit: error: relative links leave the repository; link the GitHub URL instead:" >&2
+    echo "$escaping" >&2
+    exit 1
 fi
 
 echo "pre-commit: cargo fmt --all --check"

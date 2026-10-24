@@ -4,7 +4,7 @@
 - **Protocol Version**: `26.10.22`
 - **Status**: Normative Architecture & Migration Plan
 - **Applies To**: `RefineID-Windows` (`RefineID-winui`, `refineid-minidriver`, `refineid-pkcs11`, `refineid-rapp-core`)
-- **Companion Specification**: [RAPP Transport and Discovery Hierarchy Specification](../../refineid-core/doc/protocols/rapp-transport-and-discovery-hierarchy.md)
+- **Companion Specification**: [RAPP Transport and Discovery Hierarchy Specification](https://github.com/refineid/refineid-core/blob/main/doc/protocols/rapp-transport-and-discovery-hierarchy.md)
 
 ---
 
