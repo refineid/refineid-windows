@@ -223,40 +223,20 @@ internal sealed partial class MainPage : Page
     }
 
     /// <summary>
-    /// The button is disabled while its dialog is up: a second click would
-    /// open a second ContentDialog, which WinUI refuses with an exception.
+    /// The click forgets at once. The button is disabled while the forget
+    /// runs: the busy overlay stops a second click, and this stops a
+    /// repeated key press from starting a second forget.
     /// </summary>
     private async void ForgetIdentity_Click(object sender, RoutedEventArgs args)
     {
         this.ForgetIdentityButton.IsEnabled = false;
         try
         {
-            await this.ConfirmForgetIdentityAsync().ConfigureAwait(true);
+            await this.ForgetIdentityAsync().ConfigureAwait(true);
         }
         finally
         {
             this.ForgetIdentityButton.IsEnabled = true;
-        }
-    }
-
-    private async Task ConfirmForgetIdentityAsync()
-    {
-        // The scan was the consent to read; forgetting is destructive to the
-        // device-local identity, so it takes its own explicit confirmation.
-        // Cancel is the safe default the way Windows dialogs expect.
-        var dialog = new ContentDialog
-        {
-            XamlRoot = this.XamlRoot,
-            Title = "Forget identity?",
-            Content = "The pairing with the phone is removed from this device.",
-            PrimaryButtonText = "Forget",
-            CloseButtonText = "Cancel",
-            DefaultButton = ContentDialogButton.Close,
-        };
-
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
-        {
-            await this.ForgetIdentityAsync().ConfigureAwait(true);
         }
     }
 
