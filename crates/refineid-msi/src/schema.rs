@@ -227,5 +227,7 @@ pub const SERVICE_EVENT_UNINSTALL_STOP: i32 = 32;
 
 /// Treat `VersionMin` as inclusive when detecting a related product.
 pub const UPGRADE_VERSION_MIN_INCLUSIVE: i32 = 256;
+/// Treat `VersionMax` as inclusive when detecting a related product.
+pub const UPGRADE_VERSION_MAX_INCLUSIVE: i32 = 512;
 /// Detect a related product without removing it.
 pub const UPGRADE_ONLY_DETECT: i32 = 2;

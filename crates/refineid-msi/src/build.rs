@@ -36,6 +36,8 @@ const SYSTEM_DIRECTORY: &str = "System64Folder";
 const OLDER_VERSION: &str = "OLDERVERSIONBEINGUPGRADED";
 /// Property set when a newer package is found.
 const NEWER_VERSION: &str = "NEWERVERSIONDETECTED";
+/// The lowest product version, the bottom of the removing upgrade range.
+const LOWEST_VERSION: &str = "0.0.0";
 /// `msidbFileAttributesVital`.
 const FILE_VITAL: i32 = 512;
 
@@ -742,6 +744,42 @@ fn write_service(database: &Database, package: &Package<'_>) -> Result<(), Build
     Ok(())
 }
 
+/// One row of the `Upgrade` table: a range of related product versions and
+/// the property that receives the product codes found in it.
+struct UpgradeRow<'a> {
+    version_min: &'a str,
+    version_max: &'a str,
+    attributes: i32,
+    action_property: &'static str,
+}
+
+/// The removing row and the detect-only row for a package at `version`.
+///
+/// The removing row reaches up to and including the package's own
+/// `ProductVersion`: builds within one version slot share a `ProductVersion`
+/// under distinct product codes, and the later install replaces the earlier
+/// one. `FindRelatedProducts` runs only on the first install of a product
+/// code, so a package never removes itself; ICE61 warns that the maximum is
+/// not below the product version. The detect-only row starts strictly above
+/// the version, so a downgrade is found but nothing is removed.
+const fn upgrade_rows(version: &str) -> [UpgradeRow<'_>; 2] {
+    [
+        UpgradeRow {
+            version_min: LOWEST_VERSION,
+            version_max: version,
+            attributes: schema::UPGRADE_VERSION_MIN_INCLUSIVE
+                | schema::UPGRADE_VERSION_MAX_INCLUSIVE,
+            action_property: OLDER_VERSION,
+        },
+        UpgradeRow {
+            version_min: version,
+            version_max: "",
+            attributes: schema::UPGRADE_ONLY_DETECT,
+            action_property: NEWER_VERSION,
+        },
+    ]
+}
+
 /// Writes major-upgrade detection and the downgrade guard.
 fn write_upgrade_rules(
     database: &Database,
@@ -752,36 +790,21 @@ fn write_upgrade_rules(
     let upgrade_sql = "INSERT INTO `Upgrade` \
         (`UpgradeCode`,`VersionMin`,`VersionMax`,`Language`,`Attributes`,`Remove`,`ActionProperty`) \
         VALUES (?,?,?,?,?,?,?)";
-    // Anything below this version is removed on install; the maximum is
-    // exclusive so a package never detects itself as an older product.
-    insert(
-        database,
-        upgrade_sql,
-        &[
-            Value::Text(upgrade_code),
-            Value::Text("0.0.0"),
-            Value::Text(version),
-            Value::Text(""),
-            Value::Integer(schema::UPGRADE_VERSION_MIN_INCLUSIVE),
-            Value::Text(""),
-            Value::Text(OLDER_VERSION),
-        ],
-    )?;
-    // Anything strictly above is only detected, so a downgrade fails the
-    // launch condition instead of silently replacing newer files.
-    insert(
-        database,
-        upgrade_sql,
-        &[
-            Value::Text(upgrade_code),
-            Value::Text(version),
-            Value::Text(""),
-            Value::Text(""),
-            Value::Integer(schema::UPGRADE_ONLY_DETECT),
-            Value::Text(""),
-            Value::Text(NEWER_VERSION),
-        ],
-    )?;
+    for row in upgrade_rows(version) {
+        insert(
+            database,
+            upgrade_sql,
+            &[
+                Value::Text(upgrade_code),
+                Value::Text(row.version_min),
+                Value::Text(row.version_max),
+                Value::Text(""),
+                Value::Integer(row.attributes),
+                Value::Text(""),
+                Value::Text(row.action_property),
+            ],
+        )?;
+    }
 
     let downgrade_message = format!(
         "A newer version of {} is already installed.",
@@ -822,7 +845,11 @@ fn write_sequences(database: &Database) -> Result<(), BuildError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MINUTES_PER_DAY, RegistryData, Version, encode_registry, short_name};
+    use super::{
+        LOWEST_VERSION, MINUTES_PER_DAY, NEWER_VERSION, OLDER_VERSION, RegistryData, Version,
+        encode_registry, short_name, upgrade_rows,
+    };
+    use crate::schema;
 
     #[test]
     fn binary_registry_data_uses_the_hexadecimal_prefix() {
@@ -947,6 +974,23 @@ mod tests {
             }
         }
         assert_eq!(at(0), at(1), "adjacent minutes may share a slot");
+    }
+
+    #[test]
+    fn the_removing_row_includes_the_package_version() {
+        let version = "26.10.18822";
+        let [removing, detecting] = upgrade_rows(version);
+        assert_eq!(removing.version_min, LOWEST_VERSION);
+        assert_eq!(removing.version_max, version);
+        assert_eq!(
+            removing.attributes,
+            schema::UPGRADE_VERSION_MIN_INCLUSIVE | schema::UPGRADE_VERSION_MAX_INCLUSIVE
+        );
+        assert_eq!(removing.action_property, OLDER_VERSION);
+        assert_eq!(detecting.version_min, version);
+        assert_eq!(detecting.version_max, "");
+        assert_eq!(detecting.attributes, schema::UPGRADE_ONLY_DETECT);
+        assert_eq!(detecting.action_property, NEWER_VERSION);
     }
 
     #[test]
