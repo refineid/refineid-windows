@@ -116,18 +116,20 @@
                                 Visibility="Collapsed"
                             />
                             <!--  Forgetting is one visible action on the
-                                   row while a pairing exists. A confirmation
-                                   dialog stands in front of it.  -->
+                                   row while a pairing exists, and the click
+                                   forgets at once.  -->
                             <Button
                                 x:Name="ForgetIdentityButton"
                                 VerticalAlignment="Center"
                                 AutomationProperties.AutomationId="ForgetIdentityButton"
-                                AutomationProperties.Name="Forget identity"
+                                AutomationProperties.Name="Forget"
                                 Click="ForgetIdentity_Click"
-                                Content="Forget"
-                                ToolTipService.ToolTip="Remove the pairing with the phone from this device"
+                                ToolTipService.ToolTip="Forget"
                                 Visibility="Collapsed"
-                            />
+                            >
+                                <!--  Segoe Fluent Icons UserRemove  -->
+                                <FontIcon Glyph="&#xF69B;" />
+                            </Button>
                         </StackPanel>
                     </controls:SettingsCard>
                 </StackPanel>
