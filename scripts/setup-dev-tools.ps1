@@ -15,7 +15,7 @@
 # Installs the Windows 11 development toolchain for this repository and
 # updates every installed part to its latest release: Git, GitHub CLI, the
 # latest Visual Studio Build Tools with the MSVC x64 and ARM64 tools and the
-# Windows 11 SDK, rustup with the toolchain pinned by rust-toolchain.toml, the
+# Windows 11 SDK, rustup with the latest stable toolchain rust-toolchain.toml selects, the
 # latest .NET SDK of the major the WinUI apps target, the latest Python 3
 # through the Python Install Manager, the repository's .NET local tools, and
 # the Git hooks. Rerun it at any time to update. Run it from a
@@ -214,8 +214,8 @@ Invoke-Checked 'python3 --version' { python3 --version }
 Push-Location $repositoryRoot
 try {
     # With no toolchain name, rustup installs the channel, components, and
-    # targets pinned by rust-toolchain.toml.
-    Write-Host 'Installing the Rust toolchain pinned by rust-toolchain.toml...'
+    # targets rust-toolchain.toml names.
+    Write-Host 'Installing the stable Rust toolchain named by rust-toolchain.toml...'
     Invoke-Checked 'rustup toolchain install' { rustup toolchain install }
     Invoke-Checked 'rustc --version' { rustc --version }
 
