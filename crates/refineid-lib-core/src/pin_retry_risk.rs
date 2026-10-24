@@ -223,10 +223,12 @@ impl core::error::Error for RetryFloorRefusal {}
 /// for that credential.
 ///
 /// Served at five, four or three tries left, and when the card reports
-/// the credential verified in the current security context -- a
+/// PIN 1 or PIN 2 verified in the current security context -- a
 /// successful verification resets the counter to its maximum. Refused at
 /// two, one or no tries left, at a blocked credential, and at any status
-/// that carries no readable counter, a count above five included.
+/// that carries no readable counter: a count above five, and a PUK
+/// reported verified, which carries no count of the try a wrong PUK
+/// would spend.
 ///
 /// # Errors
 ///
@@ -237,7 +239,10 @@ pub const fn check_retry_floor(
     status: PinStatus,
 ) -> Result<(), RetryFloorRefusal> {
     match status {
-        PinStatus::Verified => Ok(()),
+        PinStatus::Verified => match credential {
+            FlooredCredential::Pin1 | FlooredCredential::Pin2 => Ok(()),
+            FlooredCredential::Puk => Err(RetryFloorRefusal::CounterUnreadable { credential }),
+        },
         PinStatus::Remaining(remaining) => match PinRetryRisk::from_retries(remaining) {
             Some(risk) if risk.is_above_floor() => Ok(()),
             Some(_) => Err(RetryFloorRefusal::TriesBelowFloor {
@@ -393,8 +398,16 @@ mod tests {
 
     #[test]
     fn a_verified_credential_is_served_and_states_without_a_counter_are_refused() {
-        for &credential in CREDENTIALS {
+        for credential in [FlooredCredential::Pin1, FlooredCredential::Pin2] {
             assert_eq!(check_retry_floor(credential, PinStatus::Verified), Ok(()));
+        }
+        assert_eq!(
+            check_retry_floor(FlooredCredential::Puk, PinStatus::Verified),
+            Err(RetryFloorRefusal::CounterUnreadable {
+                credential: FlooredCredential::Puk
+            })
+        );
+        for &credential in CREDENTIALS {
             assert_eq!(
                 check_retry_floor(credential, PinStatus::Locked),
                 Err(RetryFloorRefusal::Blocked { credential })

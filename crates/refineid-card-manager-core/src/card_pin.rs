@@ -700,9 +700,9 @@ pub fn unblock_pin_first(
         });
     }
 
-    puk_retry_floor(&mut transport)?;
-
     re_verify_session(&mut transport, ctx.bound_serial())?;
+
+    puk_retry_floor(&mut transport)?;
 
     // Bridge typed Puk to the auth primitive's PinBytes. The
     // transient PinBytes zeroizes on drop, same as every other
@@ -1560,6 +1560,8 @@ mod activate_tests {
     /// APDUs a served older-card activation sends: the PUK probe and
     /// `RESET RETRY COUNTER`.
     const PROBE_AND_RESET: usize = 2;
+    /// A status word outside the modeled set.
+    const UNMODELED_SW: u16 = 0x6F00;
     /// Synthetic seven-digit activation code.
     const ACTIVATION_CODE: &[u8] = b"0000000";
     /// Synthetic new PIN.
@@ -1709,6 +1711,26 @@ mod activate_tests {
                     Err(CardPinError::RetryFloor(RetryFloorRefusal::Blocked { .. }))
                 ),
                 "blocked PUK refused",
+            )?;
+            check_true(transport.sent == PROBE_ONLY, "only the probe sent")?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn older_activation_is_refused_on_an_unreadable_puk_counter() -> TestResult {
+        // Success with no PIN container body carries no counter.
+        for status in [StatusWord::Success, StatusWord::from_u16(UNMODELED_SW)] {
+            let mut transport = FixedStatusTransport::new(status);
+            let outcome = setup(&mut transport, CardGeneration::Older)?;
+            check_true(
+                matches!(
+                    outcome,
+                    Err(CardPinError::RetryFloor(
+                        RetryFloorRefusal::CounterUnreadable { .. }
+                    ))
+                ),
+                "unreadable PUK counter refused",
             )?;
             check_true(transport.sent == PROBE_ONLY, "only the probe sent")?;
         }
