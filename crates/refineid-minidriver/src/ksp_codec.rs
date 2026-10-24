@@ -32,6 +32,42 @@ const ECDSA_PUBLIC_P384_MAGIC: u32 = 0x3353_4345;
 /// `BCRYPT_RSAPUBLIC_MAGIC` (`"RSA1"`).
 const RSAPUBLIC_MAGIC: u32 = 0x3141_5352;
 
+/// Bits in one byte, the step between a modulus length and its byte width.
+const BITS_PER_BYTE: usize = 8;
+/// Modulus length of an RSA key the `rsa_2048` signing profile covers.
+const RSA_2048_MODULUS_BITS: usize = 2048;
+/// Modulus length of an RSA key the `rsa_3072` signing profile covers.
+const RSA_3072_MODULUS_BITS: usize = 3072;
+
+/// The RSA modulus lengths a signing profile exists for; a certificate with
+/// any other modulus is not a key this provider offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RsaKeySize {
+    /// A 2048-bit modulus, the `rsa_2048` profile.
+    Bits2048,
+    /// A 3072-bit modulus, the `rsa_3072` profile.
+    Bits3072,
+}
+
+impl RsaKeySize {
+    /// The profile a modulus of exactly `bits` bits belongs to, if any.
+    pub(crate) const fn from_bits(bits: usize) -> Option<Self> {
+        match bits {
+            RSA_2048_MODULUS_BITS => Some(Self::Bits2048),
+            RSA_3072_MODULUS_BITS => Some(Self::Bits3072),
+            _ => None,
+        }
+    }
+
+    /// Modulus length in bits.
+    pub(crate) const fn bits(self) -> usize {
+        match self {
+            Self::Bits2048 => RSA_2048_MODULUS_BITS,
+            Self::Bits3072 => RSA_3072_MODULUS_BITS,
+        }
+    }
+}
+
 /// The public key kinds a paired card can present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeyKind {
@@ -39,11 +75,8 @@ pub(crate) enum KeyKind {
     EcP256,
     /// ECDSA on NIST P-384.
     EcP384,
-    /// RSA with the given modulus length in bits.
-    Rsa {
-        /// Modulus length in bits.
-        bits: usize,
-    },
+    /// RSA with one of the profiled modulus lengths.
+    Rsa(RsaKeySize),
 }
 
 impl KeyKind {
@@ -52,7 +85,7 @@ impl KeyKind {
         match self {
             Self::EcP256 => 32,
             Self::EcP384 => 48,
-            Self::Rsa { bits } => bits.div_ceil(8),
+            Self::Rsa(size) => size.bits().div_ceil(BITS_PER_BYTE),
         }
     }
 
@@ -61,7 +94,7 @@ impl KeyKind {
     pub(crate) const fn signature_bytes(self) -> usize {
         match self {
             Self::EcP256 | Self::EcP384 => self.element_bytes() * 2,
-            Self::Rsa { .. } => self.element_bytes(),
+            Self::Rsa(_) => self.element_bytes(),
         }
     }
 
@@ -70,7 +103,7 @@ impl KeyKind {
         match self {
             Self::EcP256 => 256,
             Self::EcP384 => 384,
-            Self::Rsa { bits } => bits,
+            Self::Rsa(size) => size.bits(),
         }
     }
 
@@ -78,7 +111,7 @@ impl KeyKind {
     pub(crate) const fn algorithm_group(self) -> &'static str {
         match self {
             Self::EcP256 | Self::EcP384 => "ECDSA",
-            Self::Rsa { .. } => "RSA",
+            Self::Rsa(_) => "RSA",
         }
     }
 
@@ -87,7 +120,7 @@ impl KeyKind {
         match self {
             Self::EcP256 => "ECDSA_P256",
             Self::EcP384 => "ECDSA_P384",
-            Self::Rsa { .. } => "RSA",
+            Self::Rsa(_) => "RSA",
         }
     }
 }
@@ -189,7 +222,10 @@ pub(crate) fn rsa_signature_to_width(signature: &[u8], width: usize) -> Option<V
 
 #[cfg(test)]
 mod tests {
-    use super::{Digest, KeyKind, ecc_public_blob, rsa_public_blob, rsa_signature_to_width};
+    use super::{
+        BITS_PER_BYTE, Digest, KeyKind, RSA_2048_MODULUS_BITS, RSA_3072_MODULUS_BITS, RsaKeySize,
+        ecc_public_blob, rsa_public_blob, rsa_signature_to_width,
+    };
 
     #[test]
     fn an_ecc_blob_carries_the_magic_and_the_coordinates() {
@@ -237,10 +273,43 @@ mod tests {
     fn signature_widths_follow_the_key_kind() {
         assert_eq!(KeyKind::EcP256.signature_bytes(), 64);
         assert_eq!(KeyKind::EcP384.signature_bytes(), 96);
-        assert_eq!(KeyKind::Rsa { bits: 3072 }.signature_bytes(), 384);
-        assert_eq!(KeyKind::Rsa { bits: 2048 }.bits(), 2048);
+        assert_eq!(
+            KeyKind::Rsa(RsaKeySize::Bits3072).signature_bytes(),
+            RSA_3072_MODULUS_BITS / BITS_PER_BYTE
+        );
+        assert_eq!(
+            KeyKind::Rsa(RsaKeySize::Bits2048).bits(),
+            RSA_2048_MODULUS_BITS
+        );
         assert_eq!(KeyKind::EcP384.algorithm_name(), "ECDSA_P384");
-        assert_eq!(KeyKind::Rsa { bits: 2048 }.algorithm_group(), "RSA");
+        assert_eq!(KeyKind::Rsa(RsaKeySize::Bits2048).algorithm_group(), "RSA");
+    }
+
+    #[test]
+    fn only_the_profiled_rsa_moduli_are_keys() {
+        assert_eq!(
+            RsaKeySize::from_bits(RSA_2048_MODULUS_BITS),
+            Some(RsaKeySize::Bits2048)
+        );
+        assert_eq!(
+            RsaKeySize::from_bits(RSA_3072_MODULUS_BITS),
+            Some(RsaKeySize::Bits3072)
+        );
+        let unprofiled = [
+            RSA_2048_MODULUS_BITS / 2,
+            RSA_2048_MODULUS_BITS - 1,
+            RSA_3072_MODULUS_BITS + 1,
+            RSA_2048_MODULUS_BITS * 2,
+        ];
+        for bits in unprofiled {
+            assert_eq!(RsaKeySize::from_bits(bits), None);
+        }
+        for size in [RsaKeySize::Bits2048, RsaKeySize::Bits3072] {
+            assert_eq!(
+                KeyKind::Rsa(size).element_bytes(),
+                size.bits() / BITS_PER_BYTE
+            );
+        }
     }
 
     #[test]

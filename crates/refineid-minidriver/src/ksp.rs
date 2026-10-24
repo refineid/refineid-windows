@@ -68,7 +68,9 @@ use windows_sys::Win32::System::Memory::{GetProcessHeap, HEAP_ZERO_MEMORY, HeapA
 use windows_sys::core::{HRESULT, PCWSTR};
 
 use crate::cardmod::remote_ecdsa_to_p1363;
-use crate::ksp_codec::{Digest, KeyKind, ecc_public_blob, rsa_public_blob, rsa_signature_to_width};
+use crate::ksp_codec::{
+    Digest, KeyKind, RsaKeySize, ecc_public_blob, rsa_public_blob, rsa_signature_to_width,
+};
 use crate::ksp_verify::verifies;
 
 /// `NCRYPT_VERSION_PROPERTY` value: 1.0.
@@ -122,10 +124,13 @@ fn opened_key(handle: NCRYPT_KEY_HANDLE) -> Option<OpenKey> {
 }
 
 /// The key kind a certificate's public key implies, if this provider can
-/// sign with it.
+/// sign with it: a P-256 or P-384 key, or an RSA key whose modulus a signing
+/// profile covers.
 fn key_kind(certificate: &OwnedCert) -> Option<KeyKind> {
     match certificate.view().spki.algorithm() {
-        PublicKeyAlgorithm::Rsa { modulus_bits } => Some(KeyKind::Rsa { bits: modulus_bits }),
+        PublicKeyAlgorithm::Rsa { modulus_bits } => {
+            RsaKeySize::from_bits(modulus_bits).map(KeyKind::Rsa)
+        }
         PublicKeyAlgorithm::Ec(EcCurve::Secp256r1) => Some(KeyKind::EcP256),
         PublicKeyAlgorithm::Ec(EcCurve::Secp384r1) => Some(KeyKind::EcP384),
         _ => None,
@@ -171,7 +176,7 @@ fn public_blob(key: &OpenKey) -> Option<Vec<u8>> {
         KeyKind::EcP256 | KeyKind::EcP384 => {
             ecc_public_blob(view.spki.ec_public_key_point()?.as_bytes())
         }
-        KeyKind::Rsa { .. } => {
+        KeyKind::Rsa(_) => {
             let rsa = extract_rsa_public_key(view.spki.as_der())?;
             rsa_public_blob(rsa.modulus.as_bytes(), rsa.exponent.as_bytes())
         }
@@ -605,7 +610,7 @@ unsafe extern "system" fn ExportKey(
         (blob_type.as_str(), key.kind),
         ("PUBLICBLOB", _)
             | ("ECCPUBLICBLOB", KeyKind::EcP256 | KeyKind::EcP384)
-            | ("RSAPUBLICBLOB", KeyKind::Rsa { .. })
+            | ("RSAPUBLICBLOB", KeyKind::Rsa(_))
     );
     if !wants_public {
         return NTE_NOT_SUPPORTED;
@@ -716,7 +721,7 @@ unsafe extern "system" fn SignHash(
             Digest::Sha512 => SignatureAlgorithm::EcdsaSha512,
         },
         // SAFETY: the padding pointer belongs to the flags the caller set.
-        KeyKind::Rsa { .. } => match unsafe { rsa_algorithm(pPaddingInfo, dwFlags, digest) } {
+        KeyKind::Rsa(_) => match unsafe { rsa_algorithm(pPaddingInfo, dwFlags, digest) } {
             Ok(algorithm) => algorithm,
             Err(code) => return code,
         },
@@ -724,8 +729,8 @@ unsafe extern "system" fn SignHash(
     let key_profile = match key.kind {
         KeyKind::EcP256 => KeyProfile::EcdsaP256,
         KeyKind::EcP384 => KeyProfile::EcdsaP384,
-        KeyKind::Rsa { bits } if bits <= 2048 => KeyProfile::Rsa2048,
-        KeyKind::Rsa { .. } => KeyProfile::Rsa3072,
+        KeyKind::Rsa(RsaKeySize::Bits2048) => KeyProfile::Rsa2048,
+        KeyKind::Rsa(RsaKeySize::Bits3072) => KeyProfile::Rsa3072,
     };
     let Ok(request) = SignRequest::new(key.pair_id, key_profile, algorithm, hash) else {
         return NTE_INVALID_PARAMETER;
@@ -754,7 +759,7 @@ unsafe extern "system" fn SignHash(
         KeyKind::EcP256 | KeyKind::EcP384 => {
             remote_ecdsa_to_p1363(&signature, key.kind.element_bytes())
         }
-        KeyKind::Rsa { .. } => rsa_signature_to_width(&signature, key.kind.element_bytes()),
+        KeyKind::Rsa(_) => rsa_signature_to_width(&signature, key.kind.element_bytes()),
     };
     let Some(encoded) = encoded else {
         refineid_dev_errors::report!(
