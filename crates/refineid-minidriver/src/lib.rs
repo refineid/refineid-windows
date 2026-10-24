@@ -158,7 +158,9 @@ use refineid_lib_core::pin::PinBytes;
 #[cfg(windows)]
 use refineid_lib_core::pin_cache::PinSafetyCache;
 #[cfg(windows)]
-use refineid_lib_core::pin_retry_risk::{RetryFloorRefusal, check_retry_floor};
+use refineid_lib_core::pin_retry_risk::{
+    RetryFloorRefusal, check_retry_floor, pin1_status_permits_reusable_cache,
+};
 #[cfg(windows)]
 use refineid_lib_core::pkcs15::{CertSlot, Pkcs15Ops};
 #[cfg(windows)]
@@ -197,7 +199,8 @@ fn live_pin_status(tx: &mut CardSessionTransport, slot: PinSlot) -> Result<PinSt
 /// Apply the retry floor to `slot` before any command that can spend one
 /// of its attempts. A refusal below the floor or at a blocked PIN answers
 /// `SCARD_W_CHV_BLOCKED`, which routes the user to the PUK; a counter the
-/// card did not report answers `SCARD_W_WRONG_CHV`.
+/// card did not report answers `SCARD_F_INTERNAL_ERROR`, since no PIN was
+/// presented.
 #[cfg(windows)]
 fn retry_floor_answer(slot: PinSlot, status: PinStatus) -> Result<(), DWORD> {
     check_retry_floor(slot, status).map_err(|refusal| match refusal {
@@ -215,16 +218,30 @@ fn retry_floor_answer(slot: PinSlot, status: PinStatus) -> Result<(), DWORD> {
                 "PIN not tried",
                 "the retry counter is unreadable"
             );
-            SCARD_W_WRONG_CHV
+            SCARD_F_INTERNAL_ERROR
         }
     })
 }
 
 /// Read the live status of `slot` and apply [`retry_floor_answer`].
 #[cfg(windows)]
-fn live_retry_floor(tx: &mut CardSessionTransport, slot: PinSlot) -> Result<(), DWORD> {
+fn live_retry_floor(tx: &mut CardSessionTransport, slot: PinSlot) -> Result<PinStatus, DWORD> {
     let status = live_pin_status(tx, slot)?;
-    retry_floor_answer(slot, status)
+    retry_floor_answer(slot, status)?;
+    Ok(status)
+}
+
+/// Hold a just-verified PIN 1: reusable when the counter read before the
+/// VERIFY was pristine, for exactly one checkout otherwise.
+#[cfg(windows)]
+fn hold_verified_pin1(serial: TokenSerial, pin: PinBytes, status: PinStatus) {
+    let _ = with_pin_safety(|cache| {
+        if pin1_status_permits_reusable_cache(status) {
+            cache.store_pin1(serial, pin)
+        } else {
+            cache.stage_pin1_once(serial, pin)
+        }
+    });
 }
 
 #[cfg(windows)]
@@ -1704,9 +1721,10 @@ unsafe extern "system" fn CardAuthenticatePin(
         Ok(serial) => serial,
         Err(error) => return error,
     };
-    if let Err(error) = live_retry_floor(&mut tx, slot) {
-        return error;
-    }
+    let status = match live_retry_floor(&mut tx, slot) {
+        Ok(status) => status,
+        Err(error) => return error,
+    };
     let is_rejected =
         with_pin_safety(|cache| cache.is_rejected(&serial, slot, &pin)).unwrap_or(false);
     if is_rejected {
@@ -1722,7 +1740,7 @@ unsafe extern "system" fn CardAuthenticatePin(
         Ok(VerifyOutcome::Ok) => {
             if slot == PinSlot::Pin1 {
                 ctx.pin1_authenticated = true;
-                let _ = with_pin_safety(|cache| cache.store_pin1(serial, pin));
+                hold_verified_pin1(serial, pin, status);
             } else {
                 ctx.pin2_authenticated = true;
             }
@@ -2688,9 +2706,10 @@ unsafe extern "system" fn CardAuthenticateEx(
         Ok(serial) => serial,
         Err(error) => return error,
     };
-    if let Err(error) = live_retry_floor(&mut tx, slot) {
-        return error;
-    }
+    let status = match live_retry_floor(&mut tx, slot) {
+        Ok(status) => status,
+        Err(error) => return error,
+    };
     let is_rejected =
         with_pin_safety(|cache| cache.is_rejected(&serial, slot, &pin)).unwrap_or(false);
     if is_rejected {
@@ -2706,7 +2725,7 @@ unsafe extern "system" fn CardAuthenticateEx(
         Ok(VerifyOutcome::Ok) => {
             if slot == PinSlot::Pin1 {
                 ctx.pin1_authenticated = true;
-                let _ = with_pin_safety(|cache| cache.store_pin1(serial, pin));
+                hold_verified_pin1(serial, pin, status);
             } else {
                 ctx.pin2_authenticated = true;
             }
