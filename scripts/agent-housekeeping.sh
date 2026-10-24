@@ -9,10 +9,16 @@
 #   scripts/agent-housekeeping.sh [--clean]
 #
 # Without flags the script only reports. With --clean it removes worktrees
-# whose branch is merged into main, whose tree is clean, and that hold no
-# unpushed commits, then deletes the merged branch. Anything else —
-# uncommitted changes, unpushed commits, or an unmerged branch — is
-# reported with its latest commit message and never destroyed.
+# whose branch is merged into main, whose tree is clean, that hold no
+# unpushed commits, and that have been idle for a day, then deletes the
+# merged branch. Anything else — fresh activity, uncommitted changes,
+# unpushed commits, or an unmerged branch — is reported with its latest
+# commit message and never destroyed. A live claim is tested first, so a
+# branch with no commits of its own (an ancestor of main) is never removed
+# while its worktree is fresh.
+#
+# scripts/test-agent-housekeeping.sh exercises these verdicts in a
+# throwaway repository.
 
 set -euo pipefail
 
@@ -93,7 +99,9 @@ while IFS= read -r line; do
       echo "  branch: ${branch} (merged: ${merged}, dirty: ${dirty}, unpushed: ${unpushed})"
       echo "  activity: ${activity}"
       [[ -n "${latest_subject}" ]] && echo "  latest: ${latest_subject}"
-      if [[ "${merged}" == "yes" && "${dirty}" == "no" && "${unpushed}" == "0" ]]; then
+      if [[ "${activity}" == fresh* || "${dirty}" == "yes" ]]; then
+        echo "  verdict: KEEP (live claim)"
+      elif [[ "${merged}" == "yes" && "${dirty}" == "no" && "${unpushed}" == "0" ]]; then
         if [[ "${clean}" == "1" ]]; then
           git worktree remove "${path}"
           git branch -d "${branch}"
@@ -101,8 +109,6 @@ while IFS= read -r line; do
         else
           echo "  verdict: REMOVE (rerun with --clean)"
         fi
-      elif [[ "${activity}" == fresh* || "${dirty}" == "yes" ]]; then
-        echo "  verdict: KEEP (live claim)"
       else
         echo "  verdict: REVIEW (needs an owner decision)"
       fi
