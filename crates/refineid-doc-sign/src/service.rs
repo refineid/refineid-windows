@@ -56,6 +56,7 @@ use refineid_lib_core::crypto::digest::{Sha256 as CoreSha256, Sha384 as CoreSha3
 use refineid_lib_core::identity::{CommonName, TokenSerial, render_token_serial};
 use refineid_lib_core::pace;
 use refineid_lib_core::pin::PinBytes;
+use refineid_lib_core::pin_retry_risk::{RetryFloorRefusal, check_retry_floor};
 use refineid_lib_core::pkcs15::Pkcs15Ops as _;
 use refineid_lib_core::pkcs15::{CertSlot, Pkcs15Error};
 use refineid_lib_core::secure_messaging::SmTransport;
@@ -494,6 +495,10 @@ pub enum SignErrorKind {
         /// `AuthenticationFailed`, ...).
         outcome: VerifyOutcome,
     },
+    /// The retry floor refused the signing PIN before any VERIFY went
+    /// out: the card reports two, one or no tries left, the PIN blocked,
+    /// or no readable counter. Counter is unaffected.
+    RetryFloor(RetryFloorRefusal),
     /// Local-policy rejection (PIN length / non-digit) before any
     /// APDU went out. Counter is unaffected.
     PinPolicy {
@@ -600,6 +605,7 @@ impl fmt::Display for SignErrorKind {
             Self::PinRejected {
                 outcome: VerifyOutcome::Ok,
             } => write!(f, "internal: PinRejected(Ok) is not an error state"),
+            Self::RetryFloor(refusal) => write!(f, "{refusal}"),
             Self::PinPolicy { reason } => {
                 write!(f, "{SIGNING_PIN_LABEL} rejected locally: {reason}")
             }
@@ -725,11 +731,12 @@ impl PinReferenceScheme {
 fn resolve_pin_reference_scheme<T: CardTransport>(
     transport: &mut T,
 ) -> Result<PinReferenceScheme, AuthError<TransportDispatchError<T::Error>>> {
-    let citizen = reference_probe_sw(transport, PinReferenceScheme::Citizen)?;
+    let citizen = reference_probe_sw(transport, PinReferenceScheme::Citizen, PinSlot::Pin1)?;
     if !matches!(citizen, StatusWord::ReferenceDataNotFound) {
         return Ok(PinReferenceScheme::Citizen);
     }
-    let organizational = reference_probe_sw(transport, PinReferenceScheme::Organizational)?;
+    let organizational =
+        reference_probe_sw(transport, PinReferenceScheme::Organizational, PinSlot::Pin1)?;
     Ok(match classify_pin_status_sw(organizational) {
         PinStatus::Verified | PinStatus::Remaining(_) | PinStatus::Locked | PinStatus::NoInfo => {
             PinReferenceScheme::Organizational
@@ -738,22 +745,38 @@ fn resolve_pin_reference_scheme<T: CardTransport>(
     })
 }
 
-/// Counter-safe VERIFY status probe (`Lc=0`) against PIN1 under
+/// Counter-safe VERIFY status probe (`Lc=0`) against `slot` under
 /// `scheme`. Wire-identical to the core `pin_status` probe
 /// except for the P2 source.
 fn reference_probe_sw<T: CardTransport>(
     transport: &mut T,
     scheme: PinReferenceScheme,
+    slot: PinSlot,
 ) -> Result<StatusWord, AuthError<TransportDispatchError<T::Error>>> {
     let apdu = [
         ApduClass::Plain.as_byte(),
         0x20, // INS VERIFY
         VerifyMode::Verify.as_p1(),
-        scheme.p2_reference(PinSlot::Pin1),
+        scheme.p2_reference(slot),
         0x00, // Lc=0 probe form
     ];
     let r = transport.transmit(&apdu).map_err(AuthError::Transport)?;
     Ok(r.status_word())
+}
+
+/// Apply the retry floor to the signing PIN under `scheme`, from its
+/// counter-safe status probe, before any VERIFY can spend an attempt.
+fn signing_pin_retry_floor<T: CardTransport>(
+    transport: &mut T,
+    scheme: PinReferenceScheme,
+) -> Result<(), SignErrorKind> {
+    let status = reference_probe_sw(transport, scheme, SIGNING_PIN)
+        .map(classify_pin_status_sw)
+        .map_err(|e| match e {
+            AuthError::Transport(t) => SignErrorKind::Transport(format!("{t}")),
+            AuthError::PinPolicy(reason) => SignErrorKind::PinPolicy { reason },
+        })?;
+    check_retry_floor(SIGNING_PIN, status).map_err(SignErrorKind::RetryFloor)
 }
 
 /// VERIFY `pin` for `slot` under the resolved `scheme`.
@@ -1144,6 +1167,7 @@ fn sign_chain<T: CardTransport>(
         AuthError::Transport(t) => SignErrorKind::Transport(format!("{t}")),
         AuthError::PinPolicy(reason) => SignErrorKind::PinPolicy { reason },
     })?;
+    signing_pin_retry_floor(transport, scheme)?;
     let outcome = verify_pin_with_scheme(transport, SIGNING_PIN, scheme, options.pin.clone())
         .map_err(|e| match e {
             AuthError::Transport(t) => SignErrorKind::Transport(format!("{t}")),
@@ -2777,5 +2801,110 @@ mod tests {
         let s2 = report.to_string();
         check_true(!s2.contains("cert DER:"), "no cert der line")?;
         check_true(!s2.contains("retries after verify"), "no retry line")
+    }
+
+    // ---- Retry floor on the signing PIN ----
+
+    /// Answers every command with one status word and records the
+    /// command bytes.
+    struct FloorProbeTransport {
+        status: StatusWord,
+        sent: Vec<Vec<u8>>,
+    }
+
+    impl CardTransport for FloorProbeTransport {
+        type Error = String;
+
+        fn transmit_outcome(
+            &mut self,
+            apdu: &refineid_lib_core::transport::CommandApdu,
+        ) -> Result<refineid_lib_core::transport::TransportOutcome, Self::Error> {
+            self.sent.push(apdu.as_bytes().to_vec());
+            let [sw1, sw2] = self.status.as_u16().to_be_bytes();
+            Ok(refineid_lib_core::transport::TransportOutcome::Response(
+                refineid_lib_core::transport::ResponseApdu {
+                    body: Vec::new(),
+                    sw1,
+                    sw2,
+                },
+            ))
+        }
+
+        fn atr(&self) -> Result<refineid_lib_core::atr::Atr, refineid_lib_core::atr::AtrError> {
+            refineid_lib_core::atr::Atr::new(refineid_lib_core::atr::MINIMAL_DIRECT_ATR)
+        }
+    }
+
+    /// The floor's answer and the commands sent to reach it.
+    struct FloorProbe {
+        outcome: Result<(), SignErrorKind>,
+        sent: Vec<Vec<u8>>,
+    }
+
+    fn floor_probe(
+        count: u8,
+        scheme: PinReferenceScheme,
+    ) -> Result<FloorProbe, Box<dyn core::error::Error>> {
+        let mut transport = FloorProbeTransport {
+            status: StatusWord::PinIncorrect {
+                retries: pin_retries(count)?,
+            },
+            sent: Vec::new(),
+        };
+        let outcome = signing_pin_retry_floor(&mut transport, scheme);
+        Ok(FloorProbe {
+            outcome,
+            sent: transport.sent,
+        })
+    }
+
+    /// Tries left at which the signing PIN is served.
+    const FLOOR_SERVED: [u8; 3] = [5, 4, 3];
+    /// Tries left at which the signing PIN is refused.
+    const FLOOR_REFUSED: [u8; 3] = [2, 1, 0];
+    /// Offset of P2 in a short command APDU.
+    const P2_OFFSET: usize = 3;
+
+    #[test]
+    fn signing_pin_is_served_at_five_four_and_three_tries() -> TestResult {
+        for scheme in [
+            PinReferenceScheme::Citizen,
+            PinReferenceScheme::Organizational,
+        ] {
+            for count in FLOOR_SERVED {
+                let FloorProbe { outcome, sent } = floor_probe(count, scheme)?;
+                check_true(outcome.is_ok(), "served above the floor")?;
+                check_true(sent.len() == 1, "one counter-safe probe")?;
+                check_true(
+                    sent.first().and_then(|apdu| apdu.get(P2_OFFSET)).copied()
+                        == Some(scheme.p2_reference(SIGNING_PIN)),
+                    "the probe targets the signing PIN",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn signing_pin_is_refused_at_two_one_and_zero_tries() -> TestResult {
+        for count in FLOOR_REFUSED {
+            let FloorProbe { outcome, sent } = floor_probe(count, PinReferenceScheme::Citizen)?;
+            let Err(error) = outcome else {
+                return Err("refused below the floor".into());
+            };
+            check_true(
+                matches!(
+                    error,
+                    SignErrorKind::RetryFloor(RetryFloorRefusal::TriesBelowFloor { .. })
+                ),
+                "retry floor refusal",
+            )?;
+            check_true(sent.len() == 1, "only the counter-safe probe sent")?;
+            let text = error.to_string();
+            check_true(text.contains("PIN 2"), "refusal names the PIN")?;
+            check_true(text.contains(&count.to_string()), "refusal names the tries")?;
+            check_true(text.contains("PUK"), "refusal names the PUK")?;
+        }
+        Ok(())
     }
 }

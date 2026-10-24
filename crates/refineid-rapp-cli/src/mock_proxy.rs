@@ -15,6 +15,9 @@ use std::io::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use refineid_lib_core::apdu::status_word::PinRetries;
+use refineid_lib_core::auth::{PinSlot, PinStatus};
+use refineid_lib_core::pin_retry_risk::check_retry_floor;
 use refineid_lib_core::x509::OwnedCert;
 use refineid_rapp::{
     BinaryFrame, CardIdentity, CardInspection, CardOperation, CardOperationResult, CardPresence,
@@ -22,10 +25,10 @@ use refineid_rapp::{
     DEFAULT_OPERATION_LIFETIME_MS, EndpointRole, EstablishedSessionRuntime, MAXIMUM_CPACE_ATTEMPTS,
     OfferId, OperationRequest, OperationResultMessage, OperationViolation, PairRecord,
     PairingHandshake, PairingOffer, PingChallenge, ProfileName, ProgressEvent, ProxyDispatch,
-    ProxyEngineError, ProxyFailure, ProxyOperationEngine, RetryDecision, RoutingKey, RuntimePoll,
-    RuntimeReceive, SESSION_READY_NONCE_SIZE, SessionHandshake, SignatureAlgorithm,
-    TransportProfile, TypedMessage, UserApproval, decode_pair_record, encode_pair_record,
-    generate_pair_key_material, route_session, standard_pairing_context_v2,
+    ProxyEngineError, ProxyFailure, ProxyOperationEngine, RoutingKey, RuntimePoll, RuntimeReceive,
+    SESSION_READY_NONCE_SIZE, SessionHandshake, SignatureAlgorithm, TransportProfile, TypedMessage,
+    UserApproval, decode_pair_record, encode_pair_record, generate_pair_key_material,
+    route_session, standard_pairing_context_v2,
 };
 use refineid_rapp_core::clock::{continuous_ms, unix_time_ms};
 use refineid_rapp_core::engine::SESSION_RECEIVE_TICK;
@@ -704,11 +707,12 @@ fn execute(
             .operations
             .finish_failure(operation_id, ProxyFailure::CardError));
     }
-    let remaining = match operation {
-        CardOperation::BrowserAuthenticate { .. } => options.pin1_attempts,
-        _ => options.pin2_attempts,
+    let (slot, remaining) = match operation {
+        CardOperation::BrowserAuthenticate { .. } => (PinSlot::Pin1, options.pin1_attempts),
+        _ => (PinSlot::Pin2, options.pin2_attempts),
     };
-    if RetryDecision::for_decrementing_counter(Some(remaining)) != RetryDecision::Permit {
+    let status = PinRetries::from_nibble(remaining).map_or(PinStatus::NoInfo, PinStatus::Remaining);
+    if check_retry_floor(slot, status).is_err() {
         println!("refusing {operation:?}: the retry floor");
         return Ok(session
             .operations
