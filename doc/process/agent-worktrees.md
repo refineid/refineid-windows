@@ -39,9 +39,9 @@ crates and .NET apps recompile from scratch.
 merge state, dirty files, unpushed commits, activity freshness, and disk use.
 With `--clean` it removes only what is provably done:
 
-- The branch is merged into main, the tree is clean, and nothing is
-  unpushed. The work is fully preserved in main, so deleting the worktree
-  loses nothing. The branch goes with it.
+- The branch is merged into main, the tree is clean, nothing is unpushed,
+  and the worktree has been idle for a day. The work is fully preserved in
+  main, so deleting the worktree loses nothing. The branch goes with it.
 
 Everything else is reported, never destroyed, with the latest commit headline
 quoted so the evaluator — owner or agent — can decide in seconds whether to
@@ -49,6 +49,9 @@ resume work or clean up. In particular:
 
 - Fresh activity (or dirty working tree) is hands off, unconditionally.
 - Uncommitted changes or unpushed commits are never auto-deleted.
+
+`scripts/test-agent-housekeeping.sh` checks these verdicts in a throwaway
+repository.
 
 ## Finishing a task
 
