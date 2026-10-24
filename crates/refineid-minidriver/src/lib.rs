@@ -159,7 +159,7 @@ use refineid_lib_core::pin::PinBytes;
 use refineid_lib_core::pin_cache::PinSafetyCache;
 #[cfg(windows)]
 use refineid_lib_core::pin_retry_risk::{
-    RetryFloorRefusal, check_retry_floor, pin1_status_permits_reusable_cache,
+    RetryFloorRefusal, check_puk_retry_floor, check_retry_floor, pin1_status_permits_reusable_cache,
 };
 #[cfg(windows)]
 use refineid_lib_core::pkcs15::{CertSlot, Pkcs15Ops};
@@ -203,7 +203,7 @@ fn live_pin_status(tx: &mut CardSessionTransport, slot: PinSlot) -> Result<PinSt
 /// presented.
 #[cfg(windows)]
 fn retry_floor_answer(slot: PinSlot, status: PinStatus) -> Result<(), DWORD> {
-    check_retry_floor(slot, status).map_err(|refusal| match refusal {
+    check_retry_floor(slot.into(), status).map_err(|refusal| match refusal {
         RetryFloorRefusal::TriesBelowFloor { .. } | RetryFloorRefusal::Blocked { .. } => {
             refineid_dev_errors::report!(
                 CardModule,
@@ -216,6 +216,36 @@ fn retry_floor_answer(slot: PinSlot, status: PinStatus) -> Result<(), DWORD> {
             refineid_dev_errors::report!(
                 CardModule,
                 "PIN not tried",
+                "the retry counter is unreadable"
+            );
+            SCARD_F_INTERNAL_ERROR
+        }
+    })
+}
+
+/// Read the PUK's counter without spending a try and apply the retry
+/// floor to it before anything that presents the PUK. A PUK below the
+/// floor or blocked answers `SCARD_W_CHV_BLOCKED`; a counter the card did
+/// not report answers `SCARD_F_INTERNAL_ERROR`. The target PIN's counter
+/// does not gate the unblock.
+#[cfg(windows)]
+fn puk_floor_answer(tx: &mut CardSessionTransport) -> Result<(), DWORD> {
+    tx.select_pkcs15_application()
+        .map_err(|_error| SCARD_F_INTERNAL_ERROR)?;
+    let status = tx.puk_status().map_err(|_error| SCARD_F_INTERNAL_ERROR)?;
+    check_puk_retry_floor(status).map_err(|refusal| match refusal {
+        RetryFloorRefusal::TriesBelowFloor { .. } | RetryFloorRefusal::Blocked { .. } => {
+            refineid_dev_errors::report!(
+                CardModule,
+                "PUK not tried",
+                "the retry counter is below its floor"
+            );
+            SCARD_W_CHV_BLOCKED
+        }
+        RetryFloorRefusal::CounterUnreadable { .. } => {
+            refineid_dev_errors::report!(
+                CardModule,
+                "PUK not tried",
                 "the retry counter is unreadable"
             );
             SCARD_F_INTERNAL_ERROR
@@ -2562,6 +2592,9 @@ unsafe extern "system" fn CardUnblockPin(
     if let Err(error) = live_token_serial(&mut tx) {
         return error;
     }
+    if let Err(error) = puk_floor_answer(&mut tx) {
+        return error;
+    }
     let outcome = match target_slot {
         PinSlot::Pin1 => tx.unblock_pin1(puk, new_pin),
         PinSlot::Pin2 => tx.reset_retry_counter(PinSlot::Pin2, puk, new_pin),
@@ -2808,6 +2841,9 @@ unsafe extern "system" fn CardChangeAuthenticatorEx(
         };
         let mut tx = lock_transport(&ctx.transport);
         if let Err(error) = live_token_serial(&mut tx) {
+            return error;
+        }
+        if let Err(error) = puk_floor_answer(&mut tx) {
             return error;
         }
         let outcome = match target_slot {

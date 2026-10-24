@@ -712,7 +712,7 @@ fn execute(
         _ => (PinSlot::Pin2, options.pin2_attempts),
     };
     let status = PinRetries::from_nibble(remaining).map_or(PinStatus::NoInfo, PinStatus::Remaining);
-    if check_retry_floor(slot, status).is_err() {
+    if check_retry_floor(slot.into(), status).is_err() {
         println!("refusing {operation:?}: the retry floor");
         return Ok(session
             .operations

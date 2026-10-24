@@ -776,7 +776,7 @@ fn signing_pin_retry_floor<T: CardTransport>(
             AuthError::Transport(t) => SignErrorKind::Transport(format!("{t}")),
             AuthError::PinPolicy(reason) => SignErrorKind::PinPolicy { reason },
         })?;
-    check_retry_floor(SIGNING_PIN, status).map_err(SignErrorKind::RetryFloor)
+    check_retry_floor(SIGNING_PIN.into(), status).map_err(SignErrorKind::RetryFloor)
 }
 
 /// VERIFY `pin` for `slot` under the resolved `scheme`.

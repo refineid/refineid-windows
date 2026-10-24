@@ -38,7 +38,9 @@ use refineid_lib_core::backend::{
 use refineid_lib_core::crypto::digest::Sha256;
 use refineid_lib_core::fineid_card::{CardClassificationError, FineidCardModel};
 use refineid_lib_core::pin::{ActivationCode, PinBytes, Puk};
-use refineid_lib_core::pin_retry_risk::{RetryFloorRefusal, check_retry_floor};
+use refineid_lib_core::pin_retry_risk::{
+    RetryFloorRefusal, check_puk_retry_floor, check_retry_floor,
+};
 use refineid_lib_core::pkcs15::{
     CardGeneration, CertSlot, FineidReaderPick, classify_card_generation,
     classify_card_generation_by_issuance,
@@ -638,7 +640,7 @@ pub fn change_pin_first(
             });
         }
     };
-    check_retry_floor(slot, status).map_err(CardPinError::RetryFloor)?;
+    check_retry_floor(slot.into(), status).map_err(CardPinError::RetryFloor)?;
 
     re_verify_session(&mut transport, ctx.bound_serial())?;
 
@@ -663,10 +665,14 @@ pub fn change_pin_first(
 /// exhausted the card is dead -- no software recovery, DVV
 /// reissue required. The card's own outcome (wrong-PUK with
 /// retries-left, PUK locked, etc.) is surfaced via
-/// [`UnblockPinReport::outcome`].
+/// [`UnblockPinReport::outcome`]. The PUK is presented only at five,
+/// four or three PUK tries left; the target PIN's counter does not gate
+/// the reset.
 ///
 /// # Errors
-/// PC/SC / PKCS#15 / local-policy / transport failures.
+/// PC/SC / PKCS#15 / local-policy / transport failures, and
+/// [`CardPinError::RetryFloor`] for a PUK below the floor, blocked or
+/// unreadable.
 #[expect(
     clippy::needless_pass_by_value,
     reason = "UnblockPinOptions embeds PUK + new-PIN PinBytes; consumed by value so both drop+zeroize at function return."
@@ -693,6 +699,8 @@ pub fn unblock_pin_first(
             probe,
         });
     }
+
+    puk_retry_floor(&mut transport)?;
 
     re_verify_session(&mut transport, ctx.bound_serial())?;
 
@@ -1228,11 +1236,20 @@ const fn change_to_unblock(o: ChangePinOutcome) -> UnblockOutcome {
 ///
 /// `options` is taken by value so the embedded [`PinBytes`]
 /// instances drop (and zeroize) when this returns.
+/// Read the PUK's counter without spending a try and apply the retry
+/// floor to it, before anything that presents the PUK is sent.
+fn puk_retry_floor<T: refineid_lib_core::transport::CardTransport>(
+    transport: &mut T,
+) -> Result<(), CardPinError> {
+    let status = transport.puk_status().map_err(auth_to_card_pin)?;
+    check_puk_retry_floor(status).map_err(CardPinError::RetryFloor)
+}
+
 /// Per-slot setup for [`activate_first`]: dispatch the
 /// generation-appropriate APDU (`CHANGE REFERENCE DATA` for newer
-/// cards, behind the retry floor; `RESET RETRY COUNTER` for older,
-/// where the activation PIN acts as the PUK) and return the typed
-/// [`UnblockOutcome`].
+/// cards, behind the slot's retry floor; `RESET RETRY COUNTER` for
+/// older, where the activation PIN acts as the PUK, behind the PUK's
+/// retry floor) and return the typed [`UnblockOutcome`].
 ///
 /// `activation_pin_bytes` and `new_pin` are consumed by value so
 /// the PIN material drops + zeroizes at function return.
@@ -1248,15 +1265,20 @@ fn activate_slot_setup<T: refineid_lib_core::transport::CardTransport>(
             // The activation PIN is the slot's current PIN: a wrong one
             // spends that slot's tries, so the retry floor applies.
             let status = transport.pin_status(slot).map_err(auth_to_card_pin)?;
-            check_retry_floor(slot, status).map_err(CardPinError::RetryFloor)?;
+            check_retry_floor(slot.into(), status).map_err(CardPinError::RetryFloor)?;
             transport
                 .change_pin(slot, activation_pin_bytes, new_pin)
                 .map(change_to_unblock)
                 .map_err(auth_to_card_pin)
         }
-        CardGeneration::Older => transport
-            .reset_retry_counter(slot, activation_pin_bytes, new_pin)
-            .map_err(auth_to_card_pin),
+        CardGeneration::Older => {
+            // The activation PIN is presented as the PUK, under the
+            // PUK's counter.
+            puk_retry_floor(transport)?;
+            transport
+                .reset_retry_counter(slot, activation_pin_bytes, new_pin)
+                .map_err(auth_to_card_pin)
+        }
         CardGeneration::Unknown => Err(CardPinError::UnknownCardGeneration),
     }
 }
@@ -1535,8 +1557,9 @@ mod activate_tests {
     const PROBE_AND_CHANGE: usize = 2;
     /// APDUs a refused newer-card activation sends: the status probe only.
     const PROBE_ONLY: usize = 1;
-    /// APDUs an older-card activation sends: `RESET RETRY COUNTER` only.
-    const RESET_ONLY: usize = 1;
+    /// APDUs a served older-card activation sends: the PUK probe and
+    /// `RESET RETRY COUNTER`.
+    const PROBE_AND_RESET: usize = 2;
     /// Synthetic seven-digit activation code.
     const ACTIVATION_CODE: &[u8] = b"0000000";
     /// Synthetic new PIN.
@@ -1632,15 +1655,62 @@ mod activate_tests {
     }
 
     #[test]
-    fn older_activation_with_the_puk_is_not_floored() -> TestResult {
+    fn older_activation_is_served_at_five_four_and_three_puk_tries() -> TestResult {
+        for count in SERVED {
+            let mut transport = FixedStatusTransport::new(tries(count)?);
+            let outcome = setup(&mut transport, CardGeneration::Older)?;
+            check_true(outcome.is_ok(), "PUK-driven reset served above the floor")?;
+            check_true(
+                transport.sent == PROBE_AND_RESET,
+                "PUK probe and RESET RETRY COUNTER sent above the floor",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn older_activation_is_refused_at_two_one_and_zero_puk_tries() -> TestResult {
         for count in REFUSED {
             let mut transport = FixedStatusTransport::new(tries(count)?);
             let outcome = setup(&mut transport, CardGeneration::Older)?;
-            check_true(outcome.is_ok(), "PUK-driven reset served below the floor")?;
+            let Err(error) = outcome else {
+                return Err("PUK-driven reset refused below the floor".into());
+            };
             check_true(
-                transport.sent == RESET_ONLY,
-                "RESET RETRY COUNTER sent without a floor probe",
+                matches!(
+                    error,
+                    CardPinError::RetryFloor(RetryFloorRefusal::TriesBelowFloor { .. })
+                ),
+                "refused by the retry floor",
             )?;
+            let text = error.to_string();
+            check_true(text.contains("PUK"), "refusal names the PUK")?;
+            check_true(text.contains(&count.to_string()), "refusal names the tries")?;
+            check_true(!text.contains("PIN"), "refusal names no other credential")?;
+            check_true(
+                transport.sent == PROBE_ONLY,
+                "only the counter-safe PUK probe sent below the floor",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn older_activation_is_refused_on_a_blocked_puk() -> TestResult {
+        for status in [
+            StatusWord::AuthenticationBlocked,
+            StatusWord::ReferenceDataInvalidated,
+        ] {
+            let mut transport = FixedStatusTransport::new(status);
+            let outcome = setup(&mut transport, CardGeneration::Older)?;
+            check_true(
+                matches!(
+                    outcome,
+                    Err(CardPinError::RetryFloor(RetryFloorRefusal::Blocked { .. }))
+                ),
+                "blocked PUK refused",
+            )?;
+            check_true(transport.sent == PROBE_ONLY, "only the probe sent")?;
         }
         Ok(())
     }
