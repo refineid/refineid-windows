@@ -27,9 +27,9 @@
 - Verify claims from Microsoft, DVV, ICAO, eIDAS, or another primary source.
 - On Windows, run `scripts/setup-dev-tools.ps1` before building (see
   `doc/toolchain.md`). It installs the toolchain and keeps Visual Studio and
-  every SDK at the latest release. The Rust release is pinned only in
-  `rust-toolchain.toml`; never repeat it in prose.
-- Always run formatting (`cargo fmt`, `csharpier`), clippy (`-D warnings` on both host and Windows targets), and unit tests before committing (`.githooks/pre-commit` enforces this). `Cargo.lock` must match the manifests (`.githooks/pre-push` enforces this); it may pin an older refineid-core commit, and moving to a newer core is its own pull request. Never bypass verification with `--no-verify`. Hardware claims additionally require a real reader and card.
+  every SDK at the latest release. Rust follows the latest stable release
+  (`rust-toolchain.toml` selects the stable channel); never pin a release.
+- Always run formatting (`cargo fmt`, `csharpier`), clippy (`-D warnings` on both host and Windows targets), and unit tests before committing (`.githooks/pre-commit` enforces this). `Cargo.lock` must match the manifests (`.githooks/pre-push` enforces this); the refineid-core crates track core main, so refresh them with `cargo update -p refineid-rapp` when core moves. Never bypass verification with `--no-verify`. Hardware claims additionally require a real reader and card.
 - Reading does not require a worktree; writing does. The main checkout is
   never edited directly. Before writing code or modifying files for any task,
   create a dedicated git worktree strictly under `../wt/`

@@ -25,8 +25,8 @@ Visual Studio Installer for:
   recommends (including `signtool.exe`). An existing Visual Studio 2026 or
   later instance, Community or Build Tools, is updated and extended instead of
   installing a second one;
-- `rustup`, updated to its latest release, and the toolchain pinned by
-  `rust-toolchain.toml`;
+- `rustup`, updated to its latest release, and the latest stable Rust with
+  the components and targets `rust-toolchain.toml` names;
 - the latest .NET SDK of the major the WinUI apps target
   (`TargetFramework` in `apps/RefineID-winui/RefineID.csproj`) and the
   repository's .NET local tools (`csharpier`);
@@ -59,8 +59,9 @@ git ls-files --eol | grep -c w/crlf   # 0
 
 The requirements it satisfies:
 
-- **Rust** through `rustup`. The channel, components, and targets are pinned
-  only by `rust-toolchain.toml`; update the release there and nowhere else.
+- **Rust** through `rustup`. `rust-toolchain.toml` selects the stable channel,
+  so every build uses the latest stable release; it also names the
+  components and targets. `rustup update` moves to a new release.
   `rustup toolchain install` in the repository, or the first `cargo`
   invocation, installs them.
 - **.NET 10 SDK** for the WinUI apps. The apps obtain their Windows App SDK
