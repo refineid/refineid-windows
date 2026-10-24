@@ -63,7 +63,13 @@ pub(crate) type SCARDCONTEXT = usize; // ULONG_PTR
 pub(crate) type SCARDHANDLE = usize; // ULONG_PTR
 
 // ---------- SCard / NTSTATUS error codes -----------------------------------
+//
+// Microsoft Learn, "Authentication Return Values", Smart Card Return
+// Values (Scarderr.h) for the SCARD_ statuses; winerror.h for the NTE_
+// statuses. `tests` below holds every constant to the Windows SDK value
+// `windows-sys` carries for the same name.
 
+/// Scarderr.h `NO_ERROR`.
 pub(crate) const SCARD_S_SUCCESS: DWORD = 0;
 pub(crate) const SCARD_F_INTERNAL_ERROR: DWORD = 0x8010_0001;
 pub(crate) const SCARD_E_CANCELLED: DWORD = 0x8010_0002;
@@ -73,29 +79,29 @@ pub(crate) const SCARD_E_NO_MEMORY: DWORD = 0x8010_0006;
 pub(crate) const SCARD_E_INSUFFICIENT_BUFFER: DWORD = 0x8010_0008;
 pub(crate) const SCARD_E_UNKNOWN_CARD: DWORD = 0x8010_000D;
 pub(crate) const SCARD_E_INVALID_VALUE: DWORD = 0x8010_0011;
+/// "The specified reader is not currently available for use."
+pub(crate) const SCARD_E_READER_UNAVAILABLE: DWORD = 0x8010_0017;
+/// "This smart card does not support the requested feature."
+pub(crate) const SCARD_E_UNSUPPORTED_FEATURE: DWORD = 0x8010_0022;
+pub(crate) const SCARD_E_DIR_NOT_FOUND: DWORD = 0x8010_0023;
+pub(crate) const SCARD_E_FILE_NOT_FOUND: DWORD = 0x8010_0024;
+/// "The supplied path does not represent a smart card directory."
+pub(crate) const SCARD_E_NO_DIR: DWORD = 0x8010_0025;
+/// "The supplied path does not represent a smart card file."
+pub(crate) const SCARD_E_NO_FILE: DWORD = 0x8010_0026;
+pub(crate) const SCARD_E_NO_ACCESS: DWORD = 0x8010_0027;
+pub(crate) const SCARD_E_WRITE_TOO_MANY: DWORD = 0x8010_0028;
+/// "A communications error with the smart card has been detected."
+pub(crate) const SCARD_E_COMM_DATA_LOST: DWORD = 0x8010_002F;
+pub(crate) const SCARD_E_NO_KEY_CONTAINER: DWORD = 0x8010_0030;
 pub(crate) const SCARD_W_UNRESPONSIVE_CARD: DWORD = 0x8010_0066;
 pub(crate) const SCARD_W_UNPOWERED_CARD: DWORD = 0x8010_0067;
 pub(crate) const SCARD_W_RESET_CARD: DWORD = 0x8010_0068;
 pub(crate) const SCARD_W_REMOVED_CARD: DWORD = 0x8010_0069;
 pub(crate) const SCARD_W_WRONG_CHV: DWORD = 0x8010_006B;
 pub(crate) const SCARD_W_CHV_BLOCKED: DWORD = 0x8010_006C;
-pub(crate) const SCARD_E_DIR_NOT_FOUND: DWORD = 0x8010_0023;
-pub(crate) const SCARD_E_FILE_NOT_FOUND: DWORD = 0x8010_0024;
-pub(crate) const SCARD_E_NO_FILE: DWORD = 0x8010_0024;
-pub(crate) const SCARD_E_NO_DIR: DWORD = 0x8010_0023;
-pub(crate) const SCARD_E_NO_KEY_CONTAINER: DWORD = 0x8010_0030;
-pub(crate) const SCARD_E_UNSUPPORTED_FEATURE: DWORD = 0x8010_001F;
-pub(crate) const SCARD_E_NO_ACCESS: DWORD = 0x8010_0027;
-pub(crate) const SCARD_E_WRITE_TOO_MANY: DWORD = 0x8010_0028;
-pub(crate) const SCARD_E_NO_MORE_AVAILABLE: DWORD = 0x8010_0022;
-// Microsoft Learn, "Authentication Return Values", Smart Card Return
-// Values (Scarderr.h).
 /// "The action was canceled by the user."
 pub(crate) const SCARD_W_CANCELLED_BY_USER: DWORD = 0x8010_006E;
-/// "A communications error with the smart card has been detected."
-pub(crate) const SCARD_E_COMM_DATA_LOST: DWORD = 0x8010_002F;
-/// "The specified reader is not currently available for use."
-pub(crate) const SCARD_E_READER_UNAVAILABLE: DWORD = 0x8010_0017;
 pub(crate) const NTE_NO_KEY: DWORD = 0x8009_000D;
 pub(crate) const NTE_BAD_KEYSET: DWORD = 0x8009_0016;
 
@@ -729,3 +735,59 @@ pub(crate) struct CONTAINER_MAP_RECORD {
 }
 pub(crate) const CONTAINER_MAP_VALID_CONTAINER: BYTE = 1;
 pub(crate) const CONTAINER_MAP_DEFAULT_CONTAINER: BYTE = 2;
+
+#[cfg(test)]
+mod tests {
+    //! Every status constant against the Windows SDK value `windows-sys`
+    //! carries for the same name.
+
+    use super::*;
+
+    macro_rules! assert_sdk_value {
+        ($($name:ident),* $(,)?) => {
+            $(assert_eq!(
+                $name,
+                windows_sys::Win32::Foundation::$name.cast_unsigned(),
+                stringify!($name)
+            );)*
+        };
+    }
+
+    #[test]
+    fn success_is_no_error() {
+        assert_eq!(SCARD_S_SUCCESS, windows_sys::Win32::Foundation::NO_ERROR);
+    }
+
+    #[test]
+    fn status_constants_carry_their_sdk_values() {
+        assert_sdk_value![
+            SCARD_F_INTERNAL_ERROR,
+            SCARD_E_CANCELLED,
+            SCARD_E_INVALID_HANDLE,
+            SCARD_E_INVALID_PARAMETER,
+            SCARD_E_NO_MEMORY,
+            SCARD_E_INSUFFICIENT_BUFFER,
+            SCARD_E_UNKNOWN_CARD,
+            SCARD_E_INVALID_VALUE,
+            SCARD_E_READER_UNAVAILABLE,
+            SCARD_E_UNSUPPORTED_FEATURE,
+            SCARD_E_DIR_NOT_FOUND,
+            SCARD_E_FILE_NOT_FOUND,
+            SCARD_E_NO_DIR,
+            SCARD_E_NO_FILE,
+            SCARD_E_NO_ACCESS,
+            SCARD_E_WRITE_TOO_MANY,
+            SCARD_E_COMM_DATA_LOST,
+            SCARD_E_NO_KEY_CONTAINER,
+            SCARD_W_UNRESPONSIVE_CARD,
+            SCARD_W_UNPOWERED_CARD,
+            SCARD_W_RESET_CARD,
+            SCARD_W_REMOVED_CARD,
+            SCARD_W_WRONG_CHV,
+            SCARD_W_CHV_BLOCKED,
+            SCARD_W_CANCELLED_BY_USER,
+            NTE_NO_KEY,
+            NTE_BAD_KEYSET,
+        ];
+    }
+}
