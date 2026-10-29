@@ -55,11 +55,11 @@ const DEFAULT_LE_ATT_MTU: u16 = 23;
 /// §3.2.9); no indication fragment is longer.
 const ATTRIBUTE_VALUE_LIMIT: usize = 512;
 
-/// The ATT error a custodian refuses a write with when it cannot admit the
-/// `CPace` step 1 it carries: `0x80 Application Error`, the first code of
-/// the application error range (Bluetooth Core v5.4, Vol 3, Part F,
-/// §3.4.1.1; RAPP v26.10.29 §3.3 item 6 and §4.2, "Busy Refusal" item 2).
-const ATT_APPLICATION_ERROR: u8 = 0x80;
+/// The ATT error a custodian answers to a `CPace` step 1 write it cannot
+/// admit (RAPP v26.10.29 §4.2, "Busy Refusal"): `0x11 Insufficient
+/// Resources`, Bluetooth Core Specification Vol. 3, Part F, §3.4.1.1. The
+/// requester then reads the Bootstrap Characteristic again.
+const ATT_INSUFFICIENT_RESOURCES: u8 = 0x11;
 
 /// A characteristic of the RAPP service.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -388,7 +388,7 @@ impl BleLink {
                 if written
                     .ProtocolError()
                     .and_then(|error| error.Value())
-                    .is_ok_and(|error| error == ATT_APPLICATION_ERROR) =>
+                    .is_ok_and(|error| error == ATT_INSUFFICIENT_RESOURCES) =>
             {
                 Err(TransportError::Refused)
             }
