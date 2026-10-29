@@ -71,6 +71,10 @@ const FIRST_ENDPOINT: usize = 0;
 const SECOND_ENDPOINT: usize = 1;
 /// The wait a busy scripted custodian asks for: its admission spacing.
 const BUSY_WAIT_MS: u64 = PRE_AUTHENTICATION_SPACING_MS;
+/// The discovery round that finds the custodians present at the start.
+const FIRST_ROUND: usize = 1;
+/// The discovery round that finds the custodians that arrive later.
+const SECOND_ROUND: usize = 2;
 /// The least wait a busy custodian may ask for.
 const LEAST_BUSY_WAIT_MS: u64 = refineid_rapp::PAIRING_BUSY_RETRY_AFTER_MIN_MS;
 /// How long a scripted custodian waits for the requester while it tries
@@ -1104,12 +1108,14 @@ fn input_that_is_not_a_code_never_touches_the_transport() {
 /// What a scripted custodian does on its half of one pairing connection.
 type CustodianScript = Box<dyn FnOnce(MemoryTransport) + Send>;
 
-/// Custodians in pairing mode at scripted endpoints, all found in the
-/// first discovery round. Each endpoint holds the connections it answers,
-/// in the order they are opened.
+/// Custodians in pairing mode at scripted endpoints, found in the first
+/// discovery round except those in `found_later`, which the second round
+/// finds. Each endpoint holds the connections it answers, in the order
+/// they are opened.
 struct ScriptedCustodians {
     connections: Vec<Vec<MemoryTransport>>,
-    discovered: bool,
+    found_later: Vec<usize>,
+    rounds: usize,
     /// The endpoints opened, in the order opened.
     opened: Vec<usize>,
 }
@@ -1119,8 +1125,18 @@ impl PairingCandidateSource for ScriptedCustodians {
     type Transport = MemoryTransport;
 
     fn discover(&mut self) -> Option<Vec<usize>> {
-        (!std::mem::replace(&mut self.discovered, true))
-            .then(|| (0..self.connections.len()).collect())
+        self.rounds += 1;
+        match self.rounds {
+            FIRST_ROUND => Some(
+                (0..self.connections.len())
+                    .filter(|endpoint| !self.found_later.contains(endpoint))
+                    .collect(),
+            ),
+            SECOND_ROUND if !self.found_later.is_empty() => {
+                Some(std::mem::take(&mut self.found_later))
+            }
+            _ => None,
+        }
     }
 
     fn open(&mut self, endpoint: &usize) -> Option<PairingConnection<MemoryTransport>> {
@@ -1157,7 +1173,8 @@ fn scripted_endpoints(
     }
     let source = ScriptedCustodians {
         connections,
-        discovered: false,
+        found_later: Vec::new(),
+        rounds: 0,
         opened: Vec::new(),
     };
     (source, custodians)
@@ -1329,6 +1346,22 @@ fn a_busy_phone_is_asked_again_after_the_others_and_its_wait() {
 }
 
 #[test]
+fn a_phone_found_during_a_busy_wait_is_opened_before_the_busy_one() {
+    let mut requester = test_requester();
+    let (mut custodians, threads) = scripted_endpoints(vec![
+        vec![busy_at_bootstrap(BUSY_WAIT_MS), Box::new(drop)],
+        vec![accepting()],
+    ]);
+    custodians.found_later = vec![SECOND_ENDPOINT];
+    let outcome = requester.pair_with_code(SHOWN_CODE, &mut custodians, |_, requested| {
+        Some(requested.to_vec())
+    });
+    assert_eq!(outcome.map(|(_, endpoint)| endpoint), Ok(SECOND_ENDPOINT));
+    assert_eq!(custodians.opened, [FIRST_ENDPOINT, SECOND_ENDPOINT]);
+    join(threads);
+}
+
+#[test]
 fn a_busy_answer_in_place_of_step_two_is_not_a_try() {
     let mut requester = test_requester();
     let (mut custodians, threads) =
@@ -1347,7 +1380,7 @@ fn a_busy_answer_in_place_of_step_two_is_not_a_try() {
 fn a_phone_busy_at_the_limit_has_not_accepted_the_code() {
     let mut requester = test_requester();
     let (mut custodians, threads) = scripted_endpoints(vec![
-        (0..PAIRING_CANDIDATES_MAX)
+        (0..=PAIRING_CANDIDATES_MAX)
             .map(|_| busy_at_bootstrap(LEAST_BUSY_WAIT_MS))
             .collect(),
     ]);
@@ -1357,6 +1390,55 @@ fn a_phone_busy_at_the_limit_has_not_accepted_the_code() {
     join(threads);
     assert_eq!(outcome, Err(PairingSearchError::NotAccepted));
     assert_eq!(custodians.opened.len(), PAIRING_CANDIDATES_MAX);
+}
+
+/// One custodian that answers busy for the longest wait, and a user who
+/// stops the search `stop_after` the connection.
+struct StoppedWhileBusy {
+    connection: Option<MemoryTransport>,
+    stop_after: Duration,
+    stop_at: Option<Instant>,
+}
+
+impl PairingCandidateSource for StoppedWhileBusy {
+    type Endpoint = ();
+    type Transport = MemoryTransport;
+
+    fn stopped(&self) -> bool {
+        self.stop_at
+            .is_some_and(|stop_at| Instant::now() >= stop_at)
+    }
+
+    fn discover(&mut self) -> Option<Vec<()>> {
+        self.connection.is_some().then(|| vec![()])
+    }
+
+    fn open(&mut self, _endpoint: &()) -> Option<PairingConnection<MemoryTransport>> {
+        let transport = self.connection.take()?;
+        self.stop_at = Some(Instant::now() + self.stop_after);
+        read_bootstrap_answer(transport).ok()
+    }
+}
+
+#[test]
+fn stopping_during_a_busy_wait_ends_the_search_within_a_tick() {
+    let (requester_side, custodian_side) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    let custodian = std::thread::spawn(move || {
+        busy_at_bootstrap(refineid_rapp::PAIRING_BUSY_RETRY_AFTER_MAX_MS)(custodian_side);
+    });
+    let stop_after = Duration::from_millis(BUSY_WAIT_MS);
+    let mut source = StoppedWhileBusy {
+        connection: Some(requester_side),
+        stop_after,
+        stop_at: None,
+    };
+    let started = Instant::now();
+    let outcome = test_requester().pair_with_code(SHOWN_CODE, &mut source, |_, _| {
+        panic!("a busy phone never reaches confirmation")
+    });
+    custodian.join().unwrap();
+    assert_eq!(outcome, Err(PairingSearchError::Stopped));
+    assert!(started.elapsed() < stop_after + SESSION_RECEIVE_TICK + SESSION_RECEIVE_TICK);
 }
 
 /// A connection whose custodian, while `refusing`, refuses every write, as

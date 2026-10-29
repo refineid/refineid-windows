@@ -341,14 +341,18 @@ impl Admission {
     }
 
     /// Admits a pairing connection at `now_ms` to be served the offer, or
-    /// answers it busy (section 4.2, Bootstrap Read Flow item 2).
+    /// answers it busy (section 4.2, Bootstrap Read Flow item 2). A refused
+    /// connection does not move the connection spacing, and its busy
+    /// answer carries the larger of the attempt's time left and every
+    /// spacing left.
     fn admit_connection(&mut self, now_ms: u64) -> Result<(), PairingBusy> {
         self.expire(now_ms);
-        if !self.connections.admit(now_ms) {
-            return Err(self.busy(now_ms, self.connections.wait_ms(now_ms)));
-        }
-        if self.slot.has_active_attempt() || self.step_one.wait_ms(now_ms) > 0 {
-            return Err(self.busy(now_ms, 0));
+        let spacing_wait_ms = self.connections.wait_ms(now_ms);
+        if self.slot.has_active_attempt()
+            || self.step_one.wait_ms(now_ms) > 0
+            || !self.connections.admit(now_ms)
+        {
+            return Err(self.busy(now_ms, spacing_wait_ms));
         }
         Ok(())
     }
@@ -1048,4 +1052,42 @@ fn sign_digest(digest: &[u8], algorithm: SignatureAlgorithm) -> Vec<u8> {
         | SignatureAlgorithm::RsaPssSha256 => MOCK_RSA_2048_SIG_BYTES,
     };
     vec![MOCK_FALLBACK_SIGNATURE_BYTE; sig_len]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Admission;
+    use refineid_rapp::{CPACE_ATTEMPT_WINDOW_MS, PRE_AUTHENTICATION_SPACING_MS};
+
+    /// The monotonic time the offer is shown at.
+    const SHOWN_AT_MS: u64 = 10_000;
+
+    #[test]
+    fn a_connection_during_an_attempt_is_busy_and_moves_no_spacing() {
+        let mut admission = Admission::new(SHOWN_AT_MS);
+        assert!(admission.admit_connection(SHOWN_AT_MS).is_ok());
+        let attempt = admission.admit_step_one(SHOWN_AT_MS).expect("admitted");
+
+        let probe_ms = SHOWN_AT_MS + PRE_AUTHENTICATION_SPACING_MS;
+        let busy = admission
+            .admit_connection(probe_ms)
+            .expect_err("an attempt is active");
+        assert_eq!(
+            busy.retry_after_ms(),
+            CPACE_ATTEMPT_WINDOW_MS - PRE_AUTHENTICATION_SPACING_MS
+        );
+
+        admission.fail(attempt);
+        assert!(admission.admit_connection(probe_ms).is_ok());
+    }
+
+    #[test]
+    fn a_busy_answer_carries_the_connection_spacing_left() {
+        let mut admission = Admission::new(SHOWN_AT_MS);
+        assert!(admission.admit_connection(SHOWN_AT_MS).is_ok());
+        let busy = admission
+            .admit_connection(SHOWN_AT_MS)
+            .expect_err("the spacing has not passed");
+        assert_eq!(busy.retry_after_ms(), PRE_AUTHENTICATION_SPACING_MS);
+    }
 }

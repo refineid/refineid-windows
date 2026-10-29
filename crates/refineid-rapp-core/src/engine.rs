@@ -73,6 +73,7 @@ const SESSION_SILENCE_LIMIT: Duration =
 const SESSION_RECORD_INTERVAL_MS: u64 =
     refineid_rapp::PAIRING_IDLE_EXPIRY_MS / refineid_rapp::PAIRING_IDLE_EXPIRY_DAYS;
 
+use crate::clock::continuous_ms;
 use crate::ids::{Challenge, OperationId, PairId, RandomIdExt, SessionId};
 use crate::message::{CardPresence, CardStatusMessage, CloseReason, ResultError, ResultStatus};
 use crate::offer::{BootstrapAnswer, OfferError, PairingBusy, PairingOffer};
@@ -716,8 +717,10 @@ impl<Store: PairingStore> Requester<Store> {
     /// opened. A Custodian that answers `pairing-busy`, at bootstrap, in
     /// place of `CPace` step 2, or by refusing step 1 on BLE, is not a try:
     /// its endpoint is opened again after every other endpoint waiting and
-    /// no sooner than the wait it asked for, which the search sits out
-    /// quietly. The offer a connection serves is admitted before `CPace`
+    /// no sooner than the wait it asked for. During the wait the search
+    /// keeps discovering, and an endpoint found meanwhile is opened first;
+    /// once discovery is over the wait is sat out quietly. Waits run on the
+    /// monotonic clock. The offer a connection serves is admitted before `CPace`
     /// step 1, so a Custodian found on two endpoints receives one guess. On an
     /// admitted offer the requester binds the entry for the connection's
     /// transport profile, sends `Y_A`, and verifies the Custodian's
@@ -766,14 +769,24 @@ impl<Store: PairingStore> Requester<Store> {
             .map(Zeroizing::new)
             .ok_or(PairingSearchError::InvalidCode)?;
         let mut candidates = PairingCandidates::<Source::Endpoint>::new();
+        // Whether discovery still finds endpoints; once a round says the
+        // search is over, a busy wait is sat out without browsing.
+        let mut discovering = true;
         loop {
             if source.stopped() {
                 return Err(PairingSearchError::Stopped);
             }
-            let endpoint = match candidates.next_endpoint(current_time_ms()) {
+            let endpoint = match candidates.next_endpoint(continuous_ms()) {
                 Ok(NextEndpoint::Open(endpoint)) => endpoint.clone(),
                 Ok(NextEndpoint::NotBefore(due_ms)) => {
-                    Self::sit_out_busy(source, due_ms);
+                    if let Some(found) = discovering.then(|| source.discover()).flatten() {
+                        for endpoint in found {
+                            candidates.found(endpoint);
+                        }
+                    } else {
+                        discovering = false;
+                        Self::sit_out_busy(source, due_ms);
+                    }
                     continue;
                 }
                 Ok(NextEndpoint::Exhausted) | Err(_) => {
@@ -788,7 +801,7 @@ impl<Store: PairingStore> Requester<Store> {
             };
             let next = match source.open(&endpoint) {
                 Some(PairingConnection::Busy(busy)) => {
-                    candidates.busy(busy.retry_after_ms(), current_time_ms())
+                    candidates.busy(busy.retry_after_ms(), continuous_ms())
                 }
                 Some(PairingConnection::Offer(mut transport, offer))
                     if candidates.begin_try(&offer).is_ok() =>
@@ -802,15 +815,15 @@ impl<Store: PairingStore> Requester<Store> {
                                 .map_err(PairingSearchError::Ceremony);
                         }
                         Err(CodeRefusal::Busy(retry_after_ms)) => {
-                            candidates.busy(retry_after_ms, current_time_ms())
+                            candidates.busy(retry_after_ms, continuous_ms())
                         }
                         Err(CodeRefusal::StepOneRefused) => {
                             match source.bootstrap_again(&mut transport) {
                                 Some(BootstrapAnswer::Busy(busy)) => {
-                                    candidates.busy(busy.retry_after_ms(), current_time_ms())
+                                    candidates.busy(busy.retry_after_ms(), continuous_ms())
                                 }
                                 Some(BootstrapAnswer::Offer(_)) => {
-                                    candidates.busy(OFFER_AFTER_REFUSAL_WAIT_MS, current_time_ms())
+                                    candidates.busy(OFFER_AFTER_REFUSAL_WAIT_MS, continuous_ms())
                                 }
                                 None => candidates.closed(),
                             }
@@ -829,12 +842,13 @@ impl<Store: PairingStore> Requester<Store> {
         }
     }
 
-    /// Waits until the monotonic time `due_ms` a busy Custodian asked for,
+    /// Waits until the time `due_ms` on the monotonic clock a busy Custodian
+    /// asked for,
     /// or until the user stops the search; nothing is shown meanwhile
     /// (section 4.2, "Trying Each Custodian in Pairing Mode" item 1).
     fn sit_out_busy<Source: PairingCandidateSource>(source: &Source, due_ms: u64) {
         loop {
-            let left_ms = due_ms.saturating_sub(current_time_ms());
+            let left_ms = due_ms.saturating_sub(continuous_ms());
             if left_ms == 0 || source.stopped() {
                 return;
             }
@@ -1749,5 +1763,5 @@ fn receive_handshake_frame<Transport: FrameTransport>(
 /// The continuous clock every protocol deadline is measured on (section
 /// 8.1 item 2).
 fn current_time_ms() -> u64 {
-    crate::clock::continuous_ms()
+    continuous_ms()
 }
