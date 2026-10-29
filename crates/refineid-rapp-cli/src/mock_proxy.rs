@@ -1,6 +1,6 @@
 //! Mock RAPP custodian for automated verification and testing.
 //!
-//! Listens like a phone does (RAPP v26.10.22 section 2.2.2), shows a pairing
+//! Listens like a phone does (RAPP v26.10.29 section 2.2.2), shows a pairing
 //! code, serves a random offer after the pairing preamble, answers `CPace`
 //! KC2 as responder and `Noise_XXpsk3` with the hello, confirmation, and
 //! storage confirmation exchange, then accepts sessions routed by their
@@ -22,10 +22,10 @@ use refineid_lib_core::x509::OwnedCert;
 use refineid_rapp::{
     BinaryFrame, CardIdentity, CardInspection, CardOperation, CardOperationResult, CardPresence,
     CardReader, CardStatusMessage, CertificateFingerprint, CpaceKc2Responder,
-    DEFAULT_OPERATION_LIFETIME_MS, EndpointRole, EstablishedSessionRuntime, MAXIMUM_CPACE_ATTEMPTS,
-    OfferId, OperationRequest, OperationResultMessage, OperationViolation, PairRecord,
-    PairingHandshake, PairingOffer, PingChallenge, ProfileName, ProgressEvent, ProxyDispatch,
-    ProxyEngineError, ProxyFailure, ProxyOperationEngine, RoutingKey, RuntimePoll, RuntimeReceive,
+    DEFAULT_OPERATION_LIFETIME_MS, EndpointRole, EstablishedSessionRuntime, OfferId,
+    OperationRequest, OperationResultMessage, OperationViolation, PairRecord, PairingHandshake,
+    PairingOffer, PingChallenge, ProfileName, ProgressEvent, ProxyDispatch, ProxyEngineError,
+    ProxyFailure, ProxyOperationEngine, RoutingKey, RuntimePoll, RuntimeReceive,
     SESSION_READY_NONCE_SIZE, SessionHandshake, SignatureAlgorithm, TransportProfile, TypedMessage,
     UserApproval, decode_pair_record, encode_pair_record, generate_pair_key_material,
     route_session, standard_pairing_context_v2,
@@ -33,6 +33,7 @@ use refineid_rapp::{
 use refineid_rapp_core::clock::{continuous_ms, unix_time_ms};
 use refineid_rapp_core::engine::SESSION_RECEIVE_TICK;
 use refineid_rapp_core::ids::{Challenge, RandomIdExt as _};
+use refineid_rapp_core::limits::OFFER_TTL_MS;
 use refineid_rapp_core::offer::{format_pairing_code, generate_pairing_code};
 use refineid_rapp_core::stream::{STREAM_CANDIDATE_ID, StreamAccept, StreamListener};
 use refineid_rapp_core::transport::{
@@ -43,6 +44,9 @@ use zeroize::Zeroizing;
 /// How long the mock waits for each frame of a pairing: the requester's
 /// user confirms the grants in between.
 const PAIRING_STEP_WAIT: Duration = Duration::from_secs(10);
+
+/// How long the mock serves one pairing offer (section 3.3).
+const OFFER_LIFETIME: Duration = Duration::from_millis(OFFER_TTL_MS);
 
 /// Default listen address: the local mock custodian endpoint requesters
 /// fall back to.
@@ -276,8 +280,9 @@ fn custodian_offer() -> Result<PairingOffer, String> {
     .map_err(|e| format!("offer creation failed: {e:?}"))
 }
 
-/// Shows the code and accepts pairing connections until one pairs or the
-/// custodian's three `CPace` attempts are spent (section 3.3).
+/// Shows the code and serves the offer to one pairing connection at a time
+/// until one pairs or the offer's lifetime ends (section 3.3). A failed
+/// attempt frees the slot and leaves the offer as it was.
 fn run_pairing(
     listener: &StreamListener,
     options: &MockProxyOptions,
@@ -288,22 +293,24 @@ fn run_pairing(
     };
     let offer = custodian_offer()?;
     println!("pairing code: {}", format_pairing_code(&code));
-    let mut attempts = 0_u8;
-    while attempts < MAXIMUM_CPACE_ATTEMPTS {
+    let offer_ends = Instant::now() + OFFER_LIFETIME;
+    loop {
+        let remaining = offer_ends.saturating_duration_since(Instant::now());
         let accepted = listener
-            .accept()
+            .accept_timeout(remaining)
             .map_err(|e| format!("accept failed: {e:?}"))?;
+        let Some(accepted) = accepted else {
+            return Err("pairing offer expired".into());
+        };
         let StreamAccept::Pairing(transport) = accepted else {
             println!("ignored a session connection while pairing");
             continue;
         };
-        attempts += 1;
         match pair_once(transport, &offer, &code, options) {
             Ok(record) => return Ok(ProxyPairing { record }),
-            Err(error) => println!("pairing attempt {attempts} failed: {error}"),
+            Err(error) => println!("pairing attempt failed: {error}"),
         }
     }
-    Err("pairing attempts exhausted".into())
 }
 
 /// Receives one pairing frame, waiting through the connection's receive

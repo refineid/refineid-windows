@@ -1,4 +1,4 @@
-//! Reaching a stored pairing's phone over Bluetooth (RAPP v26.10.22
+//! Reaching a stored pairing's phone over Bluetooth (RAPP v26.10.29
 //! section 2.2.1).
 //!
 //! An advertisement cannot say whose phone it is, so a session preamble is
@@ -48,7 +48,7 @@ pub enum ReachError {
     NotReached,
     /// No session can open: the pairing is unknown, revoked, forgotten or
     /// unconfirmed, its phone revoked it on this attempt, or the requester
-    /// withdrew (RAPP v26.10.22 section 4.5 item 8).
+    /// withdrew (RAPP v26.10.29 section 4.5 item 8).
     Pairing(SessionError),
 }
 

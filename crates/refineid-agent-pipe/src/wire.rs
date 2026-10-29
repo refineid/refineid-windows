@@ -202,7 +202,7 @@ pub enum SignAnswer {
     /// The phone refused the request.
     Rejected,
     /// The session to the phone ended before its answer; the operation
-    /// ended with it (RAPP v26.10.22 section 8.1 item 3).
+    /// ended with it (RAPP v26.10.29 section 8.1 item 3).
     Lost,
     /// The paired phone could not be reached in time.
     NoPhone,

@@ -359,7 +359,7 @@ impl ModuleState {
         // offered on: one whose card a session heard present within the
         // grace. It goes once that lapses, at once when a session hears
         // another card, and when the pairing is forgotten or revoked (RAPP
-        // v26.10.22 sections 4.6 and 8.4 item 3).
+        // v26.10.29 sections 4.6 and 8.4 item 3).
         let offering: Vec<String> = pairs
             .iter()
             .filter(|pair| {

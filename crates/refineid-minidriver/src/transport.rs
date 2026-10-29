@@ -268,7 +268,7 @@ pub(crate) enum RemoteFailure {
     /// The holder declined on the phone (`user_cancelled`).
     UserCancelled,
     /// The pairing serves nothing: the user forgot it here, or the phone
-    /// closed with `pairing_revoked` (RAPP v26.10.22 section 4.6).
+    /// closed with `pairing_revoked` (RAPP v26.10.29 section 4.6).
     Unpaired,
     /// The phone was not reached, or has turned remote access off.
     Unreachable,
@@ -276,7 +276,7 @@ pub(crate) enum RemoteFailure {
     Lost,
     /// The phone's card did not answer this operation (`card_error`): a
     /// failed operation, never the card's absence, which only `card.status`
-    /// reports (RAPP v26.10.22 section 8.4 item 1).
+    /// reports (RAPP v26.10.29 section 8.4 item 1).
     CardError,
     /// Any other refusal or fault, named for debug logs.
     Failed(String),
@@ -373,7 +373,7 @@ impl RemoteCardTransport {
         );
 
         // The phone's `pairing_revoked` close revokes the pairing in the
-        // protected store the requester runs over (RAPP v26.10.22 section
+        // protected store the requester runs over (RAPP v26.10.29 section
         // 4.6 item 4), and the user is told to pair again.
         let mut session = match requester.connect(self.pair_id, transport) {
             Ok(session) => session,

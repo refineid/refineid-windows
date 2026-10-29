@@ -38,7 +38,7 @@ const PAIRING_BLOB_MAGIC: &[u8] = b"RAPP-pair-record";
 const PAIRING_BLOB_VERSION: u8 = 8;
 
 /// The highest revision written for an earlier RAPP protocol version. Those
-/// pairings cannot open RAPP v26.10.22 sessions, so they are not loaded.
+/// pairings cannot open RAPP v26.10.29 sessions, so they are not loaded.
 const LAST_EARLIER_PROTOCOL_BLOB_VERSION: u8 = 7;
 
 /// The lowest revision ever written.

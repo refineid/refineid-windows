@@ -50,15 +50,15 @@ const STORE_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 /// The operation lifetime sent on the wire, in milliseconds.
 const OPERATION_LIFETIME_MS: u64 = OPERATION_LIFETIME.as_secs() * 1_000;
 /// How long a fresh session waits for the phone's first card report before
-/// a waiting request runs (RAPP v26.10.22 section 8.4 item 1): the phone
+/// a waiting request runs (RAPP v26.10.29 section 8.4 item 1): the phone
 /// sends it right after `session.ready`.
 const FIRST_CARD_REPORT_WAIT: Duration = Duration::from_secs(5);
 /// How long a quitting agent waits for its `service_withdrawn` closes to be
-/// written before it exits (RAPP v26.10.22 section 4.5 item 8).
+/// written before it exits (RAPP v26.10.29 section 4.5 item 8).
 const QUIT_WITHDRAWAL_BOUND: Duration =
     Duration::from_millis(refineid_rapp::QUIT_WITHDRAWAL_BOUND_MS);
 /// How often the agent checks every pairing for idle expiry while it holds
-/// a session: one day, the least often RAPP v26.10.22 section 4.6 item 5
+/// a session: one day, the least often RAPP v26.10.29 section 4.6 item 5
 /// allows. Between sessions it checks each time it reads the pairing store.
 const IDLE_CHECK_INTERVAL: Duration = Duration::from_millis(
     refineid_rapp::PAIRING_IDLE_EXPIRY_MS / refineid_rapp::PAIRING_IDLE_EXPIRY_DAYS,
@@ -197,7 +197,7 @@ struct Pairing {
     key: RoutingKey,
 }
 
-/// The user quit the agent (RAPP v26.10.22 section 4.5 item 8): each open
+/// The user quit the agent (RAPP v26.10.29 section 4.5 item 8): each open
 /// session gets the `service_withdrawn` close, written within the quit
 /// bound or dropped, and the offer to browsers goes, as nothing serves it
 /// after (section 8.4 item 3): the offer's gate closes, so the removal runs
@@ -243,7 +243,7 @@ fn load_pairing(withdrawal: &Withdrawal, offered: &mut Option<Offered>) -> Optio
     })
 }
 
-/// Checks every stored pairing for idle expiry (RAPP v26.10.22 section 4.6
+/// Checks every stored pairing for idle expiry (RAPP v26.10.29 section 4.6
 /// item 5), `held` being the pairing whose session the agent holds, if any.
 /// A pairing that expired is forgotten and its identity is offered no
 /// longer, so the browsers' offer of it is withdrawn; nothing is sent to its
@@ -264,7 +264,7 @@ fn check_idle_expiry(
 
 /// Gives the phone of each pairing the user forgot while it was out of
 /// reach its `pairing_revoked` close, as the first message of a session
-/// (RAPP v26.10.22 section 4.6 item 2); a phone not found now is tried
+/// (RAPP v26.10.29 section 4.6 item 2); a phone not found now is tried
 /// again on the next round, for at most 30 days.
 fn deliver_revocation_notices(requester: &mut AgentRequester) {
     let owed: Vec<(PairId, RoutingKey)> = requester
@@ -283,7 +283,7 @@ fn deliver_revocation_notices(requester: &mut AgentRequester) {
 }
 
 /// W-R-8: brings the browsers' offer in line with the certificate the
-/// pairing's identity is offered on now (RAPP v26.10.22 section 8.4 item
+/// pairing's identity is offered on now (RAPP v26.10.29 section 8.4 item
 /// 3). The offer stands before and between sessions on a certificate whose
 /// card a session heard present within the grace, and goes at once when the
 /// pairing is forgotten or revoked or a session hears another card; another
@@ -322,7 +322,7 @@ fn sync_offer(requester: &AgentRequester, pair_id: PairId, offered: &mut Option<
 
 /// How long the standing offer has until it lapses, when one is offered: no
 /// step between sessions may last longer, so the withdrawal lands when the
-/// grace ends and never before (RAPP v26.10.22 section 8.4 item 3).
+/// grace ends and never before (RAPP v26.10.29 section 8.4 item 3).
 fn until_offer_lapses(
     requester: &AgentRequester,
     pair_id: PairId,
@@ -356,7 +356,7 @@ fn remove_offer() {
 }
 
 /// The session thread: keeps the phone's session and runs every job until
-/// the agent withdraws (RAPP v26.10.22 section 4.5 item 8).
+/// the agent withdraws (RAPP v26.10.29 section 4.5 item 8).
 fn serve_phone(inbox: &Receiver<Job>, withdrawal: &Withdrawal) {
     // W-R-8: certificates offered by an earlier run are purged first.
     let mut offered = None;
@@ -402,7 +402,7 @@ fn serve_phone(inbox: &Receiver<Job>, withdrawal: &Withdrawal) {
             }
         };
         // A waiting request runs only once the phone has said which card it
-        // holds and the offer follows it (RAPP v26.10.22 section 8.4).
+        // holds and the offer follows it (RAPP v26.10.29 section 8.4).
         await_card_report(&mut pairing, &mut session);
         let mut card_checked = None;
         follow_card(&mut pairing, &mut session, &mut offered, &mut card_checked);
@@ -439,7 +439,7 @@ enum AfterSearch {
 /// After a search that found no session: a waiting request searches on for
 /// what is left of its window, or is answered with every request queued
 /// behind it; then the agent pauses, never past the moment the standing
-/// offer lapses (RAPP v26.10.22 section 8.4 item 3).
+/// offer lapses (RAPP v26.10.29 section 8.4 item 3).
 fn after_failed_search(
     error: &ReachError,
     pairing: &Pairing,
@@ -493,7 +493,7 @@ fn await_card_report(pairing: &mut Pairing, session: &mut Session<BleLink>) {
     }
 }
 
-/// Follows the card the session reports (RAPP v26.10.22 section 8.4): a
+/// Follows the card the session reports (RAPP v26.10.29 section 8.4): a
 /// card whose certificate is not the cached one has the earlier offer
 /// withdrawn at once and its certificate read on the session, and the
 /// offer is then brought in line with what the session heard.
@@ -528,7 +528,7 @@ fn follow_card(
 }
 
 /// Holds an open session: runs every job that arrives, keeps the session
-/// alive in between (RAPP v26.10.22 section 8.3), reads the certificate
+/// alive in between (RAPP v26.10.29 section 8.3), reads the certificate
 /// when the phone reports a card whose certificate is not the cached one
 /// (section 8.4 item 2), keeps the offer in line with what the session
 /// hears (section 8.4 item 3), closes with `pairing_revoked` when the user
@@ -548,7 +548,7 @@ fn hold_session(
         match inbox.try_recv() {
             Ok(job) => {
                 // A pairing the user forgot meanwhile signs nothing (RAPP
-                // v26.10.22 section 4.6).
+                // v26.10.29 section 4.6).
                 store_checked = Instant::now();
                 close_if_forgotten(pairing, session, offered);
                 if session.end().is_some() {
@@ -583,7 +583,7 @@ fn hold_session(
 
 /// Closes the session when its pairing no longer serves: one the user
 /// forgot gets the `pairing_revoked` close now and loses its keys (RAPP
-/// v26.10.22 section 4.6 item 1); one already revoked or removed is closed.
+/// v26.10.29 section 4.6 item 1); one already revoked or removed is closed.
 /// A store that cannot be read changes nothing.
 fn close_if_forgotten(
     pairing: &mut Pairing,

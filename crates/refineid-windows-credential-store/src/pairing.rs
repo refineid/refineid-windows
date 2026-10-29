@@ -15,7 +15,7 @@
 //! Durable pairing storage, protected to the Windows user by DPAPI.
 //!
 //! RAPP requires the pair keys to live in device-only, non-migrating secret
-//! storage (RAPP v26.10.22 section 4.3 item 4). The whole pairing set is
+//! storage (RAPP v26.10.29 section 4.3 item 4). The whole pairing set is
 //! serialized by [`refineid_rapp_core::persistence`], protected with
 //! `CryptProtectData` to the current user under a purpose entropy, and
 //! written as one file in the user's local application data, through a
@@ -33,7 +33,7 @@
 //! [`ProtectedPairingStore`] keeps the decoded records in memory so it can
 //! satisfy the borrowing [`PairingStore`] contract, and writes the set through
 //! on every change, after re-reading it: a change is never written over a set
-//! that could not be read. An idle-expiry check (RAPP v26.10.22 section 4.6
+//! that could not be read. An idle-expiry check (RAPP v26.10.29 section 4.6
 //! item 5) writes the set first and changes the record held here only once
 //! the write succeeded.
 //!
@@ -43,7 +43,7 @@
 //! without it, so it is refused once.
 //!
 //! Beside the set, in a directory of plain files, one per pairing, the
-//! store keeps the last card a session heard present (RAPP v26.10.22
+//! store keeps the last card a session heard present (RAPP v26.10.29
 //! section 8.4): a pair identifier, the fingerprint of a public certificate
 //! and a time, nothing secret. Every requester process of this user offers
 //! the phone's identity by it, and a session refreshes it every few
@@ -81,7 +81,7 @@ impl ProtectedPairingStore {
     ///
     /// A record whose peer never confirmed its storage was written inside a
     /// pairing this computer did not complete; it is removed with its keys
-    /// here, at the first load after that pairing (RAPP v26.10.22 section
+    /// here, at the first load after that pairing (RAPP v26.10.29 section
     /// 4.3 item 4). A forgotten pairing whose `pairing_revoked` close was
     /// not delivered within 30 days loses its keys untold (section 4.6
     /// item 3). A record the codec refuses is left out, and the set is
@@ -146,7 +146,7 @@ impl ProtectedPairingStore {
     }
 
     /// The pairings forgotten here whose `pairing_revoked` close is still
-    /// owed to the phone (RAPP v26.10.22 section 4.6 item 2).
+    /// owed to the phone (RAPP v26.10.29 section 4.6 item 2).
     pub fn forgotten_pairings(&self) -> impl Iterator<Item = &PairingRecord> {
         self.records
             .iter()
@@ -160,7 +160,7 @@ impl ProtectedPairingStore {
     }
 
     /// Records that the phone revoked `pair_id` with its `pairing_revoked`
-    /// close (RAPP v26.10.22 section 4.6 item 4): the keys are destroyed and
+    /// close (RAPP v26.10.29 section 4.6 item 4): the keys are destroyed and
     /// the record stays so the user is told.
     ///
     /// # Errors

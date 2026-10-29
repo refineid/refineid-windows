@@ -172,7 +172,7 @@ CryptoAPI and CNG. For a mutual-TLS site (such as `https://suomi.fi` or
 1. **Certificate in the user store**:
    - The `read_identity` answer carries the authentication certificate: the
      one whose SHA-256 fingerprint the session's `card.status` names (RAPP
-     v26.10.22 section 8.4). The RefineID app keeps it on the pairing record,
+     v26.10.29 section 8.4). The RefineID app keeps it on the pairing record,
      and its offering session adds it to `Cert:\CurrentUser\My` with
      `CERT_KEY_PROV_INFO` naming the provider `RefineID Key Storage Provider`
      and the key `rapp:<pair id>` once a session hears that card present.

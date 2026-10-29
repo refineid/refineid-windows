@@ -22,6 +22,10 @@ use sha2::{Digest as _, Sha384};
 const DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 const OPERATION_EXPIRY_MS: u64 = 30_000;
 const TEST_CODE: &str = "654321";
+/// A code one character off [`TEST_CODE`].
+const MISTYPED_CODE: &str = "654322";
+/// Wrong codes typed before the right one.
+const FAILED_ATTEMPTS: usize = 4;
 /// The login challenge the requester asks the mock card to sign.
 const LOGIN_CHALLENGE: &[u8] = b"synthetic login challenge";
 /// Tries a card has left when only the issuer's software may spend them.
@@ -116,11 +120,34 @@ fn a_mistyped_code_is_refused_by_the_custodian() {
     )
     .expect("dial pairing");
     let outcome = requester().pair_with_code(
-        "654322",
+        MISTYPED_CODE,
         &mut OpenedConnection::new(transport),
         |_, requested| Some(requested.to_vec()),
     );
     assert_eq!(outcome, Err(PairingSearchError::NotAccepted));
+}
+
+#[test]
+fn the_offer_outlives_failed_attempts() {
+    let (endpoint, _proxy) = start_custodian(options());
+    for _ in 0..FAILED_ATTEMPTS {
+        let transport = dial(
+            std::slice::from_ref(&endpoint),
+            STREAM_CANDIDATE_ID,
+            DEADLINE,
+            DialPurpose::Pairing,
+        )
+        .expect("dial pairing");
+        let outcome = requester().pair_with_code(
+            MISTYPED_CODE,
+            &mut OpenedConnection::new(transport),
+            |_, requested| Some(requested.to_vec()),
+        );
+        assert_eq!(outcome, Err(PairingSearchError::NotAccepted));
+    }
+    let mut requester = requester();
+    let (pair_id, _session) = paired_session(&mut requester, &endpoint);
+    assert!(requester.store().get(pair_id).is_ok());
 }
 
 #[test]

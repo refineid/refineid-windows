@@ -1,5 +1,5 @@
 //! The agent's console: Ctrl+C, Ctrl+Break and closing the agent's console
-//! window are its user quitting it (RAPP v26.10.22 section 4.5 item 8).
+//! window are its user quitting it (RAPP v26.10.29 section 4.5 item 8).
 //! Log-off and shutdown keep the default handling: the operating system
 //! ending the agent is not a withdrawal.
 

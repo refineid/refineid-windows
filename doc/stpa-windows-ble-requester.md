@@ -2,7 +2,7 @@
 
 **Status:** prospective, for owner review
 **Date:** 2026-10-20
-**Applies to:** RAPP v26.10.22, the BLE transport profile
+**Applies to:** RAPP v26.10.29, the BLE transport profile
 `"fi.refineid.rapp.ble"`, and this repository's requester: the key
 storage provider in `refineid_minidriver.dll`, the agent that holds the
 phone's session, the pairing and certificate stores, and the WinUI

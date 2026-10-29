@@ -1,6 +1,6 @@
 //! The clocks the requester reads.
 //!
-//! Protocol deadlines run on the continuous clock (RAPP v26.10.22 section
+//! Protocol deadlines run on the continuous clock (RAPP v26.10.29 section
 //! 8.1 item 2): milliseconds that keep advancing while the machine sleeps,
 //! so a request that waited through a sleep is as old as it is. Record
 //! timestamps use the wall clock, which both endpoints can relate to.

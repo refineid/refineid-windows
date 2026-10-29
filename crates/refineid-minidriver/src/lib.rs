@@ -377,7 +377,7 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
         };
         let pair_id = pairing.pair_id();
         // The card is offered on the certificate whose card a session heard
-        // present within the grace, and on nothing else (RAPP v26.10.22
+        // present within the grace, and on nothing else (RAPP v26.10.29
         // section 8.4 items 2 and 3).
         let Some(auth) = refineid_rapp_core::store::offered_certificate(
             &store,
@@ -806,7 +806,7 @@ fn reverify_cached_pin(
         };
     }
     // A failed read is a transport failure: the held PIN 1 stays, and the
-    // retry counter read before its next use decides (RAPP v26.10.22
+    // retry counter read before its next use decides (RAPP v26.10.29
     // section 11 item 2).
     let serial = match live_token_serial(tx) {
         Ok(serial) => serial,
@@ -1053,7 +1053,7 @@ fn pin_unblock_permission(pin_id: DWORD) -> DWORD {
 #[cfg(windows)]
 const NO_PIN_CACHE_POLICY_INFO: DWORD = 0;
 
-/// The Base CSP's PIN caching for each PIN (RAPP v26.10.22 section 11 item
+/// The Base CSP's PIN caching for each PIN (RAPP v26.10.29 section 11 item
 /// 2): PIN 1 in its process memory, as this module holds it; PIN 2 asked for
 /// every signature.
 #[cfg(windows)]
@@ -1131,14 +1131,14 @@ fn clear_pin_state(pin1_authenticated: &mut bool, pin2_authenticated: &mut bool)
 
 /// Forgets the card's verified state after a transport failure or a failed
 /// command: the held PIN 1 stays, and the retry counter read before its next
-/// use decides (RAPP v26.10.22 section 11 item 2).
+/// use decides (RAPP v26.10.29 section 11 item 2).
 #[cfg(windows)]
 const fn reset_card_state(pin1_authenticated: &mut bool, pin2_authenticated: &mut bool) {
     *pin1_authenticated = false;
     *pin2_authenticated = false;
 }
 
-/// PIN 2 is entered for every signature and never held (RAPP v26.10.22
+/// PIN 2 is entered for every signature and never held (RAPP v26.10.29
 /// section 11 item 2): the card spends it on one signature, and the next
 /// one asks again.
 #[cfg(windows)]

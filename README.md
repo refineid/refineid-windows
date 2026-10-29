@@ -257,8 +257,8 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 ## Remote authorization (RAPP)
 
 `crates/refineid-rapp-core` implements the requester role of the Remote
-Authorization Proxy Protocol, RAPP v26.10.22 (specified in refineid-core
-`doc/protocols/rapp-v26.10.22.md`), through the `refineid_rapp` engine.
+Authorization Proxy Protocol, RAPP v26.10.29 (specified in refineid-core
+`doc/protocols/rapp-v26.10.29.md`), through the `refineid_rapp` engine.
 RAPP lets this Windows machine use an identity card held by the holder's
 phone: pairing takes the six-character code the phone shows (`CPace`,
 then `Noise_XXpsk3`), every session is a mutually authenticated
@@ -289,7 +289,7 @@ for architecture details.
 
 - PIN values and private card material must never be logged.
 - A card in a reader of this computer follows the phone's PIN rule (RAPP
-  v26.10.22 section 11 item 2): PIN 1 is held in process memory only, never
+  v26.10.29 section 11 item 2): PIN 1 is held in process memory only, never
   in storage and with no time window, until the card is removed or
   replaced, rejects it or shows a retry counter below pristine, or the user
   or the process ends it; a transport failure keeps it. PIN 2 is entered

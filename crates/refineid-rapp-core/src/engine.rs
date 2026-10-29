@@ -1,4 +1,4 @@
-//! The requester engine: the workstation side of RAPP v26.10.22.
+//! The requester engine: the workstation side of RAPP v26.10.29.
 //!
 //! The engine drives pairing, sessions, and operations through the
 //! canonical protocol boundaries of `refineid_rapp`: a typed code is tried
@@ -60,7 +60,7 @@ const SESSION_SILENCE_LIMIT: Duration =
 
 /// How often an established session records its time on its pairing
 /// again: one day, the least often an endpoint checks for idle expiry
-/// (RAPP v26.10.22 section 4.6 item 5).
+/// (RAPP v26.10.29 section 4.6 item 5).
 const SESSION_RECORD_INTERVAL_MS: u64 =
     refineid_rapp::PAIRING_IDLE_EXPIRY_MS / refineid_rapp::PAIRING_IDLE_EXPIRY_DAYS;
 
@@ -166,7 +166,7 @@ impl core::fmt::Display for PairingError {
 
 impl core::error::Error for PairingError {}
 
-/// Why a typed code paired with no Custodian (RAPP v26.10.22 section 4.2,
+/// Why a typed code paired with no Custodian (RAPP v26.10.29 section 4.2,
 /// "Trying Each Custodian in Pairing Mode").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PairingSearchError {
@@ -202,7 +202,7 @@ impl core::error::Error for PairingSearchError {}
 /// Where a requester finds the Custodians a typed code is tried with.
 ///
 /// A source names the endpoints it finds in pairing mode and opens a
-/// pairing connection to one (RAPP v26.10.22 section 4.2, "Trying Each
+/// pairing connection to one (RAPP v26.10.29 section 4.2, "Trying Each
 /// Custodian in Pairing Mode").
 pub trait PairingCandidateSource {
     /// How the source names an endpoint it found.
@@ -375,7 +375,7 @@ impl core::fmt::Display for AdmissionError {
 
 impl core::error::Error for AdmissionError {}
 
-/// How an operation ended (RAPP v26.10.22 section 8).
+/// How an operation ended (RAPP v26.10.29 section 8).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OperationOutcome {
     /// `operation.result` `completed`, with its typed response.
@@ -509,7 +509,7 @@ enum Event {
     Ended,
 }
 
-/// A requester's withdrawal (RAPP v26.10.22 section 4.5 item 8), shared
+/// A requester's withdrawal (RAPP v26.10.29 section 4.5 item 8), shared
 /// between the engines that follow it and whatever withdraws.
 ///
 /// The user turning remote use off, a local card doing so, or the user
@@ -650,7 +650,7 @@ impl<Store: PairingStore> Requester<Store> {
     }
 
     /// Pairs with the Custodian showing `code`, trying in turn each
-    /// Custodian `source` finds in pairing mode (RAPP v26.10.22 sections 3,
+    /// Custodian `source` finds in pairing mode (RAPP v26.10.29 sections 3,
     /// 4.2 and 6), and returns the pairing with the endpoint it was made
     /// on.
     ///
@@ -1024,7 +1024,7 @@ impl<Store: PairingStore> Requester<Store> {
 
     /// Opens a session to a paired custodian over a connected transport,
     /// already past its `"session"` routing preamble: the `Noise_KK`
-    /// handshake, then the Custodian's `session.ready` (RAPP v26.10.22
+    /// handshake, then the Custodian's `session.ready` (RAPP v26.10.29
     /// sections 6.3 and 7.1 item 5).
     ///
     /// A Custodian that closes in place of `session.ready` ends the attempt;
@@ -1121,7 +1121,7 @@ impl<Store: PairingStore> Requester<Store> {
     /// session was open, over a connected transport already past its
     /// `"session"` routing preamble: the `Noise_KK` handshake, then the close
     /// as the session's first and only message. The keys are destroyed once
-    /// it is sent (RAPP v26.10.22 section 4.6 items 2 and 3); no card session
+    /// it is sent (RAPP v26.10.29 section 4.6 items 2 and 3); no card session
     /// starts. A notice past its 30 days is not sent: the keys go untold.
     /// After the engine withdrew, nothing is sent and the notice stays owed
     /// (section 4.5 item 8).
@@ -1172,7 +1172,7 @@ impl<Store: PairingStore> Requester<Store> {
     }
 
     /// The user forgets a pairing that has no open session here (RAPP
-    /// v26.10.22 section 4.6): it serves nothing from now on and keeps its
+    /// v26.10.29 section 4.6): it serves nothing from now on and keeps its
     /// keys only for the `pairing_revoked` close of its next session. One
     /// the peer never confirmed, and a revoked one, are removed.
     ///
@@ -1188,7 +1188,7 @@ impl<Store: PairingStore> Requester<Store> {
         })
     }
 
-    /// The user forgets the pairing of an open session (RAPP v26.10.22
+    /// The user forgets the pairing of an open session (RAPP v26.10.29
     /// section 4.6 item 1): the `pairing_revoked` close goes out at once and
     /// the keys are destroyed. A close that cannot be sent leaves the
     /// pairing forgotten, for the next session to carry the close.
@@ -1217,7 +1217,7 @@ impl<Store: PairingStore> Requester<Store> {
     /// Keeps an idle session alive for one receive: answers the peer's
     /// ping, sends ours after 5 seconds of silence, notes `card.status`, and
     /// ends the session after 30 seconds of silence or on the peer's close
-    /// (RAPP v26.10.22 sections 8.3 and 8.4), or with the `service_withdrawn`
+    /// (RAPP v26.10.29 sections 8.3 and 8.4), or with the `service_withdrawn`
     /// close once the engine withdrew (section 4.5 item 8).
     ///
     /// # Errors
@@ -1271,7 +1271,7 @@ impl<Store: PairingStore> Requester<Store> {
     /// Runs one typed operation to its outcome, reporting each
     /// `operation.progress` event of it to `observe`: queued behind another
     /// session's operation, the PIN prompt on the phone's screen, the
-    /// wait for the card and its end (RAPP v26.10.22 section 8.2). The
+    /// wait for the card and its end (RAPP v26.10.29 section 8.2). The
     /// operation lives inside the session: it ends with its result, or with
     /// the session (section 8.1).
     ///
