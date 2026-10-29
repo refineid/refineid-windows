@@ -1,6 +1,6 @@
 //! Durable pairing records.
 //!
-//! A pairing record is the atomic result of pairing (RAPP v26.10.22 section
+//! A pairing record is the atomic result of pairing (RAPP v26.10.29 section
 //! 4.3): the engine's own [`PairRecord`], which holds the pair keys,
 //! `pair_id`, the granted profiles, `grants_hash`, whether the peer
 //! confirmed its storage, and when the user forgot the pairing, together
@@ -59,7 +59,7 @@ enum Keys {
     },
 }
 
-/// Where a stored pairing stands (RAPP v26.10.22 sections 4.3 and 4.6).
+/// Where a stored pairing stands (RAPP v26.10.29 sections 4.3 and 4.6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PairingState {
     /// Stored, and the peer has not confirmed its own storage: serves
@@ -425,7 +425,7 @@ pub trait PairingStore {
         sighting: CardSighting,
     ) -> Result<(), StoreError>;
 
-    /// The idle-expiry check of RAPP v26.10.22 section 4.6 item 5 on one
+    /// The idle-expiry check of RAPP v26.10.29 section 4.6 item 5 on one
     /// pairing at `now_ms` ([`PairingRecord::sweep`]), its change written
     /// through before it is made.
     ///
@@ -445,7 +445,7 @@ pub trait PairingStore {
 }
 
 /// The certificate a pairing's identity is offered to local consumers on at
-/// `now_ms` (RAPP v26.10.22 section 8.4 item 3).
+/// `now_ms` (RAPP v26.10.29 section 8.4 item 3).
 ///
 /// It is the cached authentication certificate of a pairing that serves,
 /// while the last card a session on this computer heard present is that
@@ -510,7 +510,7 @@ pub fn forget_pairing<S: PairingStore + ?Sized>(
 /// keys included.
 ///
 /// Such a record was written inside a confirmation window this endpoint
-/// did not complete (RAPP v26.10.22 section 4.3 item 4); its keys are
+/// did not complete (RAPP v26.10.29 section 4.3 item 4); its keys are
 /// destroyed and nobody is told (section 4.6 item 3). Returns the removed
 /// pair identifiers.
 pub fn remove_unconfirmed<S: PairingStore + ?Sized>(store: &mut S) -> Vec<PairId> {
@@ -533,7 +533,7 @@ pub fn remove_unconfirmed<S: PairingStore + ?Sized>(store: &mut S) -> Vec<PairId
 /// at `now_ms`.
 ///
 /// Its `pairing_revoked` close was not delivered within 30 days of the
-/// forget (RAPP v26.10.22 section 4.6 item 3). Returns the revoked pair
+/// forget (RAPP v26.10.29 section 4.6 item 3). Returns the revoked pair
 /// identifiers.
 pub fn expire_revocation_notices<S: PairingStore + ?Sized>(
     store: &mut S,
@@ -556,7 +556,7 @@ pub fn expire_revocation_notices<S: PairingStore + ?Sized>(
     expired
 }
 
-/// The idle-expiry check of RAPP v26.10.22 section 4.6 item 5 on every
+/// The idle-expiry check of RAPP v26.10.29 section 4.6 item 5 on every
 /// stored pairing.
 ///
 /// `now_ms` is milliseconds since the Unix epoch. `in_session` says whether

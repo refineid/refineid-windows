@@ -1,5 +1,5 @@
 //! What sessions on this computer heard of a pairing's card, and the identity
-//! offer it bounds (RAPP v26.10.22 section 8.4).
+//! offer it bounds (RAPP v26.10.29 section 8.4).
 //!
 //! A requester offers a pairing's identity to local consumers on a
 //! certificate whose fingerprint the custodian confirmed on a session, and

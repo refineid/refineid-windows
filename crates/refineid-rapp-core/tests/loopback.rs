@@ -3,7 +3,7 @@
 //!
 //! The custodian here is test scaffolding, not a product: the real
 //! custodians are the holder's phones. It speaks the exact wire of RAPP
-//! v26.10.22 so the requester is exercised end to end: code pairing through
+//! v26.10.29 so the requester is exercised end to end: code pairing through
 //! `CPace` KC2 and `Noise_XXpsk3` with grant agreement and the storage
 //! confirmation, `Noise_KK` sessions with the Custodian's `session.ready`
 //! and card status, operations and their results inside their session,
@@ -159,7 +159,7 @@ fn custodian_offer_with(offer_id: OfferId) -> PairingOffer {
     .unwrap()
 }
 
-/// Serves a random offer's bootstrap (RAPP v26.10.22 section 4.2) and
+/// Serves a random offer's bootstrap (RAPP v26.10.29 section 4.2) and
 /// returns the offer and its `CPace` context.
 fn serve_offer<T: FrameTransport>(transport: &mut T) -> (PairingOffer, Vec<u8>) {
     let offer = custodian_offer();
@@ -889,7 +889,7 @@ fn a_forgotten_pairing_sends_the_close_as_its_next_sessions_first_message() {
     );
 }
 
-/// The quit bound of RAPP v26.10.22 section 4.5 item 8.
+/// The quit bound of RAPP v26.10.29 section 4.5 item 8.
 const QUIT_BOUND: Duration = Duration::from_millis(QUIT_WITHDRAWAL_BOUND_MS);
 
 /// A requester that follows `withdrawal`.

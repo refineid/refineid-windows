@@ -5,7 +5,7 @@
 //! `_refineid-stream._tcp.local.` under a fresh random instance name, with a
 //! TXT record naming its mode: `mode=pairing` during a pairing ceremony,
 //! `mode=session` while it serves stored pairings, and `mode=withdrawn`
-//! briefly when it stops serving (RAPP v26.10.22 section 4.5). The requester
+//! briefly when it stops serving (RAPP v26.10.29 section 4.5). The requester
 //! browses by those attributes, dials, and opens every connection with one
 //! plaintext routing preamble. A session preamble
 //! carries a fresh nonce and a tag keyed by the pairing's static agreement,
@@ -31,7 +31,7 @@ pub use refineid_rapp::{MAX_ROUTING_PREAMBLE_FRAME, RoutingPreamble, STREAM_PROF
 /// The DNS-SD service type of the stream tier.
 pub const STREAM_SERVICE_TYPE: &str = "_refineid-stream._tcp.local";
 
-/// The registered candidate identifier of the stream profile (RAPP v26.10.22
+/// The registered candidate identifier of the stream profile (RAPP v26.10.29
 /// section 2.2).
 pub const STREAM_CANDIDATE_ID: &str = refineid_rapp::STREAM_CANDIDATE_ID;
 
@@ -871,7 +871,7 @@ pub fn browse(mode: DiscoveryMode, timeout: Duration) -> Vec<StreamService> {
 ///
 /// They are browsed round by round until the search time is spent or
 /// `stopped` holds, and are the endpoints a typed code is tried with (RAPP
-/// v26.10.22 section 4.2, "Trying Each Custodian in Pairing Mode"). Each is
+/// v26.10.29 section 4.2, "Trying Each Custodian in Pairing Mode"). Each is
 /// known by its service instance and dialed at the addresses it last
 /// answered from.
 pub struct PairingServices<Stopped: Fn() -> bool> {
@@ -1038,7 +1038,7 @@ mod tests {
     const CANDIDATE: &str = "stream-test";
     const STREAM_CANDIDATE: &str = super::STREAM_CANDIDATE_ID;
 
-    /// Synthetic keys of `rapp-routing-v26.10.22.json` (`pair_keys`).
+    /// Synthetic keys of `rapp-routing-v26.10.29.json` (`pair_keys`).
     const PAIR_ID: [u8; 16] = [0x33; 16];
     const CUSTODIAN_PRIVATE: [u8; 32] = [0x11; 32];
     const REQUESTER_PRIVATE: [u8; 32] = [0x22; 32];

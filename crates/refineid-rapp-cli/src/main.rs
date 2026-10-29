@@ -542,7 +542,7 @@ fn flush_now() {
     let _ = std::io::Write::flush(&mut std::io::stdout());
 }
 
-/// The grant confirmation of RAPP v26.10.22 section 4.3 item 3.
+/// The grant confirmation of RAPP v26.10.29 section 4.3 item 3.
 fn confirm_grants(peer: &PeerIntroduction, requested: &[ProfileName]) -> Option<Vec<ProfileName>> {
     println!();
     println!(
@@ -731,7 +731,7 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
 /// Deletes this user's whole pairing set, keys included, and tells no
 /// phone: a local wipe for a development machine, for instance of a set
 /// that no longer decodes. `forget-pairing` is the user's forget action of
-/// RAPP v26.10.22 section 4.6.
+/// RAPP v26.10.29 section 4.6.
 fn clear_pairing() -> Result<(), String> {
     refineid_windows_credential_store::delete_pairing_set()
         .map_err(|e| format!("failed to clear pairing: {e:?}"))?;
@@ -739,7 +739,7 @@ fn clear_pairing() -> Result<(), String> {
     Ok(())
 }
 
-/// The user's forget action on one pairing (RAPP v26.10.22 section 4.6): a
+/// The user's forget action on one pairing (RAPP v26.10.29 section 4.6): a
 /// confirmed pairing keeps its keys only for the `pairing_revoked` close
 /// its phone is given on the next session, and serves nothing from now on;
 /// an unconfirmed or revoked one is removed.

@@ -15,7 +15,7 @@
 //! Process-local PIN retry protection and the held PIN 1.
 //!
 //! A PIN 1 the card accepted is held in this process's memory, never in
-//! storage, with no idle window or countdown (RAPP v26.10.22 section 11 item
+//! storage, with no idle window or countdown (RAPP v26.10.29 section 11 item
 //! 2). It ends when the card is removed or replaced (a checkout for another
 //! card's serial), when the card rejects it or its retry counter reads below
 //! pristine or unreadable, when the user clears it, and when the process

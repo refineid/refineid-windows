@@ -25,7 +25,7 @@
 //! a pairing with the code the phone shows, polls its state, confirms it,
 //! then reads the paired card. Each handle owns one background pairing
 //! thread that finds the phone by its DNS-SD `mode=pairing` record and dials
-//! it (RAPP v26.10.22 section 2.2), and, after pairing, the live `Requester`
+//! it (RAPP v26.10.29 section 2.2), and, after pairing, the live `Requester`
 //! whose device-only credential store persists the pairing so the minidriver
 //! can later load and use it behind this same ABI. After a card read the
 //! handle also holds the offering session of section 8.4 on a watch thread:
@@ -286,7 +286,7 @@ pub unsafe extern "C" fn refineid_rapp_string_free(json: *mut c_char) {
     drop(unsafe { CString::from_raw(json) });
 }
 
-/// Forget every stored pairing (RAPP v26.10.22 section 4.6).
+/// Forget every stored pairing (RAPP v26.10.29 section 4.6).
 ///
 /// This is the holder's local forget action. Each pairing serves nothing
 /// from now on; its phone is told with the `pairing_revoked` close as the
@@ -413,7 +413,7 @@ pub unsafe extern "C" fn refineid_rapp_open_pairing(
 /// Begin a pairing with the code the phone shows.
 ///
 /// Returns `{ handle }` immediately, or `invalid_code` when the input is not
-/// a six-character pairing code (RAPP v26.10.22 section 3.1). The background
+/// a six-character pairing code (RAPP v26.10.29 section 3.1). The background
 /// thread finds the phone in pairing mode, dials it, reads its offer, and
 /// runs the pairing handshake; the caller drives confirmation through
 /// [`refineid_rapp_poll_pairing`] and [`refineid_rapp_confirm_pairing`].
@@ -488,7 +488,7 @@ pub unsafe extern "C" fn refineid_rapp_confirm_pairing(
 }
 
 /// The profiles a caller grants: a JSON array of registered profile names
-/// (RAPP v26.10.22 section 9), parsed here, at the border.
+/// (RAPP v26.10.29 section 9), parsed here, at the border.
 fn granted_profiles(text: &str) -> Result<Vec<ProfileName>, ApiFailure> {
     let invalid = || {
         ApiFailure::new(
@@ -668,7 +668,7 @@ fn register_handle(shared: Shared) -> Result<u64, ApiFailure> {
 }
 
 /// Tries the typed code with each phone in pairing mode found, dialing
-/// each with the pairing preamble (RAPP v26.10.22 section 4.2, "Trying Each
+/// each with the pairing preamble (RAPP v26.10.29 section 4.2, "Trying Each
 /// Custodian in Pairing Mode"), until one pairs, every one tried refuses
 /// the code, the search time passes, or the handle ends.
 fn pairing_thread(handle_id: u64, mut requester: StreamRequester, code: &str) {
@@ -1020,7 +1020,7 @@ fn hold_offering_session(
 
 /// What the user is asked while the phone reports no card: the phone's card
 /// reader is named only while the phone reports one attached (RAPP
-/// v26.10.22 section 8.4 item 6).
+/// v26.10.29 section 8.4 item 6).
 const fn card_request_status(reader: CardReader) -> &'static str {
     match reader {
         CardReader::Attached => CARD_TO_READER_STATUS,
@@ -1029,7 +1029,7 @@ const fn card_request_status(reader: CardReader) -> &'static str {
 }
 
 /// Whether the pairing caches the certificate of the card whose fingerprint
-/// the session reports (RAPP v26.10.22 section 8.4 item 2): the stored one
+/// the session reports (RAPP v26.10.29 section 8.4 item 2): the stored one
 /// when its fingerprint matches, or else one read afresh on the session,
 /// stored only when the phone confirmed its fingerprint.
 fn caches_confirmed_certificate(
@@ -1069,7 +1069,7 @@ fn caches_confirmed_certificate(
 
 /// Closes the session when its pairing no longer serves: one the user
 /// forgot gets the `pairing_revoked` close now and loses its keys (RAPP
-/// v26.10.22 section 4.6 item 1); one already revoked or removed is closed.
+/// v26.10.29 section 4.6 item 1); one already revoked or removed is closed.
 /// A store that cannot be read changes nothing.
 fn close_if_forgotten(requester: &mut StreamRequester, session: &mut Session<TcpFrameTransport>) {
     if requester.store_mut().refresh().is_err() {
@@ -1105,7 +1105,7 @@ fn serving_keys(
 
 /// The authentication certificate among those an identity read answered
 /// with: the one whose fingerprint the session's card status names (RAPP
-/// v26.10.22 section 8.4 item 2), or, before the phone has named one, the
+/// v26.10.29 section 8.4 item 2), or, before the phone has named one, the
 /// first. Each is parsed here, at the border.
 fn authentication_certificate(
     card: Option<CardStatusMessage>,

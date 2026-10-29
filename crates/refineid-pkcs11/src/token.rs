@@ -1138,7 +1138,7 @@ fn card_sign_with_origin_source(
     card.select_pkcs15_application()
         .map_err(|_select_err| CKR_DEVICE_ERROR)?;
     // A failed read is a transport failure: the held PIN 1 stays, and the
-    // retry counter read before its next use decides (RAPP v26.10.22
+    // retry counter read before its next use decides (RAPP v26.10.29
     // section 11 item 2).
     let serial = live_token_serial(&mut card)?;
     let pin1_status = card
@@ -1210,7 +1210,7 @@ fn parse_der_len(der: &[u8], idx: &mut usize) -> Option<usize> {
 
 /// Normalizes a remote ECDSA signature to IEEE P1363 (`r || s`).
 ///
-/// RAPP v26.10.22 section 9.2 sends the fixed-width raw form, which may itself
+/// RAPP v26.10.29 section 9.2 sends the fixed-width raw form, which may itself
 /// begin with the DER sequence tag, so the raw length is checked before any
 /// DER decoding; other lengths are accepted only as DER.
 #[cfg_attr(
@@ -1288,7 +1288,7 @@ pub fn ecdsa_der_to_p1363(der: &[u8], field_bytes: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// The lifetime a remote operation is sent with (RAPP v26.10.22 section
+/// The lifetime a remote operation is sent with (RAPP v26.10.29 section
 /// 8.1 item 2).
 #[cfg(windows)]
 const REMOTE_OPERATION_LIFETIME_MS: u64 = 30_000;
@@ -1353,7 +1353,7 @@ impl RemoteCardTransport {
         );
 
         // The phone's `pairing_revoked` close revokes the pairing in the
-        // protected store the requester runs over (RAPP v26.10.22 section
+        // protected store the requester runs over (RAPP v26.10.29 section
         // 4.6 item 4), and the user is told to pair again.
         let mut session = match requester.connect(self.pair_id, transport) {
             Ok(session) => session,

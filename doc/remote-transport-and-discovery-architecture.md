@@ -1,7 +1,7 @@
 # RefineID Windows: Remote Transport & Discovery Architecture
 
 - **Document Version**: `26.10.3`
-- **Protocol Version**: `26.10.22`
+- **Protocol Version**: `26.10.29`
 - **Status**: Normative Architecture & Migration Plan
 - **Applies To**: `RefineID-Windows` (`RefineID-winui`, `refineid-minidriver`, `refineid-pkcs11`, `refineid-rapp-core`)
 - **Companion Specification**: [RAPP Transport and Discovery Hierarchy Specification](https://github.com/refineid/refineid-core/blob/main/doc/protocols/rapp-transport-and-discovery-hierarchy.md)
@@ -29,7 +29,7 @@ This document specifies the architecture for remote card operations on Windows, 
    - An explicit UI toggle in `RefineID-winui` (**"Enable Remote Phone Reader"**, default: `false`) is required before Windows activates background discovery.
 4. **Normative 3-Tier Discovery & Transport Hierarchy**:
    - **Tier 1: Apple Native (Direct P2P)**: Exclusively Apple-to-Apple; not applicable on Windows.
-   - **Tier 2: Bluetooth / BLE Proximity Transport (`fi.refineid.rapp.ble`)**: Implemented via Windows WinRT `Windows.Devices.Bluetooth.GenericAttributeProfile` for GATT-based RAPP communication. The Requester routes a session preamble to each advertiser of a scan, strongest signal first; signal strength only orders the attempts, admits or refuses none, and proves nothing about proximity (RAPP v26.10.22 §4.4). (Note: Windows user-space does not expose public APIs for BLE L2CAP Connection-Oriented Channels). On legacy hardware lacking BLE (e.g. ThinkPad R61 Broadcom BCM2045B Bluetooth 2.0+EDR), unauthenticated Classic RFCOMM is supported as a proximity fallback.
+   - **Tier 2: Bluetooth / BLE Proximity Transport (`fi.refineid.rapp.ble`)**: Implemented via Windows WinRT `Windows.Devices.Bluetooth.GenericAttributeProfile` for GATT-based RAPP communication. The Requester routes a session preamble to each advertiser of a scan, strongest signal first; signal strength only orders the attempts, admits or refuses none, and proves nothing about proximity (RAPP v26.10.29 §4.4). (Note: Windows user-space does not expose public APIs for BLE L2CAP Connection-Oriented Channels). On legacy hardware lacking BLE (e.g. ThinkPad R61 Broadcom BCM2045B Bluetooth 2.0+EDR), unauthenticated Classic RFCOMM is supported as a proximity fallback.
    - **Tier 3: Local IP Stream via mDNS / DNS-SD Fallback (`fi.refineid.stream`)**: Discovered using supported `Windows.Devices.Enumeration` or Win32 `DnsServiceBrowse` APIs, establishing an outbound TCP connection to the phone.
 
 ---
@@ -126,9 +126,9 @@ In the legacy codebase:
        ```
    - Resolves the phone's advertised IP address and dynamic port without requiring administrative privileges.
    - When the user toggles "Enable Remote Phone Reader" off, `watcher.Stop()` is invoked immediately, stopping discovery and releasing all resources.
-   - TXT records are handed to `refineid_rapp` unparsed: `DiscoveryRecord::parse` and `DiscoveryKey::matches_record` decide whether a `mode=session` record names a stored pairing, and `WithdrawnRecord::parse` with `WithdrawalKey::matches` decides whether a `mode=withdrawn` record announces that its custodian stopped serving (RAPP v26.10.22 §4.5).
+   - TXT records are handed to `refineid_rapp` unparsed: `DiscoveryRecord::parse` and `DiscoveryKey::matches_record` decide whether a `mode=session` record names a stored pairing, and `WithdrawnRecord::parse` with `WithdrawalKey::matches` decides whether a `mode=withdrawn` record announces that its custodian stopped serving (RAPP v26.10.29 §4.5).
    - A verified withdrawal, or an authenticated `session.close` with reason `service_withdrawn`, marks the pairing withdrawn: discovered phones are not dialed for it again until a `mode=session` record that names it, or one publishing no hints, shows its custodian serving. Configured endpoints (`REFINEID_RAPP_ENDPOINT`, `--connect`, the local mock custodian) are always dialed. A custodian that disappears without announcing it is simply not found at the next dial; the pairing is unchanged either way.
-   - An authenticated `session.close` with reason `pairing_revoked`, in place of `session.ready` or at any point of a session, revokes the pairing here at once (RAPP v26.10.22 §4.6 item 4): its keys are destroyed, its certificate is withdrawn from browsers, no close is sent back, nothing is dialed for it again, and the user is told that the phone forgot this computer. No failure revokes a pairing (§10.1); a protocol violation closes the session with a sealed `protocol_violation` close and the pairing stays.
+   - An authenticated `session.close` with reason `pairing_revoked`, in place of `session.ready` or at any point of a session, revokes the pairing here at once (RAPP v26.10.29 §4.6 item 4): its keys are destroyed, its certificate is withdrawn from browsers, no close is sent back, nothing is dialed for it again, and the user is told that the phone forgot this computer. No failure revokes a pairing (§10.1); a protocol violation closes the session with a sealed `protocol_violation` close and the pairing stays.
    - The computer's own forget action (§4.6): a session open to the phone sends the `pairing_revoked` close at once and the keys are destroyed. Otherwise the pairing serves nothing from then on and keeps its keys for that close alone; the next session with the phone, dialed as before, carries the close as its first message and then destroys the keys, and after 30 days the keys go untold.
    - Idle expiry (§4.6 item 5): the engine records on the pairing that a session to it is established when the phone's `session.ready` is verified, once a day while the session lasts, and when it ends, in whichever process holds the session. The agent checks every pairing each time it reads the pairing store and once a day while it holds a session, the held pairing counting as in session. A pairing that has had no established session for 30 days, counted from its creation while it has had none, expires silently: nothing is sent or shown, its certificate is withdrawn from every local consumer, and it is forgotten as above. The record is written before it changes in memory, so a write the store refuses changes nothing and is repeated at the next check.
    - Stored pairings are not migrated: a record written in an earlier format is left out when the store is read, and the store is written back without it, so it is refused once and its phone pairs again.
@@ -162,7 +162,7 @@ In the legacy codebase:
    - When unchecked, the application generates zero network traffic and listens on zero sockets.
    - When checked, DNS-SD service browsing and BLE scanning activate to discover announced mobile readers.
 3. **One-Time Pairing UI**:
-   - When pairing a new phone, the desktop prompts for the 6-character Crockford Base32 code displayed on the phone (per RAPP v26.10.22 §3).
+   - When pairing a new phone, the desktop prompts for the 6-character Crockford Base32 code displayed on the phone (per RAPP v26.10.29 §3).
    - Once paired, the trust record is stored in Windows Credential Store (`refineid-windows-credential-store`).
 
 ---
