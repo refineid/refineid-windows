@@ -9,16 +9,17 @@
 use std::io::Write as _;
 use std::time::{Duration, Instant};
 
-use refineid_rapp::{PairingOffer, ProfileName, RoutingKey};
+use refineid_rapp::{ProfileName, RoutingKey};
 use refineid_rapp_ble::gatt::BleLink;
 use refineid_rapp_ble::link::AdvertiserAddress;
 use refineid_rapp_ble::reach::{Attempt, reach_session};
 use refineid_rapp_ble::scan::{ScannedAdvertiser, scan};
 use refineid_rapp_core::engine::{
-    OperationOutcome, PairingCandidateSource, PeerIntroduction, Requester, RequesterConfig,
+    OperationOutcome, PairingCandidateSource, PairingConnection, PeerIntroduction, Requester,
+    RequesterConfig,
 };
 use refineid_rapp_core::message::{CloseReason, ResultError};
-use refineid_rapp_core::offer::normalize_pairing_code;
+use refineid_rapp_core::offer::{BootstrapAnswer, normalize_pairing_code};
 use refineid_rapp_core::operations::{
     CardOperation, CardOperationExt, CardOperationResult, CertificateKind,
 };
@@ -102,8 +103,8 @@ fn requester(name: &str) -> Result<Requester<ProtectedPairingStore>, String> {
 
 /// The RAPP advertisers in range, scanned round by round until the pairing
 /// window passes, strongest first. An advertisement does not show the
-/// mode: a peripheral is in pairing mode when it serves an offer on a
-/// pairing connection (section 4.2, "Trying Each Custodian in Pairing
+/// mode: a peripheral is in pairing mode when it serves an offer or a
+/// `pairing-busy` on a pairing connection (section 4.2, "Trying Each Custodian in Pairing
 /// Mode" item 1).
 struct Advertisers {
     search_until: Instant,
@@ -133,7 +134,7 @@ impl PairingCandidateSource for Advertisers {
         )
     }
 
-    fn open(&mut self, address: &AdvertiserAddress) -> Option<(BleLink, PairingOffer)> {
+    fn open(&mut self, address: &AdvertiserAddress) -> Option<PairingConnection<BleLink>> {
         println!("connecting to {address}");
         let link = BleLink::open(*address, DialPurpose::Pairing, RECEIVE_DEADLINE)
             .inspect_err(|error| println!("  {error}"))
@@ -143,12 +144,21 @@ impl PairingCandidateSource for Advertisers {
             link.mtu().bytes(),
             link.capacity().bytes()
         );
-        let offer = link
+        match link
             .read_bootstrap()
             .inspect_err(|error| println!("  {error}"))
-            .ok()?;
-        println!("  read the pairing offer");
-        Some((link, offer))
+            .ok()?
+        {
+            BootstrapAnswer::Offer(offer) => {
+                println!("  read the pairing offer");
+                Some(PairingConnection::Offer(link, offer))
+            }
+            BootstrapAnswer::Busy(busy) => Some(PairingConnection::Busy(busy)),
+        }
+    }
+
+    fn bootstrap_again(&mut self, link: &mut BleLink) -> Option<BootstrapAnswer> {
+        link.read_bootstrap().ok()
     }
 }
 
@@ -172,8 +182,8 @@ pub fn ble_scan(arguments: &[String]) -> Result<(), String> {
 }
 
 /// `ble-pair`: pairs with the phone showing `--code`, trying each
-/// advertiser in pairing mode once, strongest first, and stores the
-/// pairing.
+/// advertiser in pairing mode once, strongest first, a busy one again
+/// after its wait, and stores the pairing.
 pub fn ble_pair(arguments: &[String]) -> Result<(), String> {
     let options = parse(arguments)?;
     let code = options.code.as_deref().ok_or("--code is required")?;

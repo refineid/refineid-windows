@@ -6,7 +6,8 @@
 //! wait for the ATT MTU exchange, subscribe to indications on the Channel
 //! Characteristic (the custodian fixes its fragment capacity at that
 //! moment), and write the routing preamble. For pairing,
-//! [`BleLink::read_bootstrap`] then reads the offer. Every protocol frame
+//! [`BleLink::read_bootstrap`] then reads the offer, or the custodian's
+//! `pairing-busy` while it cannot admit an attempt. Every protocol frame
 //! after that moves through the link's [`FrameTransport`] implementation.
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
@@ -14,9 +15,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use refineid_rapp::ble_sar::{BleSarError, BleSarReassembler, segment};
-use refineid_rapp::{BLE_CANDIDATE_ID, BLE_PROFILE, BinaryFrame, PairingOffer, PairingOfferError};
+use refineid_rapp::{BLE_CANDIDATE_ID, BLE_PROFILE, BinaryFrame, PairingOfferError};
 use refineid_rapp_core::limits;
-use refineid_rapp_core::offer::TransportProfile;
+use refineid_rapp_core::offer::{BootstrapAnswer, TransportProfile};
 use refineid_rapp_core::stream::{DialPurpose, StreamError};
 use refineid_rapp_core::transport::{FrameTransport, TransportError};
 use windows::Devices::Bluetooth::GenericAttributeProfile::{
@@ -54,6 +55,12 @@ const DEFAULT_LE_ATT_MTU: u16 = 23;
 /// §3.2.9); no indication fragment is longer.
 const ATTRIBUTE_VALUE_LIMIT: usize = 512;
 
+/// The ATT error a custodian refuses a write with when it cannot admit the
+/// `CPace` step 1 it carries: `0x80 Application Error`, the first code of
+/// the application error range (Bluetooth Core v5.4, Vol 3, Part F,
+/// §3.4.1.1; RAPP v26.10.29 §3.3 item 6 and §4.2, "Busy Refusal" item 2).
+const ATT_APPLICATION_ERROR: u8 = 0x80;
+
 /// A characteristic of the RAPP service.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RappCharacteristic {
@@ -89,7 +96,7 @@ pub enum BleLinkError {
     /// The Bootstrap Characteristic could not be read: no pairing offer is
     /// open on the phone.
     BootstrapUnreadable,
-    /// The offer read from the Bootstrap Characteristic was refused.
+    /// The answer read from the Bootstrap Characteristic was refused.
     Offer(PairingOfferError),
     /// A Windows Runtime call failed with this `HRESULT`.
     Platform(i32),
@@ -305,13 +312,14 @@ impl BleLink {
         self.capacity
     }
 
-    /// Reads the custodian's pairing offer from the Bootstrap Characteristic
-    /// and decodes it for this transport (section 4.2 steps 1 and 3).
+    /// Reads the custodian's bootstrap answer from the Bootstrap
+    /// Characteristic and decodes it for this transport (section 4.2,
+    /// Bootstrap Read Flow items 1 and 3): its offer, or its `pairing-busy`.
     ///
     /// # Errors
     /// [`BleLinkError::BootstrapUnreadable`] when the read fails, and
-    /// [`BleLinkError::Offer`] when the offer is refused at its border.
-    pub fn read_bootstrap(&self) -> Result<PairingOffer, BleLinkError> {
+    /// [`BleLinkError::Offer`] when the answer is refused at its border.
+    pub fn read_bootstrap(&self) -> Result<BootstrapAnswer, BleLinkError> {
         let offer = self.bootstrap_offer();
         match &offer {
             Ok(_) => {}
@@ -324,7 +332,7 @@ impl BleLink {
     }
 
     /// [`Self::read_bootstrap`], unreported.
-    fn bootstrap_offer(&self) -> Result<PairingOffer, BleLinkError> {
+    fn bootstrap_offer(&self) -> Result<BootstrapAnswer, BleLinkError> {
         let read = self
             .bootstrap
             .ReadValueWithCacheModeAsync(BluetoothCacheMode::Uncached)?
@@ -334,7 +342,7 @@ impl BleLink {
         }
         match attribute_value(&read.Value()?, refineid_rapp::MAX_OFFER_SIZE)? {
             AttributeValue::Within(bytes) => {
-                PairingOffer::from_bootstrap(&bytes, TransportProfile::Ble)
+                BootstrapAnswer::from_bootstrap(&bytes, TransportProfile::Ble)
                     .map_err(BleLinkError::Offer)
             }
             AttributeValue::Oversized(got) => {
@@ -376,6 +384,14 @@ impl BleLink {
             .map_err(|_| TransportError::Failed)?;
         match written.Status() {
             Ok(GattCommunicationStatus::Success) => Ok(()),
+            Ok(GattCommunicationStatus::ProtocolError)
+                if written
+                    .ProtocolError()
+                    .and_then(|error| error.Value())
+                    .is_ok_and(|error| error == ATT_APPLICATION_ERROR) =>
+            {
+                Err(TransportError::Refused)
+            }
             _ => Err(TransportError::Failed),
         }
     }

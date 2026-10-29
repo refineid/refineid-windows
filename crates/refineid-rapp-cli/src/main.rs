@@ -28,8 +28,8 @@ use refineid_rapp_cli::mock_proxy::{
 };
 use refineid_rapp_core::clock::unix_time_ms;
 use refineid_rapp_core::engine::{
-    OpenedConnection, OperationOutcome, PairingError, PairingSearchError, PeerIntroduction,
-    Requester, RequesterConfig,
+    OperationOutcome, PairingError, PairingSearchError, PeerIntroduction, Requester,
+    RequesterConfig,
 };
 use refineid_rapp_core::ids::{Challenge, PairId};
 use refineid_rapp_core::message::{CloseReason, ResultError};
@@ -43,7 +43,8 @@ use refineid_rapp_core::store::{
     MemoryPairingStore, PairingRecord, PairingState, PairingStore, forget_pairing,
 };
 use refineid_rapp_core::stream::{
-    DialPurpose, PairingServices, STREAM_CANDIDATE_ID, StreamError, dial, dial_session,
+    DialPurpose, PairingAddress, PairingServices, STREAM_CANDIDATE_ID, StreamError, dial,
+    dial_session,
 };
 use refineid_rapp_core::transport::TcpFrameTransport;
 use refineid_windows_credential_store::ProtectedPairingStore;
@@ -247,7 +248,11 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
         )
         .map_err(|error| format!("cannot reach {endpoint}: {error:?}"))?;
         requester
-            .pair_with_code(code, &mut OpenedConnection::new(transport), confirm)
+            .pair_with_code(
+                code,
+                &mut PairingAddress::new(transport, vec![endpoint.clone()], RECEIVE_DEADLINE),
+                confirm,
+            )
             .map(|(pair_id, ())| pair_id)
     } else {
         let mut services =
@@ -691,7 +696,7 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
     let (pair_id, ()) = requester
         .pair_with_code(
             MOCK_PAIRING_CODE,
-            &mut OpenedConnection::new(transport),
+            &mut PairingAddress::new(transport, vec![DEFAULT_LISTEN.to_owned()], MOCK_DIAL_WINDOW),
             |_peer, requested| Some(requested.to_vec()),
         )
         .map_err(|e| format!("pairing failed: {e:?}"))?;

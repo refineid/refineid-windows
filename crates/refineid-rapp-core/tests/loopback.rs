@@ -28,19 +28,21 @@ use refineid_rapp::{
     CardOperation, CardOperationResult, CardPresence, CardReader, CardStatusMessage,
     CertificateFingerprint, CloseReason, CpaceKc2Responder, EndpointRole, EstablishedEndpoint,
     LIVENESS_PING_AFTER_SILENCE_MS, OFFER_ID_SIZE, OfferId, OperationId, OperationProgressMessage,
-    OperationResultMessage, PAIRING_CANDIDATES_MAX, PAIRING_IDLE_EXPIRY_MS, PairRecord,
-    PairingHandshake, PairingOffer, ProfileName, ProgressEvent, ProtocolErrorMessage, ProxyFailure,
-    QUIT_WITHDRAWAL_BOUND_MS, ReceiveOutcome, ResultError, SESSION_READY_NONCE_SIZE,
-    SessionCloseMessage, SessionHandshake, SignatureAlgorithm, TransportProfile, TypedMessage,
-    generate_pair_key_material, standard_pairing_context_v2,
+    OperationResultMessage, PAIRING_CANDIDATES_MAX, PAIRING_IDLE_EXPIRY_MS,
+    PRE_AUTHENTICATION_SPACING_MS, PairRecord, PairingBusy, PairingHandshake, PairingOffer,
+    ProfileName, ProgressEvent, ProtocolErrorMessage, ProxyFailure, QUIT_WITHDRAWAL_BOUND_MS,
+    ReceiveOutcome, ResultError, SESSION_READY_NONCE_SIZE, SessionCloseMessage, SessionHandshake,
+    SignatureAlgorithm, TransportProfile, TypedMessage, generate_pair_key_material,
+    standard_pairing_context_v2,
 };
 use refineid_rapp_core::clock::unix_time_ms;
 use refineid_rapp_core::engine::{
-    OpenedConnection, OperationOutcome, PairingCandidateSource, PairingError, PairingSearchError,
-    Requester, RequesterConfig, SESSION_RECEIVE_TICK, SessionEnd, SessionError, Withdrawal,
-    read_offer,
+    OpenedConnection, OperationOutcome, PairingCandidateSource, PairingConnection, PairingError,
+    PairingSearchError, Requester, RequesterConfig, SESSION_RECEIVE_TICK, SessionEnd, SessionError,
+    Withdrawal, read_bootstrap_answer,
 };
 use refineid_rapp_core::ids::PairId;
+use refineid_rapp_core::offer::{BootstrapAnswer, read_bootstrap};
 use refineid_rapp_core::presence::CardSighting;
 use refineid_rapp_core::store::{
     MemoryPairingStore, PairingRecord, PairingState, PairingStore, StoreError, SweepError,
@@ -63,8 +65,14 @@ const SHOWN_CODE: &str = "7KX4M9";
 const OTHER_CODE: &str = "7KX4MA";
 /// The offer one custodian serves on each endpoint it is found on.
 const SHARED_OFFER_ID: [u8; OFFER_ID_SIZE] = *b"synthetic offer of one custodian";
+/// The endpoint of the first scripted custodian a search finds.
+const FIRST_ENDPOINT: usize = 0;
 /// The endpoint of the second scripted custodian a search finds.
 const SECOND_ENDPOINT: usize = 1;
+/// The wait a busy scripted custodian asks for: its admission spacing.
+const BUSY_WAIT_MS: u64 = PRE_AUTHENTICATION_SPACING_MS;
+/// The least wait a busy custodian may ask for.
+const LEAST_BUSY_WAIT_MS: u64 = refineid_rapp::PAIRING_BUSY_RETRY_AFTER_MIN_MS;
 /// How long a scripted custodian waits for the requester while it tries
 /// another custodian first: longer than the attempt deadline.
 const OUTLASTS_ATTEMPT: Duration = Duration::from_secs(10);
@@ -1097,11 +1105,13 @@ fn input_that_is_not_a_code_never_touches_the_transport() {
 type CustodianScript = Box<dyn FnOnce(MemoryTransport) + Send>;
 
 /// Custodians in pairing mode at scripted endpoints, all found in the
-/// first discovery round: endpoint `n` is the `n`-th connection.
+/// first discovery round. Each endpoint holds the connections it answers,
+/// in the order they are opened.
 struct ScriptedCustodians {
-    connections: Vec<Option<MemoryTransport>>,
+    connections: Vec<Vec<MemoryTransport>>,
     discovered: bool,
-    opened: usize,
+    /// The endpoints opened, in the order opened.
+    opened: Vec<usize>,
 }
 
 impl PairingCandidateSource for ScriptedCustodians {
@@ -1113,27 +1123,42 @@ impl PairingCandidateSource for ScriptedCustodians {
             .then(|| (0..self.connections.len()).collect())
     }
 
-    fn open(&mut self, endpoint: &usize) -> Option<(MemoryTransport, PairingOffer)> {
-        let mut transport = self.connections.get_mut(*endpoint)?.take()?;
-        self.opened += 1;
-        let offer = read_offer(&mut transport).ok()?;
-        Some((transport, offer))
+    fn open(&mut self, endpoint: &usize) -> Option<PairingConnection<MemoryTransport>> {
+        let connections = self.connections.get_mut(*endpoint)?;
+        if connections.is_empty() {
+            return None;
+        }
+        let transport = connections.remove(FIRST_ENDPOINT);
+        self.opened.push(*endpoint);
+        read_bootstrap_answer(transport).ok()
     }
 }
 
 /// One scripted endpoint per script, each custodian on its own thread.
 fn scripted(scripts: Vec<CustodianScript>) -> (ScriptedCustodians, Vec<JoinHandle<()>>) {
+    scripted_endpoints(scripts.into_iter().map(|script| vec![script]).collect())
+}
+
+/// One scripted endpoint per list of scripts, one script for each
+/// connection opened to it, each on its own thread.
+fn scripted_endpoints(
+    endpoints: Vec<Vec<CustodianScript>>,
+) -> (ScriptedCustodians, Vec<JoinHandle<()>>) {
     let mut connections = Vec::new();
     let mut custodians = Vec::new();
-    for script in scripts {
-        let (requester_side, custodian_side) = MemoryTransport::pair(CANDIDATE, DEADLINE);
-        connections.push(Some(requester_side));
-        custodians.push(std::thread::spawn(move || script(custodian_side)));
+    for scripts in endpoints {
+        let mut endpoint = Vec::new();
+        for script in scripts {
+            let (requester_side, custodian_side) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+            endpoint.push(requester_side);
+            custodians.push(std::thread::spawn(move || script(custodian_side)));
+        }
+        connections.push(endpoint);
     }
     let source = ScriptedCustodians {
         connections,
         discovered: false,
-        opened: 0,
+        opened: Vec::new(),
     };
     (source, custodians)
 }
@@ -1205,7 +1230,7 @@ fn the_code_is_not_accepted_only_after_every_phone_refused_it() {
     });
     join(threads);
     assert_eq!(outcome, Err(PairingSearchError::NotAccepted));
-    assert_eq!(custodians.opened, custodians.connections.len());
+    assert_eq!(custodians.opened.len(), custodians.connections.len());
     assert_eq!(
         PairingSearchError::NotAccepted.to_string(),
         "the code was not accepted"
@@ -1260,7 +1285,183 @@ fn a_search_opens_at_most_the_limit_of_connections() {
     });
     join(threads);
     assert_eq!(outcome, Err(PairingSearchError::NotAccepted));
-    assert_eq!(custodians.opened, PAIRING_CANDIDATES_MAX);
+    assert_eq!(custodians.opened.len(), PAIRING_CANDIDATES_MAX);
+}
+
+/// A custodian that cannot admit an attempt: it answers `pairing-busy`
+/// asking for `wait_ms` at bootstrap and closes the connection.
+fn busy_at_bootstrap(wait_ms: u64) -> CustodianScript {
+    Box::new(move |mut transport| {
+        let busy = PairingBusy::new(wait_ms).unwrap();
+        transport.send_frame(&busy.to_cbor().unwrap()).unwrap();
+    })
+}
+
+/// A custodian that served its offer and then admitted another attempt:
+/// it answers `CPace` step 1 with `pairing-busy` in place of step 2.
+fn busy_in_place_of_step_two() -> CustodianScript {
+    Box::new(|mut transport| {
+        serve_offer(&mut transport);
+        assert!(transport.receive_frame().is_ok());
+        let busy = PairingBusy::new(BUSY_WAIT_MS).unwrap();
+        transport.send_frame(&busy.to_cbor().unwrap()).unwrap();
+    })
+}
+
+#[test]
+fn a_busy_phone_is_asked_again_after_the_others_and_its_wait() {
+    let mut requester = test_requester();
+    let (mut custodians, threads) = scripted_endpoints(vec![
+        vec![busy_at_bootstrap(BUSY_WAIT_MS), accepting()],
+        vec![refusing()],
+    ]);
+    let started = Instant::now();
+    let outcome = requester.pair_with_code(SHOWN_CODE, &mut custodians, |_, requested| {
+        Some(requested.to_vec())
+    });
+    join(threads);
+    assert_eq!(outcome.map(|(_, endpoint)| endpoint), Ok(FIRST_ENDPOINT));
+    assert_eq!(
+        custodians.opened,
+        [FIRST_ENDPOINT, SECOND_ENDPOINT, FIRST_ENDPOINT]
+    );
+    assert!(started.elapsed() >= Duration::from_millis(BUSY_WAIT_MS));
+}
+
+#[test]
+fn a_busy_answer_in_place_of_step_two_is_not_a_try() {
+    let mut requester = test_requester();
+    let (mut custodians, threads) =
+        scripted_endpoints(vec![vec![busy_in_place_of_step_two(), accepting()]]);
+    let started = Instant::now();
+    let outcome = requester.pair_with_code(SHOWN_CODE, &mut custodians, |_, requested| {
+        Some(requested.to_vec())
+    });
+    join(threads);
+    assert_eq!(outcome.map(|(_, endpoint)| endpoint), Ok(FIRST_ENDPOINT));
+    assert_eq!(custodians.opened, [FIRST_ENDPOINT, FIRST_ENDPOINT]);
+    assert!(started.elapsed() >= Duration::from_millis(BUSY_WAIT_MS));
+}
+
+#[test]
+fn a_phone_busy_at_the_limit_has_not_accepted_the_code() {
+    let mut requester = test_requester();
+    let (mut custodians, threads) = scripted_endpoints(vec![
+        (0..PAIRING_CANDIDATES_MAX)
+            .map(|_| busy_at_bootstrap(LEAST_BUSY_WAIT_MS))
+            .collect(),
+    ]);
+    let outcome = requester.pair_with_code(SHOWN_CODE, &mut custodians, |_, _| {
+        panic!("a busy phone never reaches confirmation")
+    });
+    join(threads);
+    assert_eq!(outcome, Err(PairingSearchError::NotAccepted));
+    assert_eq!(custodians.opened.len(), PAIRING_CANDIDATES_MAX);
+}
+
+/// A connection whose custodian, while `refusing`, refuses every write, as
+/// a BLE custodian refuses a `CPace` step 1 it cannot admit with the ATT
+/// error `0x80`.
+struct StepOneRefusal {
+    transport: MemoryTransport,
+    refusing: bool,
+}
+
+impl FrameTransport for StepOneRefusal {
+    fn send_frame(&mut self, frame: &[u8]) -> Result<(), TransportError> {
+        if self.refusing {
+            return Err(TransportError::Refused);
+        }
+        self.transport.send_frame(frame)
+    }
+
+    fn receive_frame(&mut self) -> Result<Vec<u8>, TransportError> {
+        self.transport.receive_frame()
+    }
+
+    fn set_receive_deadline(&mut self, deadline: Duration) -> Result<Duration, TransportError> {
+        self.transport.set_receive_deadline(deadline)
+    }
+
+    fn profile(&self) -> &str {
+        self.transport.profile()
+    }
+
+    fn candidate_id(&self) -> &str {
+        self.transport.candidate_id()
+    }
+}
+
+/// One BLE-like custodian: its first connection serves an offer, refuses
+/// `CPace` step 1, and answers the bootstrap read that follows with
+/// `then`; its second connection is the custodian showing the code.
+struct RefusingStepOne {
+    first: Option<(MemoryTransport, MemoryTransport)>,
+    then: Option<BootstrapAnswer>,
+    second: Option<MemoryTransport>,
+}
+
+impl RefusingStepOne {
+    fn new(then: BootstrapAnswer) -> (Self, JoinHandle<()>) {
+        let (second, custodian) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+        let accepting = std::thread::spawn(move || accepting()(custodian));
+        let source = Self {
+            first: Some(MemoryTransport::pair(CANDIDATE, DEADLINE)),
+            then: Some(then),
+            second: Some(second),
+        };
+        (source, accepting)
+    }
+}
+
+impl PairingCandidateSource for RefusingStepOne {
+    type Endpoint = ();
+    type Transport = StepOneRefusal;
+
+    fn discover(&mut self) -> Option<Vec<()>> {
+        self.first.is_some().then(|| vec![()])
+    }
+
+    fn open(&mut self, _endpoint: &()) -> Option<PairingConnection<StepOneRefusal>> {
+        let Some((requester_side, mut custodian)) = self.first.take() else {
+            return read_bootstrap_answer(StepOneRefusal {
+                transport: self.second.take()?,
+                refusing: false,
+            })
+            .ok();
+        };
+        serve_offer(&mut custodian);
+        let again = match self.then.take()? {
+            BootstrapAnswer::Offer(offer) => offer.to_cbor().unwrap(),
+            BootstrapAnswer::Busy(busy) => busy.to_cbor().unwrap(),
+        };
+        custodian.send_frame(&again).unwrap();
+        read_bootstrap_answer(StepOneRefusal {
+            transport: requester_side,
+            refusing: true,
+        })
+        .ok()
+    }
+
+    fn bootstrap_again(&mut self, transport: &mut StepOneRefusal) -> Option<BootstrapAnswer> {
+        read_bootstrap(&mut transport.transport).ok()
+    }
+}
+
+#[test]
+fn a_refused_step_one_reads_the_bootstrap_again_as_a_busy_refusal() {
+    for then in [
+        BootstrapAnswer::Busy(PairingBusy::new(BUSY_WAIT_MS).unwrap()),
+        BootstrapAnswer::Offer(custodian_offer()),
+    ] {
+        let mut requester = test_requester();
+        let (mut custodian, accepting) = RefusingStepOne::new(then);
+        let outcome = requester.pair_with_code(SHOWN_CODE, &mut custodian, |_, requested| {
+            Some(requested.to_vec())
+        });
+        accepting.join().unwrap();
+        assert!(outcome.is_ok());
+    }
 }
 
 #[test]

@@ -53,6 +53,15 @@ const RECEIVE_TICKS_PER_QUIT_BOUND: u64 = 4;
 pub const SESSION_RECEIVE_TICK: Duration =
     Duration::from_millis(refineid_rapp::QUIT_WITHDRAWAL_BOUND_MS / RECEIVE_TICKS_PER_QUIT_BOUND);
 
+/// The wait of a Custodian that refused `CPace` step 1 and then served its
+/// offer: it counts as busy with no wait (section 4.2, "Busy Refusal" item
+/// 2).
+const OFFER_AFTER_REFUSAL_WAIT_MS: u64 = 0;
+
+/// How often a requester waiting out a Custodian's busy answer looks at
+/// whether the user stopped the search.
+const BUSY_WAIT_TICK: Duration = SESSION_RECEIVE_TICK;
+
 /// How long a session handshake or the Custodian's first message may stay
 /// silent: the silence that ends an established session (section 8.3).
 const SESSION_SILENCE_LIMIT: Duration =
@@ -66,7 +75,7 @@ const SESSION_RECORD_INTERVAL_MS: u64 =
 
 use crate::ids::{Challenge, OperationId, PairId, RandomIdExt, SessionId};
 use crate::message::{CardPresence, CardStatusMessage, CloseReason, ResultError, ResultStatus};
-use crate::offer::{OfferError, PairingOffer};
+use crate::offer::{BootstrapAnswer, OfferError, PairingBusy, PairingOffer};
 use crate::operations::{CardOperation, CardOperationError, CardOperationResult};
 use crate::presence::{CardSighting, SIGHTING_REFRESH_MS};
 use crate::store::{
@@ -76,11 +85,11 @@ use crate::store::{
 use crate::transport::{BinaryFrame, FrameTransport, TransportError};
 use refineid_rapp::{
     ActivePairing, AuthenticatedViolation, EndpointRole, EstablishedSessionRuntime,
-    ExplicitUserIntent, NextCandidate, OperationRequest, OperationViolation, PairRecord,
-    PairingCandidates, PairingHandshake, PairingSecret, PairingStorage, PingChallenge, ProfileName,
-    ProgressEvent, ReadyOutcome, RequesterDispatch, RequesterEngineError, RequesterOperationEngine,
-    RuntimePoll, RuntimeReceive, SessionAuthentication, SessionHandshake, SweepError,
-    TransportProfile, TypedMessage, generate_pair_key_material,
+    ExplicitUserIntent, NextCandidate, NextEndpoint, OperationRequest, OperationViolation,
+    PairRecord, PairingCandidates, PairingHandshake, PairingSecret, PairingStorage, PingChallenge,
+    ProfileName, ProgressEvent, ReadyOutcome, RequesterDispatch, RequesterEngineError,
+    RequesterOperationEngine, RuntimePoll, RuntimeReceive, SessionAuthentication, SessionHandshake,
+    SweepError, TransportProfile, TypedMessage, generate_pair_key_material,
 };
 
 /// Local labels sent inside `pairing.hello`. Labels, not identities.
@@ -220,10 +229,32 @@ pub trait PairingCandidateSource {
     fn discover(&mut self) -> Option<Vec<Self::Endpoint>>;
 
     /// Opens a pairing connection to `endpoint`, past its `"pairing"`
-    /// routing preamble, and reads the offer it serves (section 4.2 step
-    /// 1); `None` when no connection opens or it serves no offer this
-    /// requester can use.
-    fn open(&mut self, endpoint: &Self::Endpoint) -> Option<(Self::Transport, PairingOffer)>;
+    /// routing preamble, and reads its bootstrap answer (section 4.2,
+    /// Bootstrap Read Flow): the offer with the open connection, or the
+    /// Custodian's `pairing-busy` once the connection is closed; `None`
+    /// when no connection opens or it answers nothing this requester can
+    /// use.
+    fn open(&mut self, endpoint: &Self::Endpoint) -> Option<PairingConnection<Self::Transport>>;
+
+    /// Reads the bootstrap answer again on `transport` after the Custodian
+    /// refused its `CPace` step 1 with [`TransportError::Refused`] (section
+    /// 4.2, "Busy Refusal" item 2); `None` on a transport with no such
+    /// refusal or when the read fails.
+    fn bootstrap_again(&mut self, transport: &mut Self::Transport) -> Option<BootstrapAnswer> {
+        let _ = transport;
+        None
+    }
+}
+
+/// A Custodian's bootstrap answer on a pairing connection (section 4.2,
+/// Bootstrap Read Flow item 3).
+#[derive(Debug)]
+pub enum PairingConnection<Transport> {
+    /// The Custodian can admit an attempt: the open connection and the
+    /// offer it served.
+    Offer(Transport, PairingOffer),
+    /// The Custodian cannot admit an attempt now; the connection is closed.
+    Busy(PairingBusy),
 }
 
 /// A pairing connection the caller already opened, as the one Custodian a
@@ -246,26 +277,32 @@ impl<Transport: FrameTransport> PairingCandidateSource for OpenedConnection<Tran
         self.0.is_some().then(|| vec![()])
     }
 
-    fn open(&mut self, _endpoint: &()) -> Option<(Transport, PairingOffer)> {
-        let mut transport = self.0.take()?;
-        let offer = read_offer(&mut transport).ok()?;
-        Some((transport, offer))
+    fn open(&mut self, _endpoint: &()) -> Option<PairingConnection<Transport>> {
+        read_bootstrap_answer(self.0.take()?).ok()
     }
 }
 
-/// Reads the offer a Custodian serves as its first frame on a pairing
-/// connection, for the connection's transport profile (section 4.2 step 1).
-/// Development builds report a connection that serves none.
+/// Reads the first frame of the pairing connection `transport`: the
+/// Custodian's bootstrap answer.
+///
+/// The answer is read for the connection's transport profile (section
+/// 4.2, Bootstrap Read Flow items 2 and 3), and the connection is closed
+/// after a `pairing-busy`. Development builds report a connection that
+/// answers nothing usable.
 ///
 /// # Errors
 /// [`PairingError::Transport`] when no frame arrives,
 /// [`PairingError::UnregisteredTransport`] for a connection of no
-/// registered profile, and [`PairingError::Offer`] when the frame is not an
-/// offer this connection can bind.
-pub fn read_offer<Transport: FrameTransport>(
-    transport: &mut Transport,
-) -> Result<PairingOffer, PairingError> {
-    crate::offer::read_bootstrap(transport)
+/// registered profile, and [`PairingError::Offer`] when the frame is
+/// neither a `pairing-busy` nor an offer this connection can bind.
+pub fn read_bootstrap_answer<Transport: FrameTransport>(
+    mut transport: Transport,
+) -> Result<PairingConnection<Transport>, PairingError> {
+    crate::offer::read_bootstrap(&mut transport)
+        .map(|answer| match answer {
+            BootstrapAnswer::Offer(offer) => PairingConnection::Offer(transport, offer),
+            BootstrapAnswer::Busy(busy) => PairingConnection::Busy(busy),
+        })
         .map_err(|error| match error {
             crate::offer::BootstrapError::Transport(error) => PairingError::Transport(error),
             crate::offer::BootstrapError::UnregisteredTransport => {
@@ -274,6 +311,26 @@ pub fn read_offer<Transport: FrameTransport>(
             crate::offer::BootstrapError::Offer(error) => PairingError::Offer(error),
         })
         .inspect_err(|error| refineid_dev_errors::report!(Rapp, "pairing offer not read", error))
+}
+
+/// Why a Custodian did not prove it holds the code.
+enum CodeRefusal {
+    /// The Custodian answered `pairing-busy` in place of `CPace` step 2,
+    /// asking for this wait in milliseconds (section 4.2, "Busy Refusal"
+    /// item 2).
+    Busy(u64),
+    /// The Custodian refused the `CPace` step 1 write; its bootstrap answer
+    /// tells whether it was busy (section 4.2, "Busy Refusal" item 2).
+    StepOneRefused,
+    /// The Custodian refused the code (section 4.2, "Trying Each Custodian
+    /// in Pairing Mode" item 4).
+    Refused(PairingError),
+}
+
+impl From<PairingError> for CodeRefusal {
+    fn from(error: PairingError) -> Self {
+        Self::Refused(error)
+    }
 }
 
 /// A Custodian's proof that it holds the code: its `CPace` step 2 verified,
@@ -654,10 +711,14 @@ impl<Store: PairingStore> Requester<Store> {
     /// 4.2 and 6), and returns the pairing with the endpoint it was made
     /// on.
     ///
-    /// One pairing connection is open at a time, each endpoint is opened at
-    /// most once, and at most [`refineid_rapp::PAIRING_CANDIDATES_MAX`] are
-    /// opened. The offer a connection serves is admitted before `CPace` step
-    /// 1, so a Custodian found on two endpoints receives one guess. On an
+    /// One pairing connection is open at a time, each endpoint is opened
+    /// once, and at most [`refineid_rapp::PAIRING_CANDIDATES_MAX`] are
+    /// opened. A Custodian that answers `pairing-busy`, at bootstrap, in
+    /// place of `CPace` step 2, or by refusing step 1 on BLE, is not a try:
+    /// its endpoint is opened again after every other endpoint waiting and
+    /// no sooner than the wait it asked for, which the search sits out
+    /// quietly. The offer a connection serves is admitted before `CPace`
+    /// step 1, so a Custodian found on two endpoints receives one guess. On an
     /// admitted offer the requester binds the entry for the connection's
     /// transport profile, sends `Y_A`, and verifies the Custodian's
     /// `Y_B || T_B`. A connection that serves no usable offer, closes,
@@ -676,7 +737,8 @@ impl<Store: PairingStore> Requester<Store> {
     /// code, [`PairingSearchError::Stopped`] once `source` is stopped,
     /// [`PairingSearchError::NoneInPairingMode`] when the search ends with
     /// no Custodian tried, [`PairingSearchError::NotAccepted`] when every
-    /// Custodian tried refused the code, and
+    /// Custodian tried refused the code or one still answered busy at the
+    /// connection limit, and
     /// [`PairingSearchError::Ceremony`] when the Custodian holding the code
     /// fails the handshake, a deadline, the grants, or the storage.
     pub fn pair_with_code<Source: PairingCandidateSource>(
@@ -703,51 +765,94 @@ impl<Store: PairingStore> Requester<Store> {
         let code = crate::offer::normalize_pairing_code(code)
             .map(Zeroizing::new)
             .ok_or(PairingSearchError::InvalidCode)?;
-        let mut candidates = PairingCandidates::new();
+        let mut candidates = PairingCandidates::<Source::Endpoint>::new();
         loop {
             if source.stopped() {
                 return Err(PairingSearchError::Stopped);
             }
-            let Some(endpoint) = candidates.next_endpoint().ok().flatten().cloned() else {
-                let found = source
-                    .discover()
-                    .ok_or(PairingSearchError::NoneInPairingMode)?;
-                for endpoint in found {
-                    candidates.found(endpoint);
+            let endpoint = match candidates.next_endpoint(current_time_ms()) {
+                Ok(NextEndpoint::Open(endpoint)) => endpoint.clone(),
+                Ok(NextEndpoint::NotBefore(due_ms)) => {
+                    Self::sit_out_busy(source, due_ms);
+                    continue;
                 }
-                continue;
+                Ok(NextEndpoint::Exhausted) | Err(_) => {
+                    let found = source
+                        .discover()
+                        .ok_or(PairingSearchError::NoneInPairingMode)?;
+                    for endpoint in found {
+                        candidates.found(endpoint);
+                    }
+                    continue;
+                }
             };
-            if let Some((mut transport, offer)) = source.open(&endpoint)
-                && candidates.begin_try(&offer).is_ok()
-            {
-                match Self::offer_code(&code, &offer, &mut transport) {
-                    Ok(confirmed) => {
-                        let _ = candidates.accepted();
-                        return self
-                            .finish_pairing(offer, &confirmed, transport, confirm)
-                            .map(|pair_id| (pair_id, endpoint))
-                            .map_err(PairingSearchError::Ceremony);
-                    }
-                    Err(error) => {
-                        refineid_dev_errors::report!(Rapp, "pairing code refused", error);
+            let next = match source.open(&endpoint) {
+                Some(PairingConnection::Busy(busy)) => {
+                    candidates.busy(busy.retry_after_ms(), current_time_ms())
+                }
+                Some(PairingConnection::Offer(mut transport, offer))
+                    if candidates.begin_try(&offer).is_ok() =>
+                {
+                    match Self::offer_code(&code, &offer, &mut transport) {
+                        Ok(confirmed) => {
+                            let _ = candidates.accepted();
+                            return self
+                                .finish_pairing(offer, &confirmed, transport, confirm)
+                                .map(|pair_id| (pair_id, endpoint))
+                                .map_err(PairingSearchError::Ceremony);
+                        }
+                        Err(CodeRefusal::Busy(retry_after_ms)) => {
+                            candidates.busy(retry_after_ms, current_time_ms())
+                        }
+                        Err(CodeRefusal::StepOneRefused) => {
+                            match source.bootstrap_again(&mut transport) {
+                                Some(BootstrapAnswer::Busy(busy)) => {
+                                    candidates.busy(busy.retry_after_ms(), current_time_ms())
+                                }
+                                Some(BootstrapAnswer::Offer(_)) => {
+                                    candidates.busy(OFFER_AFTER_REFUSAL_WAIT_MS, current_time_ms())
+                                }
+                                None => candidates.closed(),
+                            }
+                        }
+                        Err(CodeRefusal::Refused(error)) => {
+                            refineid_dev_errors::report!(Rapp, "pairing code refused", error);
+                            candidates.closed()
+                        }
                     }
                 }
-            }
-            if candidates.closed() == Ok(NextCandidate::NotAccepted) {
+                Some(PairingConnection::Offer(..)) | None => candidates.closed(),
+            };
+            if next == Ok(NextCandidate::NotAccepted) {
                 return Err(PairingSearchError::NotAccepted);
             }
+        }
+    }
+
+    /// Waits until the monotonic time `due_ms` a busy Custodian asked for,
+    /// or until the user stops the search; nothing is shown meanwhile
+    /// (section 4.2, "Trying Each Custodian in Pairing Mode" item 1).
+    fn sit_out_busy<Source: PairingCandidateSource>(source: &Source, due_ms: u64) {
+        loop {
+            let left_ms = due_ms.saturating_sub(current_time_ms());
+            if left_ms == 0 || source.stopped() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(left_ms).min(BUSY_WAIT_TICK));
         }
     }
 
     /// Runs `CPace` with `code` on `offer` up to the Custodian's proof that
     /// it holds the code: binds the offer's entry for the connection's
     /// transport profile, sends `Y_A`, and verifies the Custodian's
-    /// `Y_B || T_B`, which must arrive within the attempt deadline.
+    /// `Y_B || T_B`, which must arrive within the attempt deadline. A
+    /// `pairing-busy` in place of step 2, or a refused step 1 write, is the
+    /// Custodian's busy refusal (section 4.2, "Busy Refusal" item 2).
     fn offer_code<Transport: FrameTransport>(
         code: &str,
         offer: &PairingOffer,
         transport: &mut Transport,
-    ) -> Result<CodeConfirmed, PairingError> {
+    ) -> Result<CodeConfirmed, CodeRefusal> {
         let profile = TransportProfile::parse(transport.profile())
             .ok_or(PairingError::UnregisteredTransport)?;
         let candidate_id = offer
@@ -771,7 +876,10 @@ impl<Store: PairingStore> Requester<Store> {
             .map_err(|_| PairingError::HandshakeFailed)?;
         transport
             .send_frame(step_one_frame.as_bytes())
-            .map_err(PairingError::Transport)?;
+            .map_err(|error| match error {
+                TransportError::Refused => CodeRefusal::StepOneRefused,
+                error => CodeRefusal::Refused(PairingError::Transport(error)),
+            })?;
         let waited = transport
             .set_receive_deadline(CPACE_STEP_TWO_WAIT)
             .map_err(PairingError::Transport)?;
@@ -779,8 +887,12 @@ impl<Store: PairingStore> Requester<Store> {
         transport
             .set_receive_deadline(waited)
             .map_err(PairingError::Transport)?;
-        let step_two = BinaryFrame::reconstruct(step_two.map_err(PairingError::Transport)?)
-            .map_err(|_| PairingError::HandshakeFailed)?;
+        let step_two = step_two.map_err(PairingError::Transport)?;
+        if let Ok(busy) = PairingBusy::from_cbor(&step_two) {
+            return Err(CodeRefusal::Busy(busy.retry_after_ms()));
+        }
+        let step_two =
+            BinaryFrame::reconstruct(step_two).map_err(|_| PairingError::HandshakeFailed)?;
         let (step_three, pairing_secret) =
             initiator
                 .process_step2_frame(&step_two)

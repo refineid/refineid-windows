@@ -18,9 +18,10 @@ use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use crate::engine::{PairingCandidateSource, SESSION_RECEIVE_TICK, read_offer};
+use crate::engine::{
+    PairingCandidateSource, PairingConnection, SESSION_RECEIVE_TICK, read_bootstrap_answer,
+};
 use crate::ids::PairId;
-use crate::offer::PairingOffer;
 use crate::transport::{FrameTransport, TcpFrameTransport, TransportError};
 use refineid_rapp::{
     DiscoveryKey, DiscoveryRecord, InstanceName, PairRecord, RoutingKey, SessionRouting,
@@ -935,24 +936,82 @@ impl<Stopped: Fn() -> bool> PairingCandidateSource for PairingServices<Stopped> 
         Some(instances)
     }
 
-    fn open(&mut self, instance: &String) -> Option<(TcpFrameTransport, PairingOffer)> {
+    fn open(&mut self, instance: &String) -> Option<PairingConnection<TcpFrameTransport>> {
         let service = self
             .found
             .iter()
             .find(|service| &service.instance == instance)?;
-        let mut transport = dial(
-            &service.endpoints,
-            STREAM_CANDIDATE_ID,
-            self.receive_deadline,
-            DialPurpose::Pairing,
-        )
-        .inspect_err(|error| {
-            refineid_dev_errors::report!(Rapp, "pairing connection not opened", error);
-        })
-        .ok()?;
-        let offer = read_offer(&mut transport).ok()?;
-        Some((transport, offer))
+        dial_pairing(&service.endpoints, self.receive_deadline)
     }
+}
+
+/// One custodian at addresses the user named, the one endpoint a typed
+/// code is tried with.
+///
+/// Every pairing connection to it, a reopening after a busy answer
+/// included, is dialed afresh; the first may be one the caller already
+/// opened.
+#[derive(Debug)]
+pub struct PairingAddress {
+    endpoints: Vec<String>,
+    receive_deadline: Duration,
+    opened: Option<TcpFrameTransport>,
+    found: bool,
+}
+
+impl PairingAddress {
+    /// The custodian at `endpoints`, whose first pairing connection
+    /// `opened` is already past its `"pairing"` routing preamble; each
+    /// later one waits `receive_deadline` per receive.
+    #[must_use]
+    pub const fn new(
+        opened: TcpFrameTransport,
+        endpoints: Vec<String>,
+        receive_deadline: Duration,
+    ) -> Self {
+        Self {
+            endpoints,
+            receive_deadline,
+            opened: Some(opened),
+            found: false,
+        }
+    }
+}
+
+impl PairingCandidateSource for PairingAddress {
+    type Endpoint = ();
+    type Transport = TcpFrameTransport;
+
+    fn discover(&mut self) -> Option<Vec<()>> {
+        (!core::mem::replace(&mut self.found, true)).then(|| vec![()])
+    }
+
+    fn open(&mut self, _endpoint: &()) -> Option<PairingConnection<TcpFrameTransport>> {
+        match self.opened.take() {
+            Some(transport) => read_bootstrap_answer(transport).ok(),
+            None => dial_pairing(&self.endpoints, self.receive_deadline),
+        }
+    }
+}
+
+/// Dials a pairing connection to `endpoints` and reads its bootstrap
+/// answer (section 4.2, Bootstrap Read Flow item 2); `None` when no
+/// connection opens or it answers nothing usable.
+fn dial_pairing(
+    endpoints: &[String],
+    receive_deadline: Duration,
+) -> Option<PairingConnection<TcpFrameTransport>> {
+    let transport = dial(
+        endpoints,
+        STREAM_CANDIDATE_ID,
+        receive_deadline,
+        DialPurpose::Pairing,
+    )
+    .inspect_err(|error| {
+        refineid_dev_errors::report!(Rapp, "pairing connection not opened", error);
+    })
+    .ok()?;
+    read_bootstrap_answer(transport).ok()
 }
 
 /// Rejected stream-profile bytes, parameters, or connection steps.
