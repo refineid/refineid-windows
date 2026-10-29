@@ -1,20 +1,25 @@
 //! Integration test for RAPP mock proxy pairing and operation exchange.
 
 use p384::ecdsa::signature::hazmat::PrehashVerifier as _;
-use refineid_rapp::{CertificateFingerprint, MINIMUM_REMAINING_ATTEMPTS, ProfileName, ResultError};
+use refineid_rapp::{
+    CPACE_ATTEMPT_WINDOW_MS, CertificateFingerprint, CpaceKc2Initiator, MINIMUM_REMAINING_ATTEMPTS,
+    PRE_AUTHENTICATION_SPACING_MS, ProfileName, ResultError, encode_kc2_step1_frame,
+    standard_pairing_context_v2,
+};
 use refineid_rapp_cli::mock_proxy::{MockProxyOptions, serve_mock_proxy};
 use refineid_rapp_core::engine::{
-    OpenedConnection, OperationOutcome, PairingSearchError, Requester, RequesterConfig,
+    OperationOutcome, PairingConnection, PairingSearchError, Requester, RequesterConfig,
     SESSION_RECEIVE_TICK,
 };
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::message::{CardPresence, CardReader, CardStatusMessage, CloseReason};
+use refineid_rapp_core::offer::{BootstrapAnswer, read_bootstrap};
 use refineid_rapp_core::operations::{
     CardOperation, CardOperationResult, CertificateKind, KeyProfile, SignatureAlgorithm,
 };
 use refineid_rapp_core::store::{MemoryPairingStore, PairingRecord, PairingStore};
 use refineid_rapp_core::stream::{
-    DialPurpose, STREAM_CANDIDATE_ID, StreamListener, dial, dial_session,
+    DialPurpose, PairingAddress, STREAM_CANDIDATE_ID, StreamListener, dial, dial_session,
 };
 use sha2::{Digest as _, Sha384};
 
@@ -28,6 +33,11 @@ const MISTYPED_CODE: &str = "654322";
 const FAILED_ATTEMPTS: usize = 4;
 /// The login challenge the requester asks the mock card to sign.
 const LOGIN_CHALLENGE: &[u8] = b"synthetic login challenge";
+/// Uniform bytes one `CPace` scalar is drawn from (section 6.1.1).
+const CPACE_SCALAR_ENTROPY_BYTES: usize = 64;
+/// The scalar entropy of the requester that holds the attempt.
+const HOLDER_ENTROPY: &[u8; CPACE_SCALAR_ENTROPY_BYTES] =
+    b"synthetic requester cpace scalar entropy holding the one attempt";
 /// Tries a card has left when only the issuer's software may spend them.
 const BELOW_THE_FLOOR: u8 = MINIMUM_REMAINING_ATTEMPTS - 1;
 
@@ -77,7 +87,7 @@ fn paired_session(
     let (pair_id, ()) = requester
         .pair_with_code(
             TEST_CODE,
-            &mut OpenedConnection::new(transport),
+            &mut PairingAddress::new(transport, vec![endpoint.to_owned()], DEADLINE),
             |peer, requested| {
                 assert_eq!(peer.display_name, "RefineID Mock Phone");
                 assert_eq!(peer.platform, "iOS");
@@ -113,7 +123,7 @@ fn authentication(digest: &[u8]) -> CardOperation {
 fn a_mistyped_code_is_refused_by_the_custodian() {
     let (endpoint, _proxy) = start_custodian(options());
     let transport = dial(
-        &[endpoint],
+        std::slice::from_ref(&endpoint),
         STREAM_CANDIDATE_ID,
         DEADLINE,
         DialPurpose::Pairing,
@@ -121,7 +131,7 @@ fn a_mistyped_code_is_refused_by_the_custodian() {
     .expect("dial pairing");
     let outcome = requester().pair_with_code(
         MISTYPED_CODE,
-        &mut OpenedConnection::new(transport),
+        &mut PairingAddress::new(transport, vec![endpoint], DEADLINE),
         |_, requested| Some(requested.to_vec()),
     );
     assert_eq!(outcome, Err(PairingSearchError::NotAccepted));
@@ -140,7 +150,7 @@ fn the_offer_outlives_failed_attempts() {
         .expect("dial pairing");
         let outcome = requester().pair_with_code(
             MISTYPED_CODE,
-            &mut OpenedConnection::new(transport),
+            &mut PairingAddress::new(transport, vec![endpoint.clone()], DEADLINE),
             |_, requested| Some(requested.to_vec()),
         );
         assert_eq!(outcome, Err(PairingSearchError::NotAccepted));
@@ -320,6 +330,72 @@ fn an_absent_card_answers_card_error() {
         )
         .expect("execute browser_authenticate");
     assert_eq!(signed, OperationOutcome::Rejected(ResultError::CardError));
+    requester.disconnect(&mut session, CloseReason::UserDisconnect);
+    proxy_handle
+        .join()
+        .expect("proxy thread finished")
+        .expect("mock proxy failed");
+}
+
+/// Dials a pairing connection to the mock custodian at `endpoint`.
+fn dial_pairing(endpoint: &str) -> refineid_rapp_core::transport::TcpFrameTransport {
+    dial(
+        &[endpoint.to_owned()],
+        STREAM_CANDIDATE_ID,
+        DEADLINE,
+        DialPurpose::Pairing,
+    )
+    .expect("dial pairing")
+}
+
+#[test]
+fn a_second_requester_is_answered_busy_during_an_attempt_and_then_pairs() {
+    use refineid_rapp_core::transport::FrameTransport as _;
+
+    let (endpoint, proxy_handle) = start_custodian(options());
+
+    // The first requester sends CPace step 1 and holds the attempt open.
+    let mut holder = dial_pairing(&endpoint);
+    let Ok(BootstrapAnswer::Offer(offer)) = read_bootstrap(&mut holder) else {
+        panic!("the first pairing connection is served the offer");
+    };
+    let context = standard_pairing_context_v2(
+        &offer.offer_hash().expect("offer hash"),
+        refineid_rapp_core::transport::STREAM_PROFILE,
+        STREAM_CANDIDATE_ID,
+    )
+    .expect("context");
+    let (_initiator, step_one) =
+        CpaceKc2Initiator::new(TEST_CODE, &context, &offer.offer_id, HOLDER_ENTROPY)
+            .expect("step 1");
+    holder
+        .send_frame(
+            encode_kc2_step1_frame(&step_one)
+                .expect("step 1 frame")
+                .as_bytes(),
+        )
+        .expect("send step 1");
+    holder
+        .receive_frame()
+        .expect("step 2: the attempt is admitted");
+    std::thread::sleep(std::time::Duration::from_millis(
+        PRE_AUTHENTICATION_SPACING_MS,
+    ));
+
+    // The second requester is answered busy for the attempt's time left.
+    let Ok(PairingConnection::Busy(busy)) =
+        refineid_rapp_core::engine::read_bootstrap_answer(dial_pairing(&endpoint))
+    else {
+        panic!("a pairing connection during an attempt is answered busy");
+    };
+    assert!(busy.retry_after_ms() > PRE_AUTHENTICATION_SPACING_MS);
+    assert!(busy.retry_after_ms() <= CPACE_ATTEMPT_WINDOW_MS);
+
+    // The attempt ends; the second requester waits and pairs.
+    drop(holder);
+    let mut requester = requester();
+    let (pair_id, mut session) = paired_session(&mut requester, &endpoint);
+    assert!(requester.store().get(pair_id).is_ok());
     requester.disconnect(&mut session, CloseReason::UserDisconnect);
     proxy_handle
         .join()

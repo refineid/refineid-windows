@@ -41,6 +41,11 @@ pub enum TransportError {
     OversizedFrame,
     /// A blocking receive reached its deadline with no frame.
     TimedOut,
+    /// The peer refused a sent frame with the RAPP application error: on
+    /// BLE, the ATT error `0x80 Application Error` a Custodian answers to a
+    /// `CPace` step 1 it cannot admit (RAPP v26.10.29 section 4.2, "Busy
+    /// Refusal" item 2). The connection stays up.
+    Refused,
 }
 
 impl core::fmt::Display for TransportError {
@@ -50,6 +55,7 @@ impl core::fmt::Display for TransportError {
             Self::Failed => write!(f, "transport failed"),
             Self::OversizedFrame => write!(f, "oversized frame"),
             Self::TimedOut => write!(f, "transport timed out"),
+            Self::Refused => write!(f, "the peer refused the frame"),
         }
     }
 }

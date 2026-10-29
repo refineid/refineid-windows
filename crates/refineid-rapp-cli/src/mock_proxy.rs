@@ -1,8 +1,9 @@
 //! Mock RAPP custodian for automated verification and testing.
 //!
 //! Listens like a phone does (RAPP v26.10.29 section 2.2.2), shows a pairing
-//! code, serves a random offer after the pairing preamble, answers `CPace`
-//! KC2 as responder and `Noise_XXpsk3` with the hello, confirmation, and
+//! code, serves a random offer after the pairing preamble, or `pairing-busy`
+//! while it cannot admit an attempt (section 4.2, "Busy Refusal"), answers
+//! `CPace` KC2 as responder and `Noise_XXpsk3` with the hello, confirmation, and
 //! storage confirmation exchange, then accepts sessions routed by their
 //! routing tag, each on its own thread. Every session sends `session.ready`
 //! and the card's status (section 8.4), keeps liveness (section 8.3), and
@@ -12,7 +13,8 @@
 //! DNS-SD record: requesters dial it by address.
 
 use std::io::Write as _;
-use std::sync::Arc;
+use std::sync::mpsc::{Sender, channel};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use refineid_lib_core::apdu::status_word::PinRetries;
@@ -21,14 +23,14 @@ use refineid_lib_core::pin_retry_risk::check_retry_floor;
 use refineid_lib_core::x509::OwnedCert;
 use refineid_rapp::{
     BinaryFrame, CardIdentity, CardInspection, CardOperation, CardOperationResult, CardPresence,
-    CardReader, CardStatusMessage, CertificateFingerprint, CpaceKc2Responder,
+    CardReader, CardStatusMessage, CertificateFingerprint, CpaceAttemptSlot, CpaceKc2Responder,
     DEFAULT_OPERATION_LIFETIME_MS, EndpointRole, EstablishedSessionRuntime, OfferId,
-    OperationRequest, OperationResultMessage, OperationViolation, PairRecord, PairingHandshake,
-    PairingOffer, PingChallenge, ProfileName, ProgressEvent, ProxyDispatch, ProxyEngineError,
-    ProxyFailure, ProxyOperationEngine, RoutingKey, RuntimePoll, RuntimeReceive,
-    SESSION_READY_NONCE_SIZE, SessionHandshake, SignatureAlgorithm, TransportProfile, TypedMessage,
-    UserApproval, decode_pair_record, encode_pair_record, generate_pair_key_material,
-    route_session, standard_pairing_context_v2,
+    OperationRequest, OperationResultMessage, OperationViolation, PairRecord, PairingBusy,
+    PairingHandshake, PairingOffer, PingChallenge, PreAuthenticationRateLimit, ProfileName,
+    ProgressEvent, ProxyDispatch, ProxyEngineError, ProxyFailure, ProxyOperationEngine, RoutingKey,
+    RuntimePoll, RuntimeReceive, SESSION_READY_NONCE_SIZE, SessionHandshake, SignatureAlgorithm,
+    TransportProfile, TypedMessage, UserApproval, decode_pair_record, encode_pair_record,
+    generate_pair_key_material, route_session, standard_pairing_context_v2,
 };
 use refineid_rapp_core::clock::{continuous_ms, unix_time_ms};
 use refineid_rapp_core::engine::SESSION_RECEIVE_TICK;
@@ -47,6 +49,10 @@ const PAIRING_STEP_WAIT: Duration = Duration::from_secs(10);
 
 /// How long the mock serves one pairing offer (section 3.3).
 const OFFER_LIFETIME: Duration = Duration::from_millis(OFFER_TTL_MS);
+
+/// How long one wait for a pairing connection lasts before the mock looks
+/// at whether an attempt paired.
+const PAIRING_ACCEPT_TICK: Duration = SESSION_RECEIVE_TICK;
 
 /// Default listen address: the local mock custodian endpoint requesters
 /// fall back to.
@@ -224,16 +230,16 @@ pub fn serve_mock_proxy(
     listener: &StreamListener,
     options: MockProxyOptions,
 ) -> Result<(), String> {
-    let pairing = if let Some(state_path) = &options.resume_state {
+    let (pairing, mut early_session) = if let Some(state_path) = &options.resume_state {
         println!("resuming from state file: {state_path}");
-        ProxyPairing::load_from_file(state_path)?
+        (ProxyPairing::load_from_file(state_path)?, None)
     } else {
-        let p = run_pairing(listener, &options)?;
+        let (p, early_session) = run_pairing(listener, &options)?;
         if let Some(save_path) = &options.save_state {
             p.save_to_file(save_path)?;
             println!("saved proxy state to: {save_path}");
         }
-        p
+        (p, early_session)
     };
 
     println!(
@@ -249,7 +255,7 @@ pub fn serve_mock_proxy(
     let mut sessions_served = 0;
     let mut workers = Vec::new();
     while options.count == SERVE_FOREVER || sessions_served < options.count {
-        let transport = accept_session(listener, &pairing)?;
+        let transport = accept_session(listener, &pairing, early_session.take())?;
         sessions_served += 1;
         println!("serving session {sessions_served}...");
         let pairing = Arc::clone(&pairing);
@@ -280,13 +286,142 @@ fn custodian_offer() -> Result<PairingOffer, String> {
     .map_err(|e| format!("offer creation failed: {e:?}"))
 }
 
-/// Shows the code and serves the offer to one pairing connection at a time
-/// until one pairs or the offer's lifetime ends (section 3.3). A failed
-/// attempt frees the slot and leaves the offer as it was.
+/// What the mock custodian admits under its one offer (section 3.3 items 2
+/// to 6): one attempt at a time, pairing connections and `CPace` step 1
+/// submissions each at most once per 500 ms.
+struct Admission {
+    offer_expires_ms: u64,
+    slot: CpaceAttemptSlot,
+    /// The number of the attempt holding the slot.
+    holder: Option<u64>,
+    attempts: u64,
+    connections: PreAuthenticationRateLimit,
+    step_one: PreAuthenticationRateLimit,
+}
+
+/// How an attempt the mock admitted ended.
+enum AttemptEnd {
+    /// The code was refused or the attempt failed before `T_A` verified;
+    /// the offer stays as it was.
+    Failed(String),
+    /// `T_A` verified and consumed the offer; the pairing that followed.
+    Consumed(Result<PairRecord, String>),
+}
+
+impl Admission {
+    fn new(now_ms: u64) -> Self {
+        Self {
+            offer_expires_ms: now_ms.saturating_add(OFFER_TTL_MS),
+            slot: CpaceAttemptSlot::default(),
+            holder: None,
+            attempts: 0,
+            connections: PreAuthenticationRateLimit::default(),
+            step_one: PreAuthenticationRateLimit::default(),
+        }
+    }
+
+    /// Frees the slot of an attempt whose deadline passed.
+    fn expire(&mut self, now_ms: u64) {
+        if self.slot.has_active_attempt() && !self.slot.attempt_is_live(now_ms) {
+            self.slot.end_active_attempt();
+            self.holder = None;
+        }
+    }
+
+    /// The `pairing-busy` for a connection refused at `now_ms`: the larger
+    /// of the active attempt's time left, the step 1 spacing left, and
+    /// `spacing_wait_ms` (section 4.2, "`PairingBusy` Schema").
+    fn busy(&self, now_ms: u64, spacing_wait_ms: u64) -> PairingBusy {
+        PairingBusy::until_admissible(
+            self.slot
+                .active_attempt_wait_ms(now_ms)
+                .max(self.step_one.wait_ms(now_ms))
+                .max(spacing_wait_ms),
+        )
+    }
+
+    /// Admits a pairing connection at `now_ms` to be served the offer, or
+    /// answers it busy (section 4.2, Bootstrap Read Flow item 2). A refused
+    /// connection does not move the connection spacing, and its busy
+    /// answer carries the larger of the attempt's time left and every
+    /// spacing left.
+    fn admit_connection(&mut self, now_ms: u64) -> Result<(), PairingBusy> {
+        self.expire(now_ms);
+        let spacing_wait_ms = self.connections.wait_ms(now_ms);
+        if self.slot.has_active_attempt()
+            || self.step_one.wait_ms(now_ms) > 0
+            || !self.connections.admit(now_ms)
+        {
+            return Err(self.busy(now_ms, spacing_wait_ms));
+        }
+        Ok(())
+    }
+
+    /// Admits the attempt a `CPace` step 1 arriving at `now_ms` starts and
+    /// returns its number, or answers it busy (section 4.2, "Busy Refusal"
+    /// item 2).
+    fn admit_step_one(&mut self, now_ms: u64) -> Result<u64, PairingBusy> {
+        self.expire(now_ms);
+        if self.slot.has_active_attempt()
+            || !self.step_one.admit(now_ms)
+            || !self.slot.admit(now_ms, self.offer_expires_ms)
+        {
+            return Err(self.busy(now_ms, 0));
+        }
+        self.attempts += 1;
+        self.holder = Some(self.attempts);
+        Ok(self.attempts)
+    }
+
+    /// Ends `attempt` as failed, unless another holds the slot.
+    fn fail(&mut self, attempt: u64) {
+        if self.holder == Some(attempt) {
+            self.slot.end_active_attempt();
+            self.holder = None;
+        }
+    }
+
+    /// Ends `attempt` as the one whose `T_A` verified at `now_ms`, which
+    /// consumes the offer, or refuses it once its deadline passed.
+    fn consume(&mut self, attempt: u64, now_ms: u64) -> bool {
+        if self.holder != Some(attempt) || !self.slot.attempt_is_live(now_ms) {
+            return false;
+        }
+        self.slot.consume();
+        self.holder = None;
+        true
+    }
+}
+
+/// Locks the admission state; a worker that panicked leaves it usable.
+fn admission(admission: &Mutex<Admission>) -> std::sync::MutexGuard<'_, Admission> {
+    admission.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Sends a `pairing-busy` and closes the connection (section 4.2, "Busy
+/// Refusal").
+fn answer_busy(mut transport: TcpFrameTransport, busy: PairingBusy) {
+    match busy.to_cbor() {
+        Ok(bytes) => {
+            if let Err(error) = transport.send_frame(&bytes) {
+                println!("busy answer not sent: {error:?}");
+            }
+        }
+        Err(error) => println!("busy answer not encoded: {error:?}"),
+    }
+}
+
+/// Shows the code and serves the offer to every pairing connection it can
+/// admit, each on its own thread, until one pairs or the offer's lifetime
+/// ends (section 3.3). One attempt runs at a time; a connection or a
+/// `CPace` step 1 it cannot admit is answered `pairing-busy` (section 4.2,
+/// "Busy Refusal"). A failed attempt frees the slot and leaves the offer as
+/// it was; a verified `T_A` consumes it. A session connection that arrives
+/// once the offer is consumed is handed back with the pairing.
 fn run_pairing(
     listener: &StreamListener,
     options: &MockProxyOptions,
-) -> Result<ProxyPairing, String> {
+) -> Result<(ProxyPairing, Option<StreamAccept>), String> {
     let code = match &options.code {
         Some(code) => code.clone(),
         None => generate_pairing_code().map_err(|e| format!("rng failed: {e}"))?,
@@ -294,21 +429,65 @@ fn run_pairing(
     let offer = custodian_offer()?;
     println!("pairing code: {}", format_pairing_code(&code));
     let offer_ends = Instant::now() + OFFER_LIFETIME;
+    let admission_state = Mutex::new(Admission::new(continuous_ms()));
+    let (ended, endings) = channel();
+    std::thread::scope(|workers| {
+        loop {
+            while let Ok(end) = endings.try_recv() {
+                match end {
+                    AttemptEnd::Failed(error) => println!("pairing attempt failed: {error}"),
+                    AttemptEnd::Consumed(record) => {
+                        return record.map(|record| (ProxyPairing { record }, None));
+                    }
+                }
+            }
+            let remaining = offer_ends.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("pairing offer expired".into());
+            }
+            let accepted = listener
+                .accept_timeout(remaining.min(PAIRING_ACCEPT_TICK))
+                .map_err(|e| format!("accept failed: {e:?}"))?;
+            let Some(accepted) = accepted else {
+                continue;
+            };
+            let StreamAccept::Pairing(transport) = accepted else {
+                if admission(&admission_state).slot.is_consumed() {
+                    let record = consumed_pairing(&endings)?;
+                    return Ok((ProxyPairing { record }, Some(accepted)));
+                }
+                println!("ignored a session connection while pairing");
+                continue;
+            };
+            let admitted = {
+                let mut state = admission(&admission_state);
+                if state.slot.is_consumed() {
+                    println!("closed a pairing connection; the offer is consumed");
+                    continue;
+                }
+                state.admit_connection(continuous_ms())
+            };
+            if let Err(busy) = admitted {
+                println!("answered a pairing connection busy");
+                answer_busy(transport, busy);
+                continue;
+            }
+            let ended = ended.clone();
+            let (offer, code, admission_state) = (&offer, code.as_str(), &admission_state);
+            workers.spawn(move || {
+                pair_once(transport, offer, code, options, admission_state, &ended);
+            });
+        }
+    })
+}
+
+/// Waits for the attempt that consumed the offer to end its pairing.
+fn consumed_pairing(endings: &std::sync::mpsc::Receiver<AttemptEnd>) -> Result<PairRecord, String> {
     loop {
-        let remaining = offer_ends.saturating_duration_since(Instant::now());
-        let accepted = listener
-            .accept_timeout(remaining)
-            .map_err(|e| format!("accept failed: {e:?}"))?;
-        let Some(accepted) = accepted else {
-            return Err("pairing offer expired".into());
-        };
-        let StreamAccept::Pairing(transport) = accepted else {
-            println!("ignored a session connection while pairing");
-            continue;
-        };
-        match pair_once(transport, &offer, &code, options) {
-            Ok(record) => return Ok(ProxyPairing { record }),
-            Err(error) => println!("pairing attempt failed: {error}"),
+        match endings.recv() {
+            Ok(AttemptEnd::Consumed(record)) => return record,
+            Ok(AttemptEnd::Failed(error)) => println!("pairing attempt failed: {error}"),
+            Err(_) => return Err("the consuming attempt ended without a pairing".into()),
         }
     }
 }
@@ -343,51 +522,113 @@ fn send_pairing_frame(
         .map_err(|e| format!("send {step} failed: {e:?}"))
 }
 
-/// One pairing connection: the offer bootstrap, `CPace` KC2 as responder,
-/// `Noise_XXpsk3`, then the hello, confirmation, and storage exchange.
+/// One admitted pairing connection: the offer bootstrap, then `CPace` KC2
+/// as responder once its step 1 is admitted, or `pairing-busy` in place of
+/// step 2 when it is not; after a verified `T_A`, `Noise_XXpsk3` and the
+/// hello, confirmation, and storage exchange. How an admitted attempt ended
+/// goes to `ended`.
 fn pair_once(
     mut transport: TcpFrameTransport,
     offer: &PairingOffer,
     code: &str,
     options: &MockProxyOptions,
-) -> Result<PairRecord, String> {
+    admission_state: &Mutex<Admission>,
+    ended: &Sender<AttemptEnd>,
+) {
+    let step_one = match serve_offer(&mut transport, offer) {
+        Ok(step_one) => step_one,
+        Err(error) => {
+            println!("pairing connection closed before an attempt: {error}");
+            return;
+        }
+    };
+    let admitted = {
+        let mut state = admission(admission_state);
+        if state.slot.is_consumed() {
+            println!("closed a pairing attempt; the offer is consumed");
+            return;
+        }
+        state.admit_step_one(continuous_ms())
+    };
+    let attempt = match admitted {
+        Ok(attempt) => attempt,
+        Err(busy) => {
+            println!("answered a pairing attempt busy");
+            answer_busy(transport, busy);
+            return;
+        }
+    };
+    let verified = run_cpace(&mut transport, offer, code, &step_one);
+    let end = match verified {
+        Ok(pairing_secret) if admission(admission_state).consume(attempt, continuous_ms()) => {
+            AttemptEnd::Consumed(finish_pairing(transport, offer, &pairing_secret, options))
+        }
+        Ok(_) => {
+            admission(admission_state).fail(attempt);
+            AttemptEnd::Failed("T_A arrived after the attempt deadline".into())
+        }
+        Err(error) => {
+            admission(admission_state).fail(attempt);
+            AttemptEnd::Failed(error)
+        }
+    };
+    let _ = ended.send(end);
+}
+
+/// Sends the offer and receives `CPace` step 1.
+fn serve_offer(
+    transport: &mut TcpFrameTransport,
+    offer: &PairingOffer,
+) -> Result<BinaryFrame, String> {
     let bootstrap = offer
         .to_cbor()
         .map_err(|e| format!("offer encoding failed: {e:?}"))?;
     transport
         .send_frame(&bootstrap)
         .map_err(|e| format!("send offer failed: {e:?}"))?;
+    receive_pairing_frame(transport, "Y_A")
+}
+
+/// `CPace` KC2 as responder on an admitted step 1, up to a verified `T_A`.
+fn run_cpace(
+    transport: &mut TcpFrameTransport,
+    offer: &PairingOffer,
+    code: &str,
+    step_one: &BinaryFrame,
+) -> Result<refineid_rapp::PairingSecret, String> {
     let offer_hash = offer
         .offer_hash()
         .map_err(|e| format!("offer hash failed: {e:?}"))?;
     let context = standard_pairing_context_v2(&offer_hash, STREAM_PROFILE, STREAM_CANDIDATE_ID)
         .map_err(|e| format!("context failed: {e:?}"))?;
-
-    let step_one = receive_pairing_frame(&mut transport, "Y_A")?;
     let mut entropy = Zeroizing::new([0_u8; CPACE_SCALAR_ENTROPY_BYTES]);
     getrandom::fill(entropy.as_mut()).map_err(|e| format!("rng failed: {e}"))?;
-    let (step_two, waiting) = CpaceKc2Responder::process_step1_frame(
-        code,
-        &context,
-        &offer.offer_id,
-        &step_one,
-        &entropy,
-    )
-    .map_err(|e| format!("Y_A refused: {e:?}"))?;
+    let (step_two, waiting) =
+        CpaceKc2Responder::process_step1_frame(code, &context, &offer.offer_id, step_one, &entropy)
+            .map_err(|e| format!("Y_A refused: {e:?}"))?;
     drop(entropy);
-    send_pairing_frame(&mut transport, &step_two, "Y_B")?;
-    let step_three = receive_pairing_frame(&mut transport, "T_A (mistyped code?)")?;
-    let pairing_secret = waiting
+    send_pairing_frame(transport, &step_two, "Y_B")?;
+    let step_three = receive_pairing_frame(transport, "T_A (mistyped code?)")?;
+    waiting
         .process_step3_frame(&step_three)
-        .map_err(|e| format!("T_A refused: {e:?}"))?;
+        .map_err(|e| format!("T_A refused: {e:?}"))
+}
 
+/// `Noise_XXpsk3` under the `CPace` key, then the hello, confirmation, and
+/// storage exchange.
+fn finish_pairing(
+    mut transport: TcpFrameTransport,
+    offer: &PairingOffer,
+    pairing_secret: &refineid_rapp::PairingSecret,
+    options: &MockProxyOptions,
+) -> Result<PairRecord, String> {
     let keys = generate_pair_key_material().map_err(|e| format!("key generation failed: {e:?}"))?;
     let mut handshake = PairingHandshake::begin(
         EndpointRole::Proxy,
         offer.clone(),
         STREAM_CANDIDATE_ID,
         keys,
-        &pairing_secret,
+        pairing_secret,
     )
     .map_err(|fail| format!("pairing handshake failed: {:?}", fail.error()))?;
 
@@ -455,17 +696,21 @@ fn pair_once(
         .map_err(|e| format!("confirm failed: {e:?}"))
 }
 
-/// Accepts connections until one opens a session for this pairing; others
-/// are closed without changing state.
+/// Accepts connections, `early` first when given, until one opens a
+/// session for this pairing; others are closed without changing state.
 fn accept_session(
     listener: &StreamListener,
     pairing: &ProxyPairing,
+    mut early: Option<StreamAccept>,
 ) -> Result<TcpFrameTransport, String> {
     loop {
-        match listener
-            .accept()
-            .map_err(|e| format!("accept failed: {e:?}"))?
-        {
+        let accepted = match early.take() {
+            Some(accepted) => accepted,
+            None => listener
+                .accept()
+                .map_err(|e| format!("accept failed: {e:?}"))?,
+        };
+        match accepted {
             StreamAccept::Session { routing, transport }
                 if RoutingKey::derive(&pairing.record).is_ok_and(|key| {
                     route_session(
@@ -807,4 +1052,42 @@ fn sign_digest(digest: &[u8], algorithm: SignatureAlgorithm) -> Vec<u8> {
         | SignatureAlgorithm::RsaPssSha256 => MOCK_RSA_2048_SIG_BYTES,
     };
     vec![MOCK_FALLBACK_SIGNATURE_BYTE; sig_len]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Admission;
+    use refineid_rapp::{CPACE_ATTEMPT_WINDOW_MS, PRE_AUTHENTICATION_SPACING_MS};
+
+    /// The monotonic time the offer is shown at.
+    const SHOWN_AT_MS: u64 = 10_000;
+
+    #[test]
+    fn a_connection_during_an_attempt_is_busy_and_moves_no_spacing() {
+        let mut admission = Admission::new(SHOWN_AT_MS);
+        assert!(admission.admit_connection(SHOWN_AT_MS).is_ok());
+        let attempt = admission.admit_step_one(SHOWN_AT_MS).expect("admitted");
+
+        let probe_ms = SHOWN_AT_MS + PRE_AUTHENTICATION_SPACING_MS;
+        let busy = admission
+            .admit_connection(probe_ms)
+            .expect_err("an attempt is active");
+        assert_eq!(
+            busy.retry_after_ms(),
+            CPACE_ATTEMPT_WINDOW_MS - PRE_AUTHENTICATION_SPACING_MS
+        );
+
+        admission.fail(attempt);
+        assert!(admission.admit_connection(probe_ms).is_ok());
+    }
+
+    #[test]
+    fn a_busy_answer_carries_the_connection_spacing_left() {
+        let mut admission = Admission::new(SHOWN_AT_MS);
+        assert!(admission.admit_connection(SHOWN_AT_MS).is_ok());
+        let busy = admission
+            .admit_connection(SHOWN_AT_MS)
+            .expect_err("the spacing has not passed");
+        assert_eq!(busy.retry_after_ms(), PRE_AUTHENTICATION_SPACING_MS);
+    }
 }

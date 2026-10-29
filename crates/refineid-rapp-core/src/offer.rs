@@ -3,9 +3,13 @@
 //! In RAPP v26.10.29 the custodian (the phone) shows a six-character code and
 //! the requester types it (section 3). The custodian creates the offer with a
 //! random `offer_id` and sends it as its first frame after the pairing
-//! preamble (section 4.2); nothing derived from the code is ever published.
+//! preamble (section 4.2), or a `pairing-busy` while it cannot admit an
+//! attempt; nothing derived from the code is ever published.
 
-pub use refineid_rapp::{PairingOffer, PairingOfferError, TransportCandidate, TransportProfile};
+pub use refineid_rapp::{
+    BootstrapAnswer, PairingBusy, PairingOffer, PairingOfferError, TransportCandidate,
+    TransportProfile,
+};
 
 use crate::transport::{FrameTransport, TransportError};
 
@@ -80,34 +84,37 @@ pub fn format_pairing_code(code: &str) -> String {
         .join(" ")
 }
 
-/// Why the custodian's offer could not be read.
+/// Why the custodian's bootstrap answer could not be read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BootstrapError {
-    /// The transport failed before the offer arrived.
+    /// The transport failed before the bootstrap answer arrived.
     Transport(TransportError),
     /// The connection's transport profile is not a registered one.
     UnregisteredTransport,
-    /// The offer frame failed decoding or the section 4.2 step 3 checks.
+    /// The bootstrap frame is neither a `pairing-busy` nor an offer that
+    /// passes the section 4.2 Bootstrap Read Flow item 3 checks.
     Offer(OfferError),
 }
 
-/// Reads the offer the custodian sends as its first frame after the
-/// pairing preamble, and checks it lists the connection's transport
-/// (section 4.2).
+/// Reads the custodian's bootstrap answer, its first frame after the
+/// pairing preamble.
+///
+/// The answer is its offer, checked to list the connection's transport, or
+/// its `pairing-busy` (section 4.2, Bootstrap Read Flow).
 ///
 /// # Errors
 /// [`BootstrapError`] when the frame does not arrive, the transport is not
-/// registered, or the offer is malformed, of another version, or does not
-/// list the connection's transport.
+/// registered, or the frame is a malformed answer, of another version, or
+/// an offer that does not list the connection's transport.
 pub fn read_bootstrap<Transport: FrameTransport>(
     transport: &mut Transport,
-) -> Result<PairingOffer, BootstrapError> {
+) -> Result<BootstrapAnswer, BootstrapError> {
     let profile = TransportProfile::parse(transport.profile())
         .ok_or(BootstrapError::UnregisteredTransport)?;
     let bytes = transport
         .receive_frame()
         .map_err(BootstrapError::Transport)?;
-    PairingOffer::from_bootstrap(&bytes, profile).map_err(BootstrapError::Offer)
+    BootstrapAnswer::from_bootstrap(&bytes, profile).map_err(BootstrapError::Offer)
 }
 
 #[cfg(test)]
@@ -149,7 +156,26 @@ mod tests {
         custodian
             .send_frame(&offer.to_cbor().expect("cbor"))
             .expect("send");
-        assert_eq!(read_bootstrap(&mut requester), Ok(offer));
+        assert_eq!(
+            read_bootstrap(&mut requester),
+            Ok(BootstrapAnswer::Offer(offer))
+        );
+    }
+
+    #[test]
+    fn a_busy_answer_is_read_with_its_wait() {
+        let busy = PairingBusy::until_admissible(refineid_rapp::PRE_AUTHENTICATION_SPACING_MS);
+        let (mut custodian, mut requester) = crate::transport::MemoryTransport::pair(
+            crate::stream::STREAM_CANDIDATE_ID,
+            crate::engine::SESSION_RECEIVE_TICK,
+        );
+        custodian
+            .send_frame(&busy.to_cbor().expect("cbor"))
+            .expect("send");
+        assert_eq!(
+            read_bootstrap(&mut requester),
+            Ok(BootstrapAnswer::Busy(busy))
+        );
     }
 
     #[test]
