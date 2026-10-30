@@ -204,6 +204,14 @@ pub const REGISTRY_ROOT_LOCAL_MACHINE: i32 = 2;
 /// the installer's elevation after the file is in place.
 pub const CUSTOM_ACTION_INSTALLED_DLL_DEFERRED: i32 = 1 | 0x10 | 0x400 | 0x800;
 
+/// The same call, written into the rollback script instead
+/// (`msidbCustomActionTypeRollback`). It is recorded when the installer
+/// reaches it in the sequence and runs only if the installation rolls back
+/// after that point; the rollback script runs in reverse, so it undoes a
+/// deferred action sequenced after it while the installed file is still
+/// in place.
+pub const CUSTOM_ACTION_INSTALLED_DLL_ROLLBACK: i32 = CUSTOM_ACTION_INSTALLED_DLL_DEFERRED | 0x100;
+
 /// Sequence number of the first uninstall custom action: after services
 /// stop and before registry values and files go.
 pub const UNINSTALL_ACTION_SEQUENCE: i32 = 2500;

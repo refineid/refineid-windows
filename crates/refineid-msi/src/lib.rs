@@ -49,5 +49,5 @@ mod build;
 #[cfg(windows)]
 pub use crate::build::{
     Architecture, BuildError, CustomAction, Package, ProductVersion, RegistryData, RegistryValue,
-    SystemFile, Version, VersionParseError, build,
+    Schedule, SystemFile, Version, VersionParseError, build,
 };

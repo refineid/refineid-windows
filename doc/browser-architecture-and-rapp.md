@@ -189,8 +189,11 @@ CryptoAPI and CNG. For a mutual-TLS site (such as `https://suomi.fi` or
      not seen until the next boot, because CNG caches its configuration.
    - The driver MSI calls the DLL's `RefineIdRegisterKeyStorageProvider`
      custom action after the file is installed and
-     `RefineIdUnregisterKeyStorageProvider` before it is removed;
-     `install-dev.ps1` runs the same code through `rundll32`.
+     `RefineIdUnregisterKeyStorageProvider` before it is removed. The same
+     unregister entry point is the registration's rollback action,
+     sequenced before it, so a first installation that fails after
+     registering leaves no provider entry behind; `install-dev.ps1` runs the same code
+     through `rundll32`.
 3. **Signing**:
    - The browser calls `CryptAcquireCertificatePrivateKey`; `ncrypt.dll` loads the
      DLL into the browser process, resolves `GetKeyStorageInterface`, and opens the
@@ -222,8 +225,9 @@ Packaging is implemented natively in Rust via `crates/refineid-msi`:
   2. `FINEID-S4-1-v4.0` (Physical card)
   3. `FINEID-RAPP-Remote` (Remote wireless card, for the later virtual reader)
 - Registers the same DLL as the `RefineID Key Storage Provider` for CNG
-  through two custom actions in the DLL itself (section 6), and removes the
-  registration on uninstall.
+  through two custom actions in the DLL itself (section 6), removes the
+  registration on uninstall, and rolls it back when an installation fails
+  after it.
 - Automatically notifies and restarts `SCardSvr` upon installation.
 
 ---

@@ -37,8 +37,8 @@ mod windows_main {
     use std::path::PathBuf;
 
     use refineid_msi::{
-        Architecture, CustomAction, Guid, Package, RegistryData, RegistryValue, SystemFile,
-        Version, build,
+        Architecture, CustomAction, Guid, Package, RegistryData, RegistryValue, Schedule,
+        SystemFile, Version, build,
     };
 
     /// Where Windows keeps per-card Smart Card Crypto Provider registrations.
@@ -56,6 +56,11 @@ mod windows_main {
     const BASE_CSP: &str = "Microsoft Base Smart Card Crypto Provider";
     const BASE_KSP: &str = "Microsoft Smart Card Key Storage Provider";
 
+    /// The entry point that removes the module's key storage provider
+    /// registration. It runs on uninstall and as the rollback of the
+    /// registration.
+    const UNREGISTER_ENTRY_POINT: &str = "RefineIdUnregisterKeyStorageProvider";
+
     /// The module's own entry points that register it with CNG as the key
     /// storage provider for a paired phone, and remove that registration.
     /// CNG caches its configuration, so a registry write alone is not seen
@@ -65,12 +70,14 @@ mod windows_main {
         CustomAction {
             name: "RegisterKeyStorageProvider",
             entry_point: "RefineIdRegisterKeyStorageProvider",
-            on_uninstall: false,
+            schedule: Schedule::Install {
+                rollback_entry_point: UNREGISTER_ENTRY_POINT,
+            },
         },
         CustomAction {
             name: "UnregisterKeyStorageProvider",
-            entry_point: "RefineIdUnregisterKeyStorageProvider",
-            on_uninstall: true,
+            entry_point: UNREGISTER_ENTRY_POINT,
+            schedule: Schedule::Uninstall,
         },
     ];
 
