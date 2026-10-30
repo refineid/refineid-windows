@@ -799,8 +799,8 @@ impl fmt::Display for UnblockPinReport {
 /// [`refineid_lib_core::pin::ActivationCode`] variant until the
 /// card itself has been authenticated against a pinned anchor.
 ///
-/// Today this gate is the on-card root cert's SHA-256 matching
-/// [`crate::trust_roots::PINNED_ROOT_SHA256`]. Full chain walk
+/// Today this gate is the on-card root cert's SHA-256 matching a
+/// pinned root (`trust_roots::pinned_root_label`). Full chain walk
 /// (auth -> AIA-fetched intermediate -> on-card root) is a
 /// follow-up; the pin-match alone defeats the "counterfeit
 /// card with forged on-card data" attack because an attacker
@@ -814,7 +814,7 @@ pub enum CardTrustAttestation {
     PinnedRootMatched {
         /// Human-readable label of the pinned root that matched
         /// (e.g. "DVV CA Generation 3 RSA"). Sourced from
-        /// `crate::trust_roots::PINNED_ROOT_SHA256`; the value
+        /// `trust_roots::pinned_root_label`; the value
         /// is a compile-time string set so `&'static str` is
         /// acceptable.
         root_label: &'static str,

@@ -917,7 +917,7 @@ fn sign_dispatch_by_alg<T: CardTransport>(
     }
 }
 
-/// Drive the full sign flow for one [`SignSlot`].
+/// Drive the full sign flow with the card's qualified signature key.
 ///
 /// FINEID S1 v4.2 §3.5 + §3.6 + §3.7. Steps:
 ///

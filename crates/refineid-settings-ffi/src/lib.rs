@@ -446,7 +446,7 @@ impl From<SignReport> for DocumentSignJson {
 /// language identifier), an `ASiC-E` container beside any file. The
 /// signature is timestamped by the default authority and carries its
 /// validation material and an archive timestamp. `format` is
-/// [`FORMAT_PADES`] or [`FORMAT_ASICE`]; `reason` may be empty.
+/// `FORMAT_PADES` or `FORMAT_ASICE`; `reason` may be empty.
 ///
 /// # Safety
 ///

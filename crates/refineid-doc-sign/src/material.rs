@@ -15,7 +15,7 @@
 //! Gather the certificates and revocation answers a level-LT signature
 //! carries.
 //!
-//! [`refineid_lib_core::sign::validation`] defines the shape; this
+//! [`crate::validation`] defines the shape; this
 //! fills it. Doing so means going to the network -- following the
 //! authority information access extension up the chain, and asking each
 //! issuer's responder whether the certificate below it is still good --

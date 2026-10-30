@@ -29,7 +29,7 @@
   `doc/toolchain.md`). It installs the toolchain and keeps Visual Studio and
   every SDK at the latest release. Rust follows the latest stable release
   (`rust-toolchain.toml` selects the stable channel); never pin a release.
-- Always run formatting (`cargo fmt`, `csharpier`), clippy (`-D warnings` on both host and Windows targets), and unit tests before committing (`.githooks/pre-commit` enforces this). `Cargo.lock` must match the manifests (`.githooks/pre-push` enforces this); the refineid-core crates track core main, so refresh them with `cargo update -p refineid-rapp` when core moves. Never bypass verification with `--no-verify`. Hardware claims additionally require a real reader and card.
+- Always run formatting (`cargo fmt`, `csharpier`), clippy (`-D warnings` on both host and Windows targets), and unit tests before committing (`.githooks/pre-commit` enforces this). `Cargo.lock` must match the manifests and the workspace documentation must build with rustdoc warnings denied (`.githooks/pre-push` enforces both); the refineid-core crates track core main, so refresh them with `cargo update -p refineid-rapp` when core moves. Never bypass verification with `--no-verify`. Hardware claims additionally require a real reader and card.
 - Reading does not require a worktree; writing does. The main checkout is
   never edited directly. Before writing code or modifying files for any task,
   create a dedicated git worktree strictly under `../wt/`
