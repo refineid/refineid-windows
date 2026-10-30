@@ -979,12 +979,19 @@ mod tests {
     }
 
     #[test]
-    fn the_rollback_action_only_adds_the_rollback_flag() {
+    fn the_rollback_action_is_the_deferred_call_with_the_rollback_flag() {
+        let deferred_call = schema::CUSTOM_ACTION_TYPE_DLL
+            | schema::CUSTOM_ACTION_TYPE_SOURCE_FILE
+            | schema::CUSTOM_ACTION_TYPE_IN_SCRIPT
+            | schema::CUSTOM_ACTION_TYPE_NO_IMPERSONATE;
         let rows = custom_action_rows(ACTIONS);
         let rollback = &rows[0];
         let deferred = &rows[1];
-        assert_ne!(rollback.kind, deferred.kind);
-        assert_eq!(rollback.kind & deferred.kind, deferred.kind);
+        assert_eq!(deferred.kind, deferred_call);
+        assert_eq!(
+            rollback.kind,
+            deferred_call | schema::CUSTOM_ACTION_TYPE_ROLLBACK
+        );
         assert!(rollback.sequence < deferred.sequence);
     }
 
