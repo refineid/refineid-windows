@@ -24,13 +24,14 @@ use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
 use refineid_rapp::{
     BinaryFrame, CardIdentity, CardInspection, CardOperation, CardOperationResult, CardPresence,
     CardReader, CardStatusMessage, CertificateFingerprint, CpaceAttemptSlot, CpaceKc2Responder,
-    DEFAULT_OPERATION_LIFETIME_MS, EndpointRole, EstablishedSessionRuntime, OfferId,
-    OperationRequest, OperationResultMessage, OperationViolation, PairRecord, PairingBusy,
-    PairingHandshake, PairingOffer, PingChallenge, PreAuthenticationRateLimit, ProfileName,
-    ProgressEvent, ProxyDispatch, ProxyEngineError, ProxyFailure, ProxyOperationEngine, RoutingKey,
-    RuntimePoll, RuntimeReceive, SESSION_READY_NONCE_SIZE, SessionHandshake, SignatureAlgorithm,
-    TransportProfile, TypedMessage, UserApproval, decode_pair_record, encode_pair_record,
-    generate_pair_key_material, route_session, standard_pairing_context_v2,
+    DEFAULT_OPERATION_LIFETIME_MS, EncodedPairRecord, EndpointRole, EstablishedSessionRuntime,
+    OfferId, OperationRequest, OperationResultMessage, OperationViolation, PairRecord, PairingBusy,
+    PairingCode, PairingHandshake, PairingOffer, PingChallenge, PreAuthenticationRateLimit,
+    ProfileName, ProgressEvent, ProxyDispatch, ProxyEngineError, ProxyFailure,
+    ProxyOperationEngine, RoutingKey, RuntimePoll, RuntimeReceive, SESSION_READY_NONCE_SIZE,
+    SessionHandshake, SignatureAlgorithm, TransportProfile, TypedMessage, UserApproval,
+    decode_pair_record, encode_pair_record, generate_pair_key_material, route_session,
+    standard_pairing_context_v2,
 };
 use refineid_rapp_core::clock::{continuous_ms, unix_time_ms};
 use refineid_rapp_core::engine::SESSION_RECEIVE_TICK;
@@ -178,11 +179,9 @@ impl ProxyPairing {
     /// # Errors
     /// When the record cannot be encoded or the file written.
     pub fn save_to_file(&self, path: &str) -> Result<(), String> {
-        let cbor = Zeroizing::new(
-            encode_pair_record(&self.record)
-                .map_err(|e| format!("cannot serialize pair record: {e:?}"))?,
-        );
-        let text = Zeroizing::new(hex::encode(&*cbor));
+        let encoded = encode_pair_record(&self.record)
+            .map_err(|e| format!("cannot serialize pair record: {e:?}"))?;
+        let text = Zeroizing::new(hex::encode(encoded.as_bytes()));
         let mut file =
             std::fs::File::create(path).map_err(|e| format!("cannot save state to {path}: {e}"))?;
         file.write_all(text.as_bytes())
@@ -199,10 +198,11 @@ impl ProxyPairing {
             std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?,
         );
         let line = text.lines().next().ok_or("state file is empty")?;
-        let cbor =
-            Zeroizing::new(hex::decode(line.trim()).map_err(|e| format!("invalid hex: {e}"))?);
+        let encoded = EncodedPairRecord::from_stored(
+            hex::decode(line.trim()).map_err(|e| format!("invalid hex: {e}"))?,
+        );
         let record =
-            decode_pair_record(&cbor).map_err(|e| format!("invalid pair record: {e:?}"))?;
+            decode_pair_record(&encoded).map_err(|e| format!("invalid pair record: {e:?}"))?;
         if record.role() != EndpointRole::Proxy {
             return Err("the state file holds a requester's record".to_owned());
         }
@@ -429,6 +429,7 @@ fn run_pairing(
     };
     let offer = custodian_offer()?;
     println!("pairing code: {}", format_pairing_code(&code));
+    let code = PairingCode::parse(&code).map_err(|e| format!("not a pairing code: {e}"))?;
     let offer_ends = Instant::now() + OFFER_LIFETIME;
     let admission_state = Mutex::new(Admission::new(continuous_ms()));
     let (ended, endings) = channel();
@@ -474,7 +475,7 @@ fn run_pairing(
                 continue;
             }
             let ended = ended.clone();
-            let (offer, code, admission_state) = (&offer, code.as_str(), &admission_state);
+            let (offer, code, admission_state) = (&offer, &code, &admission_state);
             workers.spawn(move || {
                 pair_once(transport, offer, code, options, admission_state, &ended);
             });
@@ -531,7 +532,7 @@ fn send_pairing_frame(
 fn pair_once(
     mut transport: TcpFrameTransport,
     offer: &PairingOffer,
-    code: &str,
+    code: &PairingCode,
     options: &MockProxyOptions,
     admission_state: &Mutex<Admission>,
     ended: &Sender<AttemptEnd>,
@@ -594,7 +595,7 @@ fn serve_offer(
 fn run_cpace(
     transport: &mut TcpFrameTransport,
     offer: &PairingOffer,
-    code: &str,
+    code: &PairingCode,
     step_one: &BinaryFrame,
 ) -> Result<refineid_rapp::PairingSecret, String> {
     let offer_hash = offer
