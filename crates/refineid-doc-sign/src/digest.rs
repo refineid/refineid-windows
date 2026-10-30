@@ -17,8 +17,7 @@
 //! Fingerprint newtypes that carry the algorithm in their name. The
 //! benefit isn't confidentiality (these are public values); it's
 //! *traceability* and a *typing invariant* `digest::Output<D>` cannot
-//! give -- see `doc/typing-discipline.md` -> "Refining an ecosystem
-//! base type". Concretely, all three of:
+//! give. Concretely, all three of:
 //!
 //! - **Nominal identity.** `Output<D>` is keyed by output *size*:
 //!   `Output<Sha256>` and `Output<Sha3_256>` are both `Array<u8, U32>`,
@@ -42,11 +41,11 @@
 //! never a hash implementation. Both types come from a single
 //! `digest_newtype!` definition so the shared surface can't drift.
 //!
-//! See [`doc/typing-discipline.md`][doc] for the project's position on
+//! See refineid-core's [refinement types] for the project's position on
 //! newtyping at trust boundaries. Cert fingerprints drive pin matching
 //! -- one of the highest-impact boundaries in refineid.
 //!
-//! [doc]: ../../../../../doc/typing-discipline.md
+//! [refinement types]: https://github.com/refineid/refineid-core/blob/main/doc/architecture/refinement-types.md
 
 use core::fmt;
 

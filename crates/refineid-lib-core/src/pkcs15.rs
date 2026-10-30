@@ -751,7 +751,7 @@ pub struct TokenInfo {
     /// long serial. Surfaced as the typed
     /// [`crate::identity::TokenSerial`] (kept distinct from the
     /// plastic-printed `PrintedSerial` and the X.509
-    /// `CertSerial` per `doc/typing-discipline.md`).
+    /// `CertSerial`).
     pub serial_number_hex: Option<crate::identity::TokenSerial>,
     /// `EF.TokenInfo.manufacturerID` per PKCS#15 §6.6.1
     /// (`UTF8String`). Tier 0 `String` -- a tighter form would be
@@ -782,9 +782,11 @@ impl TokenInfo {
     /// `der` is borrowed because the result owns everything it
     /// keeps (it copies the fields out); the bytes need not
     /// outlive the call. The raw `&[u8]` here is the sanctioned
-    /// validation-boundary carve-out (see `doc/typing-discipline.md`
-    /// Rule B / the typing-grep register), not a leak -- it is the
-    /// single door, on the validated type itself.
+    /// validation-boundary carve-out (validated at the border, see
+    /// [refinement types]), not a leak -- it is the single door,
+    /// on the validated type itself.
+    ///
+    /// [refinement types]: https://github.com/refineid/refineid-core/blob/main/doc/architecture/refinement-types.md
     ///
     /// Best-effort *within* a well-formed outer SEQUENCE --
     /// silently treats malformed / unsupported sub-objects as
@@ -793,7 +795,7 @@ impl TokenInfo {
     /// failure is the outer SEQUENCE itself not decoding: that
     /// returns [`BerError`](crate::ber::BerError) so a malformed
     /// file is distinct from the caller's "absent / use
-    /// defaults" path (see `doc/security/der-trust-boundary.md`).
+    /// defaults" path.
     pub(crate) fn parse(der: &[u8]) -> Result<Self, crate::ber::BerError> {
         use crate::ber::{
             BerTag, BerTlv, BerTlvIter, Integer, OctetString, PrintableString, Sequence, Utf8String,
@@ -869,8 +871,7 @@ impl TokenInfo {
 /// Any other shape returns [`CardGeneration::Unknown`], and
 /// callers should refuse to make activation-length decisions
 /// on its behalf. The correlation between issuer family and
-/// card-OS generation is empirical, not protocol-guaranteed;
-/// see `doc/dvv-terminology.md`.
+/// card-OS generation is empirical, not protocol-guaranteed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CardGeneration {
     /// Older FINEID card (RSA-based citizen certs, DVV G3/G4 R

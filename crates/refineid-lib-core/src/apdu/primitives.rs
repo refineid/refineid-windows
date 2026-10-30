@@ -14,7 +14,7 @@
 
 //! Shared APDU primitives used across protocol modules.
 //!
-//! Per `doc/typing-discipline.md`, every byte sequence crossing
+//! Per refineid-core's [refinement types], every byte sequence crossing
 //! the card boundary needs a typed container that names its
 //! role. This module hosts the small set of role types that
 //! refineid's APDU command structs (`pace::commands`,
@@ -26,6 +26,8 @@
 //! and a clear semantic role. Encoding into the wire byte stream
 //! happens at each protocol-specific command's `into_apdu`
 //! boundary -- this module is the type layer, not the encoder.
+//!
+//! [refinement types]: https://github.com/refineid/refineid-core/blob/main/doc/architecture/refinement-types.md
 
 use core::error::Error as CoreError;
 use core::fmt;

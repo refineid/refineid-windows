@@ -14,8 +14,8 @@
 
 //! Typed APDU commands for the auth (PIN / PUK) module.
 //!
-//! Per `doc/typing-discipline.md`'s "every byte sequence crossing
-//! the card boundary has a protocol role" rule, each PIN-related
+//! Every byte sequence crossing the card boundary has a protocol
+//! role ([refinement types]), so each PIN-related
 //! command refineid issues has its own struct here.
 //! `into_apdu(self) -> CommandApdu` does the byte serialisation
 //! at the transport boundary; before that point everything is
@@ -27,6 +27,8 @@
 //! and `data` are filled by each command's role.
 //!
 //! [`PinSlot`]: crate::auth::PinSlot
+//!
+//! [refinement types]: https://github.com/refineid/refineid-core/blob/main/doc/architecture/refinement-types.md
 
 use crate::apdu::iso7816::ApduClass;
 use crate::apdu::status_word::PinRetries;
@@ -296,8 +298,8 @@ impl GetPukInfo {
 /// Helper for parsing the [`GetPinInfo`] response body per
 /// FINEID S1 v4.2 §3.15.3 Table 19.
 ///
-/// Hosted on a unit struct (typing-discipline: no free fns with
-/// borrowed parameters; see `doc/typing-discipline.md`). The
+/// Hosted on a unit struct (no free
+/// functions with borrowed parameters). The
 /// struct and its method are `pub(crate)` because the body slice
 /// boundary makes it a raw-bytes parser -- per typing-discipline
 /// Rule B the public surface uses

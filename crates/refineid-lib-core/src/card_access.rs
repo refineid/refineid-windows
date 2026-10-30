@@ -186,8 +186,7 @@ pub struct CardAccess {
 ///
 /// Promotes the former `Option` return of `CardAccess::parse`
 /// so "malformed" is a *distinct, described* failure rather than
-/// the same `None` the absent-file case would produce -- see
-/// `doc/security/der-trust-boundary.md`.
+/// the same `None` the absent-file case would produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CardAccessError {
     /// The outer TLV is neither a SET nor a SEQUENCE, or is
@@ -211,9 +210,8 @@ pub enum CardAccessError {
     /// A well-formed `SecurityInfo` advertised a `protocol` OID
     /// outside the supported [`PaceProtocol`] set. We **reject**
     /// it -- an unsupported card surfaced loudly -- rather than
-    /// carrying its bytes forward. See the "no speculative
-    /// support, no just-in-case data" rule in
-    /// `doc/typing-discipline.md`.
+    /// carrying its bytes forward: no speculative support, no
+    /// just-in-case data.
     UnsupportedProtocol,
 }
 
@@ -244,9 +242,10 @@ impl CardAccess {
     /// `der` is borrowed because the result owns everything it
     /// keeps; the bytes need not outlive the call. The raw
     /// `&[u8]` here is the sanctioned validation-boundary carve-out
-    /// (see `doc/typing-discipline.md` Rule B / the typing-grep
-    /// register), not a leak -- the single door, on the validated
-    /// type itself.
+    /// (validated at the border, see [refinement types]), not a
+    /// leak -- the single door, on the validated type itself.
+    ///
+    /// [refinement types]: https://github.com/refineid/refineid-core/blob/main/doc/architecture/refinement-types.md
     ///
     /// Returns [`CardAccessError`] on malformed input (wrong
     /// outer tag, truncated length, trailing garbage past the
@@ -280,9 +279,8 @@ impl CardAccess {
             // Every entry must be a well-formed SecurityInfo
             // SEQUENCE carrying a supported PACE protocol. Anything
             // else is rejected -- we do not skip-and-keep-going,
-            // and we do not stash unknown entries. See the
-            // "no speculative support, no just-in-case data" rule
-            // in doc/typing-discipline.md.
+            // and we do not stash unknown entries: no speculative
+            // support, no just-in-case data.
             let entry = entry.map_err(CardAccessError::MalformedSecurityInfo)?;
             let entry = entry
                 .expect::<Sequence>()
@@ -294,9 +292,8 @@ impl CardAccess {
     }
 }
 
-/// Helpers hosted on a unit struct (typing-discipline: no
-/// free fns with borrowed parameters; see
-/// `doc/typing-discipline.md`).
+/// Helpers hosted on a unit struct (no free
+/// functions with borrowed parameters).
 struct CardAccessHelpers;
 
 impl PaceSecurityInfo {
@@ -312,9 +309,8 @@ impl PaceSecurityInfo {
     /// missing required field -> [`CardAccessError::IncompletePaceInfo`],
     /// an OID outside [`PaceProtocol`] ->
     /// [`CardAccessError::UnsupportedProtocol`]. We do **not**
-    /// retain bytes for protocols we don't model -- see the
-    /// "no speculative support, no just-in-case data" rule in
-    /// `doc/typing-discipline.md`.
+    /// retain bytes for protocols we don't model: no speculative
+    /// support, no just-in-case data.
     fn parse(body: &[u8]) -> Result<Self, CardAccessError> {
         let mut it = BerTlvIter::new(body);
         // protocol OBJECT IDENTIFIER -- required.
@@ -583,11 +579,8 @@ mod tests {
     /// make features / parse data we *need*; an EF.CardAccess
     /// advertising a protocol we don't model is an unsupported
     /// card, surfaced loudly. We do not keep an `Other`/`Unknown`
-    /// arm of un-named bytes "just in case." See the "no
-    /// speculative support, no just-in-case data" rule in
-    /// `doc/typing-discipline.md`. An earlier version of this
-    /// parser had exactly such an arm; this test exists so no
-    /// future agent re-introduces one.
+    /// arm of un-named bytes "just in case": no speculative
+    /// support, no just-in-case data.
     #[test]
     fn unsupported_protocol_oid_is_rejected_not_retained() {
         // OID value bytes for 1.2.3.4 -- a deliberately

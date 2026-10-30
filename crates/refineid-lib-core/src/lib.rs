@@ -26,14 +26,14 @@
 //! The cert-read path is the live-validation entry point: it
 //! exercises real card I/O, PKCS#15 file-system navigation, and
 //! X.509 parsing without touching any PIN-protected flow. PIN /
-//! signing paths (`auth`, `sign`, `rsa`, `pin`) still wait on the
-//! [live-validation gate](../../../releng/monorepo-port-protocol.md#live-validation-gate)
-//! once `pkcs15` + `x509` have proven against real hardware.
+//! signing paths (`auth`, `sign`, `rsa`, `pin`) still wait on live
+//! validation once `pkcs15` + `x509` have proven against real
+//! hardware.
 //!
 //! ## Typing-discipline backbone
 //!
 //! Three modules carry the type-level safety this codebase
-//! leans on (see [`doc/typing-discipline.md`][typing] for the
+//! leans on (see refineid-core's [refinement types] for the
 //! full position):
 //!
 //! - [`oid`] -- typed [`Oid<'a>`] wrapper over OBJECT
@@ -63,7 +63,7 @@
 //! [`PathValidatedCert`]: cert_state::PathValidatedCert
 //! [`RevocationCheckedCert`]: cert_state::RevocationCheckedCert
 //! [`PurposeBoundCert<P>`]: cert_state::PurposeBoundCert
-//! [typing]: ../../../../doc/typing-discipline.md
+//! [refinement types]: https://github.com/refineid/refineid-core/blob/main/doc/architecture/refinement-types.md
 
 // `clippy::pub_use` fires on every `pub use submodule::Item;` at
 // the crate root.  Those re-exports are the library-facade

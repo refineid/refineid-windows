@@ -17,10 +17,9 @@
 //! Pin tables hold typed [`Sha256`] values rather than raw
 //! `[u8; 32]` so the type system enforces "compare a SHA-256
 //! against a SHA-256 pin" -- mixing a different-shape hash
-//! against a pin won't compile. See
-//! [`doc/typing-discipline.md`][typing] and
-//! [`doc/fineid-s2-cert-profile.md`][s2] for the broader
-//! framing.
+//! against a pin won't compile. See refineid-core's
+//! [refinement types] for the broader framing; the certificate
+//! profile is DVV's FINEID S2.
 //!
 //! The on-card root cert at `EF.4334` is the proximate trust
 //! source for the chain check (leaf -> AIA-fetched intermediate
@@ -35,8 +34,7 @@
 //! Refusing one would silently break half the in-field
 //! citizen-card population.
 //!
-//! [typing]: ../../../../doc/typing-discipline.md
-//! [s2]: ../../../../doc/fineid-s2-cert-profile.md
+//! [refinement types]: https://github.com/refineid/refineid-core/blob/main/doc/architecture/refinement-types.md
 
 use refineid_lib_core::crypto::digest::Sha256;
 

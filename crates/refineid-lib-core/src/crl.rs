@@ -195,12 +195,14 @@ impl Crl<'_> {
 /// A [`Crl`] whose issuer signature has been verified against a
 /// signer SPKI.
 ///
-/// Trust by construction (see `doc/typing-discipline.md`): the only
+/// Trust by construction (see [refinement types]): the only
 /// production constructor is [`VerifiedCrl::verify`], so holding this
 /// type is proof the CRL signature checked against a signer.
 /// [`crate::revocation::check_against_crl`] takes a `VerifiedCrl`, so
 /// a CRL's revocation list cannot be consulted without a checked
 /// signature -- the same gate as [`crate::ocsp::VerifiedOcspResponse`].
+///
+/// [refinement types]: https://github.com/refineid/refineid-core/blob/main/doc/architecture/refinement-types.md
 #[derive(Debug, Clone)]
 pub struct VerifiedCrl<'a> {
     /// The verified CRL.

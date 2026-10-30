@@ -43,8 +43,7 @@
 //!   backend so eMRTD relay / embedded HAL futures can plug in.
 //! - [`Untrusted`] state with [`Card::classify_model`].
 //!
-//! Subsequent phases (sketched in [`doc/typing-discipline.md`]
-//! and the Card/Reader proposal):
+//! Subsequent phases:
 //!
 //! - Phase 2: `Card<Trusted>` + `trust_gate()`. Wraps the
 //!   current `establish_trusted_session` logic.
@@ -56,7 +55,6 @@
 //! - Phase 6: retire the free-function escape hatches.
 //!
 //! [`B::Transport`]: crate::backend::ReaderBackend::Transport
-//! [`doc/typing-discipline.md`]: ../../../../doc/typing-discipline.md
 
 use core::fmt;
 
@@ -290,15 +288,11 @@ pub struct Untrusted;
 
 impl<B: ReaderBackend> Card<'_, B, Untrusted> {
     /// Classify the card by its ATR against the in-scope
-    /// [`FineidCardModel`] set. See
-    /// [`doc/fineid-card-models.md`][doc] for the supported set
-    /// and the validity-window reasoning.
+    /// [`FineidCardModel`] set.
     ///
     /// # Errors
     /// [`CardClassificationError::UnknownOrUnsupportedAtr`]
     /// when the ATR doesn't match any in-scope model.
-    ///
-    /// [doc]: ../../../../doc/fineid-card-models.md
     pub fn classify_model(&self) -> Result<FineidCardModel, CardClassificationError> {
         self.atr.classify()
     }
@@ -418,7 +412,7 @@ mod tests {
     #[test]
     fn untrusted_classify_model_rejects_out_of_scope_atr() {
         // Gemalto MultiApp v3.0 -- expired generation, out of
-        // scope per doc/fineid-card-models.md.
+        // scope.
         let atr_bytes = vec![
             0x3B, 0x7F, 0x96, 0x00, 0x00, 0x80, 0x31, 0xB8, 0x65, 0xB0, 0x85, 0x03, 0x00, 0xEF,
             0x12, 0x00, 0xF6, 0x82, 0x90, 0x00,

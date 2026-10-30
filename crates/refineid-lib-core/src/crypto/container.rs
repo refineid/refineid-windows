@@ -32,8 +32,9 @@
 //! algorithms land as new marker types next to the existing
 //! ones -- sibling, not enum variants.
 //!
-//! See `doc/typing-discipline.md` for the policy rules these
-//! containers exist to enforce.
+//! The containers enforce refineid-core's [refinement types].
+//!
+//! [refinement types]: https://github.com/refineid/refineid-core/blob/main/doc/architecture/refinement-types.md
 
 use core::fmt;
 use core::marker::PhantomData;

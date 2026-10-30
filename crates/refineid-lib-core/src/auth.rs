@@ -91,7 +91,7 @@ pub const PIN2_MIN_LENGTH: usize = 6;
 /// DATA`, not this path) and can never unblock anything; their
 /// separately ordered PUK is 7 or 8 digits; its length is not selected
 /// from card generation.
-/// See `doc/dvv-terminology.md` and `pin::ActivationPinSeven`
+/// See `pin::ActivationPinSeven`
 /// / `pin::ActivationPinEight` / `pin::Puk`.
 pub const PUK_STORED_LENGTH: usize = 12;
 /// Minimum PUK length.
@@ -323,9 +323,8 @@ impl<TE: core::fmt::Debug + core::fmt::Display + 'static> core::error::Error for
 /// The error type is parameterised by the caller's transport
 /// error so a single helper composes into every on-card path.
 /// Local-policy gate for `ascii` PIN bytes. Unit struct hosting
-/// the validator inside an `impl` block (typing-discipline:
-/// no free fns with borrowed parameters; see
-/// `doc/typing-discipline.md`).
+/// the validator inside an `impl` block (no free functions with
+/// borrowed parameters).
 struct PinPolicyCheck;
 
 impl PinPolicyCheck {
@@ -353,8 +352,7 @@ impl PinPolicyCheck {
 /// every [`CardTransport`].
 ///
 /// The trait is the typed receiver that keeps these APIs out of
-/// the "`pub fn` with borrowed parameters" category -- see
-/// `doc/typing-discipline.md`. Import it via
+/// the "`pub fn` with borrowed parameters" category. Import it via
 /// `use refineid_lib_core::auth::PinOps;` to put the methods in
 /// scope; the blanket impl below applies to every transport.
 pub trait PinOps: CardTransport {

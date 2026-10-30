@@ -485,8 +485,8 @@ impl<T: CardTransport> CardTransport for SmTransport<T> {
 
 // MARK: - Helpers
 
-/// Helpers hosted on a unit struct (typing-discipline: no free
-/// fns with borrowed parameters; see `doc/typing-discipline.md`).
+/// Helpers hosted on a unit struct (no free
+/// functions with borrowed parameters).
 struct SmHelpers;
 
 impl SmHelpers {

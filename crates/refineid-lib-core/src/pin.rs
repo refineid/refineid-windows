@@ -139,9 +139,9 @@ impl core::fmt::Debug for PinBytes {
 //
 // PinBytes is the validated zeroizing secret carrier; the wrappers
 // below tag the role so the type system enforces "this is a
-// PUK, not an activation PIN" at every API boundary. Per
-// `doc/typing-discipline.md`, the PIN AUTH / PIN SIG / PIN PUK
-// / activation-PIN distinction must be type-enforced. PIN1 /
+// PUK, not an activation PIN" at every API boundary. The
+// PIN AUTH / PIN SIG / PIN PUK / activation-PIN distinction is
+// type-enforced. PIN1 /
 // PIN2 remain paired with `PinSlot` in the auth API (slot
 // already disambiguates); PUK and activation PIN get their own
 // types because they are semantically distinct roles even on
@@ -150,9 +150,8 @@ impl core::fmt::Debug for PinBytes {
 /// Error returned by the role-tagged PIN newtype constructors.
 ///
 /// Not PIN-bearing: variants carry only structural diagnostics
-/// (length bounds, byte offset of a non-digit). Per Rule E1 in
-/// `doc/security/excellence-rules.md`, `Copy` is forbidden only
-/// on types that hold PIN / PUK / activation-PIN / CAN material
+/// (length bounds, byte offset of a non-digit). `Copy` is
+/// forbidden only on types that hold PIN / PUK / activation-PIN / CAN material
 /// in their fields; this error enum holds none of those.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PinRoleError {
@@ -250,7 +249,7 @@ impl PinBytes {
 ///
 /// Distinct from `ActivationPin` in the type system, even
 /// though the card-side mechanism may be the same slot
-/// (`0x83`). See `doc/dvv-terminology.md`.
+/// (`0x83`).
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub enum Puk {
     /// 7-digit PUK.

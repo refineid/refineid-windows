@@ -1087,8 +1087,7 @@ mod tests {
     // raw byte-shape of each individual command is locked by
     // the dedicated wire-format tests in `sign::commands`.
     //
-    // Per typing-discipline.md "Allowed Boundary Shapes": typed
-    // values cross every boundary -- KeyRef, SignatureAlgRef,
+    // Typed values cross every boundary -- KeyRef, SignatureAlgRef,
     // ExternalHashValue, ApduClass -- no raw hex constants
     // here.
     use crate::apdu::iso7816::ApduClass;

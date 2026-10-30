@@ -38,9 +38,9 @@
 //! field of an OBJECT IDENTIFIER TLV, **not** including the
 //! tag/length prefix). Construction does not reparse; it
 //! tags an already-parsed byte slice as semantically an OID.
-//! See [`doc/typing-discipline.md`][doc].
+//! See refineid-core's [refinement types].
 //!
-//! [doc]: ../../../../doc/typing-discipline.md
+//! [refinement types]: https://github.com/refineid/refineid-core/blob/main/doc/architecture/refinement-types.md
 
 use core::error::Error as CoreError;
 use core::fmt;

@@ -311,9 +311,8 @@ pub(crate) fn run_chip_authentication<T: CardTransport>(
     }
 }
 
-/// Helpers hosted on a unit struct (typing-discipline: no
-/// free fns with borrowed parameters; see
-/// `doc/typing-discipline.md`).
+/// Helpers hosted on a unit struct (no free
+/// functions with borrowed parameters).
 struct CaHelpers;
 
 impl CaHelpers {
