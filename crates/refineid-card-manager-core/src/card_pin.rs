@@ -239,9 +239,7 @@ pub enum CardPinError {
         reason: String,
     },
     /// The card's contact-interface ATR doesn't match any
-    /// FINEID card model refineid currently supports. See
-    /// `doc/fineid-card-models.md` for the in-scope set and
-    /// the validity-window reasoning behind it. Out-of-scope
+    /// FINEID card model refineid currently supports. Out-of-scope
     /// cards (older expired models, social welfare /
     /// organizational, health care) land here, as does any
     /// non-FINEID smartcard inserted in the reader.
@@ -289,7 +287,7 @@ impl fmt::Display for CardPinError {
                 f,
                 "couldn't classify this card's generation (auth-cert issuer CN \
                  didn't match any known DVV family); refusing to guess at \
-                 activation PIN length. See doc/dvv-terminology.md"
+                 activation PIN length"
             ),
             Self::CardDataUntrusted { description } => write!(
                 f,
@@ -384,9 +382,9 @@ pub struct TrustedCardSession {
     /// subsequent step re-reads and compares against this value
     /// to detect a card swap.
     pub bound_serial: refineid_lib_core::identity::TokenSerial,
-    /// ATR-classified FINEID card model from the in-scope set
-    /// (see `doc/fineid-card-models.md`). Not a trust signal on
-    /// its own; the trust signal is [`trust`](Self::trust).
+    /// ATR-classified FINEID card model from the in-scope set.
+    /// Not a trust signal on its own; the trust signal is
+    /// [`trust`](Self::trust).
     pub model: FineidCardModel,
 }
 
@@ -474,11 +472,10 @@ impl PinManagementCardContext {
 /// Phases (in order):
 /// 1. Pick the FINEID-shape reader (or apply `reader_filter`).
 /// 2. Open the transport, read the ATR, classify against the
-///    in-scope `FineidCardModel` set
-///    ([`doc/fineid-card-models.md`][card]).
+///    in-scope `FineidCardModel` set.
 /// 3. SELECT the PKCS#15 application.
 /// 4. Read the on-card root cert (`EF.4334`), hash, match
-///    against the pinned set ([`doc/fineid-s2-cert-profile.md`][s2]).
+///    against the pinned set.
 /// 5. Capture the PKCS#15 long serial for session binding.
 ///
 /// Returns a [`TrustedCardSession`] the caller flows into the
@@ -491,9 +488,6 @@ impl PinManagementCardContext {
 /// - `CardDataUntrusted` -- on-card root not pinned, or
 ///   PKCS#15 serial unavailable.
 /// - PC/SC / SELECT / cert-read failures.
-///
-/// [card]: ../../../doc/fineid-card-models.md
-/// [s2]: ../../../doc/fineid-s2-cert-profile.md
 pub fn establish_trusted_session(
     backend: PcscBackend,
     reader_filter: Option<&ReaderFilter>,
@@ -521,7 +515,7 @@ pub fn establish_trusted_session(
 
     // Pinned-root trust gate: hash the on-card root, look up
     // its label in PINNED_ROOT_SHA256 (G3 RSA + G3 ECC both
-    // pinned per doc/fineid-s2-cert-profile.md).
+    // pinned).
     let trust = match transport.read_certificate(CertSlot::RootCa) {
         Ok(root_der) => {
             let actual = Sha256::of(root_der.as_bytes());
@@ -918,8 +912,7 @@ pub struct ActivationCardContext {
     /// happened mid-flow, which revokes the trust.
     pub bound_serial: refineid_lib_core::identity::TokenSerial,
     /// The FINEID card model identified by ATR matching at
-    /// session open, from refineid's in-scope set (see
-    /// [`doc/fineid-card-models.md`][doc]).
+    /// session open, from refineid's in-scope set.
     ///
     /// ATR is a protocol-level public value -- the card emits
     /// it at electrical reset, before any application is
@@ -929,8 +922,6 @@ pub struct ActivationCardContext {
     /// point. ATR matching is **not** a trust signal on its
     /// own; the pinned-root SHA-256 in [`trust`](Self::trust)
     /// is.
-    ///
-    /// [doc]: ../../../doc/fineid-card-models.md
     pub model: FineidCardModel,
 }
 
@@ -1414,8 +1405,8 @@ pub fn activate_first(
     })
 }
 
-/// Activate-flow pre-flight helpers. Hosted on a unit struct per
-/// typing-discipline (`doc/typing-discipline.md`).
+/// Activate-flow pre-flight helpers, hosted on a unit struct (no
+/// free functions with borrowed parameters).
 struct ActivateGuard;
 
 impl ActivateGuard {
@@ -1495,9 +1486,8 @@ impl fmt::Display for ActivateReport {
     }
 }
 
-/// Helpers hosted on a unit struct (typing-discipline: no
-/// free fns with borrowed parameters; see
-/// `doc/typing-discipline.md`).
+/// Helpers hosted on a unit struct (no free
+/// functions with borrowed parameters).
 struct CardPinHelpers;
 
 impl CardPinHelpers {

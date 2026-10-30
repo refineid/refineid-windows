@@ -260,9 +260,8 @@ pub fn build_request_with_nonce(
     ))
 }
 
-/// Helpers hosted on a unit struct (typing-discipline: no
-/// free fns with borrowed parameters; see
-/// `doc/typing-discipline.md`).
+/// Helpers hosted on a unit struct (no free
+/// functions with borrowed parameters).
 struct OcspHelpers;
 
 impl OcspHelpers {
@@ -716,7 +715,7 @@ impl BasicOcspResponse<'_> {
 /// A [`BasicOcspResponse`] whose responder signature has been
 /// verified against a signer SPKI.
 ///
-/// Trust by construction (see `doc/typing-discipline.md`): the only
+/// Trust by construction (see [refinement types]): the only
 /// production constructor is [`VerifiedOcspResponse::verify`], so
 /// holding this type is proof the response signature checked against
 /// a signer. Per-cert revocation status
@@ -724,6 +723,8 @@ impl BasicOcspResponse<'_> {
 /// `find_serial`) is reachable *only* through a
 /// verified response -- you cannot read a status off an unverified
 /// OCSP reply, by type.
+///
+/// [refinement types]: https://github.com/refineid/refineid-core/blob/main/doc/architecture/refinement-types.md
 #[derive(Debug, Clone)]
 pub struct VerifiedOcspResponse<'a> {
     /// The verified inner response.

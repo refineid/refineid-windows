@@ -207,9 +207,8 @@ pub fn parse_bytes<B: AsRef<[u8]>>(bytes: B) -> Result<Vec<LdifRecord>, LdifErro
     parse(text)
 }
 
-/// Helpers hosted on a unit struct (typing-discipline: no
-/// free fns with borrowed parameters; see
-/// `doc/typing-discipline.md`).
+/// Helpers hosted on a unit struct (no free
+/// functions with borrowed parameters).
 struct LdifHelpers;
 
 impl LdifHelpers {

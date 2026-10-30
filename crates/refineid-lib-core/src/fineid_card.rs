@@ -15,12 +15,7 @@
 //! FINEID card identity: types, classification by ATR/ATS,
 //! and the canonical strings refineid emits for each card.
 //!
-//! Canonical taxonomy:
-//! [`doc/fineid-card-models.md`](../../../../doc/fineid-card-models.md).
-//! This module is the type-system projection of that doc;
-//! every variant, accessor, and ATR/ATS literal here has a
-//! corresponding entry in the table there. Adding a model
-//! means updating both.
+//! The models and their ATR/ATS values come from DVV's technology note on ATR bytes.
 
 // Library-facade re-export: `fineid_card::Atr` is the entry
 // point external consumers reach for FINEID card-model
@@ -286,16 +281,15 @@ impl fmt::Display for CardVendor {
 /// The set of FINEID card models refineid currently
 /// recognises.
 ///
-/// Strictly the in-scope subset of DVV's ATR/ATS note; see
-/// `doc/fineid-card-models.md` for the validity-window math
-/// that defines "in scope".
+/// Strictly the in-scope subset of DVV's ATR/ATS note: the
+/// models whose cards are still within their validity window.
 ///
 /// Adding a model: extend this enum, fill in every accessor
 /// match arm (the compiler will list them), add the ATR /
-/// ATS bytes verbatim from DVV, update the doc.
+/// ATS bytes verbatim from DVV.
 // Variant names preserve DVV's FINEID card-model labels verbatim
-// (V5_0, V4_2) so the enum reads against the
-// doc/fineid-card-models.md ATR/ATS table; rustc doesn't flag
+// (V5_0, V4_2) so the enum reads against DVV's ATR/ATS
+// table; rustc doesn't flag
 // the trailing _N pieces under non_camel_case_types today, but
 // the convention is documented here so future maintainers don't
 // "normalize" the labels away.
@@ -478,8 +472,7 @@ pub enum CardClassificationError {
     /// care) land here, as does any non-FINEID smartcard.
     UnknownOrUnsupportedAtr {
         /// The ATR bytes that didn't classify. Surfaced so the
-        /// operator can compare against
-        /// `doc/fineid-card-models.md`.
+        /// operator can compare against DVV's technology note on ATR bytes.
         observed: Atr,
     },
 }
@@ -489,8 +482,7 @@ impl fmt::Display for CardClassificationError {
         match self {
             Self::UnknownOrUnsupportedAtr { observed } => write!(
                 f,
-                "card ATR `{observed}` does not match any in-scope FINEID card model; \
-                 see doc/fineid-card-models.md for the supported set"
+                "card ATR `{observed}` does not match any in-scope FINEID card model"
             ),
         }
     }

@@ -187,8 +187,7 @@ pub enum RevocationSource {
 /// forgeable read. Carries when it was obtained (`checked_at`) and
 /// the source's `nextUpdate` (`valid_until`) so a consumer can tell
 /// fresh from stale. The inner value of the card object's
-/// `Option<RevocationEvidence>` slot. See
-/// `doc/security/revocation-cache.md`.
+/// `Option<RevocationEvidence>` slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RevocationEvidence {
     /// The verified verdict.
@@ -268,15 +267,13 @@ impl RevocationEvidence {
 
 /// In-memory revocation-evidence cache, keyed by `(issuer DN, serial)`.
 ///
-/// **In-memory only -- never persisted.** An on-disk cache would
-/// create the persistent trace `doc/observability.md` forbids ("a
-/// successful Suomi.fi login leaves no persistent trace") and a
-/// poisoning surface. It is a *passive* store: it performs no network
+/// **In-memory only -- never persisted.** A successful Suomi.fi
+/// login leaves no persistent trace, and an on-disk cache would be
+/// both such a trace and a poisoning surface. It is a *passive* store: it performs no network
 /// I/O and is populated only by an explicit [`insert`](Self::insert),
 /// so it can never become a per-use beacon. Lookup is asymmetric: a
 /// cached `Revoked` is sticky (a cert never un-revokes); every other
-/// verdict is served only inside its validity window. See
-/// `doc/security/revocation-cache.md`.
+/// verdict is served only inside its validity window.
 #[derive(Debug, Default)]
 pub struct RevocationCache {
     /// Evidence keyed by the cert's owned (issuer, serial) identity.

@@ -23,8 +23,8 @@
 /// All entry points are associated functions on this unit
 /// struct so callers read as `Hex::encode(bytes)`. The unit
 /// struct exists only to host the methods inside an `impl`
-/// block (typing-discipline: no free fns with borrowed
-/// parameters; see `doc/typing-discipline.md`).
+/// block (no free
+/// functions with borrowed parameters).
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct Hex;

@@ -403,9 +403,8 @@ fn read_chunk<T: CardTransport>(
 /// follow with high bit set, terminated by one byte with high bit
 /// clear). Length form is short-form (`< 0x80`) or long-form
 /// (`0x81`, `0x82`, ...).
-/// Helpers hosted on a unit struct (typing-discipline: no
-/// free fns with borrowed parameters; see
-/// `doc/typing-discipline.md`).
+/// Helpers hosted on a unit struct (no free
+/// functions with borrowed parameters).
 struct EmrtdHelpers;
 
 #[derive(Debug, Clone, Copy)]

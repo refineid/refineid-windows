@@ -33,8 +33,7 @@
 //!   `notBefore` / `notAfter` (`UTCTime` / `GeneralizedTime`).
 //!
 //! `Duration`, `Interval`, `Recurring` variants are *not* in this
-//! module yet -- per `doc/typing-discipline.md`'s "extended and
-//! derived" rule, ISO 8601-1:2019 productions are added as new
+//! module yet: ISO 8601-1:2019 productions are added as new
 //! enum variants only when a refineid consumer needs them.
 //!
 //! ## Role wrappers
@@ -47,8 +46,7 @@
 //! `datetime()`) returning the inner [`Date`] / [`DateTime`] for
 //! representation-level operations; they do **not** expose the
 //! umbrella [`Iso8601`] via an `inner()` / `as_iso8601()` escape
-//! hatch. See `doc/typing-discipline.md` for the policy rules
-//! that keep this architecture honest.
+//! hatch.
 //!
 //! ## Parser visibility
 //!
@@ -678,8 +676,7 @@ fn check_ascii_digits(
 }
 
 /// Unit struct hosting the infallible ASCII-digit accumulators
-/// (typing-discipline: no free fns with borrowed parameters;
-/// see `doc/typing-discipline.md`). Caller guarantees
+/// (no free functions with borrowed parameters). Caller guarantees
 /// [`check_ascii_digits`] passed; non-digit input yields a
 /// wrong value, not a panic.
 struct AsciiDigits;
@@ -716,8 +713,7 @@ mod tests {
 
     use super::*;
 
-    // Tests propagate Result rather than .unwrap() per
-    // doc/typing-discipline.md.
+    // Tests propagate Result rather than .unwrap().
 
     #[test]
     fn date_constructs_in_range() -> Result<(), Iso8601Error> {

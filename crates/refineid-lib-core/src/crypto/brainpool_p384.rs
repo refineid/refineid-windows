@@ -38,8 +38,8 @@
 //!   double-and-add, which leaks the bit count of the scalar
 //!   through timing. Acceptable for v0.1 because PACE keys are
 //!   ephemeral single-use; a constant-time scalar multiplication
-//!   (e.g. Montgomery ladder over short Weierstrass) is logged as
-//!   a hardening item in `releng/monorepo-port-status.md`.
+//!   (e.g. Montgomery ladder over short Weierstrass) is a
+//!   hardening item.
 //!
 //! Validated by two property tests against the curve generator:
 //! `n*G = infinity` (subgroup order) and `(a+b)*G = a*G + b*G`

@@ -442,9 +442,8 @@ impl<'a> SignedData<'a> {
     }
 }
 
-/// Helpers hosted on a unit struct (typing-discipline: no
-/// free fns with borrowed parameters; see
-/// `doc/typing-discipline.md`).
+/// Helpers hosted on a unit struct (no free
+/// functions with borrowed parameters).
 struct CmsHelpers;
 
 /// `ContentInfo` DER wrapper for CMS parser helpers.
@@ -749,7 +748,7 @@ impl SignedData<'_> {
 /// A CMS [`SignedData`] whose signer (DSC) signature has been
 /// verified against a signer SPKI.
 ///
-/// Trust by construction (see `doc/typing-discipline.md`): the only
+/// Trust by construction (see [refinement types]): the only
 /// production constructor is [`VerifiedSignedData::verify`], so the
 /// signed eContent -- for an eMRTD SOD, the `LDSSecurityObject` of
 /// data-group hashes -- is reachable only after the CMS signature
@@ -761,6 +760,8 @@ impl SignedData<'_> {
 /// sufficient for passive authentication: the caller must also chain
 /// the DSC to a trusted CSCA (the cert-state lattice). This type
 /// proves the CMS-signature half; DSC->CSCA is a separate step.
+///
+/// [refinement types]: https://github.com/refineid/refineid-core/blob/main/doc/architecture/refinement-types.md
 #[derive(Debug, Clone)]
 pub struct VerifiedSignedData<'a> {
     /// The verified inner `SignedData`.

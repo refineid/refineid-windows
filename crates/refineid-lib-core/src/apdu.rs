@@ -28,10 +28,12 @@
 //! own APDU shapes so a future re-shuffle of, say, the PACE
 //! driver can take its APDUs with it.
 //!
-//! See `doc/typing-discipline.md` for the API-discipline rules
-//! that motivate this split (no untyped bytes across the card
+//! The split follows refineid-core's [refinement types] (no
+//! untyped bytes across the card
 //! boundary; every byte sequence has a protocol role and a
 //! typed container).
+//!
+//! [refinement types]: https://github.com/refineid/refineid-core/blob/main/doc/architecture/refinement-types.md
 
 pub mod iso7816;
 pub mod primitives;

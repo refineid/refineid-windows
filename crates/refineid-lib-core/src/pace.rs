@@ -732,9 +732,8 @@ pub(crate) fn run_pace_step_5<T: CardTransport>(
 /// Returns `None` if the point is the point at infinity (which never
 /// happens in a healthy PACE handshake - but we'd rather flag it than
 /// MAC a degenerate input).
-/// Helpers hosted on a unit struct (typing-discipline: no
-/// free fns with borrowed parameters; see
-/// `doc/typing-discipline.md`).
+/// Helpers hosted on a unit struct (no free
+/// functions with borrowed parameters).
 struct PaceHelpers;
 
 impl PaceHelpers {

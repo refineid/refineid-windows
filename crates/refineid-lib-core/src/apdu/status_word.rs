@@ -140,9 +140,8 @@ pub enum StatusWord {
 impl StatusWord {
     // Raw ISO 7816-4 / proprietary status-word codes, each named
     // exactly once here so no bare hex literal is compared or
-    // matched in the dispatch below (Rule E, No Magic Numbers --
-    // doc/typing-discipline.md; the hex-offender gate flagged the
-    // old `0x9000 => ...` arms). The human meaning lives on the
+    // matched in the dispatch below (no magic numbers, see
+    // AGENTS.md). The human meaning lives on the
     // matching `StatusWord` variant; these are the single source
     // of truth for the wire encoding.
     /// `Success` -- normal processing, no further information.

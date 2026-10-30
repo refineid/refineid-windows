@@ -15,7 +15,7 @@
 //! Card Access Number -- typed wrapper around the 6-digit code
 //! printed on the FINEID card's front face.
 //!
-//! See [`doc/typing-discipline.md`][doc] for why we newtype
+//! See refineid-core's [refinement types] for why we newtype
 //! values that cross trust boundaries. The CAN crosses a real
 //! one: it's operator input (typed at a CLI prompt or piped
 //! from an LDIF / config) and reaches the card via the PACE
@@ -30,7 +30,7 @@
 //! the previous `validate_can(&str) -> Result<(), _>` shape
 //! where the raw `&str` survived the check.
 //!
-//! [doc]: ../../../../doc/typing-discipline.md
+//! [refinement types]: https://github.com/refineid/refineid-core/blob/main/doc/architecture/refinement-types.md
 
 use core::fmt;
 

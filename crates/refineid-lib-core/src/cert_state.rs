@@ -45,9 +45,10 @@
 //! Each stage is constructed only by a function that ran the
 //! check. Skipping a stage is a compile error.
 //!
-//! Canonical docs:
-//! [`doc/typing-discipline.md`](../../../../doc/typing-discipline.md),
-//! [`doc/fineid-s2-cert-profile.md`](../../../../doc/fineid-s2-cert-profile.md).
+//! The stages follow refineid-core's [refinement types] policy; the
+//! certificate profile is DVV's FINEID S2.
+//!
+//! [refinement types]: https://github.com/refineid/refineid-core/blob/main/doc/architecture/refinement-types.md
 
 use core::fmt;
 use core::marker::PhantomData;
@@ -194,9 +195,8 @@ impl<'a> ParsedCert<'a> {
 
     // path_validate_with_intermediate: removed when the consumer
     // never landed. The 2-cert path_validate is the live entry
-    // point; the 3-cert variant can be reintroduced once the
-    // cert-state lattice roadmap (doc/typing-discipline.md) wires
-    // up a chain consumer.
+    // point; the 3-cert variant can be reintroduced once a chain
+    // consumer needs it.
 }
 
 // ----- Stage 3: PathValidatedCert ---------------------------

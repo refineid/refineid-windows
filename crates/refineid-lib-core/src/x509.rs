@@ -724,9 +724,8 @@ struct ExtensionBytes<'a> {
     value: &'a [u8],
 }
 
-/// Helpers hosted on a unit struct (typing-discipline: no
-/// free fns with borrowed parameters; see
-/// `doc/typing-discipline.md`).
+/// Helpers hosted on a unit struct (no free
+/// functions with borrowed parameters).
 struct X509Helpers;
 
 impl X509Helpers {

@@ -2582,7 +2582,7 @@ impl MrzSex {
 impl fmt::Display for MrzSex {
     /// Engineering-canonical token (`"male"` / `"female"` /
     /// `"unspecified"`). Locale-specific rendering belongs in
-    /// the l10n layer (see `doc/i18n-l10n.md`).
+    /// the l10n layer.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.fluent_token())
     }
@@ -2594,8 +2594,8 @@ impl fmt::Display for MrzSex {
 // Each is a thin newtype around `iso8601::Iso8601` -- refineid's
 // canonical time storage. The semantic role (who the date is
 // for) lives at the wrapper type; the underlying calendar /
-// datetime representation lives on `iso8601`. Per
-// `doc/typing-discipline.md` the wrappers expose only semantic
+// datetime representation lives on `iso8601`. The wrappers
+// expose only semantic
 // projections (`date()` returns `&iso8601::Date`), never an
 // `inner()` / `as_iso8601()` umbrella escape hatch.
 //

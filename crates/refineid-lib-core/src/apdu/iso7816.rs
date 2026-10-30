@@ -27,8 +27,9 @@
 //! `<module>::commands` rather than here. This module hosts only
 //! the generic commands that more than one protocol issues.
 //!
-//! See `doc/typing-discipline.md` for the rules these commands
-//! exist to enforce.
+//! The commands enforce refineid-core's [refinement types].
+//!
+//! [refinement types]: https://github.com/refineid/refineid-core/blob/main/doc/architecture/refinement-types.md
 
 use core::error::Error as CoreError;
 use core::fmt;
