@@ -36,7 +36,7 @@ use crate::asic::DataObject;
 use crate::cades::{DigestAlgorithm, SignatureAlgorithm, SignerParameters, SigningTime};
 use crate::digest::Sha256;
 use crate::document::{self, DocumentError, DocumentPlan, Format};
-use crate::pades::{SignatureInk, SignatureMetadata, StampLanguage, VisibleSignature};
+use crate::pades::{SignatureMetadata, VisibleSignature};
 use crate::timestamp::{self, TimestampError, VerifiedTimestampToken};
 use crate::validation::ValidationMaterial;
 use refineid_lib_core::apdu::iso7816::ApduClass;
@@ -212,11 +212,9 @@ pub struct DocumentRequest {
     /// swap cannot spend the PIN on an undisplayed identity. `None`
     /// only for flows that sign whichever card is present (the CLI).
     pub expected_serial: Option<TokenSerial>,
-    /// Optional visible mark for `PAdES`.
-    ///
-    /// The caller supplies only optional card-carried handwriting. The
-    /// name and SATU are always read from the live signing certificate.
-    pub visible_signature: Option<VisibleSignatureRequest>,
+    /// Optional visible mark for `PAdES`: the seal advising the reader
+    /// to check the document's electronic signature.
+    pub visible_signature: Option<VisibleSignature>,
     /// Add an archive timestamp over the finished document, raising it
     /// to level LTA.
     ///
@@ -249,20 +247,6 @@ pub struct DocumentRequest {
     /// Credentials are deliberately limited to one authority so they can
     /// never be replayed to a fallback host.
     pub timestamp_credentials: Option<TimestampCredentials>,
-}
-
-/// The visible mark a PDF signature is asked to carry.
-#[derive(Debug, Clone)]
-pub enum VisibleSignatureRequest {
-    /// The round mark advising the reader to check the electronic
-    /// signature, its middle lines in the given language.
-    Verification(StampLanguage),
-    /// The certificate's name and identifier, with the optional DG7
-    /// handwriting read from the displayed card.
-    Identity {
-        /// Optional DG7 handwriting read from the displayed card.
-        handwriting: Option<SignatureInk>,
-    },
 }
 
 impl DocumentRequest {
@@ -452,8 +436,7 @@ pub enum SignErrorKind {
     /// before the card signs anything, except for the PDF
     /// "signature did not fit" case, which is only knowable after.
     Document(DocumentError),
-    /// A visible signature could not be bound to the live card and signing
-    /// certificate before PIN verification.
+    /// A visible signature was asked of a format without a page.
     VisibleSignature(String),
     /// The live card is not the card the operator was shown; refused
     /// before PIN verification.
@@ -1146,7 +1129,7 @@ fn sign_chain<T: CardTransport>(
             ensure_displayed_card(transport, request)?;
             let parameters = document_signer(&cert, cert_algorithm, request.signing_time)?;
             let objects = load_data_objects(options, request, input_bytes)?;
-            let metadata = document_metadata(&cert, request)?;
+            let metadata = document_metadata(request)?;
             let plan = document::plan(request.format, objects, &parameters, &metadata)
                 .map_err(SignErrorKind::Document)?;
             Some((plan, parameters))
@@ -1226,15 +1209,10 @@ fn sign_chain<T: CardTransport>(
     })
 }
 
-/// Resolve a visible PDF mark from the live signing certificate.
-///
-/// This runs before PIN verification, after the displayed-card check
-/// has bound the session to the card the UI showed.
-fn document_metadata(
-    certificate: &Certificate<'_>,
-    request: &DocumentRequest,
-) -> Result<SignatureMetadata, SignErrorKind> {
-    let Some(visible) = request.visible_signature.as_ref() else {
+/// The signature metadata with the requested visible mark, refused for
+/// a format without a page.
+fn document_metadata(request: &DocumentRequest) -> Result<SignatureMetadata, SignErrorKind> {
+    let Some(visible) = request.visible_signature else {
         return Ok(request.metadata.clone());
     };
     if request.format != Format::Pades {
@@ -1242,36 +1220,8 @@ fn document_metadata(
             "visible marks are supported only for PAdES".to_owned(),
         ));
     }
-    let handwriting = match visible {
-        VisibleSignatureRequest::Verification(language) => {
-            let mut metadata = request.metadata.clone();
-            metadata.visible_signature = Some(VisibleSignature::verification(*language));
-            return Ok(metadata);
-        }
-        VisibleSignatureRequest::Identity { handwriting } => handwriting.clone(),
-    };
-
-    let names = certificate.subject.given_names();
-    let first = names.first.ok_or_else(|| {
-        SignErrorKind::VisibleSignature(
-            "signing certificate has no structured given name".to_owned(),
-        )
-    })?;
-    let surname = certificate.subject.surname().ok_or_else(|| {
-        SignErrorKind::VisibleSignature("signing certificate has no structured surname".to_owned())
-    })?;
-    let identifier = certificate.subject.peuin().ok_or_else(|| {
-        SignErrorKind::VisibleSignature("signing certificate has no SATU identifier".to_owned())
-    })?;
-    let display_name = format!("{} {}", first.to_native(), surname.to_native());
-    let appearance = VisibleSignature::new(&display_name, identifier.as_str(), handwriting)
-        .ok_or_else(|| {
-            SignErrorKind::VisibleSignature(
-                "certificate identity cannot be rendered safely in the PDF".to_owned(),
-            )
-        })?;
     let mut metadata = request.metadata.clone();
-    metadata.visible_signature = Some(appearance);
+    metadata.visible_signature = Some(visible);
     Ok(metadata)
 }
 

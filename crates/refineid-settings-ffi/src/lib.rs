@@ -37,10 +37,10 @@ use refineid_card_manager_core::service::{self, CardSnapshot, ContactlessSnapsho
 use refineid_doc_sign::asic_verify::{DocumentVerifyReport, verify_document};
 use refineid_doc_sign::cades::SigningTime;
 use refineid_doc_sign::document::Format;
-use refineid_doc_sign::pades::{SignatureMetadata, StampLanguage};
+use refineid_doc_sign::pades::{SignatureMetadata, StampLanguage, VisibleSignature};
 use refineid_doc_sign::service::{
     DEFAULT_TIMESTAMP_AUTHORITY, DocumentRequest, LocalVerifyOutcome, SignOptions, SignReport,
-    VisibleSignatureRequest, sign_qualified,
+    sign_qualified,
 };
 use refineid_doc_sign::verify::VerifyOptions;
 use refineid_lib_core::apdu::status_word::PinRetries;
@@ -591,9 +591,8 @@ fn document_request(format: Format, reason: Option<String>, language: u16) -> Do
             visible_signature: None,
         },
         expected_serial: None,
-        visible_signature: (format == Format::Pades).then(|| {
-            VisibleSignatureRequest::Verification(StampLanguage::for_windows_language(language))
-        }),
+        visible_signature: (format == Format::Pades)
+            .then(|| VisibleSignature::verification(StampLanguage::for_windows_language(language))),
         archive: true,
         long_term: true,
         timestamp_authorities: vec![DEFAULT_TIMESTAMP_AUTHORITY.to_owned()],
@@ -1156,8 +1155,8 @@ mod tests {
     };
     use refineid_card_manager_core::card_pin::PinManageSlot;
     use refineid_doc_sign::document::Format;
-    use refineid_doc_sign::pades::StampLanguage;
-    use refineid_doc_sign::service::{DEFAULT_TIMESTAMP_AUTHORITY, VisibleSignatureRequest};
+    use refineid_doc_sign::pades::{StampLanguage, VisibleSignature};
+    use refineid_doc_sign::service::DEFAULT_TIMESTAMP_AUTHORITY;
     use std::path::Path;
 
     /// The Windows language identifier of Finnish (Finland), winnt.h.
@@ -1172,12 +1171,10 @@ mod tests {
         );
         assert!(pdf.archive);
         assert!(pdf.long_term);
-        assert!(matches!(
+        assert_eq!(
             pdf.visible_signature,
-            Some(VisibleSignatureRequest::Verification(
-                StampLanguage::Finnish
-            ))
-        ));
+            Some(VisibleSignature::verification(StampLanguage::Finnish))
+        );
         let container = document_request(Format::AsicECades, Some("review".to_owned()), 0);
         assert!(container.visible_signature.is_none());
         assert!(container.archive);
