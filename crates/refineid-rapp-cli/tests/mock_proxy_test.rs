@@ -246,13 +246,15 @@ fn test_mock_proxy_pairing_and_card_operations() {
     // The P-384 signature verifies against the public key in the mock
     // certificate.
     let verifying_key = p384::ecdsa::VerifyingKey::from_sec1_bytes(
-        refineid_lib_core::x509::OwnedCert::from_der(&der)
-            .expect("parse cert")
-            .view()
-            .spki
-            .ec_public_key_point()
-            .expect("ec point")
-            .as_bytes(),
+        refineid_lib_core::x509::OwnedCert::from_der(
+            refineid_lib_core::x509::UnvalidatedCertificate::new(der),
+        )
+        .expect("parse cert")
+        .view()
+        .spki
+        .ec_public_key_point()
+        .expect("ec point")
+        .as_bytes(),
     )
     .expect("verifying key");
     let p384_sig = p384::ecdsa::Signature::from_slice(&sig).expect("parse sig");

@@ -25,7 +25,7 @@ use std::path::PathBuf;
 
 use refineid_lib_core::crypto::container::{RsaPkcs1Sha256, Signature};
 use refineid_lib_core::crypto::rsa::RsaVerifyError;
-use refineid_lib_core::x509::{OwnedCert, extract_rsa_public_key};
+use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate, extract_rsa_public_key};
 
 use crate::text::decode_cert_pem_or_der;
 
@@ -161,9 +161,11 @@ pub fn verify_offline(options: &VerifyOptions) -> Result<VerifyReport, VerifyErr
             path: options.cert.clone(),
             detail: "not PEM or DER cert bytes".to_owned(),
         })?;
-    let cert_owned = OwnedCert::from_der(&cert_der).map_err(|e| VerifyErrorKind::CertDecode {
-        path: options.cert.clone(),
-        detail: format!("parse: {e}"),
+    let cert_owned = OwnedCert::from_der(UnvalidatedCertificate::new(cert_der)).map_err(|e| {
+        VerifyErrorKind::CertDecode {
+            path: options.cert.clone(),
+            detail: format!("parse: {e}"),
+        }
     })?;
     let cert = cert_owned.view();
     let cert_subject_cn = cert.subject.common_name();
@@ -253,7 +255,8 @@ mod tests {
     /// is a genuine accept case -- no private key needed.
     fn csca_tbs_and_signature() -> Result<(Vec<u8>, Vec<u8>), Box<dyn core::error::Error>> {
         let der = decode_cert_pem_or_der(ICAO_CSCA_PEM).ok_or("decode pem")?;
-        let cert = OwnedCert::from_der(&der).map_err(|e| format!("parse: {e}"))?;
+        let cert = OwnedCert::from_der(UnvalidatedCertificate::new(der))
+            .map_err(|e| format!("parse: {e}"))?;
         let view = cert.view();
         Ok((view.tbs_der.to_vec(), view.signature_bits.to_vec()))
     }

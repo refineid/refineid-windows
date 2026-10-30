@@ -768,7 +768,7 @@ mod sighting_tests {
 
 #[cfg(all(test, windows))]
 mod tests {
-    use refineid_lib_core::x509::OwnedCert;
+    use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
     use refineid_rapp::noise::x25519_public_key;
     use refineid_rapp::{
         EndpointRole, PAIRING_IDLE_EXPIRY_MS, PairRecord, ProfileName, X25519_KEY_SIZE,
@@ -855,10 +855,14 @@ mod tests {
             },
         );
         record.remember_authentication_certificate(
-            OwnedCert::from_der(LARGE_CERTIFICATE).expect("certificate"),
+            OwnedCert::from_der(UnvalidatedCertificate::new(LARGE_CERTIFICATE.to_vec()))
+                .expect("certificate"),
         );
         record.remember_signature_certificate(
-            OwnedCert::from_der(OTHER_LARGE_CERTIFICATE).expect("certificate"),
+            OwnedCert::from_der(UnvalidatedCertificate::new(
+                OTHER_LARGE_CERTIFICATE.to_vec(),
+            ))
+            .expect("certificate"),
         );
         record
     }

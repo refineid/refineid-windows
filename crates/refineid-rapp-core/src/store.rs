@@ -687,7 +687,7 @@ impl PairingStore for MemoryPairingStore {
     reason = "test fixtures are constructed to be infallible"
 )]
 pub(crate) mod fixtures {
-    use refineid_lib_core::x509::OwnedCert;
+    use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
     use refineid_rapp::noise::x25519_public_key;
     use refineid_rapp::{
         EndpointRole, PairRecord, ProfileName, WireValue, X25519_KEY_SIZE,
@@ -768,7 +768,7 @@ pub(crate) mod fixtures {
 
     /// The mock custodian's certificate.
     pub fn certificate() -> OwnedCert {
-        OwnedCert::from_der(MOCK_CERTIFICATE_DER).unwrap()
+        OwnedCert::from_der(UnvalidatedCertificate::new(MOCK_CERTIFICATE_DER.to_vec())).unwrap()
     }
 }
 

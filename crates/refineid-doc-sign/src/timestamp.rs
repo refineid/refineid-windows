@@ -54,7 +54,7 @@ use crate::ber::{
 use crate::cades::DigestAlgorithm;
 use crate::cms::{SignedAttribute, SignedData, SignerIdentifier};
 use refineid_lib_core::oid::known;
-use refineid_lib_core::x509::{Certificate, DateTime, OwnedCert};
+use refineid_lib_core::x509::{Certificate, DateTime, OwnedCert, UnvalidatedCertificate};
 use sha1::{Digest as _, Sha1};
 use sha2::{Sha256, Sha384, Sha512};
 use spki::der::Decode as _;
@@ -416,7 +416,7 @@ fn parseable_embedded_certificates(signed_data: &SignedData<'_>) -> Vec<Vec<u8>>
     for certificate_der in &signed_data.certificates_der {
         // Port note: `Certificate::from_der` is crate-private in
         // lib-core; the owned wrapper runs the same parse.
-        if OwnedCert::from_der(certificate_der).is_err()
+        if OwnedCert::from_der(UnvalidatedCertificate::new(certificate_der.to_vec())).is_err()
             || certificates
                 .iter()
                 .any(|existing: &Vec<u8>| existing.as_slice() == *certificate_der)
@@ -645,7 +645,7 @@ fn parse_generalized_time(value: &[u8]) -> Result<DateTime, TimestampError> {
 fn select_signer_certificate(signed_data: &SignedData<'_>) -> Result<OwnedCert, TimestampError> {
     let mut matches = Vec::new();
     for cert_der in &signed_data.certificates_der {
-        let Ok(owned) = OwnedCert::from_der(cert_der) else {
+        let Ok(owned) = OwnedCert::from_der(UnvalidatedCertificate::new(cert_der.to_vec())) else {
             continue;
         };
         let certificate = owned.view();

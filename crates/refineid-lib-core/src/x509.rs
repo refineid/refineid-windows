@@ -412,6 +412,23 @@ impl<'a> TryFrom<&'a [u8]> for Name<'a> {
     }
 }
 
+/// A certificate as raw, unvalidated DER from outside the trust domain.
+///
+/// This is the boundary type [`OwnedCert::from_der`] takes. The caller
+/// names the bytes a certificate where they arrive; nothing here
+/// treats them as parsed or trusted.
+#[derive(Debug, Clone)]
+pub struct UnvalidatedCertificate(Vec<u8>);
+
+impl UnvalidatedCertificate {
+    /// Wrap raw certificate DER as an unvalidated boundary value.
+    #[must_use]
+    #[inline]
+    pub const fn new(der: Vec<u8>) -> Self {
+        Self(der)
+    }
+}
+
 /// Owning wrapper around a parsed X.509 certificate.
 ///
 /// Holds the cert's DER bytes plus a re-parseable view. Public
@@ -427,15 +444,13 @@ pub struct OwnedCert {
 }
 
 impl OwnedCert {
-    /// Parse `der` as an X.509 certificate, allocating an owned
-    /// copy of the bytes so the wrapper is independent of the
-    /// input borrow.
+    /// Parse `der` as an X.509 certificate and keep its bytes.
     ///
     /// # Errors
     /// [`X509Error`] from the cert parser.
     #[inline]
-    pub fn from_der<B: AsRef<[u8]>>(der: B) -> Result<Self, X509Error> {
-        let bytes = der.as_ref().to_vec();
+    pub fn from_der(der: UnvalidatedCertificate) -> Result<Self, X509Error> {
+        let UnvalidatedCertificate(bytes) = der;
         Certificate::from_der(&bytes)?;
         Ok(Self { der: bytes })
     }

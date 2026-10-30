@@ -166,7 +166,9 @@ use refineid_lib_core::pkcs15::{CertSlot, Pkcs15Ops};
 #[cfg(windows)]
 use refineid_lib_core::sign::{KeyRef, SignOps, commands::ExternalHashValue};
 #[cfg(windows)]
-use refineid_lib_core::x509::{EcCurve, OwnedCert, PublicKeyAlgorithm, extract_rsa_public_key};
+use refineid_lib_core::x509::{
+    EcCurve, OwnedCert, PublicKeyAlgorithm, UnvalidatedCertificate, extract_rsa_public_key,
+};
 #[cfg(windows)]
 use refineid_rapp_core::operations::{
     CardOperation, CardOperationResult, KeyProfile, SignatureAlgorithm,
@@ -1288,7 +1290,7 @@ where
 
 #[cfg(windows)]
 fn build_legacy_rsa_pubkey_blob(cert_der: &[u8], alg: u32) -> Option<Vec<u8>> {
-    let cert = OwnedCert::from_der(cert_der).ok()?;
+    let cert = OwnedCert::from_der(UnvalidatedCertificate::new(cert_der.to_vec())).ok()?;
     let spki = cert.view().spki.as_der();
     let pk = extract_rsa_public_key(spki)?;
     let mut exp = 0_u32;
@@ -1313,7 +1315,7 @@ fn build_legacy_rsa_pubkey_blob(cert_der: &[u8], alg: u32) -> Option<Vec<u8>> {
 
 #[cfg(windows)]
 fn build_cng_ecdsa_pubkey_blob(cert_der: &[u8]) -> Option<Vec<u8>> {
-    let cert = OwnedCert::from_der(cert_der).ok()?;
+    let cert = OwnedCert::from_der(UnvalidatedCertificate::new(cert_der.to_vec())).ok()?;
     let spki = cert.view().spki;
     let q = spki.ec_public_key_point()?;
     let field_bytes = match spki.algorithm() {

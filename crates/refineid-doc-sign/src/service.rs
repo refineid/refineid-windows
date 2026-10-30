@@ -64,7 +64,8 @@ use refineid_lib_core::sign::commands::SignatureAlgRef;
 use refineid_lib_core::sign::{KeyRef, RSA_3072_SIG_BYTES, SignError, SignOps as _};
 use refineid_lib_core::transport::{CardTransport, TransportDispatchError};
 use refineid_lib_core::x509::{
-    Certificate, DateTime, EcCurve, OwnedCert, PublicKeyAlgorithm, extract_rsa_public_key,
+    Certificate, DateTime, EcCurve, OwnedCert, PublicKeyAlgorithm, UnvalidatedCertificate,
+    extract_rsa_public_key,
 };
 use refineid_lib_pcsc::{PcscBackend, PcscError};
 use zeroize::Zeroizing;
@@ -1125,8 +1126,8 @@ fn sign_chain<T: CardTransport>(
         .map_err(|e| SignErrorKind::CertUnavailable {
             detail: format!("read: {e}"),
         })?;
-    let cert_owned =
-        OwnedCert::from_der(cert_der.as_bytes()).map_err(|e| SignErrorKind::CertUnavailable {
+    let cert_owned = OwnedCert::from_der(UnvalidatedCertificate::new(cert_der.as_bytes().to_vec()))
+        .map_err(|e| SignErrorKind::CertUnavailable {
             detail: format!("parse: {e}"),
         })?;
     // Bind the view once: `view()` re-parses the DER on each call.
@@ -2305,7 +2306,7 @@ mod tests {
             .first()
             .map(|(_label, der)| *der)
             .ok_or("missing test trust anchor")?;
-        let signer = OwnedCert::from_der(signer_der)?;
+        let signer = OwnedCert::from_der(UnvalidatedCertificate::new(signer_der.to_vec()))?;
         let generated_at = signer.view().not_before;
         Ok(VerifiedTimestampToken {
             token: vec![1],
@@ -2362,9 +2363,9 @@ mod tests {
             .first()
             .ok_or("pinned TSA root missing")?
             .1;
-        let signer = OwnedCert::from_der(&signer_der)?;
-        let ca = OwnedCert::from_der(&ca_der)?;
-        let root = OwnedCert::from_der(root_der)?;
+        let signer = OwnedCert::from_der(UnvalidatedCertificate::new(signer_der.clone()))?;
+        let ca = OwnedCert::from_der(UnvalidatedCertificate::new(ca_der.clone()))?;
+        let root = OwnedCert::from_der(UnvalidatedCertificate::new(root_der.to_vec()))?;
         check(
             &signer.view().issuer.as_der(),
             &ca.view().subject.as_der(),
@@ -2743,9 +2744,11 @@ mod tests {
     fn sign_report_display_renders_all_present_fields() -> TestResult {
         // Pull a real CommonName off a bundled cert rather than
         // constructing one (the field is private to lib-core).
-        let cert = OwnedCert::from_der(
-            include_bytes!("../trust-anchors/dvv-gov-root-ca-g3-rsa.der").as_slice(),
-        )
+        let cert = OwnedCert::from_der(UnvalidatedCertificate::new(
+            include_bytes!("../trust-anchors/dvv-gov-root-ca-g3-rsa.der")
+                .as_slice()
+                .to_vec(),
+        ))
         .map_err(|e| format!("parse anchor: {e}"))?;
         let cn = cert.view().subject.common_name();
         check_true(cn.is_some(), "anchor has a CN")?;
