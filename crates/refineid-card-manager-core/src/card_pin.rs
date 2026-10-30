@@ -46,7 +46,7 @@ use refineid_lib_core::pkcs15::{
     classify_card_generation_by_issuance,
 };
 use refineid_lib_core::pkcs15::{FineidReaderPicker as _, Pkcs15Ops as _};
-use refineid_lib_core::x509::{DateTime, OwnedCert};
+use refineid_lib_core::x509::{DateTime, OwnedCert, UnvalidatedCertificate};
 use refineid_lib_pcsc::{PcscBackend, PcscError};
 
 /// Which PIN slot a manage-PIN operation targets. Thin layer over
@@ -971,7 +971,7 @@ pub fn classify_card_for_activation(
     let der = transport
         .read_certificate(CertSlot::Authentication)
         .map_err(|e| CardPinError::Transport(format!("auth cert read: {e}")))?;
-    let cert_owned = OwnedCert::from_der(der.as_bytes())
+    let cert_owned = OwnedCert::from_der(UnvalidatedCertificate::new(der.as_bytes().to_vec()))
         .map_err(|e| CardPinError::Transport(format!("auth cert parse: {e}")))?;
     let cert = cert_owned.view();
     let issuance_date = cert.not_before;

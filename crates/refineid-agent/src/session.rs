@@ -12,7 +12,7 @@ use refineid_agent_pipe::{
     OPERATION_LIFETIME, PipeError, REACH_WINDOW, SIGNATURE_DEADLINE, program_label,
     requester_context,
 };
-use refineid_lib_core::x509::OwnedCert;
+use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
 use refineid_rapp::RoutingKey;
 use refineid_rapp_ble::gatt::BleLink;
 use refineid_rapp_ble::reach::{ReachError, reach_revocation_notice, reach_session};
@@ -629,7 +629,7 @@ fn learn_certificate(pairing: &mut Pairing, session: &mut Session<BleLink>) {
         // and one it did not admit.
         Ok(_) | Err(_) => return,
     };
-    let Ok(certificate) = OwnedCert::from_der(der) else {
+    let Ok(certificate) = OwnedCert::from_der(UnvalidatedCertificate::new(der)) else {
         refineid_dev_errors::report!(Agent, "certificate not read", "it does not parse");
         return;
     };

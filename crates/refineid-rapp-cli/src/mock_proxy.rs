@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use refineid_lib_core::apdu::status_word::PinRetries;
 use refineid_lib_core::auth::{PinSlot, PinStatus};
 use refineid_lib_core::pin_retry_risk::check_retry_floor;
-use refineid_lib_core::x509::OwnedCert;
+use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
 use refineid_rapp::{
     BinaryFrame, CardIdentity, CardInspection, CardOperation, CardOperationResult, CardPresence,
     CardReader, CardStatusMessage, CertificateFingerprint, CpaceAttemptSlot, CpaceKc2Responder,
@@ -128,8 +128,9 @@ impl MockProxyOptions {
     /// # Errors
     /// When the checked-in certificate does not parse.
     pub fn with_mock_certificate() -> Result<Self, String> {
-        let certificate = OwnedCert::from_der(DEFAULT_MOCK_CERT_DER)
-            .map_err(|error| format!("the mock certificate does not parse: {error:?}"))?;
+        let certificate =
+            OwnedCert::from_der(UnvalidatedCertificate::new(DEFAULT_MOCK_CERT_DER.to_vec()))
+                .map_err(|error| format!("the mock certificate does not parse: {error:?}"))?;
         Ok(Self {
             listen: DEFAULT_LISTEN.to_owned(),
             code: None,

@@ -44,7 +44,9 @@ use refineid_lib_core::pin_retry_risk::{
     RetryFloorRefusal, check_retry_floor, pin1_status_permits_reusable_cache,
 };
 use refineid_lib_core::pkcs15::{CertSlot, Pkcs15Ops as _};
-use refineid_lib_core::x509::{EcCurve, OwnedCert, PublicKeyAlgorithm, extract_rsa_public_key};
+use refineid_lib_core::x509::{
+    EcCurve, OwnedCert, PublicKeyAlgorithm, UnvalidatedCertificate, extract_rsa_public_key,
+};
 use refineid_lib_pcsc::{PcscBackend, PcscCard};
 
 #[cfg(feature = "pin-change")]
@@ -397,7 +399,8 @@ impl TokenObjects {
     /// algorithm is neither RSA nor secp384r1 EC (the only two FINEID
     /// auth profiles).
     pub(crate) fn from_cert_der(cert_der: Vec<u8>) -> Result<Self, CkRv> {
-        let auth_cert = OwnedCert::from_der(cert_der).map_err(|_parse_err| CKR_DEVICE_ERROR)?;
+        let auth_cert = OwnedCert::from_der(UnvalidatedCertificate::new(cert_der))
+            .map_err(|_parse_err| CKR_DEVICE_ERROR)?;
         let view = auth_cert.view();
         let key_material = TokenKeyMaterial::extract(&view.spki)?;
         let auth_cert_id = Sha1::of(view.spki.as_der());
@@ -869,7 +872,7 @@ fn load_persisted_ca_certs_from(dir: &std::path::Path) -> Vec<OwnedCert> {
             let _ = std::fs::remove_file(&path);
             continue;
         }
-        let Ok(cert) = OwnedCert::from_der(bytes) else {
+        let Ok(cert) = OwnedCert::from_der(UnvalidatedCertificate::new(bytes)) else {
             let _ = std::fs::remove_file(&path);
             continue;
         };
@@ -942,7 +945,7 @@ fn read_optional_ca_cert(card: &mut PcscCard, slot: CertSlot) -> Option<OwnedCer
         Ok(raw) => raw,
         Err(_read_err) => return None,
     };
-    OwnedCert::from_der(raw.into_bytes()).ok()
+    OwnedCert::from_der(UnvalidatedCertificate::new(raw.into_bytes())).ok()
 }
 
 /// Build the token objects for `reader_name`: open the card once,
@@ -1664,8 +1667,8 @@ mod tests {
 
     use super::{
         DER_LONG_FORM_ONE_OCTET, DER_TAG_INTEGER, DER_TAG_OCTET_STRING, OBJ_CERTIFICATE,
-        OBJ_PRIVATE_KEY, OBJ_PUBLIC_KEY, ObjectKind, OwnedCert, der_integer, der_octet_string,
-        pin1_verify_guard,
+        OBJ_PRIVATE_KEY, OBJ_PUBLIC_KEY, ObjectKind, OwnedCert, UnvalidatedCertificate,
+        der_integer, der_octet_string, pin1_verify_guard,
     };
     use crate::ck::{CKR_DEVICE_ERROR, CKR_PIN_LOCKED};
 
@@ -1780,7 +1783,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
         let _ = std::fs::create_dir_all(&temp_dir);
 
-        let cert1 = OwnedCert::from_der(TEST_CA_1_DER).expect("valid cert1");
+        let cert1 = OwnedCert::from_der(UnvalidatedCertificate::new(TEST_CA_1_DER.to_vec()))
+            .expect("valid cert1");
         super::persist_ca_cert_to(&temp_dir, &cert1);
 
         // Plant an unparseable / corrupted file to verify purging
@@ -1816,7 +1820,8 @@ mod tests {
     #[test]
     fn leaf_cert_rejected_by_ca_policy() {
         const LEAF_DER: &[u8] = include_bytes!("../../refineid-rapp-cli/src/mock_cert.der");
-        let leaf = OwnedCert::from_der(LEAF_DER).expect("valid leaf cert DER");
+        let leaf = OwnedCert::from_der(UnvalidatedCertificate::new(LEAF_DER.to_vec()))
+            .expect("valid leaf cert DER");
         assert!(!super::is_ca_cert(&leaf));
         assert!(!super::meets_ca_persistence_policy(&leaf));
 
@@ -1850,7 +1855,8 @@ mod tests {
             .expect("notAfter found in mock CA");
         expired_der[pos..pos + 13].copy_from_slice(b"200101000000Z");
 
-        let expired_cert = OwnedCert::from_der(&expired_der).expect("valid DER structure");
+        let expired_cert = OwnedCert::from_der(UnvalidatedCertificate::new(expired_der.clone()))
+            .expect("valid DER structure");
         assert!(super::is_ca_cert(&expired_cert));
         assert!(!super::is_cert_valid(&expired_cert));
         assert!(!super::meets_ca_persistence_policy(&expired_cert));
@@ -1885,7 +1891,8 @@ mod tests {
         ];
 
         for der in fixtures {
-            let cert = OwnedCert::from_der(der).expect("valid cert");
+            let cert =
+                OwnedCert::from_der(UnvalidatedCertificate::new(der.to_vec())).expect("valid cert");
             assert!(super::is_ca_cert(&cert));
             assert!(super::meets_ca_persistence_policy(&cert));
         }

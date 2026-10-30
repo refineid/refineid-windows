@@ -21,7 +21,7 @@ mod ble;
 use std::io::Write as _;
 use std::time::{Duration, Instant};
 
-use refineid_lib_core::x509::OwnedCert;
+use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
 use refineid_rapp::ProfileName;
 use refineid_rapp_cli::mock_proxy::{
     DEFAULT_LISTEN, MockProxyOptions, SERVE_FOREVER, run_mock_proxy,
@@ -390,7 +390,7 @@ fn record_certificate_outcome<S: PairingStore>(
     ) {
         return;
     }
-    let Ok(certificate) = OwnedCert::from_der(der) else {
+    let Ok(certificate) = OwnedCert::from_der(UnvalidatedCertificate::new(der.clone())) else {
         println!("warning: the phone's certificate does not parse");
         return;
     };
@@ -626,7 +626,8 @@ fn masked(person_id: &str) -> String {
 /// Reads a DER certificate file, parsed at this border.
 fn read_certificate(path: &str, label: &str) -> Result<OwnedCert, String> {
     let der = std::fs::read(path).map_err(|e| format!("cannot read {label} at {path}: {e}"))?;
-    OwnedCert::from_der(der).map_err(|e| format!("the {label} at {path} does not parse: {e:?}"))
+    OwnedCert::from_der(UnvalidatedCertificate::new(der))
+        .map_err(|e| format!("the {label} at {path} does not parse: {e:?}"))
 }
 
 /// Reads a certificate when a path was given.

@@ -23,7 +23,7 @@
 //! the set and counts it, so the store that writes the set back drops it
 //! for good and its peer pairs again.
 
-use refineid_lib_core::x509::OwnedCert;
+use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
 use refineid_rapp::{EndpointRole, PAIR_ID_SIZE, PairRecordCodecError};
 use zeroize::Zeroizing;
 
@@ -416,9 +416,11 @@ impl<'blob> Reader<'blob> {
         if !boolean_from_tag(self.take_u8()?)? {
             return Ok(None);
         }
-        OwnedCert::from_der(self.take_length_prefixed()?)
-            .map(Some)
-            .map_err(|_error| PairingCodecError::InvalidCertificate)
+        OwnedCert::from_der(UnvalidatedCertificate::new(
+            self.take_length_prefixed()?.to_vec(),
+        ))
+        .map(Some)
+        .map_err(|_error| PairingCodecError::InvalidCertificate)
     }
 
     /// Confirms the blob was consumed exactly.

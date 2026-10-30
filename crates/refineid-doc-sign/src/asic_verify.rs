@@ -709,7 +709,10 @@ fn verify_signature<'a>(
     signed.econtent_der = manifest;
     let mut matched: Option<(refineid_lib_core::x509::OwnedCert, Option<String>)> = None;
     for candidate in &signed.certificates_der {
-        let owned = refineid_lib_core::x509::OwnedCert::from_der(candidate).map_err(|error| {
+        let owned = refineid_lib_core::x509::OwnedCert::from_der(
+            refineid_lib_core::x509::UnvalidatedCertificate::new(candidate.to_vec()),
+        )
+        .map_err(|error| {
             DocumentVerifyError::Cms(format!("embedded certificate does not parse: {error:?}"))
         })?;
         let binds = {

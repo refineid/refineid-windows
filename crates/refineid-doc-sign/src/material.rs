@@ -37,7 +37,8 @@ use refineid_lib_core::revocation::{self, RevocationStatus};
 use refineid_lib_core::text::Uri;
 use refineid_lib_core::x509::{
     BasicConstraints, Certificate, DateTime, KeyUsage, KeyUsageMeta, Name, OwnedCert,
-    extract_ca_issuers_urls, extract_crl_distribution_urls, extract_key_usage, extract_ocsp_urls,
+    UnvalidatedCertificate, extract_ca_issuers_urls, extract_crl_distribution_urls,
+    extract_key_usage, extract_ocsp_urls,
 };
 use sha1::{Digest as Sha1Digest, Sha1};
 
@@ -424,7 +425,7 @@ fn walk<P: EvidenceProvider>(
     }
 
     loop {
-        let current = OwnedCert::from_der(&current_der)
+        let current = OwnedCert::from_der(UnvalidatedCertificate::new(current_der.clone()))
             .map_err(|e| MaterialError::Certificate(format!("path certificate parse: {e}")))?;
         let current_view = current.view();
         validate_certificate_time(&current_view, start.reference_time)?;
@@ -452,7 +453,7 @@ fn walk<P: EvidenceProvider>(
             &collection.candidates,
             provider,
         )?;
-        let issuer = OwnedCert::from_der(&issuer_der)
+        let issuer = OwnedCert::from_der(UnvalidatedCertificate::new(issuer_der.clone()))
             .map_err(|e| MaterialError::InvalidIssuer(format!("parse: {e}")))?;
         let issuer_view = issuer.view();
         // `find_issuer` verifies this already. Repeat at the trust
@@ -502,7 +503,7 @@ fn verify_chain_with<P: EvidenceProvider>(
     let mut path = Vec::new();
     let mut subordinate_ca_count = 0_u32;
     loop {
-        let current = OwnedCert::from_der(&current_der)
+        let current = OwnedCert::from_der(UnvalidatedCertificate::new(current_der.clone()))
             .map_err(|e| MaterialError::Certificate(format!("path certificate parse: {e}")))?;
         let current_view = current.view();
         validate_certificate_time(&current_view, reference_time)?;
@@ -525,7 +526,7 @@ fn verify_chain_with<P: EvidenceProvider>(
             &collection.candidates,
             provider,
         )?;
-        let issuer = OwnedCert::from_der(&issuer_der)
+        let issuer = OwnedCert::from_der(UnvalidatedCertificate::new(issuer_der.clone()))
             .map_err(|e| MaterialError::InvalidIssuer(format!("parse: {e}")))?;
         validate_direct_issuer_for_path(
             &current_view,
@@ -557,7 +558,9 @@ fn find_issuer<P: EvidenceProvider>(
         if candidate_der == subject.raw_der {
             continue;
         }
-        let Ok(candidate) = OwnedCert::from_der(candidate_der) else {
+        let Ok(candidate) =
+            OwnedCert::from_der(UnvalidatedCertificate::new(candidate_der.to_vec()))
+        else {
             continue;
         };
         if validate_direct_issuer_for_path(
@@ -594,13 +597,14 @@ fn find_issuer<P: EvidenceProvider>(
                 continue;
             }
         };
-        let candidate = match OwnedCert::from_der(&candidate_der) {
-            Ok(cert) => cert,
-            Err(why) => {
-                failures.push(format!("{url}: parse: {why}"));
-                continue;
-            }
-        };
+        let candidate =
+            match OwnedCert::from_der(UnvalidatedCertificate::new(candidate_der.clone())) {
+                Ok(cert) => cert,
+                Err(why) => {
+                    failures.push(format!("{url}: parse: {why}"));
+                    continue;
+                }
+            };
         match validate_direct_issuer_for_path(
             subject,
             &candidate.view(),
@@ -1396,7 +1400,8 @@ fn check_response(
         .ok()
         .or_else(|| {
             basic.embedded_cert_ders.iter().find_map(|embedded| {
-                let owned = OwnedCert::from_der(embedded).ok()?;
+                let owned =
+                    OwnedCert::from_der(UnvalidatedCertificate::new(embedded.to_vec())).ok()?;
                 let responder = owned.view();
                 ocsp::VerifiedOcspResponse::verify(&basic, &responder.spki).ok()
             })
@@ -1839,7 +1844,7 @@ mod tests {
     #[test]
     fn non_anchor_unknown_critical_extension_is_rejected() -> TestResult {
         let changed = replace_extension_oid_last_arc(DVV_INTERMEDIATE_DER, known::KEY_USAGE)?;
-        let certificate = OwnedCert::from_der(changed)?;
+        let certificate = OwnedCert::from_der(UnvalidatedCertificate::new(changed))?;
         let error = validate_non_anchor_extensions(&certificate.view())
             .err()
             .ok_or("unknown critical extension unexpectedly accepted")?;
@@ -1853,7 +1858,7 @@ mod tests {
     fn non_anchor_unknown_noncritical_extension_is_allowed() -> TestResult {
         let changed =
             replace_extension_oid_last_arc(DVV_INTERMEDIATE_DER, oids::CERTIFICATE_POLICIES)?;
-        let certificate = OwnedCert::from_der(changed)?;
+        let certificate = OwnedCert::from_der(UnvalidatedCertificate::new(changed))?;
         let profile = validate_non_anchor_extensions(&certificate.view())?;
         check_true(
             profile.basic_constraints.ca,
@@ -1863,7 +1868,8 @@ mod tests {
 
     #[test]
     fn unsupported_ca_constraints_fail_closed_and_path_len_is_enforced() -> TestResult {
-        let certificate = OwnedCert::from_der(DVV_INTERMEDIATE_DER)?;
+        let certificate =
+            OwnedCert::from_der(UnvalidatedCertificate::new(DVV_INTERMEDIATE_DER.to_vec()))?;
         let extensions = certificate
             .view()
             .extensions
@@ -1950,8 +1956,8 @@ mod tests {
             .last_mut()
             .ok_or("intermediate fixture unexpectedly empty")?;
         *last ^= 1;
-        let child = OwnedCert::from_der(&tampered)?;
-        let issuer = OwnedCert::from_der(DVV_ROOT_ECC_DER)?;
+        let child = OwnedCert::from_der(UnvalidatedCertificate::new(tampered.clone()))?;
+        let issuer = OwnedCert::from_der(UnvalidatedCertificate::new(DVV_ROOT_ECC_DER.to_vec()))?;
         let error = validate_direct_issuer_for_path(
             &child.view(),
             &issuer.view(),
@@ -1979,7 +1985,7 @@ mod tests {
             .first()
             .copied()
             .ok_or("APED fixture unexpectedly has no responder certificate")?;
-        let responder = OwnedCert::from_der(responder_der)?;
+        let responder = OwnedCert::from_der(UnvalidatedCertificate::new(responder_der.to_vec()))?;
         let error = validate_issuing_certificate(&responder.view(), reference_time()?, 0)
             .err()
             .ok_or("non-CA OCSP responder unexpectedly accepted as issuer")?;
@@ -1991,7 +1997,7 @@ mod tests {
 
     #[test]
     fn issuer_must_be_valid_at_the_chain_reference_time() -> TestResult {
-        let root = OwnedCert::from_der(DVV_ROOT_ECC_DER)?;
+        let root = OwnedCert::from_der(UnvalidatedCertificate::new(DVV_ROOT_ECC_DER.to_vec()))?;
         let after_expiry = DateTime::new(2050, 1, 1, 0, 0, 0)?;
         let error = validate_issuing_certificate(&root.view(), after_expiry, 0)
             .err()
@@ -2103,8 +2109,8 @@ mod tests {
         let signer_der =
             include_bytes!("../test-vectors/sectigo-qualified-tsa-signer-3.der").to_vec();
         let ca_der = include_bytes!("../test-vectors/sectigo-qualified-tsa-ca-r35.der").to_vec();
-        let signer = OwnedCert::from_der(&signer_der)?;
-        let ca = OwnedCert::from_der(&ca_der)?;
+        let signer = OwnedCert::from_der(UnvalidatedCertificate::new(signer_der.clone()))?;
+        let ca = OwnedCert::from_der(UnvalidatedCertificate::new(ca_der))?;
         let valid_instant = DateTime::new(2023, 11, 14, 22, 13, 20)?;
 
         check(
@@ -2115,7 +2121,8 @@ mod tests {
 
         let tampered_signer_der =
             replace_extension_oid_last_arc(&signer_der, oids::KP_TIME_STAMPING)?;
-        let tampered_signer = OwnedCert::from_der(tampered_signer_der)?;
+        let tampered_signer =
+            OwnedCert::from_der(UnvalidatedCertificate::new(tampered_signer_der))?;
         let error = validate_direct_issuer_for_path(
             &tampered_signer.view(),
             &ca.view(),
