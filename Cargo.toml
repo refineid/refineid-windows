@@ -23,7 +23,7 @@ members = [
 ]
 
 [workspace.package]
-version = "26.10.29"
+version = "26.10.30"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["Petri Koistinen"]
@@ -121,6 +121,13 @@ strip = "symbols"
 overflow-checks = true
 panic = "abort"
 debug = false
+
+# `pcsc` panics on a PC/SC status it has no variant for when it is built
+# with debug assertions, and returns `pcsc::Error::UnknownError` without
+# them. Development and test builds build it without, so an unmapped
+# status reaches the caller as an error in every profile.
+[profile.dev.package.pcsc]
+debug-assertions = false
 
 
 

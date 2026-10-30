@@ -34,9 +34,10 @@
 //! card), and is dropped on `C_Logout`, the last `C_CloseSession`,
 //! card removal, and `C_Finalize`.
 //!
-//! Panics. The workspace builds with `panic = "abort"`, so a panic
-//! aborts the host process rather than unwinding across the C ABI
-//! (defined behaviour, never UB). The code is panic-free by
+//! Panics. Release builds use `panic = "abort"`, and a panic that
+//! reaches an `extern "C"` entry point in a development build aborts
+//! too, so a panic aborts the host process rather than unwinding
+//! across the C ABI (defined behaviour, never UB). The code is panic-free by
 //! construction under the workspace clippy gate (no `unwrap` /
 //! `expect` / indexing / unchecked arithmetic), so no `catch_unwind`
 //! shim is needed in this minimal scope.
