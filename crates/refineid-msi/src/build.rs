@@ -234,6 +234,21 @@ pub struct RegistryValue<'a> {
     pub data: RegistryData<'a>,
 }
 
+/// When the installer calls an entry point.
+#[derive(Debug, Clone, Copy)]
+pub enum Schedule<'a> {
+    /// On install and repair, after the files are in place. On a first
+    /// installation the installer records `rollback_entry_point` before it
+    /// calls the action; an installation that rolls back after the action
+    /// ran calls that function, with the files still on disk.
+    Install {
+        /// The exported function that reverses the action.
+        rollback_entry_point: &'a str,
+    },
+    /// On uninstall, before the files go.
+    Uninstall,
+}
+
 /// An entry point of the installed module that the installer calls with
 /// elevation.
 #[derive(Debug, Clone, Copy)]
@@ -243,9 +258,80 @@ pub struct CustomAction<'a> {
     /// The exported function, with the Windows Installer custom action
     /// signature.
     pub entry_point: &'a str,
-    /// Whether the action runs on uninstall (before the files go) rather
-    /// than on install and repair (after the files are in place).
-    pub on_uninstall: bool,
+    /// When the installer calls it.
+    pub schedule: Schedule<'a>,
+}
+
+/// Prefix of the action name under which an install action's undo is
+/// written.
+const ROLLBACK_PREFIX: &str = "Rollback";
+/// Sequence condition for actions that run on install and repair.
+const INSTALL_CONDITION: &str = "NOT REMOVE~=\"ALL\"";
+/// Sequence condition for actions that run on uninstall.
+const UNINSTALL_CONDITION: &str = "REMOVE~=\"ALL\"";
+/// Sequence condition for the rollback of an install action: a first
+/// installation only. A repair runs the install action over a registration
+/// that was already there, so its rollback leaves that registration alone.
+const FIRST_INSTALL_CONDITION: &str = "NOT Installed";
+
+/// One `CustomAction` row with its `InstallExecuteSequence` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CustomActionRow<'a> {
+    /// The `Action` key of both rows.
+    action: String,
+    /// The `Type` column.
+    kind: i32,
+    /// The `Target` column: the exported function.
+    entry_point: &'a str,
+    /// The sequence `Condition` column.
+    condition: &'static str,
+    /// The `Sequence` column.
+    sequence: i32,
+}
+
+/// Lays out the custom actions in execution order: uninstall ones before
+/// the files go, install ones after they are in place, each install action
+/// immediately preceded by its rollback action, which a first installation
+/// records.
+fn custom_action_rows<'a>(actions: &[CustomAction<'a>]) -> Vec<CustomActionRow<'a>> {
+    let mut rows = Vec::with_capacity(actions.len() * 2);
+    let mut next_install = schema::INSTALL_ACTION_SEQUENCE;
+    let mut next_uninstall = schema::UNINSTALL_ACTION_SEQUENCE;
+    for action in actions {
+        match action.schedule {
+            Schedule::Install {
+                rollback_entry_point,
+            } => {
+                next_install += 1;
+                rows.push(CustomActionRow {
+                    action: format!("{ROLLBACK_PREFIX}{}", action.name),
+                    kind: schema::CUSTOM_ACTION_INSTALLED_DLL_ROLLBACK,
+                    entry_point: rollback_entry_point,
+                    condition: FIRST_INSTALL_CONDITION,
+                    sequence: next_install,
+                });
+                next_install += 1;
+                rows.push(CustomActionRow {
+                    action: action.name.to_owned(),
+                    kind: schema::CUSTOM_ACTION_INSTALLED_DLL_DEFERRED,
+                    entry_point: action.entry_point,
+                    condition: INSTALL_CONDITION,
+                    sequence: next_install,
+                });
+            }
+            Schedule::Uninstall => {
+                next_uninstall += 1;
+                rows.push(CustomActionRow {
+                    action: action.name.to_owned(),
+                    kind: schema::CUSTOM_ACTION_INSTALLED_DLL_DEFERRED,
+                    entry_point: action.entry_point,
+                    condition: UNINSTALL_CONDITION,
+                    sequence: next_uninstall,
+                });
+            }
+        }
+    }
+    rows
 }
 
 /// Everything needed to produce one architecture's package.
@@ -682,36 +768,27 @@ fn write_registry(database: &Database, package: &Package<'_>) -> Result<(), Buil
     Ok(())
 }
 
-/// Writes the custom actions and sequences them: uninstall ones before the
-/// files go, install ones after they are in place.
+/// Writes the custom actions, their rollback actions, and their sequence
+/// rows.
 fn write_custom_actions(database: &Database, package: &Package<'_>) -> Result<(), BuildError> {
-    let mut next_install = schema::INSTALL_ACTION_SEQUENCE;
-    let mut next_uninstall = schema::UNINSTALL_ACTION_SEQUENCE;
-    for action in package.custom_actions {
+    for row in custom_action_rows(package.custom_actions) {
         insert(
             database,
             "INSERT INTO `CustomAction` (`Action`,`Type`,`Source`,`Target`) VALUES (?,?,?,?)",
             &[
-                Value::Text(action.name),
-                Value::Integer(schema::CUSTOM_ACTION_INSTALLED_DLL_DEFERRED),
+                Value::Text(&row.action),
+                Value::Integer(row.kind),
                 Value::Text(package.file.key),
-                Value::Text(action.entry_point),
+                Value::Text(row.entry_point),
             ],
         )?;
-        let (condition, sequence) = if action.on_uninstall {
-            next_uninstall += 1;
-            ("REMOVE~=\"ALL\"", next_uninstall)
-        } else {
-            next_install += 1;
-            ("NOT REMOVE~=\"ALL\"", next_install)
-        };
         insert(
             database,
             "INSERT INTO `InstallExecuteSequence` (`Action`,`Condition`,`Sequence`) VALUES (?,?,?)",
             &[
-                Value::Text(action.name),
-                Value::Text(condition),
-                Value::Integer(sequence),
+                Value::Text(&row.action),
+                Value::Text(row.condition),
+                Value::Integer(row.sequence),
             ],
         )?;
     }
@@ -846,10 +923,86 @@ fn write_sequences(database: &Database) -> Result<(), BuildError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        LOWEST_VERSION, MINUTES_PER_DAY, NEWER_VERSION, OLDER_VERSION, RegistryData, Version,
-        encode_registry, short_name, upgrade_rows,
+        CustomAction, CustomActionRow, FIRST_INSTALL_CONDITION, INSTALL_CONDITION, LOWEST_VERSION,
+        MINUTES_PER_DAY, NEWER_VERSION, OLDER_VERSION, ROLLBACK_PREFIX, RegistryData, Schedule,
+        UNINSTALL_CONDITION, Version, custom_action_rows, encode_registry, short_name,
+        upgrade_rows,
     };
     use crate::schema;
+
+    /// The package's actions as authored: one install action with its undo
+    /// and one uninstall action.
+    const ACTIONS: &[CustomAction<'static>] = &[
+        CustomAction {
+            name: "Register",
+            entry_point: "DoRegister",
+            schedule: Schedule::Install {
+                rollback_entry_point: "UndoRegister",
+            },
+        },
+        CustomAction {
+            name: "Unregister",
+            entry_point: "DoUnregister",
+            schedule: Schedule::Uninstall,
+        },
+    ];
+
+    #[test]
+    fn an_install_action_is_preceded_by_its_rollback_action() {
+        let rows = custom_action_rows(ACTIONS);
+        assert_eq!(
+            rows,
+            [
+                CustomActionRow {
+                    action: format!("{ROLLBACK_PREFIX}Register"),
+                    kind: schema::CUSTOM_ACTION_INSTALLED_DLL_ROLLBACK,
+                    entry_point: "UndoRegister",
+                    condition: FIRST_INSTALL_CONDITION,
+                    sequence: schema::INSTALL_ACTION_SEQUENCE + 1,
+                },
+                CustomActionRow {
+                    action: "Register".to_owned(),
+                    kind: schema::CUSTOM_ACTION_INSTALLED_DLL_DEFERRED,
+                    entry_point: "DoRegister",
+                    condition: INSTALL_CONDITION,
+                    sequence: schema::INSTALL_ACTION_SEQUENCE + 2,
+                },
+                CustomActionRow {
+                    action: "Unregister".to_owned(),
+                    kind: schema::CUSTOM_ACTION_INSTALLED_DLL_DEFERRED,
+                    entry_point: "DoUnregister",
+                    condition: UNINSTALL_CONDITION,
+                    sequence: schema::UNINSTALL_ACTION_SEQUENCE + 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn the_rollback_action_is_the_deferred_call_with_the_rollback_flag() {
+        let deferred_call = schema::CUSTOM_ACTION_TYPE_DLL
+            | schema::CUSTOM_ACTION_TYPE_SOURCE_FILE
+            | schema::CUSTOM_ACTION_TYPE_IN_SCRIPT
+            | schema::CUSTOM_ACTION_TYPE_NO_IMPERSONATE;
+        let rows = custom_action_rows(ACTIONS);
+        let rollback = &rows[0];
+        let deferred = &rows[1];
+        assert_eq!(deferred.kind, deferred_call);
+        assert_eq!(
+            rollback.kind,
+            deferred_call | schema::CUSTOM_ACTION_TYPE_ROLLBACK
+        );
+        assert!(rollback.sequence < deferred.sequence);
+    }
+
+    #[test]
+    fn action_names_stay_unique_across_the_rows() {
+        let rows = custom_action_rows(ACTIONS);
+        let mut names: Vec<&str> = rows.iter().map(|row| row.action.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), rows.len());
+    }
 
     #[test]
     fn binary_registry_data_uses_the_hexadecimal_prefix() {

@@ -198,11 +198,36 @@ pub const ADVT_EXECUTE_SEQUENCE: &[SequencedAction] = &[
 /// `HKEY_LOCAL_MACHINE` in the `Registry` table's `Root` column.
 pub const REGISTRY_ROOT_LOCAL_MACHINE: i32 = 2;
 
-/// A custom action that calls an entry point of an installed DLL
-/// (`msidbCustomActionTypeDll | msidbCustomActionTypeSourceFile`), deferred
+/// `msidbCustomActionTypeDll`: the action calls a DLL entry point.
+pub const CUSTOM_ACTION_TYPE_DLL: i32 = 0x0001;
+/// `msidbCustomActionTypeSourceFile`: the `Source` column names a `File`
+/// row, the installed file.
+pub const CUSTOM_ACTION_TYPE_SOURCE_FILE: i32 = 0x0010;
+/// `msidbCustomActionTypeRollback`: the action is written into the
+/// rollback script.
+pub const CUSTOM_ACTION_TYPE_ROLLBACK: i32 = 0x0100;
+/// `msidbCustomActionTypeInScript`: the action is deferred into the
+/// installation script.
+pub const CUSTOM_ACTION_TYPE_IN_SCRIPT: i32 = 0x0400;
+/// `msidbCustomActionTypeNoImpersonate`: the action runs in the
+/// installer's own context, with its elevation.
+pub const CUSTOM_ACTION_TYPE_NO_IMPERSONATE: i32 = 0x0800;
+
+/// A custom action that calls an entry point of an installed DLL, deferred
 /// into the installation script and run without impersonation, so it has
 /// the installer's elevation after the file is in place.
-pub const CUSTOM_ACTION_INSTALLED_DLL_DEFERRED: i32 = 1 | 0x10 | 0x400 | 0x800;
+pub const CUSTOM_ACTION_INSTALLED_DLL_DEFERRED: i32 = CUSTOM_ACTION_TYPE_DLL
+    | CUSTOM_ACTION_TYPE_SOURCE_FILE
+    | CUSTOM_ACTION_TYPE_IN_SCRIPT
+    | CUSTOM_ACTION_TYPE_NO_IMPERSONATE;
+
+/// The same call, written into the rollback script instead. It is recorded
+/// when the installer reaches it in the sequence and runs only if the
+/// installation rolls back after that point; the rollback script runs in
+/// reverse, so it undoes a deferred action sequenced after it while the
+/// installed file is still in place.
+pub const CUSTOM_ACTION_INSTALLED_DLL_ROLLBACK: i32 =
+    CUSTOM_ACTION_INSTALLED_DLL_DEFERRED | CUSTOM_ACTION_TYPE_ROLLBACK;
 
 /// Sequence number of the first uninstall custom action: after services
 /// stop and before registry values and files go.
