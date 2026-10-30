@@ -7,6 +7,10 @@
 # older refineid-core commit pushes, and moving to a newer core is a
 # deliberate change made in its own pull request.
 #
+# Then builds the workspace documentation with rustdoc warnings denied,
+# once per target: for the native host and, when the host is another
+# target and the Windows target is installed, x86_64-pc-windows-msvc.
+#
 # Enable local hooks once per clone with:
 #
 #     git config core.hooksPath .githooks
@@ -22,4 +26,16 @@ if ! cargo fetch --locked --quiet; then
     exit 1
 fi
 
-echo "pre-push: ok (Cargo.lock matches the manifests)"
+WINDOWS_TARGET="x86_64-pc-windows-msvc"
+HOST_TARGET="$(rustc -vV | sed -n 's/^host: //p')"
+
+echo "pre-push: cargo doc with warnings denied (native host, $HOST_TARGET)"
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --quiet
+
+if [ "$HOST_TARGET" != "$WINDOWS_TARGET" ] \
+    && rustup target list --installed | grep -qx "$WINDOWS_TARGET"; then
+    echo "pre-push: cargo doc with warnings denied ($WINDOWS_TARGET)"
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --quiet --target "$WINDOWS_TARGET"
+fi
+
+echo "pre-push: ok (Cargo.lock matches the manifests, documentation builds)"

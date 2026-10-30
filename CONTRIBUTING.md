@@ -47,6 +47,9 @@ The hooks enforce standards locally:
   fetched from its remote (`cargo fetch --locked`).
   It does not require the newest `refineid-core`: moving to a newer core is a
   deliberate change in its own pull request, built and reviewed like any other.
+  It then builds the workspace documentation with rustdoc warnings denied
+  (`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`), for the
+  native host and for `x86_64-pc-windows-msvc` when that target is installed.
 - **Commit message (`.githooks/commit-msg`)**: enforces that commit messages do not
   contain forbidden trailers (such as AI attribution).
 

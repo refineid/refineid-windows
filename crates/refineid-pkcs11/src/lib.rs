@@ -71,7 +71,7 @@ use crate::ck::{CkFunctionListPtrPtr, CkRv};
 /// Returns the static PKCS#11 function list (OASIS PKCS#11 v2.40 s5.6.4).
 ///
 /// `C_GetFunctionList` is the sole symbol callers resolve by name. It returns
-/// a pointer to the static [`api::FUNCTION_LIST`] vtable through which every
+/// a pointer to the static `api::FUNCTION_LIST` vtable through which every
 /// other function is reached. p11-kit / NSS load the shared object and call
 /// this first.
 ///

@@ -283,7 +283,7 @@ pub trait BerTag {
 
 /// Typed BER-TLV slice.
 ///
-/// Constructed at a trust boundary via [`BerTlv::parse`], which
+/// Constructed at a trust boundary via `BerTlv::parse`, which
 /// rejects mismatched tags. Downstream code consumes
 /// `tlv.value` knowing the tag is `T::TAG`; the compiler
 /// refuses to pass a `BerTlv<Integer>` where `BerTlv<Sequence>`
@@ -360,7 +360,7 @@ impl<'a, T: BerTag> BerTlv<'a, T> {
 /// Use when the protocol can produce children with multiple
 /// tag classes that the parser branches on (e.g., an X.509
 /// extension block where each child's tag selects the
-/// extension shape). Promote with [`BerTlvAny::expect`] once
+/// extension shape). Promote with `BerTlvAny::expect` once
 /// the expected tag is known.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[expect(
@@ -481,7 +481,7 @@ impl<'a> BerTlvAny<'a> {
 }
 
 /// Iterator over heterogeneous TLV children. Yielded values
-/// are [`BerTlvAny`]; promote with [`BerTlvAny::expect`].
+/// are [`BerTlvAny`]; promote with `BerTlvAny::expect`.
 #[derive(Debug)]
 pub struct BerTlvIter<'a> {
     /// `remaining` field.

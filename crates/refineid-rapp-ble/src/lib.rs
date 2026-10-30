@@ -14,8 +14,8 @@
 //! signal strength, the negotiated MTU and the fragment capacity it allows.
 //! Signal strength orders the advertisers a search tries; it admits or
 //! refuses none (section 4.4).
-//! The Windows Runtime link itself is in [`gatt`], the scan in [`scan`],
-//! and the search for a stored pairing's phone in [`reach`].
+//! The Windows Runtime link itself is in `gatt`, the scan in `scan`,
+//! and the search for a stored pairing's phone in `reach`.
 //!
 //! RAPP authenticates on the application layer alone (section 5.1): the
 //! requester never asks Windows to pair or bond with the phone and never
