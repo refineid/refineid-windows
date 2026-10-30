@@ -51,10 +51,9 @@ use windows::core::{HSTRING, PCWSTR, PWSTR, w};
 use refineid_doc_sign::asic_verify::verify_document;
 use refineid_doc_sign::cades::SigningTime;
 use refineid_doc_sign::document::Format;
-use refineid_doc_sign::pades::{SignatureMetadata, StampLanguage};
+use refineid_doc_sign::pades::{SignatureMetadata, StampLanguage, VisibleSignature};
 use refineid_doc_sign::service::{
-    DEFAULT_TIMESTAMP_AUTHORITY, DocumentRequest, SignOptions, SignReport, VisibleSignatureRequest,
-    sign_qualified,
+    DEFAULT_TIMESTAMP_AUTHORITY, DocumentRequest, SignOptions, SignReport, sign_qualified,
 };
 use refineid_lib_core::identity::CommonName;
 use refineid_lib_core::pin::PinBytes;
@@ -2186,7 +2185,8 @@ fn start_doc_sign() {
         contact: None,
         name: None,
         signing_time: None,
-        visible_signature: None,
+        visible_signature: (format == Format::Pades)
+            .then(|| VisibleSignature::verification(user_interface_language())),
     };
     let output = derive_output(&input, format);
     let request = DocumentRequest {
@@ -2195,8 +2195,6 @@ fn start_doc_sign() {
         signing_time: SigningTime::now(),
         metadata,
         expected_serial: None,
-        visible_signature: (format == Format::Pades)
-            .then(|| VisibleSignatureRequest::Verification(user_interface_language())),
         archive: true,
         long_term: true,
         timestamp_authorities: vec![DEFAULT_TIMESTAMP_AUTHORITY.to_owned()],
