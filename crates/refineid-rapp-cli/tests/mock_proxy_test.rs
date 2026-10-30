@@ -3,7 +3,7 @@
 use p384::ecdsa::signature::hazmat::PrehashVerifier as _;
 use refineid_rapp::{
     CPACE_ATTEMPT_WINDOW_MS, CertificateFingerprint, CpaceKc2Initiator, MINIMUM_REMAINING_ATTEMPTS,
-    PRE_AUTHENTICATION_SPACING_MS, ProfileName, ResultError, encode_kc2_step1_frame,
+    PRE_AUTHENTICATION_SPACING_MS, PairingCode, ProfileName, ResultError, encode_kc2_step1_frame,
     standard_pairing_context_v2,
 };
 use refineid_rapp_cli::mock_proxy::{MockProxyOptions, serve_mock_proxy};
@@ -367,9 +367,13 @@ fn a_second_requester_is_answered_busy_during_an_attempt_and_then_pairs() {
         STREAM_CANDIDATE_ID,
     )
     .expect("context");
-    let (_initiator, step_one) =
-        CpaceKc2Initiator::new(TEST_CODE, &context, &offer.offer_id, HOLDER_ENTROPY)
-            .expect("step 1");
+    let (_initiator, step_one) = CpaceKc2Initiator::new(
+        &PairingCode::parse(TEST_CODE).expect("pairing code"),
+        &context,
+        &offer.offer_id,
+        HOLDER_ENTROPY,
+    )
+    .expect("step 1");
     holder
         .send_frame(
             encode_kc2_step1_frame(&step_one)

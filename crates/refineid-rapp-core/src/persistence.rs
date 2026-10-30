@@ -24,7 +24,7 @@
 //! for good and its peer pairs again.
 
 use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
-use refineid_rapp::{EndpointRole, PAIR_ID_SIZE, PairRecordCodecError};
+use refineid_rapp::{EncodedPairRecord, EndpointRole, PAIR_ID_SIZE, PairRecordCodecError};
 use zeroize::Zeroizing;
 
 use crate::engine::PeerIntroduction;
@@ -149,10 +149,9 @@ pub fn encode_pairing_record(
     match (record.pair_record(), record.state()) {
         (Some(keys), _) => {
             out.push(KEYS_HELD);
-            let encoded = Zeroizing::new(
-                refineid_rapp::encode_pair_record(keys).map_err(PairingCodecError::PairRecord)?,
-            );
-            put_bytes(&mut out, &encoded)?;
+            let encoded =
+                refineid_rapp::encode_pair_record(keys).map_err(PairingCodecError::PairRecord)?;
+            put_bytes(&mut out, encoded.as_bytes())?;
         }
         (None, state) => {
             out.push(KEYS_REVOKED);
@@ -194,7 +193,8 @@ pub fn decode_pairing_record(blob: &[u8]) -> Result<PairingRecord, PairingCodecE
     }
     let keys = match reader.take_u8()? {
         KEYS_HELD => {
-            let keys = refineid_rapp::decode_pair_record(reader.take_length_prefixed()?)
+            let encoded = EncodedPairRecord::from_stored(reader.take_length_prefixed()?.to_vec());
+            let keys = refineid_rapp::decode_pair_record(&encoded)
                 .map_err(PairingCodecError::PairRecord)?;
             if keys.role() != EndpointRole::Requester {
                 return Err(PairingCodecError::NotRequester);
@@ -485,17 +485,22 @@ mod tests {
         decode_pairing_record(&encode_pairing_record(record).unwrap()).unwrap()
     }
 
+    /// The engine's encoding of `keys`, private key included.
+    fn encoded_keys(keys: &refineid_rapp::PairRecord) -> Vec<u8> {
+        refineid_rapp::encode_pair_record(keys)
+            .unwrap()
+            .as_bytes()
+            .to_vec()
+    }
+
     fn assert_same(left: &PairingRecord, right: &PairingRecord) {
         assert_eq!(left.pair_id(), right.pair_id());
         assert_eq!(left.state(), right.state());
         assert_eq!(left.granted_profiles(), right.granted_profiles());
         assert_eq!(left.peer(), right.peer());
         assert_eq!(
-            left.pair_record()
-                .map(refineid_rapp::PairRecord::local_static_private),
-            right
-                .pair_record()
-                .map(refineid_rapp::PairRecord::local_static_private)
+            left.pair_record().map(encoded_keys),
+            right.pair_record().map(encoded_keys)
         );
         assert_eq!(
             left.pair_record()
@@ -673,7 +678,7 @@ mod tests {
     /// earlier format, as a build before the current format stored it.
     fn with_earlier_keys_format(record: &PairingRecord) -> Vec<u8> {
         let keys = refineid_rapp::encode_pair_record(record.pair_record().unwrap()).unwrap();
-        let WireValue::Map(mut fields) = decode_deterministic_cbor(&keys).unwrap() else {
+        let WireValue::Map(mut fields) = decode_deterministic_cbor(keys.as_bytes()).unwrap() else {
             panic!("an encoded pair record is a map");
         };
         fields.insert(

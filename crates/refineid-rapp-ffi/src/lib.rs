@@ -435,9 +435,9 @@ pub unsafe extern "C" fn refineid_rapp_begin_pairing(
         let code = unsafe { copy_utf8(code, code_length, MAX_CODE_BYTES, "code") }?;
         // SAFETY: As above.
         let name = unsafe { copy_utf8(name, name_length, MAX_NAME_BYTES, "name") }?;
-        if normalize_pairing_code(&code).is_none() {
+        let Some(code) = normalize_pairing_code(&code) else {
             return Err(ApiFailure::new("invalid_code", INVALID_CODE_STATUS));
-        }
+        };
         begin_pairing(code, name)
     })
 }

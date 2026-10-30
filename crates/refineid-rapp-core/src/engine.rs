@@ -87,10 +87,11 @@ use crate::transport::{BinaryFrame, FrameTransport, TransportError};
 use refineid_rapp::{
     ActivePairing, AuthenticatedViolation, EndpointRole, EstablishedSessionRuntime,
     ExplicitUserIntent, NextCandidate, NextEndpoint, OperationRequest, OperationViolation,
-    PairRecord, PairingCandidates, PairingHandshake, PairingSecret, PairingStorage, PingChallenge,
-    ProfileName, ProgressEvent, ReadyOutcome, RequesterDispatch, RequesterEngineError,
-    RequesterOperationEngine, RuntimePoll, RuntimeReceive, SessionAuthentication, SessionHandshake,
-    SweepError, TransportProfile, TypedMessage, generate_pair_key_material,
+    PairRecord, PairingCandidates, PairingCode, PairingHandshake, PairingSecret, PairingStorage,
+    PingChallenge, ProfileName, ProgressEvent, ReadyOutcome, RequesterDispatch,
+    RequesterEngineError, RequesterOperationEngine, RuntimePoll, RuntimeReceive,
+    SessionAuthentication, SessionHandshake, SweepError, TransportProfile, TypedMessage,
+    generate_pair_key_material,
 };
 
 /// Local labels sent inside `pairing.hello`. Labels, not identities.
@@ -765,9 +766,7 @@ impl<Store: PairingStore> Requester<Store> {
         source: &mut Source,
         confirm: impl FnOnce(&PeerIntroduction, &[ProfileName]) -> Option<Vec<ProfileName>>,
     ) -> Result<(PairId, Source::Endpoint), PairingSearchError> {
-        let code = crate::offer::normalize_pairing_code(code)
-            .map(Zeroizing::new)
-            .ok_or(PairingSearchError::InvalidCode)?;
+        let code = PairingCode::parse(code).map_err(|_| PairingSearchError::InvalidCode)?;
         let mut candidates = PairingCandidates::<Source::Endpoint>::new();
         // Whether discovery still finds endpoints; once a round says the
         // search is over, a busy wait is sat out without browsing.
@@ -863,7 +862,7 @@ impl<Store: PairingStore> Requester<Store> {
     /// `pairing-busy` in place of step 2, or a refused step 1 write, is the
     /// Custodian's busy refusal (section 4.2, "Busy Refusal" item 2).
     fn offer_code<Transport: FrameTransport>(
-        code: &str,
+        code: &PairingCode,
         offer: &PairingOffer,
         transport: &mut Transport,
     ) -> Result<CodeConfirmed, CodeRefusal> {

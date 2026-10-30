@@ -334,7 +334,7 @@ impl PairingRecord {
         };
         let (peer, certificates) = (&self.peer, &self.certificates);
         keys.sweep(now_ms, session_established, |encoded| {
-            let checked = decode_pair_record(encoded.as_bytes()).map_err(CheckedWrite::Encoding)?;
+            let checked = decode_pair_record(encoded).map_err(CheckedWrite::Encoding)?;
             store(&Self {
                 keys: Keys::Held(checked),
                 peer: peer.clone(),
@@ -690,7 +690,7 @@ pub(crate) mod fixtures {
     use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
     use refineid_rapp::noise::x25519_public_key;
     use refineid_rapp::{
-        EndpointRole, PairRecord, ProfileName, WireValue, X25519_KEY_SIZE,
+        EncodedPairRecord, EndpointRole, PairRecord, ProfileName, WireValue, X25519_KEY_SIZE,
         decode_deterministic_cbor, encode_deterministic_cbor,
     };
 
@@ -751,13 +751,15 @@ pub(crate) mod fixtures {
         let encoded =
             refineid_rapp::encode_pair_record(&pair_record(pair_id, vec![ProfileName::CardStatus]))
                 .unwrap();
-        let WireValue::Map(mut fields) = decode_deterministic_cbor(&encoded).unwrap() else {
+        let WireValue::Map(mut fields) = decode_deterministic_cbor(encoded.as_bytes()).unwrap()
+        else {
             panic!("an encoded pair record is a map");
         };
         fields.insert(STORAGE_CONFIRMED_FIELD.to_owned(), WireValue::Bool(false));
         let unconfirmed = encode_deterministic_cbor(&WireValue::Map(fields)).unwrap();
         PairingRecord::new(
-            refineid_rapp::decode_pair_record(&unconfirmed).unwrap(),
+            refineid_rapp::decode_pair_record(&EncodedPairRecord::from_stored(unconfirmed))
+                .unwrap(),
             phone(),
         )
     }
