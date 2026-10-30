@@ -51,7 +51,7 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
-use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
+use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate, extract_key_usage};
 use refineid_rapp::ProfileName;
 use refineid_rapp_core::clock::unix_time_ms;
 use refineid_rapp_core::engine::{
@@ -1104,9 +1104,10 @@ fn serving_keys(
 }
 
 /// The authentication certificate among those an identity read answered
-/// with: the one whose fingerprint the session's card status names (RAPP
-/// v26.10.29 section 8.4 item 2), or, before the phone has named one, the
-/// first. Each is parsed here, at the border.
+/// with, in whatever order (RAPP v26.10.29 section 9.1 fixes none): the one
+/// whose fingerprint the session's card status names (section 8.4 item 2),
+/// or, before the phone has named one, the first whose key usage is an
+/// authentication certificate's. Each is parsed here, at the border.
 fn authentication_certificate(
     card: Option<CardStatusMessage>,
     certificates: Vec<Vec<u8>>,
@@ -1123,8 +1124,20 @@ fn authentication_certificate(
             card: CardPresence::Absent,
             ..
         })
-        | None => parsed.next(),
+        | None => parsed.find(has_authentication_key_usage),
     }
+}
+
+/// Whether the certificate's key usage (RFC 5280 section 4.2.1.3) asserts
+/// `digitalSignature` without `nonRepudiation`: the card's authentication
+/// certificate, not its signature certificate, whose key usage FINEID S2
+/// fixes to `nonRepudiation` alone.
+fn has_authentication_key_usage(certificate: &OwnedCert) -> bool {
+    certificate
+        .view()
+        .extensions
+        .and_then(extract_key_usage)
+        .is_some_and(|usage| usage.digital_signature && !usage.non_repudiation)
 }
 
 /// Marks the handle as watched for the thread's lifetime; dropping it on
@@ -1542,13 +1555,16 @@ mod tests {
         CARD_TO_PHONE_STATUS, CARD_TO_READER_STATUS, CARD_UNCONFIRMED_STATUS,
         CODE_NOT_ACCEPTED_STATUS, CONSENT_SHOWN_STATUS, NO_PAIRING_STATUS,
         NONE_IN_PAIRING_MODE_STATUS, PAIRING_INCOMPLETE_STATUS, PHONE_UNREACHABLE_STATUS, Phase,
-        REVOKED_STATUS, card_request_status, granted_profiles, is_watch_status,
-        search_failure_phase, state_dto,
+        REVOKED_STATUS, authentication_certificate, card_request_status, granted_profiles,
+        is_watch_status, search_failure_phase, state_dto,
     };
+    use refineid_lib_core::x509::OwnedCert;
     use refineid_rapp::ProfileName;
     use refineid_rapp_core::engine::{PairingError, PairingSearchError, PeerIntroduction};
     use refineid_rapp_core::ids::PairId;
-    use refineid_rapp_core::message::CardReader;
+    use refineid_rapp_core::message::{
+        CardPresence, CardReader, CardStatusMessage, CertificateFingerprint,
+    };
 
     /// A synthetic pair identifier.
     const PAIR: PairId = PairId::from_array(*b"synthetic pair 1");
@@ -1640,5 +1656,65 @@ mod tests {
         );
         assert!(granted_profiles("[\"fi.refineid.unknown\"]").is_err());
         assert!(granted_profiles("not json").is_err());
+    }
+
+    /// A synthetic authentication certificate: key usage
+    /// `digitalSignature`.
+    const AUTHENTICATION_CERTIFICATE_DER: &[u8] =
+        include_bytes!("../../refineid-rapp-cli/src/mock_cert.der");
+    /// A synthetic signature certificate for the same test holder: key
+    /// usage `nonRepudiation`.
+    const SIGNATURE_CERTIFICATE_DER: &[u8] = include_bytes!("mock_signing_cert.der");
+
+    #[test]
+    fn the_authentication_certificate_is_chosen_whatever_its_place() {
+        for certificates in [
+            vec![
+                SIGNATURE_CERTIFICATE_DER.to_vec(),
+                AUTHENTICATION_CERTIFICATE_DER.to_vec(),
+            ],
+            vec![
+                AUTHENTICATION_CERTIFICATE_DER.to_vec(),
+                SIGNATURE_CERTIFICATE_DER.to_vec(),
+            ],
+        ] {
+            let chosen = authentication_certificate(None, certificates);
+            assert_eq!(
+                chosen.as_ref().map(OwnedCert::as_der),
+                Some(AUTHENTICATION_CERTIFICATE_DER)
+            );
+        }
+    }
+
+    #[test]
+    fn the_certificate_the_phone_names_is_chosen_whatever_its_place() {
+        let card = CardStatusMessage {
+            card: CardPresence::Present(CertificateFingerprint::of_certificate(
+                AUTHENTICATION_CERTIFICATE_DER,
+            )),
+            reader: CardReader::Absent,
+        };
+        for certificates in [
+            vec![
+                SIGNATURE_CERTIFICATE_DER.to_vec(),
+                AUTHENTICATION_CERTIFICATE_DER.to_vec(),
+            ],
+            vec![
+                AUTHENTICATION_CERTIFICATE_DER.to_vec(),
+                SIGNATURE_CERTIFICATE_DER.to_vec(),
+            ],
+        ] {
+            let chosen = authentication_certificate(Some(card), certificates);
+            assert_eq!(
+                chosen.as_ref().map(OwnedCert::as_der),
+                Some(AUTHENTICATION_CERTIFICATE_DER)
+            );
+        }
+    }
+
+    #[test]
+    fn a_signature_certificate_alone_is_not_taken_for_authentication() {
+        let chosen = authentication_certificate(None, vec![SIGNATURE_CERTIFICATE_DER.to_vec()]);
+        assert!(chosen.is_none());
     }
 }
