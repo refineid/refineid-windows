@@ -1665,6 +1665,9 @@ mod tests {
     /// A synthetic signature certificate for the same test holder: key
     /// usage `nonRepudiation`.
     const SIGNATURE_CERTIFICATE_DER: &[u8] = include_bytes!("mock_signing_cert.der");
+    /// A synthetic certificate for the same test holder whose key usage
+    /// asserts both `digitalSignature` and `nonRepudiation`.
+    const DUAL_USAGE_CERTIFICATE_DER: &[u8] = include_bytes!("mock_dual_usage_cert.der");
 
     #[test]
     fn the_authentication_certificate_is_chosen_whatever_its_place() {
@@ -1716,5 +1719,22 @@ mod tests {
     fn a_signature_certificate_alone_is_not_taken_for_authentication() {
         let chosen = authentication_certificate(None, vec![SIGNATURE_CERTIFICATE_DER.to_vec()]);
         assert!(chosen.is_none());
+    }
+
+    #[test]
+    fn a_certificate_that_also_asserts_non_repudiation_is_not_chosen() {
+        let chosen = authentication_certificate(None, vec![DUAL_USAGE_CERTIFICATE_DER.to_vec()]);
+        assert!(chosen.is_none());
+        let chosen = authentication_certificate(
+            None,
+            vec![
+                DUAL_USAGE_CERTIFICATE_DER.to_vec(),
+                AUTHENTICATION_CERTIFICATE_DER.to_vec(),
+            ],
+        );
+        assert_eq!(
+            chosen.as_ref().map(OwnedCert::as_der),
+            Some(AUTHENTICATION_CERTIFICATE_DER)
+        );
     }
 }
