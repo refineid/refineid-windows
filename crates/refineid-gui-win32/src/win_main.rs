@@ -2185,7 +2185,8 @@ fn start_doc_sign() {
         contact: None,
         name: None,
         signing_time: None,
-        visible_signature: None,
+        visible_signature: (format == Format::Pades)
+            .then(|| VisibleSignature::verification(user_interface_language())),
     };
     let output = derive_output(&input, format);
     let request = DocumentRequest {
@@ -2194,8 +2195,6 @@ fn start_doc_sign() {
         signing_time: SigningTime::now(),
         metadata,
         expected_serial: None,
-        visible_signature: (format == Format::Pades)
-            .then(|| VisibleSignature::verification(user_interface_language())),
         archive: true,
         long_term: true,
         timestamp_authorities: vec![DEFAULT_TIMESTAMP_AUTHORITY.to_owned()],

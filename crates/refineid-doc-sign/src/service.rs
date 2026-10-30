@@ -36,7 +36,7 @@ use crate::asic::DataObject;
 use crate::cades::{DigestAlgorithm, SignatureAlgorithm, SignerParameters, SigningTime};
 use crate::digest::Sha256;
 use crate::document::{self, DocumentError, DocumentPlan, Format};
-use crate::pades::{SignatureMetadata, VisibleSignature};
+use crate::pades::SignatureMetadata;
 use crate::timestamp::{self, TimestampError, VerifiedTimestampToken};
 use crate::validation::ValidationMaterial;
 use refineid_lib_core::apdu::iso7816::ApduClass;
@@ -212,9 +212,6 @@ pub struct DocumentRequest {
     /// swap cannot spend the PIN on an undisplayed identity. `None`
     /// only for flows that sign whichever card is present (the CLI).
     pub expected_serial: Option<TokenSerial>,
-    /// Optional visible mark for `PAdES`: the seal advising the reader
-    /// to check the document's electronic signature.
-    pub visible_signature: Option<VisibleSignature>,
     /// Add an archive timestamp over the finished document, raising it
     /// to level LTA.
     ///
@@ -436,8 +433,9 @@ pub enum SignErrorKind {
     /// before the card signs anything, except for the PDF
     /// "signature did not fit" case, which is only knowable after.
     Document(DocumentError),
-    /// A visible signature was asked of a format without a page.
-    VisibleSignature(String),
+    /// A visible signature was asked of a format other than `PAdES`;
+    /// refused before PIN verification.
+    VisibleSignatureFormat,
     /// The live card is not the card the operator was shown; refused
     /// before PIN verification.
     DisplayedCard(String),
@@ -551,7 +549,9 @@ impl fmt::Display for SignErrorKind {
             Self::ReaderPick(e) => write!(f, "{e}"),
             Self::Pcsc(e) => write!(f, "PC/SC: {e}"),
             Self::Document(e) => write!(f, "{e}"),
-            Self::VisibleSignature(detail) => write!(f, "visible signature: {detail}"),
+            Self::VisibleSignatureFormat => {
+                f.write_str("visible signature: supported only for PAdES")
+            }
             Self::DisplayedCard(detail) => write!(f, "displayed card: {detail}"),
             Self::Material(detail) => write!(f, "validation material: {detail}"),
             Self::Timestamp(detail) => write!(f, "timestamp: {detail}"),
@@ -1129,8 +1129,8 @@ fn sign_chain<T: CardTransport>(
             ensure_displayed_card(transport, request)?;
             let parameters = document_signer(&cert, cert_algorithm, request.signing_time)?;
             let objects = load_data_objects(options, request, input_bytes)?;
-            let metadata = document_metadata(request)?;
-            let plan = document::plan(request.format, objects, &parameters, &metadata)
+            ensure_visible_signature_format(request)?;
+            let plan = document::plan(request.format, objects, &parameters, &request.metadata)
                 .map_err(SignErrorKind::Document)?;
             Some((plan, parameters))
         }
@@ -1140,9 +1140,9 @@ fn sign_chain<T: CardTransport>(
         Some((ref plan, _)) => plan.to_be_signed(),
     };
 
-    // VERIFY PIN only after the document and any visible identity have been
-    // bound to this live card. A card swap or malformed appearance request
-    // therefore cannot consume a PIN retry.
+    // VERIFY PIN only after the document has been built and bound to
+    // this live card. A card swap or malformed request therefore cannot
+    // consume a PIN retry.
     //
     // The reference numbering is the card's to declare (citizen
     // S1 v4.2 vs organizational S4-2 v4.0), resolved by
@@ -1209,20 +1209,15 @@ fn sign_chain<T: CardTransport>(
     })
 }
 
-/// The signature metadata with the requested visible mark, refused for
-/// a format without a page.
-fn document_metadata(request: &DocumentRequest) -> Result<SignatureMetadata, SignErrorKind> {
-    let Some(visible) = request.visible_signature else {
-        return Ok(request.metadata.clone());
-    };
-    if request.format != Format::Pades {
-        return Err(SignErrorKind::VisibleSignature(
-            "visible marks are supported only for PAdES".to_owned(),
-        ));
+/// Refuse a visible mark on a format other than `PAdES`.
+///
+/// Runs before PIN verification, so a misplaced mark cannot consume a
+/// PIN retry.
+fn ensure_visible_signature_format(request: &DocumentRequest) -> Result<(), SignErrorKind> {
+    if request.metadata.visible_signature.is_some() && request.format != Format::Pades {
+        return Err(SignErrorKind::VisibleSignatureFormat);
     }
-    let mut metadata = request.metadata.clone();
-    metadata.visible_signature = Some(visible);
-    Ok(metadata)
+    Ok(())
 }
 
 /// Refuse to sign when the live card is not the one the operator saw.
@@ -2156,9 +2151,8 @@ mod tests {
         )
     }
 
-    #[test]
-    fn archive_request_implies_lt_material_for_direct_api_callers() -> TestResult {
-        let mut request = DocumentRequest {
+    fn pades_request() -> DocumentRequest {
+        DocumentRequest {
             format: Format::Pades,
             additional_inputs: Vec::new(),
             signing_time: SigningTime {
@@ -2171,11 +2165,38 @@ mod tests {
             },
             metadata: SignatureMetadata::default(),
             expected_serial: None,
-            visible_signature: None,
-            archive: true,
+            archive: false,
             long_term: false,
             timestamp_authorities: Vec::new(),
             timestamp_credentials: None,
+        }
+    }
+
+    #[test]
+    fn visible_signature_is_refused_outside_pades() -> TestResult {
+        let mut request = pades_request();
+        request.metadata.visible_signature = Some(crate::pades::VisibleSignature::verification(
+            crate::pades::StampLanguage::Finnish,
+        ));
+        check_true(
+            ensure_visible_signature_format(&request).is_ok(),
+            "PAdES carries the visible mark",
+        )?;
+        request.format = Format::CadesDetached;
+        check_true(
+            matches!(
+                ensure_visible_signature_format(&request),
+                Err(SignErrorKind::VisibleSignatureFormat)
+            ),
+            "a format without a page refuses the visible mark",
+        )
+    }
+
+    #[test]
+    fn archive_request_implies_lt_material_for_direct_api_callers() -> TestResult {
+        let mut request = DocumentRequest {
+            archive: true,
+            ..pades_request()
         };
         check_true(
             request.requires_long_term_material(),

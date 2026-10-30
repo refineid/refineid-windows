@@ -588,11 +588,11 @@ fn document_request(format: Format, reason: Option<String>, language: u16) -> Do
             contact: None,
             name: None,
             signing_time: None,
-            visible_signature: None,
+            visible_signature: (format == Format::Pades).then(|| {
+                VisibleSignature::verification(StampLanguage::for_windows_language(language))
+            }),
         },
         expected_serial: None,
-        visible_signature: (format == Format::Pades)
-            .then(|| VisibleSignature::verification(StampLanguage::for_windows_language(language))),
         archive: true,
         long_term: true,
         timestamp_authorities: vec![DEFAULT_TIMESTAMP_AUTHORITY.to_owned()],
@@ -1172,11 +1172,11 @@ mod tests {
         assert!(pdf.archive);
         assert!(pdf.long_term);
         assert_eq!(
-            pdf.visible_signature,
+            pdf.metadata.visible_signature,
             Some(VisibleSignature::verification(StampLanguage::Finnish))
         );
         let container = document_request(Format::AsicECades, Some("review".to_owned()), 0);
-        assert!(container.visible_signature.is_none());
+        assert!(container.metadata.visible_signature.is_none());
         assert!(container.archive);
         assert!(container.long_term);
         assert_eq!(container.metadata.reason.as_deref(), Some("review"));

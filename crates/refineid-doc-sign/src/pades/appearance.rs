@@ -59,11 +59,18 @@ pub(super) const FONT_RESOURCE_NAME: &str = "F1";
 mod tests {
     use super::{StampLanguage, VisibleSignature, stamp};
 
+    /// The suffix naming the bold face of a standard 14 font family.
+    const BOLD_SUFFIX: &str = "-Bold";
+
     #[test]
     fn the_verification_mark_is_set_in_bold_in_its_own_box() {
         let rendered = VisibleSignature::verification(StampLanguage::Finnish).render();
-        assert_eq!(rendered.font, stamp::BASE_FONT);
-        assert_eq!(rendered.side, stamp::SIDE);
+        assert!(rendered.font.ends_with(BOLD_SUFFIX), "bold face");
+        assert_eq!(
+            rendered.side,
+            stamp::REACH + stamp::REACH,
+            "the box holds the mark's reach both ways from its centre"
+        );
         let text = String::from_utf8(rendered.operators).expect("ASCII operators");
         assert!(text.contains("(TARKASTA) Tj"));
     }
