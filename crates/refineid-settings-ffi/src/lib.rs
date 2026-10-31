@@ -31,7 +31,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 
 use refineid_card_manager_core::card_pin::{
-    ActivateOptions, ActivatePreflightOutcome, ChangePinOptions, PinManageSlot, UnblockPinOptions,
+    ActivateOptions, ActivatePreflightOutcome, ActivationEvidence, ChangePinOptions, PinManageSlot,
+    UnblockPinOptions,
 };
 use refineid_card_manager_core::service::{self, CardSnapshot, ContactlessSnapshot};
 use refineid_doc_sign::asic_verify::{DocumentVerifyReport, verify_document};
@@ -248,11 +249,12 @@ const fn generation_label(generation: CardGeneration) -> &'static str {
     }
 }
 
-/// The activation preflight verdict as the app's JSON names it.
-const fn activation_state_label(activation: ActivatePreflightOutcome) -> &'static str {
+/// The activation evidence as the app's JSON names it.
+const fn activation_state_label(activation: ActivationEvidence) -> &'static str {
     match activation {
-        ActivatePreflightOutcome::LooksUnactivated { .. } => "unactivated",
-        ActivatePreflightOutcome::LooksActivated { .. } => "activated",
+        ActivationEvidence::Unactivated => "unactivated",
+        ActivationEvidence::Activated => "activated",
+        ActivationEvidence::Inconclusive => "inconclusive",
     }
 }
 

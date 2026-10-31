@@ -25,7 +25,8 @@ using Microsoft.UI.Xaml.Navigation;
 /// The PIN page: the card in the selected reader, its PIN and
 /// recovery status, PIN change and reset, activation, and the contactless
 /// CAN. A card that still waits for its activation shows the activation
-/// section alone, opened; an activated card shows PIN change and reset.
+/// section alone, opened; an activated card shows PIN change and reset;
+/// a card whose state the probes did not decide shows every section.
 /// Every modifying command is bound to the inspected reader and card
 /// serial; PINs are read from the boxes, cleared at once, and only ever
 /// handed to the native card service.
@@ -56,6 +57,9 @@ internal sealed partial class CardPage : Page
 
     /// <summary>The reader the main screen opened this page for, used once.</summary>
     private string? requestedReader;
+
+    /// <summary>Whether the activation section is the one shown.</summary>
+    private bool activationShown;
 
     public CardPage()
     {
@@ -299,28 +303,38 @@ internal sealed partial class CardPage : Page
         this.ManagementPanel.IsHitTestVisible = true;
         this.ManagementPanel.Opacity = 1;
         this.StatusInfoBar.IsOpen = false;
-        this.ShowActivationState(inspected.LooksUnactivated);
+        this.ShowActivationState(inspected);
     }
 
     /// <summary>
-    /// An unactivated card gets the activation section alone, opened, with
-    /// the notice above the card; the card service would refuse a PIN change
-    /// or reset on it. An activated card gets PIN change and reset, and the
-    /// activation section goes, since activation would be refused.
+    /// A card that waits for its activation gets the activation section
+    /// alone, opened, with the notice above the card: activation sets both
+    /// PINs, so a PIN change or reset has no place before it. An activated
+    /// card gets PIN change and reset, and the activation section goes,
+    /// since the card service refuses activation on it. Undecided evidence,
+    /// or no card, shows every section. The focus moves to the activation
+    /// code only when the activation section appears, so a re-inspection
+    /// while the holder types leaves the focus alone.
     /// </summary>
-    private void ShowActivationState(bool looksUnactivated)
+    private void ShowActivationState(LocalCardSnapshot? inspected)
     {
-        Visibility managing = looksUnactivated ? Visibility.Collapsed : Visibility.Visible;
-        Visibility activating = looksUnactivated ? Visibility.Visible : Visibility.Collapsed;
+        bool unactivated = inspected?.LooksUnactivated ?? false;
+        bool activated = inspected?.LooksActivated ?? false;
+        Visibility managing = unactivated ? Visibility.Collapsed : Visibility.Visible;
         this.ChangePinExpander.Visibility = managing;
         this.UnblockPinExpander.Visibility = managing;
-        this.ActivationExpander.Visibility = activating;
-        this.ActivationExpander.IsExpanded = looksUnactivated;
-        if (looksUnactivated)
+        this.ActivationExpander.Visibility = activated ? Visibility.Collapsed : Visibility.Visible;
+        this.ActivationExpander.IsExpanded = unactivated;
+        if (unactivated)
         {
             this.ShowStatus(InfoBarSeverity.Informational, ActivationNotice);
-            _ = this.ActivationCodeBox.Focus(FocusState.Programmatic);
+            if (!this.activationShown)
+            {
+                _ = this.ActivationCodeBox.Focus(FocusState.Programmatic);
+            }
         }
+
+        this.activationShown = unactivated;
     }
 
     private async Task RunMutationAsync(Func<MutationResult> operation)
@@ -429,6 +443,7 @@ internal sealed partial class CardPage : Page
         this.CardPanel.Visibility = Visibility.Collapsed;
         this.ManagementPanel.IsHitTestVisible = false;
         this.ManagementPanel.Opacity = 0.6;
+        this.ShowActivationState(null);
     }
 
     private void SetBusy(bool busy)

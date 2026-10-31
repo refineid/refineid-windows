@@ -52,6 +52,16 @@ internal sealed partial class MainPage : Page
     private IReadOnlyList<string>? inspectedReaders;
     private bool checkingLocalCard;
 
+    /// <summary>
+    /// The serial of the unactivated card the PIN page was opened for, so
+    /// a return to this page does not open it again for the same card.
+    /// Forgotten when no reader holds a card.
+    /// </summary>
+    private string? activationOpenedSerial;
+
+    /// <summary>Whether the pairing dialog is open over this page.</summary>
+    private bool pairing;
+
     public MainPage()
     {
         this.InitializeComponent();
@@ -77,6 +87,9 @@ internal sealed partial class MainPage : Page
     /// </summary>
     private async void OnLoaded(object sender, RoutedEventArgs args)
     {
+        // The PIN page may have changed the card, so the card is inspected
+        // again on every arrival, not only when the reader list changes.
+        this.inspectedReaders = null;
         this.CheckLocalCard();
         this.cardPollTimer.Start();
         if (this.started)
@@ -174,7 +187,15 @@ internal sealed partial class MainPage : Page
         {
             XamlRoot = this.XamlRoot,
         };
-        _ = await dialog.ShowAsync();
+        this.pairing = true;
+        try
+        {
+            _ = await dialog.ShowAsync();
+        }
+        finally
+        {
+            this.pairing = false;
+        }
 
         if (dialog.PairedHandle is ulong pairedHandle)
         {
@@ -337,6 +358,11 @@ internal sealed partial class MainPage : Page
         // The PIN page works on a reader attached to this computer, with or
         // without a card in it, so the entry follows the reader list alone.
         this.PinsCard.Visibility = readers.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        if (readers.Count == 0)
+        {
+            this.activationOpenedSerial = null;
+        }
+
         // Recorded once the inspection is done, so a failed one is tried
         // again on the next tick.
         this.inspectedReaders = null;
@@ -393,12 +419,21 @@ internal sealed partial class MainPage : Page
     {
         // A card that still waits for its activation cannot sign or
         // authenticate, so the activation flow opens on the PIN page as
-        // soon as the card is seen, while this page is the one shown. The
-        // reader list is remembered with the snapshot, so returning here
-        // does not open the page again for the same insertion.
+        // soon as the card is seen, once per card, while this page is the
+        // one shown and no pairing dialog is open over it.
         this.SignCard.IsEnabled = !snapshot.LooksUnactivated;
-        if (snapshot.LooksUnactivated && ReferenceEquals(this.Frame.Content, this))
+        if (
+            snapshot.LooksUnactivated
+            && !this.pairing
+            && ReferenceEquals(this.Frame.Content, this)
+            && !string.Equals(
+                snapshot.Serial,
+                this.activationOpenedSerial,
+                StringComparison.Ordinal
+            )
+        )
         {
+            this.activationOpenedSerial = snapshot.Serial;
             this.Frame.Navigate(typeof(CardPage), snapshot.Reader);
         }
 
