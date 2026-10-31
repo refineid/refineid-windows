@@ -28,7 +28,7 @@ using Windows.ApplicationModel.DataTransfer;
 using Windows.Graphics;
 
 /// <summary>
-/// One entry of the Errors window: when it was last written, by which
+/// One entry of the Log window: when it was last written, by which
 /// program, what, and how many times in a row.
 /// </summary>
 internal sealed record DevErrorEntry(
@@ -51,7 +51,7 @@ internal sealed record DevErrorEntry(
 }
 
 /// <summary>
-/// The development build's Errors window: every RefineID error the Windows
+/// The development build's Log window: every RefineID error the Windows
 /// Event Log holds, from this app and from every other process that runs
 /// RefineID code, newest first, as they arrive.
 /// </summary>
@@ -67,7 +67,7 @@ internal sealed record DevErrorEntry(
 internal sealed partial class DevErrorWindow : Window
 {
     /// <summary>The window's title.</summary>
-    private const string WindowTitle = "Errors";
+    private const string WindowTitle = "RefineID - Log";
 
     /// <summary>How many entries the window keeps; the oldest go first.</summary>
     private const int Capacity = 50;
@@ -274,7 +274,7 @@ internal sealed partial class DevErrorWindow : Window
         }
         catch (EventLogException error)
         {
-            DevErrorLog.Report("Errors window could not read the event log", error);
+            DevErrorLog.Report("Log window could not read the event log", error);
         }
 
         stored.Reverse();
@@ -299,7 +299,7 @@ internal sealed partial class DevErrorWindow : Window
         }
         catch (EventLogException error)
         {
-            DevErrorLog.Report("Errors window could not follow the event log", error);
+            DevErrorLog.Report("Log window could not follow the event log", error);
         }
     }
 

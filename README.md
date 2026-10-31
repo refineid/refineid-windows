@@ -173,7 +173,7 @@ RefineID process, the app, the agent, the Card Module inside `lsass.exe`,
 browsers and `certutil.exe`, the PKCS#11 module, the document signer and
 the RAPP crates, to the Windows Event Log: Application log, source
 `RefineID`, event and cause by name only (`refineid-dev-errors`). The app
-opens its Errors window when an error arrives; Ctrl+Shift+E or the version
+opens its Log window when an error arrives; Ctrl+Shift+E or the version
 line opens it again. A release build contains no logging at all.
 
 Read the entries from PowerShell:

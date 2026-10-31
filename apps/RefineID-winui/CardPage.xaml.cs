@@ -53,7 +53,7 @@ internal sealed partial class CardPage : Page
     /// <summary>The reader the main screen opened this page for, used once.</summary>
     private string? requestedReader;
 
-    /// <summary>Whether the activation section is the one shown.</summary>
+    /// <summary>Whether the activation section was shown at the last inspection.</summary>
     private bool activationShown;
 
     public CardPage()
@@ -294,10 +294,9 @@ internal sealed partial class CardPage : Page
     /// contactless setup has no place before it. An activated card gets
     /// those, and the activation section goes, since the card service
     /// refuses activation on it. Undecided evidence, or no card, shows
-    /// every section, folded or unfolded as the holder left them. The
-    /// activation section unfolds and takes the focus only when it
-    /// appears, so a re-inspection while the holder types, or after a
-    /// refused attempt, leaves both alone.
+    /// every section. The activation section takes the focus only when
+    /// it appears, so a re-inspection while the holder types, or after a
+    /// refused attempt, leaves the focus alone.
     /// </summary>
     private void ShowActivationState(LocalCardSnapshot? inspected)
     {
@@ -307,10 +306,9 @@ internal sealed partial class CardPage : Page
         this.NfcExpander.Visibility = managing;
         this.ChangePinExpander.Visibility = managing;
         this.UnblockPinExpander.Visibility = managing;
-        this.ActivationExpander.Visibility = activated ? Visibility.Collapsed : Visibility.Visible;
+        this.ActivationPanel.Visibility = activated ? Visibility.Collapsed : Visibility.Visible;
         if (unactivated && !this.activationShown)
         {
-            this.ActivationExpander.IsExpanded = true;
             _ = this.ActivationCodeBox.Focus(FocusState.Programmatic);
         }
 

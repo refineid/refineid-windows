@@ -14,7 +14,7 @@
   debug build (`debug_assertions` in Rust, `DEBUG` in C#) reports each
   failure at its typed boundary with `refineid_dev_errors::report!` or
   `DevErrorLog.Report` to the Windows Event Log (Application log, source
-  `RefineID`), and the app's Errors window shows it as it arrives. A report
+  `RefineID`), and the app's Log window shows it as it arrives. A report
   names the event and its cause: an error case, a fixed text or a
   spec-named status, never a value it carries. Release, Store and
   production builds contain no logging code: no sink, no Event Log call,
