@@ -124,10 +124,10 @@
     <value>Kortinlukija</value>
   </data>
   <data name="NfcExpander.Header" xml:space="preserve">
-    <value>Etäkäyttö (NFC)</value>
+    <value>Lähiluku (NFC)</value>
   </data>
   <data name="NfcExpander.AutomationProperties.Name" xml:space="preserve">
-    <value>Etäkäyttö (NFC)</value>
+    <value>Lähiluku (NFC)</value>
   </data>
   <data name="CanBox.Header" xml:space="preserve">
     <value>Kortin pääsykoodi (CAN)</value>
@@ -136,10 +136,10 @@
     <value>Kortin pääsykoodi (CAN)</value>
   </data>
   <data name="EnableNfcButton.Content" xml:space="preserve">
-    <value>Ota etäkäyttö käyttöön</value>
+    <value>Ota lähiluku käyttöön</value>
   </data>
   <data name="EnableNfcButton.AutomationProperties.Name" xml:space="preserve">
-    <value>Ota etäkäyttö käyttöön</value>
+    <value>Ota lähiluku käyttöön</value>
   </data>
   <data name="ChangePinExpander.Header" xml:space="preserve">
     <value>Vaihda tunnusluku</value>
@@ -274,7 +274,7 @@
     <value>Valitse ensin lukija, jossa on kortti.</value>
   </data>
   <data name="NfcAccessEnabled" xml:space="preserve">
-    <value>Etäkäyttö on päällä.</value>
+    <value>Lähiluku on päällä.</value>
   </data>
   <data name="CardServiceResponseUnreadable" xml:space="preserve">
     <value>Korttipalvelun vastausta ei voitu lukea.</value>

@@ -370,8 +370,15 @@ internal sealed partial class CardPage : Page
 
                 if (readers.Count == 0)
                 {
+                    // Without a card there is nothing to do here; the main
+                    // screen takes over, as it does on a first launch.
                     this.ClearCard();
                     this.StatusInfoBar.IsOpen = false;
+                    if (this.Frame.CanGoBack)
+                    {
+                        this.Frame.GoBack();
+                    }
+
                     return;
                 }
 
