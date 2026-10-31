@@ -629,7 +629,7 @@ dependencies = [
  "fiat-crypto 0.3.0",
  "primefield",
  "primeorder",
- "sha2 0.11.0",
+ "sha2 0.11.1",
 ]
 
 [[package]]
@@ -859,7 +859,7 @@ version = "26.10.30"
 source = "git+https://github.com/refineid/refineid-core.git?branch=main#a1b0dbf307c504cf88035a08d12e67676cec8686"
 dependencies = [
  "sha1",
- "sha2 0.11.0",
+ "sha2 0.11.1",
 ]
 
 [[package]]
@@ -874,7 +874,7 @@ dependencies = [
  "refineid-lib-core",
  "refineid-lib-pcsc",
  "sha1",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "spki",
  "windows",
  "zeroize",
@@ -910,7 +910,7 @@ dependencies = [
  "hmac",
  "proptest",
  "sha1",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "spki",
  "subtle",
  "x509-cert",
@@ -968,7 +968,7 @@ dependencies = [
  "curve25519-dalek",
  "getrandom 0.4.3",
  "hmac",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "snow",
  "subtle",
  "zeroize",
@@ -997,7 +997,7 @@ dependencies = [
  "refineid-rapp-core",
  "refineid-windows-credential-store",
  "sec1",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "zeroize",
 ]
 
@@ -1013,7 +1013,7 @@ dependencies = [
  "refineid-remote",
  "serde",
  "serde_json",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "socket2",
  "windows",
  "zeroize",
@@ -1228,9 +1228,9 @@ dependencies = [
 
 [[package]]
 name = "sha2"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
+checksum = "47d7069beb7d6ac7b9acd1039986e73443f24234f41074da099d6f994ac9ad19"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.1",
