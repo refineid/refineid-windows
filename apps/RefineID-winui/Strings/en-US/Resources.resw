@@ -376,4 +376,13 @@
   <data name="CardServiceNotInstalled" xml:space="preserve">
     <value>The card service is not installed.</value>
   </data>
+  <data name="EntryValid" xml:space="preserve">
+    <value>Valid entry</value>
+  </data>
+  <data name="EntryInvalid" xml:space="preserve">
+    <value>Invalid entry</value>
+  </data>
+  <data name="EntriesDiffer" xml:space="preserve">
+    <value>The new entries differ.</value>
+  </data>
 </root>

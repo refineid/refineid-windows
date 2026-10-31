@@ -280,7 +280,7 @@
     <value>Valitse ensin lukija, jossa on kortti.</value>
   </data>
   <data name="NfcAccessEnabled" xml:space="preserve">
-    <value>Etäkäyttö otettu käyttöön. CAN on tallennettu tälle laitteelle.</value>
+    <value>Etäkäyttö on päällä. CAN on tallennettu tälle laitteelle.</value>
   </data>
   <data name="ActivationCodeHint" xml:space="preserve">
     <value>{0}-numeroinen aktivointikoodi kirjeestä</value>
@@ -375,5 +375,14 @@
   </data>
   <data name="CardServiceNotInstalled" xml:space="preserve">
     <value>Korttipalvelua ei ole asennettu.</value>
+  </data>
+  <data name="EntryValid" xml:space="preserve">
+    <value>Kelvollinen arvo</value>
+  </data>
+  <data name="EntryInvalid" xml:space="preserve">
+    <value>Virheellinen arvo</value>
+  </data>
+  <data name="EntriesDiffer" xml:space="preserve">
+    <value>Uudet syötteet eroavat toisistaan.</value>
   </data>
 </root>

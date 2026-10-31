@@ -18,6 +18,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Text.Json;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Navigation;
@@ -263,28 +264,43 @@ internal sealed partial class CardPage : Page
     private static bool IsPinLength(string entry, int minimumDigits) =>
         entry.Length >= minimumDigits && entry.Length <= PinMaximumDigits;
 
-    /// <summary>A green check, a red cross, or an amber warning for a pair that differs.</summary>
+    /// <summary>
+    /// A green check, a red cross, or an amber warning for a pair that
+    /// differs, each named for a screen reader. A theme without the brush
+    /// leaves the mark in the text colour.
+    /// </summary>
     private static void Mark(FontIcon mark, bool valid, bool differs, bool isEmpty)
     {
         mark.Visibility = isEmpty ? Visibility.Collapsed : Visibility.Visible;
         string brush;
+        string description;
         if (valid)
         {
             mark.Glyph = ValidGlyph;
             brush = "SystemFillColorSuccessBrush";
+            description = "EntryValid";
         }
         else if (differs)
         {
             mark.Glyph = DifferGlyph;
             brush = "SystemFillColorCautionBrush";
+            description = "EntriesDiffer";
         }
         else
         {
             mark.Glyph = InvalidGlyph;
             brush = "SystemFillColorCriticalBrush";
+            description = "EntryInvalid";
         }
 
-        mark.Foreground = (Brush)Application.Current.Resources[brush];
+        AutomationProperties.SetName(mark, Strings.Get(description));
+        if (
+            Application.Current.Resources.TryGetValue(brush, out object? resource)
+            && resource is Brush found
+        )
+        {
+            mark.Foreground = found;
+        }
     }
 
     private async void ActivateButton_Click(object sender, RoutedEventArgs args)
@@ -375,7 +391,25 @@ internal sealed partial class CardPage : Page
 
         LocalCardSnapshot inspected = await Task.Run(() => LocalCardService.Inspect(reader))
             .ConfigureAwait(true);
+        // Entries typed for one card do not carry over to another.
+        if (!string.Equals(this.snapshot?.Serial, inspected.Serial, StringComparison.Ordinal))
+        {
+            Clear(
+                this.ActivationCodeBox,
+                this.ActivationPin1Box,
+                this.ActivationPin1ConfirmationBox,
+                this.ActivationPin2Box,
+                this.ActivationPin2ConfirmationBox
+            );
+        }
+
         this.snapshot = inspected;
+        // The code box takes no more digits than the card's code has.
+        if (inspected.ActivationCodeLength is int codeLength)
+        {
+            this.ActivationCodeBox.MaxLength = codeLength;
+        }
+
         // The card service refuses activation when it cannot tell the
         // code's length; without one, no entry can be complete.
         this.ActivationHintText.Text = inspected.ActivationCodeLength is int length

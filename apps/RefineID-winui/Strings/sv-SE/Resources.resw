@@ -376,4 +376,13 @@
   <data name="CardServiceNotInstalled" xml:space="preserve">
     <value>Korttjänsten är inte installerad.</value>
   </data>
+  <data name="EntryValid" xml:space="preserve">
+    <value>Giltigt värde</value>
+  </data>
+  <data name="EntryInvalid" xml:space="preserve">
+    <value>Ogiltigt värde</value>
+  </data>
+  <data name="EntriesDiffer" xml:space="preserve">
+    <value>De nya inmatningarna skiljer sig åt.</value>
+  </data>
 </root>

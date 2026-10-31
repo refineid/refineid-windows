@@ -27,13 +27,20 @@ internal static class Strings
 {
     private static readonly ResourceLoader Loader = new();
 
-    /// <summary>The text under <paramref name="key"/>.</summary>
-    public static string Get(string key) => Loader.GetString(key);
+    /// <summary>
+    /// The text under <paramref name="key"/>; the key itself when no
+    /// language has it, so a missing entry shows rather than hides.
+    /// </summary>
+    public static string Get(string key)
+    {
+        string text = Loader.GetString(key);
+        return string.IsNullOrEmpty(text) ? key : text;
+    }
 
     /// <summary>
     /// The text under <paramref name="key"/> with its numbered placeholders
     /// filled in the user's culture.
     /// </summary>
     public static string Format(string key, params object[] arguments) =>
-        string.Format(CultureInfo.CurrentCulture, Loader.GetString(key), arguments);
+        string.Format(CultureInfo.CurrentCulture, Get(key), arguments);
 }
