@@ -51,23 +51,8 @@
   <data name="IdentityHeading.Text" xml:space="preserve">
     <value>Identitet</value>
   </data>
-  <data name="PersonCard.Header" xml:space="preserve">
-    <value>Person</value>
-  </data>
   <data name="PersonCard.AutomationProperties.Name" xml:space="preserve">
     <value>Kortinnehavarens identitet</value>
-  </data>
-  <data name="ConnectRemoteReaderButton.Content" xml:space="preserve">
-    <value>Anslut fjärrläsare</value>
-  </data>
-  <data name="ConnectRemoteReaderButton.AutomationProperties.Name" xml:space="preserve">
-    <value>Anslut fjärrläsare</value>
-  </data>
-  <data name="ConnectRemoteReaderButton.AutomationProperties.HelpText" xml:space="preserve">
-    <value>Parkoppla med en mobil enhet som kör RefineID som fjärrläsare</value>
-  </data>
-  <data name="HolderText.AutomationProperties.Name" xml:space="preserve">
-    <value>Kortinnehavarens namn</value>
   </data>
   <data name="ForgetIdentityButton.AutomationProperties.Name" xml:space="preserve">
     <value>Glöm</value>
@@ -93,17 +78,11 @@
   <data name="PairingDialog.Title" xml:space="preserve">
     <value>Fjärrkort</value>
   </data>
-  <data name="PairingDialog.PrimaryButtonText" xml:space="preserve">
-    <value>Parkoppla</value>
-  </data>
   <data name="PairingDialog.CloseButtonText" xml:space="preserve">
     <value>Avbryt</value>
   </data>
   <data name="CodeBox.AutomationProperties.Name" xml:space="preserve">
     <value>Parkopplingskod</value>
-  </data>
-  <data name="CodeBox.PlaceholderText" xml:space="preserve">
-    <value>Kod</value>
   </data>
   <data name="WaitRing.AutomationProperties.Name" xml:space="preserve">
     <value>Parkopplar</value>
@@ -375,5 +354,8 @@
   </data>
   <data name="EntriesDiffer" xml:space="preserve">
     <value>De nya inmatningarna skiljer sig åt.</value>
+  </data>
+  <data name="ConnectRemoteReader" xml:space="preserve">
+    <value>Anslut fjärrläsare</value>
   </data>
 </root>

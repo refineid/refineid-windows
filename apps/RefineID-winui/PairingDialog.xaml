@@ -23,26 +23,86 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     Title="Remote Card"
     CloseButtonText="Cancel"
-    DefaultButton="Primary"
-    PrimaryButtonText="Pair"
     mc:Ignorable="d"
 >
     <StackPanel MinWidth="320" Spacing="16">
-        <TextBox
-            x:Name="CodeBox"
-            x:Uid="CodeBox"
-            HorizontalAlignment="Center"
-            AutomationProperties.AutomationId="CodeBox"
-            AutomationProperties.Name="Pairing code"
-            CharacterCasing="Upper"
-            FontSize="24"
-            IsSpellCheckEnabled="False"
-            IsTextPredictionEnabled="False"
-            MaxLength="8"
-            MinWidth="180"
-            PlaceholderText="Code"
-            TextAlignment="Center"
-        />
+        <!--  The code as the phone shows it, three groups of two, each
+              empty until typed, and the group being typed carries the
+              accent line. One text box, kept invisible over the groups,
+              takes the typing, so paste and Backspace work as in any
+              field, and a complete code starts the pairing at once.  -->
+        <Grid HorizontalAlignment="Center">
+            <StackPanel
+                AutomationProperties.AccessibilityView="Raw"
+                Orientation="Horizontal"
+                Spacing="12"
+            >
+                <Border
+                    x:Name="Group0Line"
+                    MinWidth="52"
+                    Padding="8,4"
+                    BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                    BorderThickness="0,0,0,2"
+                >
+                    <TextBlock
+                        x:Name="Group0"
+                        HorizontalAlignment="Center"
+                        FontFamily="Consolas"
+                        FontSize="28"
+                        FontWeight="SemiBold"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Text="&#160;&#160;"
+                    />
+                </Border>
+                <Border
+                    x:Name="Group1Line"
+                    MinWidth="52"
+                    Padding="8,4"
+                    BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                    BorderThickness="0,0,0,2"
+                >
+                    <TextBlock
+                        x:Name="Group1"
+                        HorizontalAlignment="Center"
+                        FontFamily="Consolas"
+                        FontSize="28"
+                        FontWeight="SemiBold"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Text="&#160;&#160;"
+                    />
+                </Border>
+                <Border
+                    x:Name="Group2Line"
+                    MinWidth="52"
+                    Padding="8,4"
+                    BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                    BorderThickness="0,0,0,2"
+                >
+                    <TextBlock
+                        x:Name="Group2"
+                        HorizontalAlignment="Center"
+                        FontFamily="Consolas"
+                        FontSize="28"
+                        FontWeight="SemiBold"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Text="&#160;&#160;"
+                    />
+                </Border>
+            </StackPanel>
+            <TextBox
+                x:Name="CodeBox"
+                x:Uid="CodeBox"
+                VerticalAlignment="Stretch"
+                AutomationProperties.AutomationId="CodeBox"
+                AutomationProperties.Name="Pairing code"
+                CharacterCasing="Upper"
+                IsSpellCheckEnabled="False"
+                IsTextPredictionEnabled="False"
+                MaxLength="8"
+                Opacity="0"
+                TextChanged="CodeBox_TextChanged"
+            />
+        </Grid>
 
         <TextBlock
             x:Name="StatusText"
