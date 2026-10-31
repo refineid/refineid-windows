@@ -79,8 +79,8 @@ The PINs entry of `apps/RefineID-winui`, shown while a card reader is
 connected, opens the PIN page, a narrow C# UI over the Rust card-service DLL
 (`refineid_settings_ffi`). It can:
 
-- inspect a card and show counter-safe PIN1, PIN2, and recovery status;
-- change PIN1 or PIN2;
+- inspect a card, counter-safe, to learn what it waits for;
+- change PIN 1 or PIN 2;
 - restore either PIN with the recovery code;
 - activate a new card while binding every modifying command to the inspected
   reader and card serial: a card that still waits for its activation opens
