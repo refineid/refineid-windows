@@ -53,11 +53,11 @@ internal sealed partial class MainPage : Page
     private bool checkingLocalCard;
 
     /// <summary>
-    /// The serial of the unactivated card the PIN page was opened for, so
-    /// a return to this page does not open it again for the same card.
-    /// Forgotten when no reader holds a card.
+    /// The serial of the last unactivated card seen, so the PIN page opens
+    /// once per card and a return to this page does not open it again.
+    /// Forgotten when no reader holds a card or the card cannot be read.
     /// </summary>
-    private string? activationOpenedSerial;
+    private string? unactivatedSerial;
 
     /// <summary>Whether the pairing dialog is open over this page.</summary>
     private bool pairing;
@@ -342,6 +342,7 @@ internal sealed partial class MainPage : Page
         catch (NativeRappException)
         {
             this.inspectedReaders = null;
+            this.unactivatedSerial = null;
             this.PinsCard.Visibility = Visibility.Collapsed;
             this.UpdateLocalCardDisconnected();
             return;
@@ -360,7 +361,7 @@ internal sealed partial class MainPage : Page
         this.PinsCard.Visibility = readers.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         if (readers.Count == 0)
         {
-            this.activationOpenedSerial = null;
+            this.unactivatedSerial = null;
         }
 
         // Recorded once the inspection is done, so a failed one is tried
@@ -407,10 +408,12 @@ internal sealed partial class MainPage : Page
         }
         catch (NativeRappException)
         {
+            this.unactivatedSerial = null;
             this.UpdateLocalCardDisconnected();
         }
         catch (JsonException)
         {
+            this.unactivatedSerial = null;
             this.UpdateLocalCardDisconnected();
         }
     }
@@ -418,23 +421,24 @@ internal sealed partial class MainPage : Page
     private void UpdateLocalCardUi(LocalCardSnapshot snapshot)
     {
         // A card that still waits for its activation cannot sign or
-        // authenticate, so the activation flow opens on the PIN page as
-        // soon as the card is seen, once per card, while this page is the
-        // one shown and no pairing dialog is open over it.
+        // authenticate, so the activation flow opens on the PIN page the
+        // first time the card is seen, while this page is the one shown and
+        // no pairing dialog is open over it. A card first seen from another
+        // page is remembered too, so a return here does not send the holder
+        // back to the page they just left.
         this.SignCard.IsEnabled = !snapshot.LooksUnactivated;
-        if (
-            snapshot.LooksUnactivated
-            && !this.pairing
-            && ReferenceEquals(this.Frame.Content, this)
-            && !string.Equals(
-                snapshot.Serial,
-                this.activationOpenedSerial,
-                StringComparison.Ordinal
-            )
-        )
+        if (snapshot.LooksUnactivated)
         {
-            this.activationOpenedSerial = snapshot.Serial;
-            this.Frame.Navigate(typeof(CardPage), snapshot.Reader);
+            bool firstSight = !string.Equals(
+                snapshot.Serial,
+                this.unactivatedSerial,
+                StringComparison.Ordinal
+            );
+            this.unactivatedSerial = snapshot.Serial;
+            if (firstSight && !this.pairing && ReferenceEquals(this.Frame.Content, this))
+            {
+                this.Frame.Navigate(typeof(CardPage), snapshot.Reader);
+            }
         }
 
         if (!string.IsNullOrWhiteSpace(snapshot.Person))

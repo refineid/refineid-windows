@@ -312,9 +312,10 @@ internal sealed partial class CardPage : Page
     /// PINs, so a PIN change or reset has no place before it. An activated
     /// card gets PIN change and reset, and the activation section goes,
     /// since the card service refuses activation on it. Undecided evidence,
-    /// or no card, shows every section. The focus moves to the activation
-    /// code only when the activation section appears, so a re-inspection
-    /// while the holder types leaves the focus alone.
+    /// or no card, shows every section, folded or unfolded as the holder
+    /// left them. The activation section unfolds and takes the focus only
+    /// when it appears, so a re-inspection while the holder types, or
+    /// after a refused attempt, leaves both alone.
     /// </summary>
     private void ShowActivationState(LocalCardSnapshot? inspected)
     {
@@ -324,12 +325,12 @@ internal sealed partial class CardPage : Page
         this.ChangePinExpander.Visibility = managing;
         this.UnblockPinExpander.Visibility = managing;
         this.ActivationExpander.Visibility = activated ? Visibility.Collapsed : Visibility.Visible;
-        this.ActivationExpander.IsExpanded = unactivated;
         if (unactivated)
         {
             this.ShowStatus(InfoBarSeverity.Informational, ActivationNotice);
             if (!this.activationShown)
             {
+                this.ActivationExpander.IsExpanded = true;
                 _ = this.ActivationCodeBox.Focus(FocusState.Programmatic);
             }
         }
