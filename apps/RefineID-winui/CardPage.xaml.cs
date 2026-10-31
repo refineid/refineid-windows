@@ -22,9 +22,9 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
 
 /// <summary>
-/// The PIN page: the card in the selected reader, its PIN and
-/// recovery status, PIN change and reset, activation, and the contactless
-/// CAN. A card that still waits for its activation shows the activation
+/// The PIN page: PIN change and reset, activation, and the contactless
+/// CAN for the card in the reader, with no more on screen than the task
+/// at hand. A card that still waits for its activation shows the activation
 /// section alone, opened; an activated card shows PIN change and reset;
 /// a card whose state the probes did not decide shows every section.
 /// Every modifying command is bound to the inspected reader and card
@@ -43,11 +43,6 @@ internal sealed partial class CardPage : Page
     /// and tapped cards appear without user action.
     /// </summary>
     private static readonly TimeSpan ReaderPollInterval = TimeSpan.FromSeconds(2);
-
-    /// <summary>What the page tells about a card that waits for activation.</summary>
-    private const string ActivationNotice =
-        "This card has not been activated yet. Enter the activation code from "
-        + "the letter and choose your PIN1 and PIN2.";
 
     private readonly DispatcherTimer readerPollTimer;
     private LocalCardSnapshot? snapshot;
@@ -146,14 +141,8 @@ internal sealed partial class CardPage : Page
         this.CanBox.Password = string.Empty;
         await this.RunCardOperationAsync(async () =>
             {
-                ContactlessSnapshot result = await Task.Run(() =>
-                        LocalCardService.PrimeContactless(reader, can)
-                    )
+                _ = await Task.Run(() => LocalCardService.PrimeContactless(reader, can))
                     .ConfigureAwait(true);
-                this.NfcResultText.Text =
-                    $"{DisplayPerson(result.Person)}, serial {result.Serial}. "
-                    + $"PIN1: {FormatStatus(result.Pin1)}. PIN2: {FormatStatus(result.Pin2)}.";
-                this.NfcResultPanel.Visibility = Visibility.Visible;
                 this.ShowSuccess("NFC access enabled. The CAN is saved on this device.");
             })
             .ConfigureAwait(true);
@@ -248,6 +237,8 @@ internal sealed partial class CardPage : Page
                 this.refreshingReaders = true;
                 try
                 {
+                    this.ReaderComboBox.Visibility =
+                        readers.Count > 1 ? Visibility.Visible : Visibility.Collapsed;
                     this.ReaderComboBox.ItemsSource = readers;
                     this.ReaderComboBox.SelectedItem =
                         previous is not null && readers.Contains(previous, StringComparer.Ordinal)
@@ -284,22 +275,13 @@ internal sealed partial class CardPage : Page
         LocalCardSnapshot inspected = await Task.Run(() => LocalCardService.Inspect(reader))
             .ConfigureAwait(true);
         this.snapshot = inspected;
-        this.PersonText.Text = DisplayPerson(inspected.Person);
-        this.ModelText.Text = inspected.Model;
-        this.SerialText.Text = inspected.Serial;
-        this.Pin1StatusText.Text = FormatStatus(inspected.Pin1, inspected.Pin1Changed);
-        this.Pin2StatusText.Text = FormatStatus(inspected.Pin2, inspected.Pin2Changed);
-        this.PukStatusText.Text = FormatStatus(inspected.Puk);
-        this.GenerationText.Text = inspected.Generation switch
-        {
-            "newer" => "Current single-use activation scheme",
-            "older" => "Legacy reusable activation scheme",
-            _ => "Unknown",
-        };
+        // The card service refuses activation when it cannot tell the
+        // code's length, so the button follows the hint.
+        bool lengthKnown = inspected.ActivationCodeLength is int;
         this.ActivationHintText.Text = inspected.ActivationCodeLength is int length
-            ? $"{length}-digit activation code."
-            : "Unknown activation code. Activation refused.";
-        this.CardPanel.Visibility = Visibility.Visible;
+            ? $"{length}-digit activation code from letter."
+            : string.Empty;
+        this.ActivateButton.IsEnabled = lengthKnown;
         this.ManagementPanel.IsHitTestVisible = true;
         this.ManagementPanel.Opacity = 1;
         this.StatusInfoBar.IsOpen = false;
@@ -308,31 +290,28 @@ internal sealed partial class CardPage : Page
 
     /// <summary>
     /// A card that waits for its activation gets the activation section
-    /// alone, opened, with the notice above the card: activation sets both
-    /// PINs, so a PIN change or reset has no place before it. An activated
-    /// card gets PIN change and reset, and the activation section goes,
-    /// since the card service refuses activation on it. Undecided evidence,
-    /// or no card, shows every section, folded or unfolded as the holder
-    /// left them. The activation section unfolds and takes the focus only
-    /// when it appears, so a re-inspection while the holder types, or
-    /// after a refused attempt, leaves both alone.
+    /// alone, opened: activation sets both PINs, so a PIN change, reset or
+    /// contactless setup has no place before it. An activated card gets
+    /// those, and the activation section goes, since the card service
+    /// refuses activation on it. Undecided evidence, or no card, shows
+    /// every section, folded or unfolded as the holder left them. The
+    /// activation section unfolds and takes the focus only when it
+    /// appears, so a re-inspection while the holder types, or after a
+    /// refused attempt, leaves both alone.
     /// </summary>
     private void ShowActivationState(LocalCardSnapshot? inspected)
     {
         bool unactivated = inspected?.LooksUnactivated ?? false;
         bool activated = inspected?.LooksActivated ?? false;
         Visibility managing = unactivated ? Visibility.Collapsed : Visibility.Visible;
+        this.NfcExpander.Visibility = managing;
         this.ChangePinExpander.Visibility = managing;
         this.UnblockPinExpander.Visibility = managing;
         this.ActivationExpander.Visibility = activated ? Visibility.Collapsed : Visibility.Visible;
-        if (unactivated)
+        if (unactivated && !this.activationShown)
         {
-            this.ShowStatus(InfoBarSeverity.Informational, ActivationNotice);
-            if (!this.activationShown)
-            {
-                this.ActivationExpander.IsExpanded = true;
-                _ = this.ActivationCodeBox.Focus(FocusState.Programmatic);
-            }
+            this.ActivationExpander.IsExpanded = true;
+            _ = this.ActivationCodeBox.Focus(FocusState.Programmatic);
         }
 
         this.activationShown = unactivated;
@@ -400,36 +379,6 @@ internal sealed partial class CardPage : Page
     private static PinSlot SlotFrom(ComboBox box) =>
         box.SelectedIndex == 1 ? PinSlot.Pin2 : PinSlot.Pin1;
 
-    private static string DisplayPerson(string person) =>
-        string.IsNullOrWhiteSpace(person) ? "Not available" : person;
-
-    private static string FormatStatus(CredentialStatus? status, bool? changed = null)
-    {
-        if (status is null)
-        {
-            return "Not available";
-        }
-
-        string value = status.State switch
-        {
-            "verified" => "Verified in this card session",
-            "ready" when status.AttemptsRemaining is byte attempts =>
-                $"Ready, {attempts} attempts remaining",
-            "locked" => "Blocked",
-            "invalidated" => "Recovery unavailable",
-            "no_information" => "No counter information",
-            "other" when status.StatusWord is ushort statusWord => $"Card status 0x{statusWord:X4}",
-            _ => status.State,
-        };
-
-        return changed switch
-        {
-            true => $"{value}; changed from factory value",
-            false => $"{value}; still at factory value",
-            null => value,
-        };
-    }
-
     private static void Clear(params PasswordBox[] boxes)
     {
         foreach (PasswordBox box in boxes)
@@ -441,7 +390,6 @@ internal sealed partial class CardPage : Page
     private void ClearCard()
     {
         this.snapshot = null;
-        this.CardPanel.Visibility = Visibility.Collapsed;
         this.ManagementPanel.IsHitTestVisible = false;
         this.ManagementPanel.Opacity = 0.6;
         this.ShowActivationState(null);

@@ -31,6 +31,7 @@
                     <ColumnDefinition Width="*" MaxWidth="920" />
                 </Grid.ColumnDefinitions>
                 <StackPanel x:Name="ActionRoot" Padding="32,20,32,40" Spacing="20">
+                    <!--  The outcome of the last operation, and nothing else.  -->
                     <InfoBar
                         x:Name="StatusInfoBar"
                         AutomationProperties.AutomationId="StatusInfoBar"
@@ -38,104 +39,16 @@
                         IsOpen="False"
                     />
 
+                    <!--  Shown only while more than one reader holds a card.  -->
                     <ComboBox
                         x:Name="ReaderComboBox"
                         HorizontalAlignment="Stretch"
                         AutomationProperties.AutomationId="ReaderComboBox"
                         AutomationProperties.Name="Card reader"
                         Header="Card reader"
-                        PlaceholderText="No reader"
                         SelectionChanged="ReaderComboBox_SelectionChanged"
-                    />
-
-                    <Border
-                        x:Name="CardPanel"
-                        Padding="20"
-                        AutomationProperties.AutomationId="CardPanel"
-                        AutomationProperties.Name="Card details"
-                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                        BorderThickness="1"
-                        CornerRadius="8"
                         Visibility="Collapsed"
-                    >
-                        <Grid ColumnSpacing="20" RowSpacing="10">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="160" />
-                                <ColumnDefinition Width="*" />
-                            </Grid.ColumnDefinitions>
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                            </Grid.RowDefinitions>
-
-                            <TextBlock FontWeight="SemiBold" Text="Card holder" />
-                            <TextBlock
-                                x:Name="PersonText"
-                                Grid.Column="1"
-                                AutomationProperties.AutomationId="PersonText"
-                                AutomationProperties.Name="Card holder"
-                                IsTextSelectionEnabled="True"
-                                TextWrapping="Wrap"
-                            />
-                            <TextBlock Grid.Row="1" FontWeight="SemiBold" Text="Card model" />
-                            <TextBlock
-                                x:Name="ModelText"
-                                Grid.Row="1"
-                                Grid.Column="1"
-                                AutomationProperties.AutomationId="ModelText"
-                                AutomationProperties.Name="Card model"
-                                TextWrapping="Wrap"
-                            />
-                            <TextBlock Grid.Row="2" FontWeight="SemiBold" Text="Card serial" />
-                            <TextBlock
-                                x:Name="SerialText"
-                                Grid.Row="2"
-                                Grid.Column="1"
-                                AutomationProperties.AutomationId="SerialText"
-                                AutomationProperties.Name="Card serial"
-                                IsTextSelectionEnabled="True"
-                                TextWrapping="Wrap"
-                            />
-                            <TextBlock Grid.Row="3" FontWeight="SemiBold" Text="PIN1" />
-                            <TextBlock
-                                x:Name="Pin1StatusText"
-                                Grid.Row="3"
-                                Grid.Column="1"
-                                AutomationProperties.AutomationId="Pin1StatusText"
-                                AutomationProperties.Name="PIN1 status"
-                            />
-                            <TextBlock Grid.Row="4" FontWeight="SemiBold" Text="PIN2" />
-                            <TextBlock
-                                x:Name="Pin2StatusText"
-                                Grid.Row="4"
-                                Grid.Column="1"
-                                AutomationProperties.AutomationId="Pin2StatusText"
-                                AutomationProperties.Name="PIN2 status"
-                            />
-                            <TextBlock Grid.Row="5" FontWeight="SemiBold" Text="Recovery code" />
-                            <TextBlock
-                                x:Name="PukStatusText"
-                                Grid.Row="5"
-                                Grid.Column="1"
-                                AutomationProperties.AutomationId="PukStatusText"
-                                AutomationProperties.Name="Recovery code status"
-                            />
-                            <TextBlock Grid.Row="6" FontWeight="SemiBold" Text="Issuance scheme" />
-                            <TextBlock
-                                x:Name="GenerationText"
-                                Grid.Row="6"
-                                Grid.Column="1"
-                                AutomationProperties.AutomationId="GenerationText"
-                                AutomationProperties.Name="Issuance scheme"
-                            />
-                        </Grid>
-                    </Border>
+                    />
 
                     <Expander
                         x:Name="NfcExpander"
@@ -173,19 +86,6 @@
                                     Content="Enable NFC access"
                                 />
                             </Grid>
-                            <Border
-                                x:Name="NfcResultPanel"
-                                Padding="12"
-                                Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                                CornerRadius="6"
-                                Visibility="Collapsed"
-                            >
-                                <TextBlock
-                                    x:Name="NfcResultText"
-                                    AutomationProperties.AutomationId="NfcResultText"
-                                    TextWrapping="Wrap"
-                                />
-                            </Border>
                         </StackPanel>
                     </Expander>
 
@@ -211,8 +111,8 @@
                                     Header="Credential"
                                     SelectedIndex="0"
                                 >
-                                    <ComboBoxItem Content="PIN1 - authentication" />
-                                    <ComboBoxItem Content="PIN2 - qualified signature" />
+                                    <ComboBoxItem Content="PIN 1 - authentication" />
+                                    <ComboBoxItem Content="PIN 2 - qualified signature" />
                                 </ComboBox>
                                 <PasswordBox
                                     x:Name="CurrentPinBox"
@@ -269,8 +169,8 @@
                                     Header="Credential"
                                     SelectedIndex="1"
                                 >
-                                    <ComboBoxItem Content="PIN1 - authentication" />
-                                    <ComboBoxItem Content="PIN2 - qualified signature" />
+                                    <ComboBoxItem Content="PIN 1 - authentication" />
+                                    <ComboBoxItem Content="PIN 2 - qualified signature" />
                                 </ComboBox>
                                 <PasswordBox
                                     x:Name="PukBox"
@@ -332,32 +232,32 @@
                                 <PasswordBox
                                     x:Name="ActivationPin1Box"
                                     AutomationProperties.AutomationId="ActivationPin1Box"
-                                    AutomationProperties.Name="New PIN1"
-                                    Header="New PIN1"
+                                    AutomationProperties.Name="New PIN 1"
+                                    Header="New PIN 1"
                                     MaxLength="12"
                                     PasswordRevealMode="Peek"
                                 />
                                 <PasswordBox
                                     x:Name="ActivationPin1ConfirmationBox"
                                     AutomationProperties.AutomationId="ActivationPin1ConfirmationBox"
-                                    AutomationProperties.Name="Confirm new PIN1"
-                                    Header="Confirm new PIN1"
+                                    AutomationProperties.Name="Confirm new PIN 1"
+                                    Header="Confirm new PIN 1"
                                     MaxLength="12"
                                     PasswordRevealMode="Peek"
                                 />
                                 <PasswordBox
                                     x:Name="ActivationPin2Box"
                                     AutomationProperties.AutomationId="ActivationPin2Box"
-                                    AutomationProperties.Name="New PIN2"
-                                    Header="New PIN2"
+                                    AutomationProperties.Name="New PIN 2"
+                                    Header="New PIN 2"
                                     MaxLength="12"
                                     PasswordRevealMode="Peek"
                                 />
                                 <PasswordBox
                                     x:Name="ActivationPin2ConfirmationBox"
                                     AutomationProperties.AutomationId="ActivationPin2ConfirmationBox"
-                                    AutomationProperties.Name="Confirm new PIN2"
-                                    Header="Confirm new PIN2"
+                                    AutomationProperties.Name="Confirm new PIN 2"
+                                    Header="Confirm new PIN 2"
                                     MaxLength="12"
                                     PasswordRevealMode="Peek"
                                 />
