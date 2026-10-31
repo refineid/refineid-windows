@@ -67,6 +67,9 @@ serde_yaml = "0.9"
 sha1 = "0.11"
 sha2 = "0.11"
 socket2 = "0.6"
+# Lists the interfaces an mDNS browse asks on. Pure Rust over
+# GetAdaptersAddresses and getifaddrs; the link-local feature stays off.
+if-addrs = "0.15"
 spki = "0.8"
 subtle = "2"
 # No default features: the `std` feature pulls `windows-future`,
