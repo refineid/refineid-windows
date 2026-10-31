@@ -286,6 +286,10 @@ serves as assistive technology for autonomous AI agents navigating the desktop
 deterministically. See [doc/accessibility-and-ui-automation.md](doc/accessibility-and-ui-automation.md)
 for architecture details.
 
+The application follows the Windows display language in English, Finnish and
+Swedish, with English as the fallback; the strings are under
+`apps/RefineID-winui/Strings`.
+
 ## Security boundary
 
 - PIN values and private card material must never be logged.
