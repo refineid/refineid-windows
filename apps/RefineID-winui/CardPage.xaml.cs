@@ -434,6 +434,18 @@ internal sealed partial class CardPage : Page
     /// it appears, so a re-inspection while the holder types, or after a
     /// refused attempt, leaves the focus alone.
     /// </summary>
+    /// <summary>
+    /// A contactless card without a stored access number: only the entry
+    /// that primes it; nothing else on the page applies before that.
+    /// </summary>
+    private void ShowContactlessPrimingOnly()
+    {
+        this.NfcExpander.Visibility = Visibility.Visible;
+        this.ChangePinExpander.Visibility = Visibility.Collapsed;
+        this.UnblockPinExpander.Visibility = Visibility.Collapsed;
+        this.ActivationPanel.Visibility = Visibility.Collapsed;
+    }
+
     private void ShowActivationState(LocalCardSnapshot? inspected)
     {
         bool unactivated = inspected?.LooksUnactivated ?? false;
@@ -480,6 +492,13 @@ internal sealed partial class CardPage : Page
         try
         {
             await operation().ConfigureAwait(true);
+        }
+        catch (NativeRappException error) when (error.Code == "access_number_required")
+        {
+            // A card on the contactless antenna, not yet primed: the page's
+            // contactless entry is the way in, alone and without a notice.
+            this.StatusInfoBar.IsOpen = false;
+            this.ShowContactlessPrimingOnly();
         }
         catch (NativeRappException error)
         {

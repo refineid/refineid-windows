@@ -92,6 +92,52 @@ pub struct ContactlessSnapshot {
     pub puk: Option<PukStatus>,
 }
 
+impl ContactlessSnapshot {
+    /// What the counter-safe PIN 1 status says about the card's activation.
+    /// The PIN-changed flag is not read over contactless, so a newer card
+    /// is judged by its PIN 1 status alone.
+    #[must_use]
+    pub const fn activation(&self) -> ActivationEvidence {
+        crate::card_pin::judge_activation(self.pin1, self.generation, None)
+    }
+
+    /// Expected activation-code length for the card's generation.
+    #[must_use]
+    pub const fn activation_code_length(&self) -> Option<usize> {
+        self.generation.activation_pin_length()
+    }
+}
+
+/// The contactless ATR of the card on a slot that answers over contactless.
+///
+/// It is the key the card family's stored CAN is kept under; `None` when
+/// no such slot holds a card. The contact inspection finds no FINEID card
+/// on such a slot, as the card gives nothing without PACE.
+///
+/// # Errors
+/// PC/SC failures other than there being no such reader or card.
+pub fn contactless_lookup_atr(
+    reader_filter: Option<&ReaderFilter>,
+) -> Result<Option<Vec<u8>>, CardPinError> {
+    use refineid_lib_core::backend::ReaderPickError;
+
+    let backend = PcscBackend;
+    let reader_id = match backend.pick_contactless_reader(reader_filter) {
+        Ok(reader_id) => reader_id,
+        Err(
+            ReaderPickError::NoReaders
+            | ReaderPickError::NoCardPresent
+            | ReaderPickError::NoFineidCard { .. },
+        ) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let transport = backend.open_exclusive(&reader_id, ReaderAccessCap::Read)?;
+    let atr = transport
+        .atr()
+        .map_err(|error| CardPinError::Transport(format!("contactless ATR failed: {error}")))?;
+    Ok(Some(atr.to_wire_bytes()))
+}
+
 /// Enumerate readers that currently report a card.
 ///
 /// # Errors
@@ -186,7 +232,7 @@ fn inspected_contactless(
     let pace_session = match run_pace_with_can(&mut transport, can) {
         Ok(session) => session,
         Err(error) => {
-            let pace_error = CardPinError::Transport(format!("contactless PACE failed: {error}"));
+            let pace_error = CardPinError::AccessNumberRejected(format!("{error}"));
             transport.reset().map_err(|reset_error| {
                 CardPinError::Transport(format!(
                     "contactless PACE failed: {error}; card power reset failed: {reset_error}"

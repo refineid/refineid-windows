@@ -358,4 +358,19 @@
   <data name="ConnectRemoteReader" xml:space="preserve">
     <value>Yhdistä etälukija</value>
   </data>
+  <data name="ContactlessAccessNumber" xml:space="preserve">
+    <value>Ota lähiluku käyttöön</value>
+  </data>
+  <data name="AccessNumberDialog.Title" xml:space="preserve">
+    <value>Lähiluku (NFC)</value>
+  </data>
+  <data name="AccessNumberDialog.CloseButtonText" xml:space="preserve">
+    <value>Peruuta</value>
+  </data>
+  <data name="AccessNumberBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Kortin pääsykoodi (CAN)</value>
+  </data>
+  <data name="AccessNumberWaitRing.AutomationProperties.Name" xml:space="preserve">
+    <value>Pääsykoodia tarkistetaan</value>
+  </data>
 </root>
