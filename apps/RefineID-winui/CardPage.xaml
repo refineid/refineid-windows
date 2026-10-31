@@ -42,6 +42,7 @@
                     <!--  Shown only while more than one reader holds a card.  -->
                     <ComboBox
                         x:Name="ReaderComboBox"
+                        x:Uid="ReaderComboBox"
                         HorizontalAlignment="Stretch"
                         AutomationProperties.AutomationId="ReaderComboBox"
                         AutomationProperties.Name="Card reader"
@@ -52,6 +53,7 @@
 
                     <Expander
                         x:Name="NfcExpander"
+                        x:Uid="NfcExpander"
                         HorizontalAlignment="Stretch"
                         HorizontalContentAlignment="Stretch"
                         AutomationProperties.AutomationId="NfcExpander"
@@ -60,6 +62,7 @@
                     >
                         <StackPanel Padding="0,12,0,4" Spacing="12">
                             <TextBlock
+                                x:Uid="NfcHintText"
                                 Text="Enter the CAN printed on the card."
                                 TextWrapping="Wrap"
                             />
@@ -70,6 +73,7 @@
                                 </Grid.ColumnDefinitions>
                                 <PasswordBox
                                     x:Name="CanBox"
+                                    x:Uid="CanBox"
                                     AutomationProperties.AutomationId="CanBox"
                                     AutomationProperties.Name="Card access number (CAN)"
                                     Header="Card access number (CAN)"
@@ -78,6 +82,7 @@
                                 />
                                 <Button
                                     x:Name="EnableNfcButton"
+                                    x:Uid="EnableNfcButton"
                                     Grid.Column="1"
                                     VerticalAlignment="Bottom"
                                     AutomationProperties.AutomationId="EnableNfcButton"
@@ -97,6 +102,7 @@
                     >
                         <Expander
                             x:Name="ChangePinExpander"
+                            x:Uid="ChangePinExpander"
                             HorizontalAlignment="Stretch"
                             HorizontalContentAlignment="Stretch"
                             AutomationProperties.AutomationId="ChangePinExpander"
@@ -106,16 +112,24 @@
                             <StackPanel Padding="0,12,0,4" Spacing="10">
                                 <ComboBox
                                     x:Name="ChangeSlotBox"
+                                    x:Uid="ChangeSlotBox"
                                     AutomationProperties.AutomationId="ChangeSlotBox"
                                     AutomationProperties.Name="Credential to change"
                                     Header="Credential"
                                     SelectedIndex="0"
                                 >
-                                    <ComboBoxItem Content="PIN 1 - authentication" />
-                                    <ComboBoxItem Content="PIN 2 - qualified signature" />
+                                    <ComboBoxItem
+                                        x:Uid="ChangeSlotPin1Item"
+                                        Content="PIN 1 - authentication"
+                                    />
+                                    <ComboBoxItem
+                                        x:Uid="ChangeSlotPin2Item"
+                                        Content="PIN 2 - qualified signature"
+                                    />
                                 </ComboBox>
                                 <PasswordBox
                                     x:Name="CurrentPinBox"
+                                    x:Uid="CurrentPinBox"
                                     AutomationProperties.AutomationId="CurrentPinBox"
                                     AutomationProperties.Name="Current PIN"
                                     Header="Current PIN"
@@ -124,6 +138,7 @@
                                 />
                                 <PasswordBox
                                     x:Name="NewPinBox"
+                                    x:Uid="NewPinBox"
                                     AutomationProperties.AutomationId="NewPinBox"
                                     AutomationProperties.Name="New PIN"
                                     Header="New PIN"
@@ -132,6 +147,7 @@
                                 />
                                 <PasswordBox
                                     x:Name="NewPinConfirmationBox"
+                                    x:Uid="NewPinConfirmationBox"
                                     AutomationProperties.AutomationId="NewPinConfirmationBox"
                                     AutomationProperties.Name="Confirm new PIN"
                                     Header="Confirm new PIN"
@@ -140,6 +156,7 @@
                                 />
                                 <Button
                                     x:Name="ChangePinButton"
+                                    x:Uid="ChangePinButton"
                                     HorizontalAlignment="Left"
                                     AutomationProperties.AutomationId="ChangePinButton"
                                     AutomationProperties.Name="Change PIN"
@@ -151,6 +168,7 @@
 
                         <Expander
                             x:Name="UnblockPinExpander"
+                            x:Uid="UnblockPinExpander"
                             HorizontalAlignment="Stretch"
                             HorizontalContentAlignment="Stretch"
                             AutomationProperties.AutomationId="UnblockPinExpander"
@@ -159,21 +177,30 @@
                         >
                             <StackPanel Padding="0,12,0,4" Spacing="10">
                                 <TextBlock
+                                    x:Uid="UnblockHintText"
                                     Text="Wrong code uses one recovery attempt."
                                     TextWrapping="Wrap"
                                 />
                                 <ComboBox
                                     x:Name="UnblockSlotBox"
+                                    x:Uid="UnblockSlotBox"
                                     AutomationProperties.AutomationId="UnblockSlotBox"
                                     AutomationProperties.Name="Credential to reset"
                                     Header="Credential"
                                     SelectedIndex="1"
                                 >
-                                    <ComboBoxItem Content="PIN 1 - authentication" />
-                                    <ComboBoxItem Content="PIN 2 - qualified signature" />
+                                    <ComboBoxItem
+                                        x:Uid="UnblockSlotPin1Item"
+                                        Content="PIN 1 - authentication"
+                                    />
+                                    <ComboBoxItem
+                                        x:Uid="UnblockSlotPin2Item"
+                                        Content="PIN 2 - qualified signature"
+                                    />
                                 </ComboBox>
                                 <PasswordBox
                                     x:Name="PukBox"
+                                    x:Uid="PukBox"
                                     AutomationProperties.AutomationId="PukBox"
                                     AutomationProperties.Name="Recovery code (PUK)"
                                     Header="Recovery code (PUK)"
@@ -182,6 +209,7 @@
                                 />
                                 <PasswordBox
                                     x:Name="UnblockNewPinBox"
+                                    x:Uid="UnblockNewPinBox"
                                     AutomationProperties.AutomationId="UnblockNewPinBox"
                                     AutomationProperties.Name="New PIN for recovery"
                                     Header="New PIN"
@@ -190,6 +218,7 @@
                                 />
                                 <PasswordBox
                                     x:Name="UnblockConfirmationBox"
+                                    x:Uid="UnblockConfirmationBox"
                                     AutomationProperties.AutomationId="UnblockConfirmationBox"
                                     AutomationProperties.Name="Confirm new PIN for recovery"
                                     Header="Confirm new PIN"
@@ -198,6 +227,7 @@
                                 />
                                 <Button
                                     x:Name="ResetPinButton"
+                                    x:Uid="ResetPinButton"
                                     HorizontalAlignment="Left"
                                     AutomationProperties.AutomationId="ResetPinButton"
                                     AutomationProperties.Name="Reset PIN"
@@ -211,6 +241,7 @@
                               for its activation it is the whole page.  -->
                         <StackPanel
                             x:Name="ActivationPanel"
+                            x:Uid="ActivationPanel"
                             Padding="16,12,16,16"
                             AutomationProperties.AutomationId="ActivationPanel"
                             AutomationProperties.Name="Activate a new card"
@@ -221,6 +252,7 @@
                                   title.  -->
                             <StackPanel Margin="0,0,0,10" Spacing="2">
                                 <TextBlock
+                                    x:Uid="ActivationHeading"
                                     AutomationProperties.HeadingLevel="Level2"
                                     Style="{StaticResource BodyStrongTextBlockStyle}"
                                     Text="Activate a new card"
@@ -240,6 +272,7 @@
                                 </Grid.ColumnDefinitions>
                                 <PasswordBox
                                     x:Name="ActivationCodeBox"
+                                    x:Uid="ActivationCodeBox"
                                     AutomationProperties.AutomationId="ActivationCodeBox"
                                     AutomationProperties.Name="Activation code"
                                     Header="Activation code"
@@ -263,6 +296,7 @@
                                 </Grid.ColumnDefinitions>
                                 <PasswordBox
                                     x:Name="ActivationPin1Box"
+                                    x:Uid="ActivationPin1Box"
                                     AutomationProperties.AutomationId="ActivationPin1Box"
                                     AutomationProperties.Name="New PIN 1"
                                     Header="New PIN 1"
@@ -286,6 +320,7 @@
                                 </Grid.ColumnDefinitions>
                                 <PasswordBox
                                     x:Name="ActivationPin1ConfirmationBox"
+                                    x:Uid="ActivationPin1ConfirmationBox"
                                     AutomationProperties.AutomationId="ActivationPin1ConfirmationBox"
                                     AutomationProperties.Name="Confirm new PIN 1"
                                     Header="Confirm new PIN 1"
@@ -309,6 +344,7 @@
                                 </Grid.ColumnDefinitions>
                                 <PasswordBox
                                     x:Name="ActivationPin2Box"
+                                    x:Uid="ActivationPin2Box"
                                     AutomationProperties.AutomationId="ActivationPin2Box"
                                     AutomationProperties.Name="New PIN 2"
                                     Header="New PIN 2"
@@ -332,6 +368,7 @@
                                 </Grid.ColumnDefinitions>
                                 <PasswordBox
                                     x:Name="ActivationPin2ConfirmationBox"
+                                    x:Uid="ActivationPin2ConfirmationBox"
                                     AutomationProperties.AutomationId="ActivationPin2ConfirmationBox"
                                     AutomationProperties.Name="Confirm new PIN 2"
                                     Header="Confirm new PIN 2"
@@ -373,6 +410,7 @@
             Visibility="Collapsed"
         >
             <ProgressRing
+                x:Uid="CardPageBusyRing"
                 Width="48"
                 Height="48"
                 AutomationProperties.AutomationId="BusyRing"

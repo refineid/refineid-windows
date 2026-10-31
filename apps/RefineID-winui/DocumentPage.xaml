@@ -47,6 +47,7 @@
                         </Grid.ColumnDefinitions>
                         <TextBox
                             x:Name="FileBox"
+                            x:Uid="FileBox"
                             AutomationProperties.AutomationId="FileBox"
                             AutomationProperties.Name="File"
                             Header="File"
@@ -54,6 +55,7 @@
                         />
                         <Button
                             x:Name="ChooseFileButton"
+                            x:Uid="ChooseFileButton"
                             Grid.Column="1"
                             VerticalAlignment="Bottom"
                             AutomationProperties.AutomationId="ChooseFileButton"
@@ -65,16 +67,18 @@
                     <StackPanel x:Name="SignPanel" Spacing="12" Visibility="Collapsed">
                         <ComboBox
                             x:Name="FormatBox"
+                            x:Uid="FormatBox"
                             AutomationProperties.AutomationId="FormatBox"
                             AutomationProperties.Name="Signature format"
                             Header="Format"
                             SelectedIndex="0"
                         >
-                            <ComboBoxItem Content="PDF signature" />
-                            <ComboBoxItem Content="ASiC-E container" />
+                            <ComboBoxItem x:Uid="FormatPdfItem" Content="PDF signature" />
+                            <ComboBoxItem x:Uid="FormatAsicEItem" Content="ASiC-E container" />
                         </ComboBox>
                         <PasswordBox
                             x:Name="PinBox"
+                            x:Uid="PinBox"
                             AutomationProperties.AutomationId="PinBox"
                             AutomationProperties.Name="Signing PIN (PIN 2)"
                             Header="Signing PIN (PIN 2)"
@@ -83,6 +87,7 @@
                         />
                         <TextBox
                             x:Name="ReasonBox"
+                            x:Uid="ReasonBox"
                             AutomationProperties.AutomationId="ReasonBox"
                             AutomationProperties.Name="Reason"
                             Header="Reason"
@@ -90,6 +95,7 @@
                         />
                         <Button
                             x:Name="SignButton"
+                            x:Uid="SignButton"
                             AutomationProperties.AutomationId="SignButton"
                             AutomationProperties.Name="Sign"
                             Click="SignButton_Click"
@@ -100,6 +106,7 @@
                     </StackPanel>
                     <Button
                         x:Name="VerifyButton"
+                        x:Uid="VerifyButton"
                         AutomationProperties.AutomationId="VerifyButton"
                         AutomationProperties.Name="Verify"
                         Click="VerifyButton_Click"

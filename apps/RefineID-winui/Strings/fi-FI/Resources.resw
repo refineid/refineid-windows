@@ -27,10 +27,353 @@
   <resheader name="writer">
     <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
   </resheader>
+  <data name="DocumentHeading.Text" xml:space="preserve">
+    <value>Asiakirja</value>
+  </data>
+  <data name="VerifyCard.Header" xml:space="preserve">
+    <value>Tarkasta</value>
+  </data>
+  <data name="VerifyCard.AutomationProperties.Name" xml:space="preserve">
+    <value>Tarkasta asiakirja</value>
+  </data>
+  <data name="VerifyCard.AutomationProperties.HelpText" xml:space="preserve">
+    <value>Tarkasta allekirjoitettu asiakirja kortilla</value>
+  </data>
+  <data name="SignCard.Header" xml:space="preserve">
+    <value>Allekirjoita</value>
+  </data>
+  <data name="SignCard.AutomationProperties.Name" xml:space="preserve">
+    <value>Allekirjoita asiakirja</value>
+  </data>
+  <data name="SignCard.AutomationProperties.HelpText" xml:space="preserve">
+    <value>Allekirjoita asiakirja kortilla</value>
+  </data>
+  <data name="IdentityHeading.Text" xml:space="preserve">
+    <value>Identiteetti</value>
+  </data>
+  <data name="PersonCard.Header" xml:space="preserve">
+    <value>Henkilö</value>
+  </data>
+  <data name="PersonCard.AutomationProperties.Name" xml:space="preserve">
+    <value>Kortinhaltijan identiteetti</value>
+  </data>
+  <data name="ConnectRemoteReaderButton.Content" xml:space="preserve">
+    <value>Yhdistä etälukija</value>
+  </data>
+  <data name="ConnectRemoteReaderButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Yhdistä etälukija</value>
+  </data>
+  <data name="ConnectRemoteReaderButton.AutomationProperties.HelpText" xml:space="preserve">
+    <value>Yhdistä puhelimeen, jossa RefineID toimii etälukijana</value>
+  </data>
+  <data name="HolderText.AutomationProperties.Name" xml:space="preserve">
+    <value>Kortinhaltijan nimi</value>
+  </data>
+  <data name="ForgetIdentityButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Unohda</value>
+  </data>
+  <data name="ForgetIdentityButton.ToolTipService.ToolTip" xml:space="preserve">
+    <value>Unohda</value>
+  </data>
+  <data name="PinsCard.Header" xml:space="preserve">
+    <value>Tunnusluvut</value>
+  </data>
+  <data name="PinsCard.AutomationProperties.Name" xml:space="preserve">
+    <value>Tunnusluvut</value>
+  </data>
+  <data name="PinsCard.AutomationProperties.HelpText" xml:space="preserve">
+    <value>Vaihda tai palauta lukijassa olevan kortin tunnusluvut</value>
+  </data>
+  <data name="MainPageBusyRing.AutomationProperties.Name" xml:space="preserve">
+    <value>Luetaan henkilökortin tietoja</value>
+  </data>
+  <data name="DriverLaneHint" xml:space="preserve">
+    <value>Lukijassa olevan kortin toiminnot tarvitsevat FINEID-ajurit. Allekirjoittaminen puhelimella etälukijan kautta toimii silti.</value>
+  </data>
+  <data name="PairingDialog.Title" xml:space="preserve">
+    <value>Etäkortti</value>
+  </data>
+  <data name="PairingDialog.PrimaryButtonText" xml:space="preserve">
+    <value>Yhdistä</value>
+  </data>
+  <data name="PairingDialog.CloseButtonText" xml:space="preserve">
+    <value>Peruuta</value>
+  </data>
+  <data name="CodeBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Yhdistämiskoodi</value>
+  </data>
+  <data name="CodeBox.PlaceholderText" xml:space="preserve">
+    <value>Koodi</value>
+  </data>
+  <data name="WaitRing.AutomationProperties.Name" xml:space="preserve">
+    <value>Yhdistetään</value>
+  </data>
+  <data name="PairingDenied" xml:space="preserve">
+    <value>Puhelin hylkäsi yhdistämisen.</value>
+  </data>
+  <data name="PairingCancelled" xml:space="preserve">
+    <value>Yhdistäminen peruutettiin.</value>
+  </data>
+  <data name="PairingFailed" xml:space="preserve">
+    <value>Yhdistäminen epäonnistui.</value>
+  </data>
+  <data name="ReaderComboBox.Header" xml:space="preserve">
+    <value>Kortinlukija</value>
+  </data>
+  <data name="ReaderComboBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Kortinlukija</value>
+  </data>
+  <data name="NfcExpander.Header" xml:space="preserve">
+    <value>Etäluku (NFC)</value>
+  </data>
+  <data name="NfcExpander.AutomationProperties.Name" xml:space="preserve">
+    <value>Etäluku (NFC)</value>
+  </data>
+  <data name="NfcHintText.Text" xml:space="preserve">
+    <value>Syötä korttiin painettu CAN.</value>
+  </data>
+  <data name="CanBox.Header" xml:space="preserve">
+    <value>Kortin pääsykoodi (CAN)</value>
+  </data>
+  <data name="CanBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Kortin pääsykoodi (CAN)</value>
+  </data>
+  <data name="EnableNfcButton.Content" xml:space="preserve">
+    <value>Ota NFC käyttöön</value>
+  </data>
+  <data name="EnableNfcButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Ota NFC käyttöön</value>
+  </data>
+  <data name="ChangePinExpander.Header" xml:space="preserve">
+    <value>Vaihda tunnusluku</value>
+  </data>
+  <data name="ChangePinExpander.AutomationProperties.Name" xml:space="preserve">
+    <value>Vaihda tunnusluku</value>
+  </data>
+  <data name="ChangeSlotBox.Header" xml:space="preserve">
+    <value>Tunnus</value>
+  </data>
+  <data name="ChangeSlotBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Vaihdettava tunnus</value>
+  </data>
+  <data name="ChangeSlotPin1Item.Content" xml:space="preserve">
+    <value>PIN 1 - tunnistautuminen</value>
+  </data>
+  <data name="ChangeSlotPin2Item.Content" xml:space="preserve">
+    <value>PIN 2 - hyväksytty allekirjoitus</value>
+  </data>
+  <data name="CurrentPinBox.Header" xml:space="preserve">
+    <value>Nykyinen tunnusluku</value>
+  </data>
+  <data name="CurrentPinBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Nykyinen tunnusluku</value>
+  </data>
+  <data name="NewPinBox.Header" xml:space="preserve">
+    <value>Uusi tunnusluku</value>
+  </data>
+  <data name="NewPinBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Uusi tunnusluku</value>
+  </data>
+  <data name="NewPinConfirmationBox.Header" xml:space="preserve">
+    <value>Uusi tunnusluku uudelleen</value>
+  </data>
+  <data name="NewPinConfirmationBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Uusi tunnusluku uudelleen</value>
+  </data>
+  <data name="ChangePinButton.Content" xml:space="preserve">
+    <value>Vaihda tunnusluku</value>
+  </data>
+  <data name="ChangePinButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Vaihda tunnusluku</value>
+  </data>
+  <data name="UnblockPinExpander.Header" xml:space="preserve">
+    <value>Palauta tunnusluku (PUK)</value>
+  </data>
+  <data name="UnblockPinExpander.AutomationProperties.Name" xml:space="preserve">
+    <value>Palauta tunnusluku (PUK)</value>
+  </data>
+  <data name="UnblockHintText.Text" xml:space="preserve">
+    <value>Väärä koodi kuluttaa yhden palautusyrityksen.</value>
+  </data>
+  <data name="UnblockSlotBox.Header" xml:space="preserve">
+    <value>Tunnus</value>
+  </data>
+  <data name="UnblockSlotBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Palautettava tunnus</value>
+  </data>
+  <data name="UnblockSlotPin1Item.Content" xml:space="preserve">
+    <value>PIN 1 - tunnistautuminen</value>
+  </data>
+  <data name="UnblockSlotPin2Item.Content" xml:space="preserve">
+    <value>PIN 2 - hyväksytty allekirjoitus</value>
+  </data>
+  <data name="PukBox.Header" xml:space="preserve">
+    <value>Palautuskoodi (PUK)</value>
+  </data>
+  <data name="PukBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Palautuskoodi (PUK)</value>
+  </data>
+  <data name="UnblockNewPinBox.Header" xml:space="preserve">
+    <value>Uusi tunnusluku</value>
+  </data>
+  <data name="UnblockNewPinBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Uusi tunnusluku palautukseen</value>
+  </data>
+  <data name="UnblockConfirmationBox.Header" xml:space="preserve">
+    <value>Uusi tunnusluku uudelleen</value>
+  </data>
+  <data name="UnblockConfirmationBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Uusi tunnusluku uudelleen palautukseen</value>
+  </data>
+  <data name="ResetPinButton.Content" xml:space="preserve">
+    <value>Palauta tunnusluku</value>
+  </data>
+  <data name="ResetPinButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Palauta tunnusluku</value>
+  </data>
+  <data name="ActivationPanel.AutomationProperties.Name" xml:space="preserve">
+    <value>Aktivoi uusi kortti</value>
+  </data>
+  <data name="ActivationHeading.Text" xml:space="preserve">
+    <value>Aktivoi uusi kortti</value>
+  </data>
+  <data name="ActivationCodeBox.Header" xml:space="preserve">
+    <value>Aktivointikoodi</value>
+  </data>
+  <data name="ActivationCodeBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Aktivointikoodi</value>
+  </data>
+  <data name="ActivationPin1Box.Header" xml:space="preserve">
+    <value>Uusi PIN 1</value>
+  </data>
+  <data name="ActivationPin1Box.AutomationProperties.Name" xml:space="preserve">
+    <value>Uusi PIN 1</value>
+  </data>
+  <data name="ActivationPin1ConfirmationBox.Header" xml:space="preserve">
+    <value>Uusi PIN 1 uudelleen</value>
+  </data>
+  <data name="ActivationPin1ConfirmationBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Uusi PIN 1 uudelleen</value>
+  </data>
+  <data name="ActivationPin2Box.Header" xml:space="preserve">
+    <value>Uusi PIN 2</value>
+  </data>
+  <data name="ActivationPin2Box.AutomationProperties.Name" xml:space="preserve">
+    <value>Uusi PIN 2</value>
+  </data>
+  <data name="ActivationPin2ConfirmationBox.Header" xml:space="preserve">
+    <value>Uusi PIN 2 uudelleen</value>
+  </data>
+  <data name="ActivationPin2ConfirmationBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Uusi PIN 2 uudelleen</value>
+  </data>
   <data name="ActivateButton.Content" xml:space="preserve">
     <value>Aktivoi henkilökortti</value>
   </data>
   <data name="ActivateButton.AutomationProperties.Name" xml:space="preserve">
     <value>Aktivoi henkilökortti</value>
+  </data>
+  <data name="CardPageBusyRing.AutomationProperties.Name" xml:space="preserve">
+    <value>Viestitään kortin kanssa</value>
+  </data>
+  <data name="SelectReaderWithCardFirst" xml:space="preserve">
+    <value>Valitse ensin lukija, jossa on kortti.</value>
+  </data>
+  <data name="NfcAccessEnabled" xml:space="preserve">
+    <value>NFC otettu käyttöön. CAN on tallennettu tälle laitteelle.</value>
+  </data>
+  <data name="ActivationCodeHint" xml:space="preserve">
+    <value>{0}-numeroinen aktivointikoodi kirjeestä</value>
+  </data>
+  <data name="CardServiceResponseUnreadable" xml:space="preserve">
+    <value>Korttipalvelun vastausta ei voitu lukea.</value>
+  </data>
+  <data name="InsertCardInContactReaderFirst" xml:space="preserve">
+    <value>Aseta kortti ensin kontaktilukijaan.</value>
+  </data>
+  <data name="FileBox.Header" xml:space="preserve">
+    <value>Tiedosto</value>
+  </data>
+  <data name="FileBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Tiedosto</value>
+  </data>
+  <data name="ChooseFileButton.Content" xml:space="preserve">
+    <value>Valitse</value>
+  </data>
+  <data name="ChooseFileButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Valitse tiedosto</value>
+  </data>
+  <data name="FormatBox.Header" xml:space="preserve">
+    <value>Allekirjoitustapa</value>
+  </data>
+  <data name="FormatBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Allekirjoitustapa</value>
+  </data>
+  <data name="FormatPdfItem.Content" xml:space="preserve">
+    <value>PDF-allekirjoitus</value>
+  </data>
+  <data name="FormatAsicEItem.Content" xml:space="preserve">
+    <value>ASiC-E-paketti</value>
+  </data>
+  <data name="PinBox.Header" xml:space="preserve">
+    <value>Allekirjoitustunnusluku (PIN 2)</value>
+  </data>
+  <data name="PinBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Allekirjoitustunnusluku (PIN 2)</value>
+  </data>
+  <data name="ReasonBox.Header" xml:space="preserve">
+    <value>Syy</value>
+  </data>
+  <data name="ReasonBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Syy</value>
+  </data>
+  <data name="SignButton.Content" xml:space="preserve">
+    <value>Allekirjoita</value>
+  </data>
+  <data name="SignButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Allekirjoita</value>
+  </data>
+  <data name="VerifyButton.Content" xml:space="preserve">
+    <value>Tarkasta</value>
+  </data>
+  <data name="VerifyButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Tarkasta</value>
+  </data>
+  <data name="DocumentSignTitle" xml:space="preserve">
+    <value>Allekirjoita</value>
+  </data>
+  <data name="DocumentVerifyTitle" xml:space="preserve">
+    <value>Tarkasta</value>
+  </data>
+  <data name="FileChooserNotOpened" xml:space="preserve">
+    <value>Tiedostonvalitsinta ei voitu avata.</value>
+  </data>
+  <data name="SignatureValid" xml:space="preserve">
+    <value>Kelvollinen</value>
+  </data>
+  <data name="SignatureInvalid" xml:space="preserve">
+    <value>Virheellinen</value>
+  </data>
+  <data name="Pin2LengthRule" xml:space="preserve">
+    <value>PIN 2:n on oltava {0}–{1} numeroa.</value>
+  </data>
+  <data name="ReasonTooLong" xml:space="preserve">
+    <value>Syy on liian pitkä.</value>
+  </data>
+  <data name="SignedDocumentSummary" xml:space="preserve">
+    <value>{0}
+{1} tavua, hyväksytty allekirjoitus, paikallinen tarkastus {2}</value>
+  </data>
+  <data name="DocumentSigned" xml:space="preserve">
+    <value>Allekirjoitettu</value>
+  </data>
+  <data name="SignatureDidNotVerify" xml:space="preserve">
+    <value>{0}: allekirjoituksen tarkastus ei onnistunut</value>
+  </data>
+  <data name="ChooseFileFirst" xml:space="preserve">
+    <value>Valitse ensin tiedosto.</value>
+  </data>
+  <data name="CardServiceNotInstalled" xml:space="preserve">
+    <value>Korttipalvelua ei ole asennettu.</value>
   </data>
 </root>

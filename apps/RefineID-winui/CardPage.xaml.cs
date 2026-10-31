@@ -148,7 +148,7 @@ internal sealed partial class CardPage : Page
         string? reader = this.SelectedReader();
         if (reader is null)
         {
-            this.ShowError("Select a reader with a card first.");
+            this.ShowError(Strings.Get("SelectReaderWithCardFirst"));
             return;
         }
 
@@ -158,7 +158,7 @@ internal sealed partial class CardPage : Page
             {
                 _ = await Task.Run(() => LocalCardService.PrimeContactless(reader, can))
                     .ConfigureAwait(true);
-                this.ShowSuccess("NFC access enabled. The CAN is saved on this device.");
+                this.ShowSuccess(Strings.Get("NfcAccessEnabled"));
             })
             .ConfigureAwait(true);
     }
@@ -379,7 +379,7 @@ internal sealed partial class CardPage : Page
         // The card service refuses activation when it cannot tell the
         // code's length; without one, no entry can be complete.
         this.ActivationHintText.Text = inspected.ActivationCodeLength is int length
-            ? $"{length}-digit activation code from letter"
+            ? Strings.Format("ActivationCodeHint", length)
             : string.Empty;
         this.UpdateActivationForm();
         this.ManagementPanel.IsHitTestVisible = true;
@@ -451,7 +451,7 @@ internal sealed partial class CardPage : Page
         }
         catch (JsonException)
         {
-            this.ShowError("The card service response could not be read.");
+            this.ShowError(Strings.Get("CardServiceResponseUnreadable"));
         }
         finally
         {
@@ -468,7 +468,7 @@ internal sealed partial class CardPage : Page
             return true;
         }
 
-        this.ShowError("Insert the card in a contact reader first.");
+        this.ShowError(Strings.Get("InsertCardInContactReaderFirst"));
         return false;
     }
 

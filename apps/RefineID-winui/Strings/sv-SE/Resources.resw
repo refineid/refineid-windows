@@ -27,10 +27,353 @@
   <resheader name="writer">
     <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
   </resheader>
+  <data name="DocumentHeading.Text" xml:space="preserve">
+    <value>Dokument</value>
+  </data>
+  <data name="VerifyCard.Header" xml:space="preserve">
+    <value>Verifiera</value>
+  </data>
+  <data name="VerifyCard.AutomationProperties.Name" xml:space="preserve">
+    <value>Verifiera dokument</value>
+  </data>
+  <data name="VerifyCard.AutomationProperties.HelpText" xml:space="preserve">
+    <value>Verifiera ett signerat dokument med kortet</value>
+  </data>
+  <data name="SignCard.Header" xml:space="preserve">
+    <value>Signera</value>
+  </data>
+  <data name="SignCard.AutomationProperties.Name" xml:space="preserve">
+    <value>Signera dokument</value>
+  </data>
+  <data name="SignCard.AutomationProperties.HelpText" xml:space="preserve">
+    <value>Signera ett dokument med kortet</value>
+  </data>
+  <data name="IdentityHeading.Text" xml:space="preserve">
+    <value>Identitet</value>
+  </data>
+  <data name="PersonCard.Header" xml:space="preserve">
+    <value>Person</value>
+  </data>
+  <data name="PersonCard.AutomationProperties.Name" xml:space="preserve">
+    <value>Kortinnehavarens identitet</value>
+  </data>
+  <data name="ConnectRemoteReaderButton.Content" xml:space="preserve">
+    <value>Anslut fjärrläsare</value>
+  </data>
+  <data name="ConnectRemoteReaderButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Anslut fjärrläsare</value>
+  </data>
+  <data name="ConnectRemoteReaderButton.AutomationProperties.HelpText" xml:space="preserve">
+    <value>Parkoppla med en mobil enhet som kör RefineID som fjärrläsare</value>
+  </data>
+  <data name="HolderText.AutomationProperties.Name" xml:space="preserve">
+    <value>Kortinnehavarens namn</value>
+  </data>
+  <data name="ForgetIdentityButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Glöm</value>
+  </data>
+  <data name="ForgetIdentityButton.ToolTipService.ToolTip" xml:space="preserve">
+    <value>Glöm</value>
+  </data>
+  <data name="PinsCard.Header" xml:space="preserve">
+    <value>PIN-koder</value>
+  </data>
+  <data name="PinsCard.AutomationProperties.Name" xml:space="preserve">
+    <value>PIN-koder</value>
+  </data>
+  <data name="PinsCard.AutomationProperties.HelpText" xml:space="preserve">
+    <value>Ändra eller återställ PIN-koderna för kortet i läsaren</value>
+  </data>
+  <data name="MainPageBusyRing.AutomationProperties.Name" xml:space="preserve">
+    <value>Läser identitetskortets uppgifter</value>
+  </data>
+  <data name="DriverLaneHint" xml:space="preserve">
+    <value>Funktionerna för kortet i läsaren behöver FINEID-drivrutinerna. Signering med telefonen via fjärrläsaren fungerar ändå.</value>
+  </data>
+  <data name="PairingDialog.Title" xml:space="preserve">
+    <value>Fjärrkort</value>
+  </data>
+  <data name="PairingDialog.PrimaryButtonText" xml:space="preserve">
+    <value>Parkoppla</value>
+  </data>
+  <data name="PairingDialog.CloseButtonText" xml:space="preserve">
+    <value>Avbryt</value>
+  </data>
+  <data name="CodeBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Parkopplingskod</value>
+  </data>
+  <data name="CodeBox.PlaceholderText" xml:space="preserve">
+    <value>Kod</value>
+  </data>
+  <data name="WaitRing.AutomationProperties.Name" xml:space="preserve">
+    <value>Parkopplar</value>
+  </data>
+  <data name="PairingDenied" xml:space="preserve">
+    <value>Telefonen nekade parkopplingen.</value>
+  </data>
+  <data name="PairingCancelled" xml:space="preserve">
+    <value>Parkopplingen avbröts.</value>
+  </data>
+  <data name="PairingFailed" xml:space="preserve">
+    <value>Parkopplingen misslyckades.</value>
+  </data>
+  <data name="ReaderComboBox.Header" xml:space="preserve">
+    <value>Kortläsare</value>
+  </data>
+  <data name="ReaderComboBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Kortläsare</value>
+  </data>
+  <data name="NfcExpander.Header" xml:space="preserve">
+    <value>Kontaktlös NFC</value>
+  </data>
+  <data name="NfcExpander.AutomationProperties.Name" xml:space="preserve">
+    <value>Kontaktlös NFC</value>
+  </data>
+  <data name="NfcHintText.Text" xml:space="preserve">
+    <value>Ange den CAN som är tryckt på kortet.</value>
+  </data>
+  <data name="CanBox.Header" xml:space="preserve">
+    <value>Kortets åtkomstkod (CAN)</value>
+  </data>
+  <data name="CanBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Kortets åtkomstkod (CAN)</value>
+  </data>
+  <data name="EnableNfcButton.Content" xml:space="preserve">
+    <value>Aktivera NFC-åtkomst</value>
+  </data>
+  <data name="EnableNfcButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Aktivera NFC-åtkomst</value>
+  </data>
+  <data name="ChangePinExpander.Header" xml:space="preserve">
+    <value>Byt PIN-kod</value>
+  </data>
+  <data name="ChangePinExpander.AutomationProperties.Name" xml:space="preserve">
+    <value>Byt PIN-kod</value>
+  </data>
+  <data name="ChangeSlotBox.Header" xml:space="preserve">
+    <value>Kod</value>
+  </data>
+  <data name="ChangeSlotBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Kod att byta</value>
+  </data>
+  <data name="ChangeSlotPin1Item.Content" xml:space="preserve">
+    <value>PIN 1 - identifiering</value>
+  </data>
+  <data name="ChangeSlotPin2Item.Content" xml:space="preserve">
+    <value>PIN 2 - kvalificerad underskrift</value>
+  </data>
+  <data name="CurrentPinBox.Header" xml:space="preserve">
+    <value>Nuvarande PIN-kod</value>
+  </data>
+  <data name="CurrentPinBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Nuvarande PIN-kod</value>
+  </data>
+  <data name="NewPinBox.Header" xml:space="preserve">
+    <value>Ny PIN-kod</value>
+  </data>
+  <data name="NewPinBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Ny PIN-kod</value>
+  </data>
+  <data name="NewPinConfirmationBox.Header" xml:space="preserve">
+    <value>Ny PIN-kod igen</value>
+  </data>
+  <data name="NewPinConfirmationBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Ny PIN-kod igen</value>
+  </data>
+  <data name="ChangePinButton.Content" xml:space="preserve">
+    <value>Byt PIN-kod</value>
+  </data>
+  <data name="ChangePinButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Byt PIN-kod</value>
+  </data>
+  <data name="UnblockPinExpander.Header" xml:space="preserve">
+    <value>Återställ PIN-kod (PUK)</value>
+  </data>
+  <data name="UnblockPinExpander.AutomationProperties.Name" xml:space="preserve">
+    <value>Återställ PIN-kod (PUK)</value>
+  </data>
+  <data name="UnblockHintText.Text" xml:space="preserve">
+    <value>En felaktig kod förbrukar ett återställningsförsök.</value>
+  </data>
+  <data name="UnblockSlotBox.Header" xml:space="preserve">
+    <value>Kod</value>
+  </data>
+  <data name="UnblockSlotBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Kod att återställa</value>
+  </data>
+  <data name="UnblockSlotPin1Item.Content" xml:space="preserve">
+    <value>PIN 1 - identifiering</value>
+  </data>
+  <data name="UnblockSlotPin2Item.Content" xml:space="preserve">
+    <value>PIN 2 - kvalificerad underskrift</value>
+  </data>
+  <data name="PukBox.Header" xml:space="preserve">
+    <value>Återställningskod (PUK)</value>
+  </data>
+  <data name="PukBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Återställningskod (PUK)</value>
+  </data>
+  <data name="UnblockNewPinBox.Header" xml:space="preserve">
+    <value>Ny PIN-kod</value>
+  </data>
+  <data name="UnblockNewPinBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Ny PIN-kod för återställning</value>
+  </data>
+  <data name="UnblockConfirmationBox.Header" xml:space="preserve">
+    <value>Ny PIN-kod igen</value>
+  </data>
+  <data name="UnblockConfirmationBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Ny PIN-kod igen för återställning</value>
+  </data>
+  <data name="ResetPinButton.Content" xml:space="preserve">
+    <value>Återställ PIN-kod</value>
+  </data>
+  <data name="ResetPinButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Återställ PIN-kod</value>
+  </data>
+  <data name="ActivationPanel.AutomationProperties.Name" xml:space="preserve">
+    <value>Aktivera ett nytt kort</value>
+  </data>
+  <data name="ActivationHeading.Text" xml:space="preserve">
+    <value>Aktivera ett nytt kort</value>
+  </data>
+  <data name="ActivationCodeBox.Header" xml:space="preserve">
+    <value>Aktiveringskod</value>
+  </data>
+  <data name="ActivationCodeBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Aktiveringskod</value>
+  </data>
+  <data name="ActivationPin1Box.Header" xml:space="preserve">
+    <value>Ny PIN 1</value>
+  </data>
+  <data name="ActivationPin1Box.AutomationProperties.Name" xml:space="preserve">
+    <value>Ny PIN 1</value>
+  </data>
+  <data name="ActivationPin1ConfirmationBox.Header" xml:space="preserve">
+    <value>Ny PIN 1 igen</value>
+  </data>
+  <data name="ActivationPin1ConfirmationBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Ny PIN 1 igen</value>
+  </data>
+  <data name="ActivationPin2Box.Header" xml:space="preserve">
+    <value>Ny PIN 2</value>
+  </data>
+  <data name="ActivationPin2Box.AutomationProperties.Name" xml:space="preserve">
+    <value>Ny PIN 2</value>
+  </data>
+  <data name="ActivationPin2ConfirmationBox.Header" xml:space="preserve">
+    <value>Ny PIN 2 igen</value>
+  </data>
+  <data name="ActivationPin2ConfirmationBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Ny PIN 2 igen</value>
+  </data>
   <data name="ActivateButton.Content" xml:space="preserve">
     <value>Aktivera identitetskort</value>
   </data>
   <data name="ActivateButton.AutomationProperties.Name" xml:space="preserve">
     <value>Aktivera identitetskort</value>
+  </data>
+  <data name="CardPageBusyRing.AutomationProperties.Name" xml:space="preserve">
+    <value>Kommunicerar med kortet</value>
+  </data>
+  <data name="SelectReaderWithCardFirst" xml:space="preserve">
+    <value>Välj först en läsare med ett kort.</value>
+  </data>
+  <data name="NfcAccessEnabled" xml:space="preserve">
+    <value>NFC-åtkomst aktiverad. CAN har sparats på den här enheten.</value>
+  </data>
+  <data name="ActivationCodeHint" xml:space="preserve">
+    <value>Aktiveringskod med {0} siffror från brevet</value>
+  </data>
+  <data name="CardServiceResponseUnreadable" xml:space="preserve">
+    <value>Svaret från korttjänsten kunde inte läsas.</value>
+  </data>
+  <data name="InsertCardInContactReaderFirst" xml:space="preserve">
+    <value>Sätt först in kortet i en kontaktläsare.</value>
+  </data>
+  <data name="FileBox.Header" xml:space="preserve">
+    <value>Fil</value>
+  </data>
+  <data name="FileBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Fil</value>
+  </data>
+  <data name="ChooseFileButton.Content" xml:space="preserve">
+    <value>Välj</value>
+  </data>
+  <data name="ChooseFileButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Välj fil</value>
+  </data>
+  <data name="FormatBox.Header" xml:space="preserve">
+    <value>Signeringssätt</value>
+  </data>
+  <data name="FormatBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Signeringssätt</value>
+  </data>
+  <data name="FormatPdfItem.Content" xml:space="preserve">
+    <value>PDF-signatur</value>
+  </data>
+  <data name="FormatAsicEItem.Content" xml:space="preserve">
+    <value>ASiC-E-paket</value>
+  </data>
+  <data name="PinBox.Header" xml:space="preserve">
+    <value>Signaturkod (PIN 2)</value>
+  </data>
+  <data name="PinBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Signaturkod (PIN 2)</value>
+  </data>
+  <data name="ReasonBox.Header" xml:space="preserve">
+    <value>Anledning</value>
+  </data>
+  <data name="ReasonBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Anledning</value>
+  </data>
+  <data name="SignButton.Content" xml:space="preserve">
+    <value>Signera</value>
+  </data>
+  <data name="SignButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Signera</value>
+  </data>
+  <data name="VerifyButton.Content" xml:space="preserve">
+    <value>Verifiera</value>
+  </data>
+  <data name="VerifyButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Verifiera</value>
+  </data>
+  <data name="DocumentSignTitle" xml:space="preserve">
+    <value>Signera</value>
+  </data>
+  <data name="DocumentVerifyTitle" xml:space="preserve">
+    <value>Verifiera</value>
+  </data>
+  <data name="FileChooserNotOpened" xml:space="preserve">
+    <value>Filväljaren kunde inte öppnas.</value>
+  </data>
+  <data name="SignatureValid" xml:space="preserve">
+    <value>Giltig</value>
+  </data>
+  <data name="SignatureInvalid" xml:space="preserve">
+    <value>Ogiltig</value>
+  </data>
+  <data name="Pin2LengthRule" xml:space="preserve">
+    <value>PIN 2 måste innehålla {0}–{1} siffror.</value>
+  </data>
+  <data name="ReasonTooLong" xml:space="preserve">
+    <value>Anledningen är för lång.</value>
+  </data>
+  <data name="SignedDocumentSummary" xml:space="preserve">
+    <value>{0}
+{1} byte, kvalificerad underskrift, lokal verifiering {2}</value>
+  </data>
+  <data name="DocumentSigned" xml:space="preserve">
+    <value>Signerat</value>
+  </data>
+  <data name="SignatureDidNotVerify" xml:space="preserve">
+    <value>{0}: signaturen kunde inte verifieras</value>
+  </data>
+  <data name="ChooseFileFirst" xml:space="preserve">
+    <value>Välj en fil först.</value>
+  </data>
+  <data name="CardServiceNotInstalled" xml:space="preserve">
+    <value>Korttjänsten är inte installerad.</value>
   </data>
 </root>

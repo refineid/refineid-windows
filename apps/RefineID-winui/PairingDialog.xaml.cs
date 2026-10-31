@@ -117,13 +117,13 @@ internal sealed partial class PairingDialog : ContentDialog
                 this.Settle(failure: null);
                 break;
             case "denied":
-                this.Settle("The phone denied the pairing.");
+                this.Settle(Strings.Get("PairingDenied"));
                 break;
             case "cancelled":
-                this.Settle("The pairing was cancelled.");
+                this.Settle(Strings.Get("PairingCancelled"));
                 break;
             case "failed":
-                this.Settle(state.Message ?? "The pairing attempt failed.");
+                this.Settle(state.Message ?? Strings.Get("PairingFailed"));
                 break;
             default:
                 // "offer": keep waiting.

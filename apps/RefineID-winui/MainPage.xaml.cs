@@ -321,10 +321,7 @@ internal sealed partial class MainPage : Page
 
         if (support.State == "driver_not_installed")
         {
-            this.ShowStatus(
-                InfoBarSeverity.Informational,
-                "Local-card functions need the FINEID drivers. Phone-powered signing via Remote Reader still works."
-            );
+            this.ShowStatus(InfoBarSeverity.Informational, Strings.Get("DriverLaneHint"));
         }
     }
 
