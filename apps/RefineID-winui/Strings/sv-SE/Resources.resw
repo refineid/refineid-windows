@@ -154,10 +154,10 @@
     <value>Kod att byta</value>
   </data>
   <data name="ChangeSlotPin1Item.Content" xml:space="preserve">
-    <value>PIN 1 - identifiering</value>
+    <value>Baskod (PIN 1)</value>
   </data>
   <data name="ChangeSlotPin2Item.Content" xml:space="preserve">
-    <value>PIN 2 - kvalificerad underskrift</value>
+    <value>Signaturkod (PIN 2)</value>
   </data>
   <data name="CurrentPinBox.Header" xml:space="preserve">
     <value>Nuvarande PIN-kod</value>
@@ -196,10 +196,10 @@
     <value>Kod att återställa</value>
   </data>
   <data name="UnblockSlotPin1Item.Content" xml:space="preserve">
-    <value>PIN 1 - identifiering</value>
+    <value>Baskod (PIN 1)</value>
   </data>
   <data name="UnblockSlotPin2Item.Content" xml:space="preserve">
-    <value>PIN 2 - kvalificerad underskrift</value>
+    <value>Signaturkod (PIN 2)</value>
   </data>
   <data name="PukBox.Header" xml:space="preserve">
     <value>Återställningskod (PUK)</value>
@@ -238,28 +238,28 @@
     <value>Aktiveringskod</value>
   </data>
   <data name="ActivationPin1Box.Header" xml:space="preserve">
-    <value>Ny PIN 1</value>
+    <value>Ny baskod (PIN 1)</value>
   </data>
   <data name="ActivationPin1Box.AutomationProperties.Name" xml:space="preserve">
-    <value>Ny PIN 1</value>
+    <value>Ny baskod (PIN 1)</value>
   </data>
   <data name="ActivationPin1ConfirmationBox.Header" xml:space="preserve">
-    <value>Ny PIN 1 igen</value>
+    <value>Ny baskod (PIN 1) igen</value>
   </data>
   <data name="ActivationPin1ConfirmationBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Ny PIN 1 igen</value>
+    <value>Ny baskod (PIN 1) igen</value>
   </data>
   <data name="ActivationPin2Box.Header" xml:space="preserve">
-    <value>Ny PIN 2</value>
+    <value>Ny signaturkod (PIN 2)</value>
   </data>
   <data name="ActivationPin2Box.AutomationProperties.Name" xml:space="preserve">
-    <value>Ny PIN 2</value>
+    <value>Ny signaturkod (PIN 2)</value>
   </data>
   <data name="ActivationPin2ConfirmationBox.Header" xml:space="preserve">
-    <value>Ny PIN 2 igen</value>
+    <value>Ny signaturkod (PIN 2) igen</value>
   </data>
   <data name="ActivationPin2ConfirmationBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Ny PIN 2 igen</value>
+    <value>Ny signaturkod (PIN 2) igen</value>
   </data>
   <data name="ActivateButton.Content" xml:space="preserve">
     <value>Aktivera identitetskort</value>

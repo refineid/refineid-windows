@@ -115,11 +115,11 @@
                                 >
                                     <ComboBoxItem
                                         x:Uid="ChangeSlotPin1Item"
-                                        Content="PIN 1 - authentication"
+                                        Content="Basic PIN (PIN 1)"
                                     />
                                     <ComboBoxItem
                                         x:Uid="ChangeSlotPin2Item"
-                                        Content="PIN 2 - qualified signature"
+                                        Content="Signature PIN (PIN 2)"
                                     />
                                 </ComboBox>
                                 <PasswordBox
@@ -181,11 +181,11 @@
                                 >
                                     <ComboBoxItem
                                         x:Uid="UnblockSlotPin1Item"
-                                        Content="PIN 1 - authentication"
+                                        Content="Basic PIN (PIN 1)"
                                     />
                                     <ComboBoxItem
                                         x:Uid="UnblockSlotPin2Item"
-                                        Content="PIN 2 - qualified signature"
+                                        Content="Signature PIN (PIN 2)"
                                     />
                                 </ComboBox>
                                 <PasswordBox
@@ -288,8 +288,8 @@
                                     x:Name="ActivationPin1Box"
                                     x:Uid="ActivationPin1Box"
                                     AutomationProperties.AutomationId="ActivationPin1Box"
-                                    AutomationProperties.Name="New PIN 1"
-                                    Header="New PIN 1"
+                                    AutomationProperties.Name="New basic PIN (PIN 1)"
+                                    Header="New basic PIN (PIN 1)"
                                     MaxLength="12"
                                     PasswordRevealMode="Peek"
                                     PasswordChanged="ActivationEntry_Changed"
@@ -312,8 +312,8 @@
                                     x:Name="ActivationPin1ConfirmationBox"
                                     x:Uid="ActivationPin1ConfirmationBox"
                                     AutomationProperties.AutomationId="ActivationPin1ConfirmationBox"
-                                    AutomationProperties.Name="Confirm new PIN 1"
-                                    Header="Confirm new PIN 1"
+                                    AutomationProperties.Name="Confirm new basic PIN (PIN 1)"
+                                    Header="Confirm new basic PIN (PIN 1)"
                                     MaxLength="12"
                                     PasswordRevealMode="Peek"
                                     PasswordChanged="ActivationEntry_Changed"
@@ -336,8 +336,8 @@
                                     x:Name="ActivationPin2Box"
                                     x:Uid="ActivationPin2Box"
                                     AutomationProperties.AutomationId="ActivationPin2Box"
-                                    AutomationProperties.Name="New PIN 2"
-                                    Header="New PIN 2"
+                                    AutomationProperties.Name="New signature PIN (PIN 2)"
+                                    Header="New signature PIN (PIN 2)"
                                     MaxLength="12"
                                     PasswordRevealMode="Peek"
                                     PasswordChanged="ActivationEntry_Changed"
@@ -360,8 +360,8 @@
                                     x:Name="ActivationPin2ConfirmationBox"
                                     x:Uid="ActivationPin2ConfirmationBox"
                                     AutomationProperties.AutomationId="ActivationPin2ConfirmationBox"
-                                    AutomationProperties.Name="Confirm new PIN 2"
-                                    Header="Confirm new PIN 2"
+                                    AutomationProperties.Name="Confirm new signature PIN (PIN 2)"
+                                    Header="Confirm new signature PIN (PIN 2)"
                                     MaxLength="12"
                                     PasswordRevealMode="Peek"
                                     PasswordChanged="ActivationEntry_Changed"

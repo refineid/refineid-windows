@@ -80,8 +80,8 @@
                             x:Name="PinBox"
                             x:Uid="PinBox"
                             AutomationProperties.AutomationId="PinBox"
-                            AutomationProperties.Name="Signing PIN (PIN 2)"
-                            Header="Signing PIN (PIN 2)"
+                            AutomationProperties.Name="Signature PIN (PIN 2)"
+                            Header="Signature PIN (PIN 2)"
                             MaxLength="12"
                             PasswordRevealMode="Hidden"
                         />
