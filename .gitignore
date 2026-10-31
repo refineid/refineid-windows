@@ -31,3 +31,6 @@ WHATSUP.md
 
 # Python bytecode caches
 __pycache__/
+
+# Packaged app output of a local publish
+apps/RefineID-winui/dist/
