@@ -46,7 +46,7 @@ public partial class App : Application
         MainWindow = new MainWindow();
         MainWindow.Activate();
 #if DEBUG
-        DevErrorWindow.Start();
+        DevErrorWindow.Start(MainWindow.AppWindow);
 #endif
     }
 }
