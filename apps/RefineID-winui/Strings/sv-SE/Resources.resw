@@ -361,4 +361,16 @@
   <data name="ContactlessAccessNumber" xml:space="preserve">
     <value>Aktivera kontaktlös användning</value>
   </data>
+  <data name="AccessNumberDialog.Title" xml:space="preserve">
+    <value>Kontaktlös (NFC)</value>
+  </data>
+  <data name="AccessNumberDialog.CloseButtonText" xml:space="preserve">
+    <value>Avbryt</value>
+  </data>
+  <data name="AccessNumberBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Kortets åtkomstkod (CAN)</value>
+  </data>
+  <data name="AccessNumberWaitRing.AutomationProperties.Name" xml:space="preserve">
+    <value>Åtkomstkoden kontrolleras</value>
+  </data>
 </root>

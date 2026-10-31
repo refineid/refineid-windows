@@ -232,7 +232,7 @@ fn inspected_contactless(
     let pace_session = match run_pace_with_can(&mut transport, can) {
         Ok(session) => session,
         Err(error) => {
-            let pace_error = CardPinError::Transport(format!("contactless PACE failed: {error}"));
+            let pace_error = CardPinError::AccessNumberRejected(format!("{error}"));
             transport.reset().map_err(|reset_error| {
                 CardPinError::Transport(format!(
                     "contactless PACE failed: {error}; card power reset failed: {reset_error}"

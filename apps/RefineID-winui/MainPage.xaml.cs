@@ -409,6 +409,7 @@ internal sealed partial class MainPage : Page
         this.inspectedReaders = null;
 
         string? targetReader = null;
+        string? promptReader = null;
         try
         {
             // Prefer the last selected reader if still present.
@@ -456,16 +457,58 @@ internal sealed partial class MainPage : Page
             this.unactivatedSerial = null;
             this.ShowAccessNumberNeeded(targetReader);
             this.inspectedReaders = readers;
+            promptReader = targetReader;
         }
         catch (NativeRappException)
         {
+            // A card that cannot be read now is asked again when the
+            // reader list changes, as when it is lifted and put back, not
+            // every tick.
             this.unactivatedSerial = null;
             this.UpdateLocalCardDisconnected();
+            this.inspectedReaders = readers;
         }
         catch (JsonException)
         {
             this.unactivatedSerial = null;
             this.UpdateLocalCardDisconnected();
+            this.inspectedReaders = readers;
+        }
+
+        if (promptReader is string reader)
+        {
+            await this.PromptAccessNumberAsync(reader).ConfigureAwait(true);
+        }
+    }
+
+    /// <summary>
+    /// Asks for the card's access number as soon as a contactless card is
+    /// seen without one, while this page is the one shown and no dialog
+    /// is open over it. A proved number has the card read at once; a
+    /// cancelled ask leaves the identity row as the way back in.
+    /// </summary>
+    private async Task PromptAccessNumberAsync(string reader)
+    {
+        if (this.pairing || !ReferenceEquals(this.Frame.Content, this))
+        {
+            return;
+        }
+
+        var dialog = new AccessNumberDialog(reader) { XamlRoot = this.XamlRoot };
+        this.pairing = true;
+        try
+        {
+            _ = await dialog.ShowAsync();
+        }
+        finally
+        {
+            this.pairing = false;
+        }
+
+        if (dialog.Primed)
+        {
+            this.inspectedReaders = null;
+            await this.InspectLocalCardOnChangeAsync().ConfigureAwait(true);
         }
     }
 

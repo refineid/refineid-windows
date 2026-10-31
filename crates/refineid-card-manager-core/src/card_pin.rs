@@ -192,6 +192,10 @@ pub enum CardPinError {
     /// SELECT (cert read, EF.TokenInfo read, ...). Tier 0 `String`
     /// -- presentational rendering of the upstream error.
     Transport(String),
+    /// PACE refused the access number: the card on the contactless slot
+    /// is not the one the stored CAN was proved on, or the CAN was typed
+    /// wrong. The card was power-reset so the next attempt starts clean.
+    AccessNumberRejected(String),
     /// `card activate` only: the activation PIN length the
     /// operator entered doesn't match what the classified card
     /// generation requires. Reported *before* any modify APDU,
@@ -273,6 +277,7 @@ impl fmt::Display for CardPinError {
             Self::PinPolicy(r) => write!(f, "PIN / PUK rejected locally: {r}"),
             Self::Pkcs15Select(s) => write!(f, "SELECT PKCS#15 app: {s}"),
             Self::Transport(s) => write!(f, "transport: {s}"),
+            Self::AccessNumberRejected(s) => write!(f, "access number rejected: {s}"),
             Self::ActivationLengthMismatch {
                 generation,
                 expected,

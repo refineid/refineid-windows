@@ -682,9 +682,19 @@ fn inspect_over_contactless(
         return Err(contact_failure());
     };
     match read_can(&atr) {
+        // A stored CAN the card refuses belongs to another card of the same
+        // family, or was typed wrong: priming again replaces it.
         Ok(Some(can)) => service::inspect_contactless(Some(filter), can)
             .map(CardSnapshotDto::from)
-            .map_err(|error| ApiFailure::new("card_inspection_failed", error.to_string())),
+            .map_err(|error| match error {
+                refineid_card_manager_core::card_pin::CardPinError::AccessNumberRejected(_) => {
+                    ApiFailure::new(
+                        "access_number_required",
+                        "The stored access number does not open this card; enter the card's own.",
+                    )
+                }
+                other => ApiFailure::new("card_inspection_failed", other.to_string()),
+            }),
         Ok(None) => Err(ApiFailure::new(
             "access_number_required",
             "The card on the contactless reader needs its access number once.",

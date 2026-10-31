@@ -361,4 +361,16 @@
   <data name="ContactlessAccessNumber" xml:space="preserve">
     <value>Enable contactless use</value>
   </data>
+  <data name="AccessNumberDialog.Title" xml:space="preserve">
+    <value>Contactless (NFC)</value>
+  </data>
+  <data name="AccessNumberDialog.CloseButtonText" xml:space="preserve">
+    <value>Cancel</value>
+  </data>
+  <data name="AccessNumberBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Card access number (CAN)</value>
+  </data>
+  <data name="AccessNumberWaitRing.AutomationProperties.Name" xml:space="preserve">
+    <value>Proving the access number</value>
+  </data>
 </root>
