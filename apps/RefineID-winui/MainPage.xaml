@@ -79,7 +79,7 @@
                         Click="Sign_Click"
                         Header="Sign"
                         IsClickEnabled="True"
-                        IsEnabled="False"
+                        Visibility="Collapsed"
                     >
                         <controls:SettingsCard.HeaderIcon>
                             <FontIcon Glyph="&#xE70F;" />

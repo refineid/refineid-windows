@@ -444,7 +444,11 @@ internal sealed partial class MainPage : Page
         // no pairing dialog is open over it. A card first seen from another
         // page is remembered too, so a return here does not send the holder
         // back to the page they just left.
-        this.SignCard.IsEnabled = !snapshot.LooksUnactivated;
+        // Sign is offered only while a card can sign; a card that waits for
+        // its activation cannot, and the entry is absent rather than grey.
+        this.SignCard.Visibility = snapshot.LooksUnactivated
+            ? Visibility.Collapsed
+            : Visibility.Visible;
         if (snapshot.LooksUnactivated)
         {
             bool firstSight = !string.Equals(
@@ -483,7 +487,7 @@ internal sealed partial class MainPage : Page
             this.HolderText.Visibility = Visibility.Collapsed;
             this.ConnectRemoteReaderButton.Visibility = Visibility.Visible;
             this.ForgetIdentityButton.Visibility = this.ForgetVisibility();
-            this.SignCard.IsEnabled = false;
+            this.SignCard.Visibility = Visibility.Collapsed;
         }
         else
         {
@@ -491,7 +495,7 @@ internal sealed partial class MainPage : Page
             this.HolderText.Visibility = Visibility.Visible;
             this.ConnectRemoteReaderButton.Visibility = Visibility.Collapsed;
             this.ForgetIdentityButton.Visibility = Visibility.Visible;
-            this.SignCard.IsEnabled = true;
+            this.SignCard.Visibility = Visibility.Visible;
         }
     }
 
