@@ -279,7 +279,7 @@ internal sealed partial class CardPage : Page
         // code's length, so the button follows the hint.
         bool lengthKnown = inspected.ActivationCodeLength is int;
         this.ActivationHintText.Text = inspected.ActivationCodeLength is int length
-            ? $"{length}-digit activation code from letter."
+            ? $"{length}-digit activation code from letter"
             : string.Empty;
         this.ActivateButton.IsEnabled = lengthKnown;
         this.ManagementPanel.IsHitTestVisible = true;

@@ -216,9 +216,10 @@
                             AutomationProperties.Name="Activate a new card"
                             Spacing="10"
                         >
-                            <!--  The hint belongs to the heading; the gap
-                                  falls after it, before the fields.  -->
-                            <StackPanel Spacing="2">
+                            <!--  The hint belongs to the heading, and the
+                                  pair stands off from the fields like a
+                                  title.  -->
+                            <StackPanel Margin="0,0,0,10" Spacing="2">
                                 <TextBlock
                                     AutomationProperties.HeadingLevel="Level2"
                                     Style="{StaticResource BodyStrongTextBlockStyle}"
