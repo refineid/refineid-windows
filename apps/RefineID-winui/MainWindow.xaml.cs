@@ -129,13 +129,16 @@ internal sealed partial class MainWindow : Window
     }
 
 #if DEBUG
-    /// <summary>The stamped assembly version, as the development title bar shows it.</summary>
+    /// <summary>
+    /// The stamped assembly version as the development title bar shows it:
+    /// the day, then the time-of-day stamp in parentheses.
+    /// </summary>
     private static string BuildVersionLabel()
     {
         Version? version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
         return version is null
             ? string.Empty
-            : $"{version.Major}.{version.Minor}.{version.Build}.{version.Revision}";
+            : $"{version.Major}.{version.Minor}.{version.Build} ({version.Revision})";
     }
 #endif
 

@@ -34,3 +34,4 @@ __pycache__/
 
 # Packaged app output of a local publish
 apps/RefineID-winui/dist/
+apps/RefineID-winui/BundleArtifacts/
