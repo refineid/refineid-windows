@@ -663,7 +663,13 @@ impl ReaderBackend for PcscBackend {
                         ));
                     };
                     let event = state.event_state();
-                    event.contains(State::PRESENT) && !event.contains(State::EMPTY)
+                    // A slot whose card answers nothing (a dual reader's
+                    // empty SAM slot reports PRESENT | MUTE) holds no card
+                    // anyone can open; counting it present had every poll
+                    // try it and log the refusal.
+                    event.contains(State::PRESENT)
+                        && !event.contains(State::EMPTY)
+                        && !event.contains(State::MUTE)
                 }
                 Err(e) => return Err(e.into()),
             };
