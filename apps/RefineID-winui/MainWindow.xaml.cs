@@ -93,6 +93,11 @@ internal sealed partial class MainWindow : Window
         this.InitializeComponent();
         this.ExtendsContentIntoTitleBar = true;
         this.SetTitleBar(this.AppTitleBar);
+#if DEBUG
+        // A development build names its version on every page, in the
+        // title bar; a release build's title bar carries the name alone.
+        this.AppTitleBar.Subtitle = BuildVersionLabel();
+#endif
         this.AppWindow.SetIcon("Assets/AppIcon.ico");
         this.ApplyInitialPlacement();
         this.Activated += this.OnFirstActivated;
@@ -122,6 +127,20 @@ internal sealed partial class MainWindow : Window
         this.Closed += (sender, args) => DevErrorWindow.Shutdown();
 #endif
     }
+
+#if DEBUG
+    /// <summary>
+    /// The stamped assembly version as the development title bar shows it:
+    /// the day, then the time-of-day stamp in parentheses.
+    /// </summary>
+    private static string BuildVersionLabel()
+    {
+        Version? version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+        return version is null
+            ? string.Empty
+            : $"{version.Major}.{version.Minor}.{version.Build} ({version.Revision})";
+    }
+#endif
 
     /// <summary>The title bar shows Back exactly when there is a page to go back to.</summary>
     private void OnNavigated(object sender, NavigationEventArgs args)

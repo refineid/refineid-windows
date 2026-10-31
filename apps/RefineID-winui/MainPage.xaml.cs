@@ -52,6 +52,16 @@ internal sealed partial class MainPage : Page
     private IReadOnlyList<string>? inspectedReaders;
     private bool checkingLocalCard;
 
+    /// <summary>
+    /// The serial of the last unactivated card seen, so the PIN page opens
+    /// once per card and a return to this page does not open it again.
+    /// Forgotten when no reader holds a card or the card cannot be read.
+    /// </summary>
+    private string? unactivatedSerial;
+
+    /// <summary>Whether the pairing dialog is open over this page.</summary>
+    private bool pairing;
+
     public MainPage()
     {
         this.InitializeComponent();
@@ -77,14 +87,26 @@ internal sealed partial class MainPage : Page
     /// </summary>
     private async void OnLoaded(object sender, RoutedEventArgs args)
     {
-        this.CheckLocalCard();
-        this.cardPollTimer.Start();
+        // The PIN page may have changed the card, so the card is inspected
+        // again on every arrival, not only when the reader list changes.
+        this.inspectedReaders = null;
         if (this.started)
         {
+            this.cardPollTimer.Start();
+            await this.CheckLocalCardAsync().ConfigureAwait(true);
             return;
         }
 
         this.started = true;
+        // The first check decides which page opens; this one stays hidden
+        // until it has, and stays hidden when the card led elsewhere.
+        await this.CheckLocalCardAsync().ConfigureAwait(true);
+        if (ReferenceEquals(this.Frame.Content, this))
+        {
+            this.ContentRoot.Visibility = Visibility.Visible;
+        }
+
+        this.cardPollTimer.Start();
         // Once per run: disable the inbound rule earlier releases opened for
         // the phone, when that needs no administrator rights.
         _ = Task.Run(FirewallService.DisableLegacyRule);
@@ -101,6 +123,16 @@ internal sealed partial class MainPage : Page
 
     /// <summary>The settings page polls the readers itself while it is shown.</summary>
     private void OnUnloaded(object sender, RoutedEventArgs args) => this.cardPollTimer.Stop();
+
+    /// <summary>A return to this page shows it at once; only the first arrival waits.</summary>
+    protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs args)
+    {
+        base.OnNavigatedTo(args);
+        if (this.started)
+        {
+            this.ContentRoot.Visibility = Visibility.Visible;
+        }
+    }
 
     private void Pins_Click(object sender, RoutedEventArgs args) =>
         this.Frame.Navigate(typeof(CardPage));
@@ -174,7 +206,15 @@ internal sealed partial class MainPage : Page
         {
             XamlRoot = this.XamlRoot,
         };
-        _ = await dialog.ShowAsync();
+        this.pairing = true;
+        try
+        {
+            _ = await dialog.ShowAsync();
+        }
+        finally
+        {
+            this.pairing = false;
+        }
 
         if (dialog.PairedHandle is ulong pairedHandle)
         {
@@ -271,7 +311,7 @@ internal sealed partial class MainPage : Page
             this.SetBusy(false);
         }
 
-        this.CheckLocalCard();
+        await this.CheckLocalCardAsync().ConfigureAwait(true);
     }
 
     private async void ShowDriverLaneHintIfNeeded()
@@ -281,10 +321,7 @@ internal sealed partial class MainPage : Page
 
         if (support.State == "driver_not_installed")
         {
-            this.ShowStatus(
-                InfoBarSeverity.Informational,
-                "Local-card functions need the FINEID drivers. Phone-powered signing via Remote Reader still works."
-            );
+            this.ShowStatus(InfoBarSeverity.Informational, Strings.Get("DriverLaneHint"));
         }
     }
 
@@ -293,7 +330,9 @@ internal sealed partial class MainPage : Page
     /// card is inspected only when that list changes, so an idle window
     /// leaves the reader alone.
     /// </summary>
-    private async void CheckLocalCard()
+    private async void CheckLocalCard() => await this.CheckLocalCardAsync().ConfigureAwait(true);
+
+    private async Task CheckLocalCardAsync()
     {
         if (this.checkingLocalCard)
         {
@@ -321,6 +360,7 @@ internal sealed partial class MainPage : Page
         catch (NativeRappException)
         {
             this.inspectedReaders = null;
+            this.unactivatedSerial = null;
             this.PinsCard.Visibility = Visibility.Collapsed;
             this.UpdateLocalCardDisconnected();
             return;
@@ -337,6 +377,11 @@ internal sealed partial class MainPage : Page
         // The PIN page works on a reader attached to this computer, with or
         // without a card in it, so the entry follows the reader list alone.
         this.PinsCard.Visibility = readers.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        if (readers.Count == 0)
+        {
+            this.unactivatedSerial = null;
+        }
+
         // Recorded once the inspection is done, so a failed one is tried
         // again on the next tick.
         this.inspectedReaders = null;
@@ -381,17 +426,42 @@ internal sealed partial class MainPage : Page
         }
         catch (NativeRappException)
         {
+            this.unactivatedSerial = null;
             this.UpdateLocalCardDisconnected();
         }
         catch (JsonException)
         {
+            this.unactivatedSerial = null;
             this.UpdateLocalCardDisconnected();
         }
     }
 
     private void UpdateLocalCardUi(LocalCardSnapshot snapshot)
     {
-        this.SignCard.IsEnabled = true;
+        // A card that still waits for its activation cannot sign or
+        // authenticate, so the activation flow opens on the PIN page the
+        // first time the card is seen, while this page is the one shown and
+        // no pairing dialog is open over it. A card first seen from another
+        // page is remembered too, so a return here does not send the holder
+        // back to the page they just left.
+        // Sign is offered only while a card can sign; a card that waits for
+        // its activation cannot, and the entry is absent rather than grey.
+        this.SignCard.Visibility = snapshot.LooksUnactivated
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+        if (snapshot.LooksUnactivated)
+        {
+            bool firstSight = !string.Equals(
+                snapshot.Serial,
+                this.unactivatedSerial,
+                StringComparison.Ordinal
+            );
+            this.unactivatedSerial = snapshot.Serial;
+            if (firstSight && !this.pairing && ReferenceEquals(this.Frame.Content, this))
+            {
+                this.Frame.Navigate(typeof(CardPage), snapshot.Reader);
+            }
+        }
 
         if (!string.IsNullOrWhiteSpace(snapshot.Person))
         {
@@ -417,7 +487,7 @@ internal sealed partial class MainPage : Page
             this.HolderText.Visibility = Visibility.Collapsed;
             this.ConnectRemoteReaderButton.Visibility = Visibility.Visible;
             this.ForgetIdentityButton.Visibility = this.ForgetVisibility();
-            this.SignCard.IsEnabled = false;
+            this.SignCard.Visibility = Visibility.Collapsed;
         }
         else
         {
@@ -425,7 +495,7 @@ internal sealed partial class MainPage : Page
             this.HolderText.Visibility = Visibility.Visible;
             this.ConnectRemoteReaderButton.Visibility = Visibility.Collapsed;
             this.ForgetIdentityButton.Visibility = Visibility.Visible;
-            this.SignCard.IsEnabled = true;
+            this.SignCard.Visibility = Visibility.Visible;
         }
     }
 

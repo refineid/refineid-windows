@@ -16,6 +16,7 @@
 -->
 <ContentDialog
     x:Class="RefineID.PairingDialog"
+    x:Uid="PairingDialog"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
@@ -29,6 +30,7 @@
     <StackPanel MinWidth="320" Spacing="16">
         <TextBox
             x:Name="CodeBox"
+            x:Uid="CodeBox"
             HorizontalAlignment="Center"
             AutomationProperties.AutomationId="CodeBox"
             AutomationProperties.Name="Pairing code"
@@ -53,6 +55,7 @@
 
         <ProgressRing
             x:Name="WaitRing"
+            x:Uid="WaitRing"
             Width="28"
             Height="28"
             HorizontalAlignment="Center"

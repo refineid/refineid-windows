@@ -110,6 +110,33 @@ internal sealed class LocalCardSnapshot
     [JsonPropertyName("activation_code_length")]
     public int? ActivationCodeLength { get; init; }
 
+    /// <summary>
+    /// What the card service's counter-safe probes say about activation:
+    /// the card still waits for it, it has been done, or nothing decided
+    /// it. A missing or unknown value decides nothing either.
+    /// </summary>
+    [JsonPropertyName("activation_state")]
+    public string ActivationState { get; init; } = InconclusiveState;
+
+    /// <summary>The probes show a card that still waits for its activation.</summary>
+    private const string UnactivatedState = "unactivated";
+
+    /// <summary>The probes show a card that was activated.</summary>
+    private const string ActivatedState = "activated";
+
+    /// <summary>The probes decided nothing.</summary>
+    private const string InconclusiveState = "inconclusive";
+
+    /// <summary>Whether the probes show a card that still waits for its activation.</summary>
+    [JsonIgnore]
+    public bool LooksUnactivated =>
+        string.Equals(this.ActivationState, UnactivatedState, StringComparison.Ordinal);
+
+    /// <summary>Whether the probes show a card that was activated.</summary>
+    [JsonIgnore]
+    public bool LooksActivated =>
+        string.Equals(this.ActivationState, ActivatedState, StringComparison.Ordinal);
+
     [JsonPropertyName("pin1")]
     public CredentialStatus? Pin1 { get; init; }
 

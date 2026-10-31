@@ -25,7 +25,14 @@
     mc:Ignorable="d"
 >
     <Grid>
-        <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <!--  Hidden until the first card check, so a card that waits for
+              its activation opens on its own page with no flash of this
+              one.  -->
+        <ScrollViewer
+            x:Name="ContentRoot"
+            VerticalScrollBarVisibility="Auto"
+            Visibility="Collapsed"
+        >
             <StackPanel
                 MaxWidth="920"
                 Padding="32,20,32,40"
@@ -42,6 +49,7 @@
                 <!--  Document  -->
                 <StackPanel Spacing="4">
                     <TextBlock
+                        x:Uid="DocumentHeading"
                         Margin="4,0,0,0"
                         AutomationProperties.HeadingLevel="Level2"
                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
@@ -50,6 +58,7 @@
                     />
                     <controls:SettingsCard
                         x:Name="VerifyCard"
+                        x:Uid="VerifyCard"
                         AutomationProperties.AutomationId="VerifyCard"
                         AutomationProperties.HelpText="Verify a signed document using the card"
                         AutomationProperties.Name="Verify document"
@@ -63,13 +72,14 @@
                     </controls:SettingsCard>
                     <controls:SettingsCard
                         x:Name="SignCard"
+                        x:Uid="SignCard"
                         AutomationProperties.AutomationId="SignCard"
                         AutomationProperties.HelpText="Sign a document with the card"
                         AutomationProperties.Name="Sign document"
                         Click="Sign_Click"
                         Header="Sign"
                         IsClickEnabled="True"
-                        IsEnabled="False"
+                        Visibility="Collapsed"
                     >
                         <controls:SettingsCard.HeaderIcon>
                             <FontIcon Glyph="&#xE70F;" />
@@ -79,6 +89,7 @@
                 <!--  Identity  -->
                 <StackPanel Spacing="4">
                     <TextBlock
+                        x:Uid="IdentityHeading"
                         Margin="4,0,0,0"
                         AutomationProperties.HeadingLevel="Level2"
                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
@@ -87,6 +98,7 @@
                     />
                     <controls:SettingsCard
                         x:Name="PersonCard"
+                        x:Uid="PersonCard"
                         AutomationProperties.AutomationId="PersonCard"
                         AutomationProperties.Name="Card holder identity"
                         Header="Person"
@@ -101,6 +113,7 @@
                         >
                             <HyperlinkButton
                                 x:Name="ConnectRemoteReaderButton"
+                                x:Uid="ConnectRemoteReaderButton"
                                 AutomationProperties.AutomationId="ConnectRemoteReaderButton"
                                 AutomationProperties.HelpText="Pair with mobile device running RefineID remote reader"
                                 AutomationProperties.Name="Connect remote reader"
@@ -109,6 +122,7 @@
                             />
                             <TextBlock
                                 x:Name="HolderText"
+                                x:Uid="HolderText"
                                 VerticalAlignment="Center"
                                 AutomationProperties.AutomationId="HolderText"
                                 AutomationProperties.Name="Card holder name"
@@ -120,6 +134,7 @@
                                    forgets at once.  -->
                             <Button
                                 x:Name="ForgetIdentityButton"
+                                x:Uid="ForgetIdentityButton"
                                 VerticalAlignment="Center"
                                 AutomationProperties.AutomationId="ForgetIdentityButton"
                                 AutomationProperties.Name="Forget"
@@ -140,6 +155,7 @@
                       connected.  -->
                 <controls:SettingsCard
                     x:Name="PinsCard"
+                    x:Uid="PinsCard"
                     AutomationProperties.AutomationId="PinsCard"
                     AutomationProperties.HelpText="Change or reset the PINs of the card in the reader"
                     AutomationProperties.Name="PINs"
@@ -171,6 +187,7 @@
             Visibility="Collapsed"
         >
             <ProgressRing
+                x:Uid="MainPageBusyRing"
                 Width="48"
                 Height="48"
                 AutomationProperties.AutomationId="BusyRing"

@@ -28,7 +28,7 @@ using Windows.ApplicationModel.DataTransfer;
 using Windows.Graphics;
 
 /// <summary>
-/// One entry of the Errors window: when it was last written, by which
+/// One entry of the Log window: when it was last written, by which
 /// program, what, and how many times in a row.
 /// </summary>
 internal sealed record DevErrorEntry(
@@ -51,7 +51,7 @@ internal sealed record DevErrorEntry(
 }
 
 /// <summary>
-/// The development build's Errors window: every RefineID error the Windows
+/// The development build's Log window: every RefineID error the Windows
 /// Event Log holds, from this app and from every other process that runs
 /// RefineID code, newest first, as they arrive.
 /// </summary>
@@ -67,7 +67,7 @@ internal sealed record DevErrorEntry(
 internal sealed partial class DevErrorWindow : Window
 {
     /// <summary>The window's title.</summary>
-    private const string WindowTitle = "Errors";
+    private const string WindowTitle = "RefineID - Log";
 
     /// <summary>How many entries the window keeps; the oldest go first.</summary>
     private const int Capacity = 50;
@@ -85,7 +85,14 @@ internal sealed partial class DevErrorWindow : Window
     private const string ClearedFileName = "dev-errors-cleared";
 
     /// <summary>The window's size when it first opens, in pixels.</summary>
-    private static readonly SizeInt32 InitialSize = new(560, 320);
+    private static readonly SizeInt32 InitialSize = new(820, 320);
+
+    /// <summary>
+    /// The main window the log sits beside: at its right edge, or its
+    /// left when the right has no room, as tall as it is. The log follows
+    /// it until the developer drags the log somewhere else.
+    /// </summary>
+    private static AppWindow? anchor;
 
     private static DevErrorWindow? shared;
 
@@ -96,6 +103,12 @@ internal sealed partial class DevErrorWindow : Window
     private readonly StackPanel rows = new() { Spacing = 6, Padding = new Thickness(12) };
     private readonly List<DevErrorEntry> entries = [];
     private bool shuttingDown;
+
+    /// <summary>Whether the log still sits where it was put beside the main window.</summary>
+    private bool glued = true;
+
+    /// <summary>Where the log was last put beside the main window.</summary>
+    private PointInt32 gluedPosition;
 
     private DevErrorWindow()
     {
@@ -138,28 +151,109 @@ internal sealed partial class DevErrorWindow : Window
         }
 
         this.AppWindow.Closing += this.OnClosing;
+        this.AppWindow.Changed += this.OnChanged;
     }
 
     /// <summary>
     /// Starts following the Event Log, once per process: the entries since
-    /// the last Clear, then each new one as it is written.
+    /// the last Clear, then each new one as it is written. The log is
+    /// shown beside <paramref name="beside"/>, the main window.
     /// </summary>
-    internal static void Start()
+    internal static void Start(AppWindow beside)
     {
         if (shared is not null)
         {
             return;
         }
 
+        anchor = beside;
         shared = new DevErrorWindow();
+        anchor.Changed += shared.OnAnchorChanged;
         shared.Follow();
+    }
+
+    /// <summary>The main window moved or grew; a glued log goes with it.</summary>
+    private void OnAnchorChanged(AppWindow sender, AppWindowChangedEventArgs args)
+    {
+        if (this.glued && (args.DidPositionChange || args.DidSizeChange))
+        {
+            this.SitBeside();
+        }
+    }
+
+    /// <summary>A move the log did not make itself is the developer taking it apart.</summary>
+    private void OnChanged(AppWindow sender, AppWindowChangedEventArgs args)
+    {
+        if (
+            args.DidPositionChange
+            && (
+                sender.Position.X != this.gluedPosition.X
+                || sender.Position.Y != this.gluedPosition.Y
+            )
+        )
+        {
+            this.glued = false;
+        }
+    }
+
+    /// <summary>
+    /// Puts the log at the main window's right edge, as tall as the main
+    /// window, or at its left edge when the work area has no room on the
+    /// right.
+    /// </summary>
+    private void SitBeside()
+    {
+        if (anchor is null)
+        {
+            return;
+        }
+
+        RectInt32 work = DisplayArea
+            .GetFromWindowId(anchor.Id, DisplayAreaFallback.Nearest)
+            .WorkArea;
+        int width = this.AppWindow.Size.Width;
+        int right = anchor.Position.X + anchor.Size.Width;
+        int x;
+        if (right + width <= work.X + work.Width)
+        {
+            x = right;
+        }
+        else if (anchor.Position.X - width >= work.X)
+        {
+            x = anchor.Position.X - width;
+        }
+        else
+        {
+            // No room on either side: the log keeps to the work area's
+            // right edge, over the main window's edge if it must.
+            x = work.X + work.Width - width;
+        }
+
+        this.gluedPosition = new PointInt32(x, anchor.Position.Y);
+        this.AppWindow.MoveAndResize(
+            new RectInt32(x, anchor.Position.Y, width, anchor.Size.Height)
+        );
     }
 
     /// <summary>Opens the window for the keyboard.</summary>
     internal static void ShowWindow()
     {
-        Start();
-        shared?.AppWindow.Show(true);
+        if (shared is null)
+        {
+            return;
+        }
+
+        shared.Place();
+        shared.AppWindow.Show(true);
+    }
+
+    /// <summary>A glued log takes its place beside the main window before it shows.</summary>
+    private void Place()
+    {
+        if (this.glued)
+        {
+            this.SitBeside();
+        }
     }
 
     /// <summary>Closes the window for good, as the app ends.</summary>
@@ -274,7 +368,7 @@ internal sealed partial class DevErrorWindow : Window
         }
         catch (EventLogException error)
         {
-            DevErrorLog.Report("Errors window could not read the event log", error);
+            DevErrorLog.Report("Log window could not read the event log", error);
         }
 
         stored.Reverse();
@@ -299,7 +393,7 @@ internal sealed partial class DevErrorWindow : Window
         }
         catch (EventLogException error)
         {
-            DevErrorLog.Report("Errors window could not follow the event log", error);
+            DevErrorLog.Report("Log window could not follow the event log", error);
         }
     }
 
@@ -356,7 +450,7 @@ internal sealed partial class DevErrorWindow : Window
                 {
                     Text = string.Create(
                         CultureInfo.InvariantCulture,
-                        $"{entry.Time.ToLocalTime():HH:mm:ss}  {entry.Program}  "
+                        $"{entry.Time.ToLocalTime():HH:mm:ss}  "
                     ),
                     Foreground = secondary,
                 }
@@ -366,8 +460,12 @@ internal sealed partial class DevErrorWindow : Window
         }
     }
 
-    /// <summary>Brings the window up in front without taking the keyboard.</summary>
-    private void Present() => this.AppWindow.Show(false);
+    /// <summary>Brings the window up beside the main window without taking the keyboard.</summary>
+    private void Present()
+    {
+        this.Place();
+        this.AppWindow.Show(false);
+    }
 
     /// <summary>Puts every entry on the clipboard, one per line and oldest first, as a log reads.</summary>
     private void CopyAll()

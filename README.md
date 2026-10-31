@@ -79,11 +79,12 @@ The PINs entry of `apps/RefineID-winui`, shown while a card reader is
 connected, opens the PIN page, a narrow C# UI over the Rust card-service DLL
 (`refineid_settings_ffi`). It can:
 
-- inspect a card and show counter-safe PIN1, PIN2, and recovery status;
-- change PIN1 or PIN2;
+- inspect a card, counter-safe, to learn what it waits for;
+- change PIN 1 or PIN 2;
 - restore either PIN with the recovery code;
 - activate a new card while binding every modifying command to the inspected
-  reader and card serial; and
+  reader and card serial: a card that still waits for its activation opens
+  the PIN page with the activation section alone as soon as it is seen; and
 - prove and save the printed CAN for the experimental contactless path.
 
 PIN, recovery, and activation values cross the FFI as bounded byte arrays, are
@@ -172,7 +173,7 @@ RefineID process, the app, the agent, the Card Module inside `lsass.exe`,
 browsers and `certutil.exe`, the PKCS#11 module, the document signer and
 the RAPP crates, to the Windows Event Log: Application log, source
 `RefineID`, event and cause by name only (`refineid-dev-errors`). The app
-opens its Errors window when an error arrives; Ctrl+Shift+E or the version
+opens its Log window when an error arrives; Ctrl+Shift+E or the version
 line opens it again. A release build contains no logging at all.
 
 Read the entries from PowerShell:
@@ -284,6 +285,10 @@ provides accessible semantics for screen readers (such as Windows Narrator) and
 serves as assistive technology for autonomous AI agents navigating the desktop
 deterministically. See [doc/accessibility-and-ui-automation.md](doc/accessibility-and-ui-automation.md)
 for architecture details.
+
+The application follows the Windows display language in English, Finnish and
+Swedish, with English as the fallback; the strings are under
+`apps/RefineID-winui/Strings`.
 
 ## Security boundary
 

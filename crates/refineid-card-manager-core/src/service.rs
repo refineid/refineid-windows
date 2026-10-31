@@ -31,8 +31,8 @@ use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
 use refineid_lib_pcsc::{PcscBackend, PcscError};
 
 use crate::card_pin::{
-    ActivateOptions, ActivateReport, CardPinError, ChangePinOptions, ChangePinReport,
-    UnblockPinOptions, UnblockPinReport,
+    ActivateOptions, ActivateReport, ActivationEvidence, CardPinError, ChangePinOptions,
+    ChangePinReport, UnblockPinOptions, UnblockPinReport,
 };
 
 /// Read-only state shown by the Windows settings app.
@@ -50,6 +50,10 @@ pub struct CardSnapshot {
     pub generation: CardGeneration,
     /// Expected activation-code length, when classification succeeded.
     pub activation_code_length: Option<usize>,
+    /// What the counter-safe probes say about the card's activation, so
+    /// the app opens the activation flow only on evidence that the card
+    /// still waits for it.
+    pub activation: ActivationEvidence,
     /// Side-effect-free PIN1 status.
     pub pin1: Option<PinStatus>,
     /// Side-effect-free PIN2 status.
@@ -127,6 +131,7 @@ fn inspected(reader_filter: Option<&ReaderFilter>) -> Result<CardSnapshot, CardP
     let pin1_changed = transport.pin_changed_flag(PinSlot::Pin1).ok().flatten();
     let pin2_changed = transport.pin_changed_flag(PinSlot::Pin2).ok().flatten();
     let activation_code_length = context.expected_activation_pin_length();
+    let activation = crate::card_pin::judge_activation(pin1, context.generation, pin1_changed);
 
     Ok(CardSnapshot {
         reader: context.reader_id.as_str().to_owned(),
@@ -135,6 +140,7 @@ fn inspected(reader_filter: Option<&ReaderFilter>) -> Result<CardSnapshot, CardP
         model: context.model,
         generation: context.generation,
         activation_code_length,
+        activation,
         pin1,
         pin2,
         puk,

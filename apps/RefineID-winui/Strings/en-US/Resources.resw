@@ -1,0 +1,379 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Copyright 2026 Petri Koistinen
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      https://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+<root>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <data name="DocumentHeading.Text" xml:space="preserve">
+    <value>Document</value>
+  </data>
+  <data name="VerifyCard.Header" xml:space="preserve">
+    <value>Verify</value>
+  </data>
+  <data name="VerifyCard.AutomationProperties.Name" xml:space="preserve">
+    <value>Verify document</value>
+  </data>
+  <data name="VerifyCard.AutomationProperties.HelpText" xml:space="preserve">
+    <value>Verify a signed document using the card</value>
+  </data>
+  <data name="SignCard.Header" xml:space="preserve">
+    <value>Sign</value>
+  </data>
+  <data name="SignCard.AutomationProperties.Name" xml:space="preserve">
+    <value>Sign document</value>
+  </data>
+  <data name="SignCard.AutomationProperties.HelpText" xml:space="preserve">
+    <value>Sign a document with the card</value>
+  </data>
+  <data name="IdentityHeading.Text" xml:space="preserve">
+    <value>Identity</value>
+  </data>
+  <data name="PersonCard.Header" xml:space="preserve">
+    <value>Person</value>
+  </data>
+  <data name="PersonCard.AutomationProperties.Name" xml:space="preserve">
+    <value>Card holder identity</value>
+  </data>
+  <data name="ConnectRemoteReaderButton.Content" xml:space="preserve">
+    <value>Connect Remote Reader</value>
+  </data>
+  <data name="ConnectRemoteReaderButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Connect remote reader</value>
+  </data>
+  <data name="ConnectRemoteReaderButton.AutomationProperties.HelpText" xml:space="preserve">
+    <value>Pair with mobile device running RefineID remote reader</value>
+  </data>
+  <data name="HolderText.AutomationProperties.Name" xml:space="preserve">
+    <value>Card holder name</value>
+  </data>
+  <data name="ForgetIdentityButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Forget</value>
+  </data>
+  <data name="ForgetIdentityButton.ToolTipService.ToolTip" xml:space="preserve">
+    <value>Forget</value>
+  </data>
+  <data name="PinsCard.Header" xml:space="preserve">
+    <value>PINs</value>
+  </data>
+  <data name="PinsCard.AutomationProperties.Name" xml:space="preserve">
+    <value>PINs</value>
+  </data>
+  <data name="PinsCard.AutomationProperties.HelpText" xml:space="preserve">
+    <value>Change or reset the PINs of the card in the reader</value>
+  </data>
+  <data name="MainPageBusyRing.AutomationProperties.Name" xml:space="preserve">
+    <value>Loading identity card data</value>
+  </data>
+  <data name="DriverLaneHint" xml:space="preserve">
+    <value>Local-card functions need the FINEID drivers. Phone-powered signing via Remote Reader still works.</value>
+  </data>
+  <data name="PairingDialog.Title" xml:space="preserve">
+    <value>Remote Card</value>
+  </data>
+  <data name="PairingDialog.PrimaryButtonText" xml:space="preserve">
+    <value>Pair</value>
+  </data>
+  <data name="PairingDialog.CloseButtonText" xml:space="preserve">
+    <value>Cancel</value>
+  </data>
+  <data name="CodeBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Pairing code</value>
+  </data>
+  <data name="CodeBox.PlaceholderText" xml:space="preserve">
+    <value>Code</value>
+  </data>
+  <data name="WaitRing.AutomationProperties.Name" xml:space="preserve">
+    <value>Pairing</value>
+  </data>
+  <data name="PairingDenied" xml:space="preserve">
+    <value>The phone denied the pairing.</value>
+  </data>
+  <data name="PairingCancelled" xml:space="preserve">
+    <value>The pairing was cancelled.</value>
+  </data>
+  <data name="PairingFailed" xml:space="preserve">
+    <value>The pairing attempt failed.</value>
+  </data>
+  <data name="ReaderComboBox.Header" xml:space="preserve">
+    <value>Card reader</value>
+  </data>
+  <data name="ReaderComboBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Card reader</value>
+  </data>
+  <data name="NfcExpander.Header" xml:space="preserve">
+    <value>Contactless NFC</value>
+  </data>
+  <data name="NfcExpander.AutomationProperties.Name" xml:space="preserve">
+    <value>Contactless NFC</value>
+  </data>
+  <data name="CanBox.Header" xml:space="preserve">
+    <value>Card access number (CAN)</value>
+  </data>
+  <data name="CanBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Card access number (CAN)</value>
+  </data>
+  <data name="EnableNfcButton.Content" xml:space="preserve">
+    <value>Enable NFC access</value>
+  </data>
+  <data name="EnableNfcButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Enable NFC access</value>
+  </data>
+  <data name="ChangePinExpander.Header" xml:space="preserve">
+    <value>Change PIN</value>
+  </data>
+  <data name="ChangePinExpander.AutomationProperties.Name" xml:space="preserve">
+    <value>Change PIN</value>
+  </data>
+  <data name="ChangeSlotBox.Header" xml:space="preserve">
+    <value>Credential</value>
+  </data>
+  <data name="ChangeSlotBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Credential to change</value>
+  </data>
+  <data name="ChangeSlotPin1Item.Content" xml:space="preserve">
+    <value>Basic PIN (PIN 1)</value>
+  </data>
+  <data name="ChangeSlotPin2Item.Content" xml:space="preserve">
+    <value>Signature PIN (PIN 2)</value>
+  </data>
+  <data name="CurrentPinBox.Header" xml:space="preserve">
+    <value>Current PIN</value>
+  </data>
+  <data name="CurrentPinBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Current PIN</value>
+  </data>
+  <data name="NewPinBox.Header" xml:space="preserve">
+    <value>New PIN</value>
+  </data>
+  <data name="NewPinBox.AutomationProperties.Name" xml:space="preserve">
+    <value>New PIN</value>
+  </data>
+  <data name="NewPinConfirmationBox.Header" xml:space="preserve">
+    <value>Confirm new PIN</value>
+  </data>
+  <data name="NewPinConfirmationBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Confirm new PIN</value>
+  </data>
+  <data name="ChangePinButton.Content" xml:space="preserve">
+    <value>Change PIN</value>
+  </data>
+  <data name="ChangePinButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Change PIN</value>
+  </data>
+  <data name="UnblockPinExpander.Header" xml:space="preserve">
+    <value>Reset PIN (PUK)</value>
+  </data>
+  <data name="UnblockPinExpander.AutomationProperties.Name" xml:space="preserve">
+    <value>Reset PIN (PUK)</value>
+  </data>
+  <data name="UnblockSlotBox.Header" xml:space="preserve">
+    <value>Credential</value>
+  </data>
+  <data name="UnblockSlotBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Credential to reset</value>
+  </data>
+  <data name="UnblockSlotPin1Item.Content" xml:space="preserve">
+    <value>Basic PIN (PIN 1)</value>
+  </data>
+  <data name="UnblockSlotPin2Item.Content" xml:space="preserve">
+    <value>Signature PIN (PIN 2)</value>
+  </data>
+  <data name="PukBox.Header" xml:space="preserve">
+    <value>Recovery code (PUK)</value>
+  </data>
+  <data name="PukBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Recovery code (PUK)</value>
+  </data>
+  <data name="UnblockNewPinBox.Header" xml:space="preserve">
+    <value>New PIN</value>
+  </data>
+  <data name="UnblockNewPinBox.AutomationProperties.Name" xml:space="preserve">
+    <value>New PIN for recovery</value>
+  </data>
+  <data name="UnblockConfirmationBox.Header" xml:space="preserve">
+    <value>Confirm new PIN</value>
+  </data>
+  <data name="UnblockConfirmationBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Confirm new PIN for recovery</value>
+  </data>
+  <data name="ResetPinButton.Content" xml:space="preserve">
+    <value>Reset PIN</value>
+  </data>
+  <data name="ResetPinButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Reset PIN</value>
+  </data>
+  <data name="ActivationPanel.AutomationProperties.Name" xml:space="preserve">
+    <value>Activate a new card</value>
+  </data>
+  <data name="ActivationHeading.Text" xml:space="preserve">
+    <value>Activate a new card</value>
+  </data>
+  <data name="ActivationCodeBox.Header" xml:space="preserve">
+    <value>Activation code from letter</value>
+  </data>
+  <data name="ActivationCodeBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Activation code from letter</value>
+  </data>
+  <data name="ActivationPin1Box.Header" xml:space="preserve">
+    <value>New basic PIN (PIN 1)</value>
+  </data>
+  <data name="ActivationPin1Box.AutomationProperties.Name" xml:space="preserve">
+    <value>New basic PIN (PIN 1)</value>
+  </data>
+  <data name="ActivationPin1ConfirmationBox.Header" xml:space="preserve">
+    <value>Repeat basic PIN</value>
+  </data>
+  <data name="ActivationPin1ConfirmationBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Repeat basic PIN</value>
+  </data>
+  <data name="ActivationPin2Box.Header" xml:space="preserve">
+    <value>New signature PIN (PIN 2)</value>
+  </data>
+  <data name="ActivationPin2Box.AutomationProperties.Name" xml:space="preserve">
+    <value>New signature PIN (PIN 2)</value>
+  </data>
+  <data name="ActivationPin2ConfirmationBox.Header" xml:space="preserve">
+    <value>Repeat signature PIN</value>
+  </data>
+  <data name="ActivationPin2ConfirmationBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Repeat signature PIN</value>
+  </data>
+  <data name="ActivateButton.Content" xml:space="preserve">
+    <value>Activate identity card</value>
+  </data>
+  <data name="ActivateButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Activate identity card</value>
+  </data>
+  <data name="CardPageBusyRing.AutomationProperties.Name" xml:space="preserve">
+    <value>Working with the card</value>
+  </data>
+  <data name="SelectReaderWithCardFirst" xml:space="preserve">
+    <value>Select a reader with a card first.</value>
+  </data>
+  <data name="NfcAccessEnabled" xml:space="preserve">
+    <value>Contactless use is on.</value>
+  </data>
+  <data name="CardServiceResponseUnreadable" xml:space="preserve">
+    <value>The card service response could not be read.</value>
+  </data>
+  <data name="InsertCardInContactReaderFirst" xml:space="preserve">
+    <value>Insert the card in a contact reader first.</value>
+  </data>
+  <data name="FileBox.Header" xml:space="preserve">
+    <value>File</value>
+  </data>
+  <data name="FileBox.AutomationProperties.Name" xml:space="preserve">
+    <value>File</value>
+  </data>
+  <data name="ChooseFileButton.Content" xml:space="preserve">
+    <value>Choose</value>
+  </data>
+  <data name="ChooseFileButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Choose file</value>
+  </data>
+  <data name="FormatBox.Header" xml:space="preserve">
+    <value>Format</value>
+  </data>
+  <data name="FormatBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Signature format</value>
+  </data>
+  <data name="FormatPdfItem.Content" xml:space="preserve">
+    <value>PDF signature</value>
+  </data>
+  <data name="FormatAsicEItem.Content" xml:space="preserve">
+    <value>ASiC-E container</value>
+  </data>
+  <data name="PinBox.Header" xml:space="preserve">
+    <value>Signature PIN (PIN 2)</value>
+  </data>
+  <data name="PinBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Signature PIN (PIN 2)</value>
+  </data>
+  <data name="ReasonBox.Header" xml:space="preserve">
+    <value>Reason</value>
+  </data>
+  <data name="ReasonBox.AutomationProperties.Name" xml:space="preserve">
+    <value>Reason</value>
+  </data>
+  <data name="SignButton.Content" xml:space="preserve">
+    <value>Sign</value>
+  </data>
+  <data name="SignButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Sign</value>
+  </data>
+  <data name="VerifyButton.Content" xml:space="preserve">
+    <value>Verify</value>
+  </data>
+  <data name="VerifyButton.AutomationProperties.Name" xml:space="preserve">
+    <value>Verify</value>
+  </data>
+  <data name="DocumentSignTitle" xml:space="preserve">
+    <value>Sign</value>
+  </data>
+  <data name="DocumentVerifyTitle" xml:space="preserve">
+    <value>Verify</value>
+  </data>
+  <data name="FileChooserNotOpened" xml:space="preserve">
+    <value>The file chooser could not be opened.</value>
+  </data>
+  <data name="SignatureValid" xml:space="preserve">
+    <value>Valid</value>
+  </data>
+  <data name="SignatureInvalid" xml:space="preserve">
+    <value>Invalid</value>
+  </data>
+  <data name="Pin2LengthRule" xml:space="preserve">
+    <value>PIN 2 is {0} to {1} digits.</value>
+  </data>
+  <data name="ReasonTooLong" xml:space="preserve">
+    <value>The reason is too long.</value>
+  </data>
+  <data name="SignedDocumentSummary" xml:space="preserve">
+    <value>{0}
+{1} bytes, qualified signature, local verify {2}</value>
+  </data>
+  <data name="DocumentSigned" xml:space="preserve">
+    <value>Signed</value>
+  </data>
+  <data name="SignatureDidNotVerify" xml:space="preserve">
+    <value>{0}: the signature did not verify</value>
+  </data>
+  <data name="ChooseFileFirst" xml:space="preserve">
+    <value>Choose a file first.</value>
+  </data>
+  <data name="CardServiceNotInstalled" xml:space="preserve">
+    <value>The card service is not installed.</value>
+  </data>
+  <data name="EntryValid" xml:space="preserve">
+    <value>Valid entry</value>
+  </data>
+  <data name="EntryInvalid" xml:space="preserve">
+    <value>Invalid entry</value>
+  </data>
+  <data name="EntriesDiffer" xml:space="preserve">
+    <value>The new entries differ.</value>
+  </data>
+</root>

@@ -31,7 +31,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 
 use refineid_card_manager_core::card_pin::{
-    ActivateOptions, ActivatePreflightOutcome, ChangePinOptions, PinManageSlot, UnblockPinOptions,
+    ActivateOptions, ActivatePreflightOutcome, ActivationEvidence, ChangePinOptions, PinManageSlot,
+    UnblockPinOptions,
 };
 use refineid_card_manager_core::service::{self, CardSnapshot, ContactlessSnapshot};
 use refineid_doc_sign::asic_verify::{DocumentVerifyReport, verify_document};
@@ -116,6 +117,7 @@ struct CardSnapshotDto {
     model: String,
     generation: &'static str,
     activation_code_length: Option<usize>,
+    activation_state: &'static str,
     pin1: Option<CredentialStatusDto>,
     pin2: Option<CredentialStatusDto>,
     puk: Option<CredentialStatusDto>,
@@ -165,6 +167,7 @@ impl From<CardSnapshot> for CardSnapshotDto {
             model,
             generation: generation_label(snapshot.generation),
             activation_code_length: snapshot.activation_code_length,
+            activation_state: activation_state_label(snapshot.activation),
             pin1: snapshot.pin1.map(CredentialStatusDto::from),
             pin2: snapshot.pin2.map(CredentialStatusDto::from),
             puk: snapshot.puk.map(CredentialStatusDto::from),
@@ -243,6 +246,15 @@ const fn generation_label(generation: CardGeneration) -> &'static str {
         CardGeneration::Newer => "newer",
         CardGeneration::Older => "older",
         CardGeneration::Unknown => "unknown",
+    }
+}
+
+/// The activation evidence as the app's JSON names it.
+const fn activation_state_label(activation: ActivationEvidence) -> &'static str {
+    match activation {
+        ActivationEvidence::Unactivated => "unactivated",
+        ActivationEvidence::Activated => "activated",
+        ActivationEvidence::Inconclusive => "inconclusive",
     }
 }
 

@@ -51,7 +51,7 @@ internal sealed partial class DocumentPage : Page
         base.OnNavigatedTo(e);
         this.mode = e.Parameter is DocumentMode requested ? requested : DocumentMode.Verify;
         bool signing = this.mode == DocumentMode.Sign;
-        this.TitleText.Text = signing ? "Sign" : "Verify";
+        this.TitleText.Text = Strings.Get(signing ? "DocumentSignTitle" : "DocumentVerifyTitle");
         this.SignPanel.Visibility = signing ? Visibility.Visible : Visibility.Collapsed;
         this.VerifyButton.Visibility = signing ? Visibility.Collapsed : Visibility.Visible;
         this.UpdateActions();
@@ -88,7 +88,7 @@ internal sealed partial class DocumentPage : Page
 #if DEBUG
             DevErrorLog.Report("file chooser not opened", error);
 #endif
-            this.ShowStatus(InfoBarSeverity.Error, "The file chooser could not be opened.");
+            this.ShowStatus(InfoBarSeverity.Error, Strings.Get("FileChooserNotOpened"));
             return;
         }
 
@@ -116,7 +116,7 @@ internal sealed partial class DocumentPage : Page
                 this.ResultText.Text = report.Report;
                 this.ShowStatus(
                     report.Ok ? InfoBarSeverity.Success : InfoBarSeverity.Error,
-                    report.Ok ? "Valid" : "Invalid"
+                    Strings.Get(report.Ok ? "SignatureValid" : "SignatureInvalid")
                 );
             })
             .ConfigureAwait(true);
@@ -138,14 +138,14 @@ internal sealed partial class DocumentPage : Page
         {
             this.ShowStatus(
                 InfoBarSeverity.Warning,
-                $"PIN 2 is {PinMinimumLength} to {PinMaximumLength} digits."
+                Strings.Format("Pin2LengthRule", PinMinimumLength, PinMaximumLength)
             );
             return;
         }
 
         if (Encoding.UTF8.GetByteCount(reason) > ReasonMaximumBytes)
         {
-            this.ShowStatus(InfoBarSeverity.Warning, "The reason is too long.");
+            this.ShowStatus(InfoBarSeverity.Warning, Strings.Get("ReasonTooLong"));
             return;
         }
 
@@ -165,17 +165,21 @@ internal sealed partial class DocumentPage : Page
                 }
 
                 this.ResultText.Text =
-                    $"{report.OutputPath}\n{report.OutputLength} bytes, qualified signature, local verify {report.LocalVerify}"
-                    + (report.SignerCommonName is string signer ? $"\n{signer}" : string.Empty);
+                    Strings.Format(
+                        "SignedDocumentSummary",
+                        report.OutputPath,
+                        report.OutputLength,
+                        report.LocalVerify
+                    ) + (report.SignerCommonName is string signer ? $"\n{signer}" : string.Empty);
                 if (report.Verified)
                 {
-                    this.ShowStatus(InfoBarSeverity.Success, "Signed");
+                    this.ShowStatus(InfoBarSeverity.Success, Strings.Get("DocumentSigned"));
                 }
                 else
                 {
                     this.ShowStatus(
                         InfoBarSeverity.Error,
-                        $"{report.OutputPath}: the signature did not verify"
+                        Strings.Format("SignatureDidNotVerify", report.OutputPath)
                     );
                 }
             })
@@ -196,7 +200,7 @@ internal sealed partial class DocumentPage : Page
             return true;
         }
 
-        this.ShowStatus(InfoBarSeverity.Warning, "Choose a file first.");
+        this.ShowStatus(InfoBarSeverity.Warning, Strings.Get("ChooseFileFirst"));
         return false;
     }
 
@@ -224,14 +228,14 @@ internal sealed partial class DocumentPage : Page
         }
         catch (JsonException)
         {
-            this.ShowStatus(InfoBarSeverity.Error, "The card service response could not be read.");
+            this.ShowStatus(InfoBarSeverity.Error, Strings.Get("CardServiceResponseUnreadable"));
         }
         catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException)
         {
 #if DEBUG
             DevErrorLog.Report("card service not loaded", error);
 #endif
-            this.ShowStatus(InfoBarSeverity.Error, "The card service is not installed.");
+            this.ShowStatus(InfoBarSeverity.Error, Strings.Get("CardServiceNotInstalled"));
         }
         // codeql[cs/catch-of-all-exceptions]
         catch (Exception error)

@@ -1166,6 +1166,58 @@ const fn classify_preflight(
     }
 }
 
+/// What the counter-safe probes say about whether the card has been
+/// activated, read for a display of the card's state rather than for
+/// the activation command.
+///
+/// The activation preflight proceeds when the probes decide nothing,
+/// because its operator chose to activate; a display must not act on
+/// that, so this verdict names the undecided case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivationEvidence {
+    /// The probes show a card that still waits for its activation: the
+    /// current scheme's PIN changed flag (S1 v4.2 §3.15.2) reads false,
+    /// or the legacy scheme's PIN1 answers with no retry information
+    /// (`SW = 0x6300`), the answer of a fresh legacy card's blocked PIN1
+    /// (S4-1 v4.2 §4.6.1).
+    Unactivated,
+    /// The probes show a card that was activated: the PIN changed flag
+    /// reads true, or the legacy scheme's PIN1 carries a counter.
+    Activated,
+    /// The probes decided nothing: the card returned no PIN changed
+    /// flag, the PIN1 probe returned no status word or one outside the
+    /// modeled set, or the generation is unknown.
+    Inconclusive,
+}
+
+/// Judge the activation evidence from the PIN1 probes.
+///
+/// The current scheme is decided by the PIN changed flag alone, since
+/// PIN1 carries a counter before and after activation (S4-1 v4.2
+/// §4.6.2); the legacy scheme is decided by the PIN1 status alone, as
+/// the preflight reads it.
+pub(crate) const fn judge_activation(
+    pin1: Option<PinStatus>,
+    generation: CardGeneration,
+    pin1_changed: Option<bool>,
+) -> ActivationEvidence {
+    match generation {
+        CardGeneration::Newer => match pin1_changed {
+            Some(true) => ActivationEvidence::Activated,
+            Some(false) => ActivationEvidence::Unactivated,
+            None => ActivationEvidence::Inconclusive,
+        },
+        CardGeneration::Older => match pin1 {
+            Some(PinStatus::Remaining(_) | PinStatus::Verified | PinStatus::Locked) => {
+                ActivationEvidence::Activated
+            }
+            Some(PinStatus::NoInfo) => ActivationEvidence::Unactivated,
+            Some(PinStatus::Other(_)) | None => ActivationEvidence::Inconclusive,
+        },
+        CardGeneration::Unknown => ActivationEvidence::Inconclusive,
+    }
+}
+
 /// Map a `CHANGE REFERENCE DATA` outcome onto the
 /// `UnblockOutcome` shape so [`ActivateReport`] can carry either
 /// scheme's per-slot result behind a single field. The user-
@@ -1532,9 +1584,10 @@ mod activate_tests {
     };
 
     use super::{
-        ActivatePreflightOutcome, CardGeneration, CardPinError, ChangePinOutcome, PinSlot,
-        PinStatus, RetryFloorRefusal, UnblockOutcome, activate_slot_setup,
-        activation_continues_after_pin1, change_to_unblock, classify_preflight,
+        ActivatePreflightOutcome, ActivationEvidence, CardGeneration, CardPinError,
+        ChangePinOutcome, PinSlot, PinStatus, RetryFloorRefusal, UnblockOutcome,
+        activate_slot_setup, activation_continues_after_pin1, change_to_unblock,
+        classify_preflight, judge_activation,
     };
     use crate::test_util::{TestResult, check_true};
 
@@ -1858,6 +1911,87 @@ mod activate_tests {
         check_true(
             matches!(pf, ActivatePreflightOutcome::LooksActivated { .. }),
             "LooksActivated",
+        )
+    }
+
+    /// Current-scheme evidence follows the PIN changed flag alone: PIN1
+    /// carries a counter before and after activation, so a missing flag
+    /// decides nothing, where the preflight would proceed.
+    #[test]
+    fn newer_evidence_follows_the_changed_flag() -> TestResult {
+        let five = PinRetries::from_nibble(5).ok_or("PinRetries::from_nibble(5)")?;
+        let pin1 = Some(PinStatus::Remaining(five));
+        check_true(
+            judge_activation(pin1, CardGeneration::Newer, Some(true))
+                == ActivationEvidence::Activated,
+            "flag true is activated",
+        )?;
+        check_true(
+            judge_activation(pin1, CardGeneration::Newer, Some(false))
+                == ActivationEvidence::Unactivated,
+            "flag false is unactivated",
+        )?;
+        check_true(
+            judge_activation(pin1, CardGeneration::Newer, None) == ActivationEvidence::Inconclusive,
+            "no flag is inconclusive",
+        )
+    }
+
+    /// Legacy-scheme evidence reads a PIN1 counter and the no-information
+    /// answer as the preflight does; a status word outside the modeled
+    /// set, or no status word, decides nothing, where the preflight would
+    /// proceed.
+    #[test]
+    fn older_evidence_reads_pin1() -> TestResult {
+        let five = PinRetries::from_nibble(5).ok_or("PinRetries::from_nibble(5)")?;
+        check_true(
+            judge_activation(
+                Some(PinStatus::Remaining(five)),
+                CardGeneration::Older,
+                None,
+            ) == ActivationEvidence::Activated,
+            "a counter is activated",
+        )?;
+        check_true(
+            judge_activation(Some(PinStatus::Verified), CardGeneration::Older, None)
+                == ActivationEvidence::Activated,
+            "a verified PIN is activated",
+        )?;
+        check_true(
+            judge_activation(Some(PinStatus::Locked), CardGeneration::Older, None)
+                == ActivationEvidence::Activated,
+            "a locked PIN is activated",
+        )?;
+        check_true(
+            judge_activation(Some(PinStatus::NoInfo), CardGeneration::Older, None)
+                == ActivationEvidence::Unactivated,
+            "no information is unactivated",
+        )?;
+        check_true(
+            judge_activation(
+                Some(PinStatus::Other(UNMODELED_SW)),
+                CardGeneration::Older,
+                None,
+            ) == ActivationEvidence::Inconclusive,
+            "an unmodeled status word is inconclusive",
+        )?;
+        check_true(
+            judge_activation(None, CardGeneration::Older, None) == ActivationEvidence::Inconclusive,
+            "no probe is inconclusive",
+        )
+    }
+
+    /// An unknown generation decides nothing: activation is refused for
+    /// it anyway, and a display must not steer the holder into it.
+    #[test]
+    fn unknown_generation_evidence_is_inconclusive() -> TestResult {
+        check_true(
+            judge_activation(
+                Some(PinStatus::NoInfo),
+                CardGeneration::Unknown,
+                Some(false),
+            ) == ActivationEvidence::Inconclusive,
+            "Inconclusive",
         )
     }
 

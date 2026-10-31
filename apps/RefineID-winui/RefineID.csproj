@@ -60,6 +60,10 @@
     <Version>$(RefineIdVersion)</Version>
     <AssemblyVersion>$(RefineIdVersion)</AssemblyVersion>
     <FileVersion>$(RefineIdVersion)</FileVersion>
+    <!-- Every language's strings travel in the one package; a bundle of
+         resource packages would change the package's name and form for a
+         few short labels. -->
+    <AppxBundle>Never</AppxBundle>
     <RustCargo Condition="Exists('$(USERPROFILE)\.cargo\bin\cargo.exe')"
       >$(USERPROFILE)\.cargo\bin\cargo.exe</RustCargo>
     <RustCargo Condition="'$(RustCargo)' == ''">cargo</RustCargo>

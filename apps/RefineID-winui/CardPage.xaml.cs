@@ -18,12 +18,18 @@ using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Text.Json;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Navigation;
 
 /// <summary>
-/// The PIN page: the card in the selected reader, its PIN and
-/// recovery status, PIN change and reset, activation, and the contactless
-/// CAN. Every modifying command is bound to the inspected reader and card
+/// The PIN page: PIN change and reset, activation, and the contactless
+/// CAN for the card in the reader, with no more on screen than the task
+/// at hand. A card that still waits for its activation shows the activation
+/// section alone, opened; an activated card shows PIN change and reset;
+/// a card whose state the probes did not decide shows every section.
+/// Every modifying command is bound to the inspected reader and card
 /// serial; PINs are read from the boxes, cleared at once, and only ever
 /// handed to the native card service.
 /// </summary>
@@ -46,6 +52,26 @@ internal sealed partial class CardPage : Page
     private bool refreshingReaders;
     private bool polling;
 
+    /// <summary>The reader the main screen opened this page for, used once.</summary>
+    private string? requestedReader;
+
+    /// <summary>Whether the activation section was shown at the last inspection.</summary>
+    private bool activationShown;
+
+    /// <summary>
+    /// The digit counts a new PIN may have, as the card service's PIN
+    /// types bound them: PIN 1 takes four to twelve digits, PIN 2 six to
+    /// twelve.
+    /// </summary>
+    private const int Pin1MinimumDigits = 4;
+    private const int Pin2MinimumDigits = 6;
+    private const int PinMaximumDigits = 12;
+
+    /// <summary>Segoe Fluent Icons: CheckMark, Cancel and Warning.</summary>
+    private const string ValidGlyph = "\uE73E";
+    private const string InvalidGlyph = "\uE711";
+    private const string DifferGlyph = "\uE7BA";
+
     public CardPage()
     {
         this.InitializeComponent();
@@ -62,6 +88,13 @@ internal sealed partial class CardPage : Page
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs args) => this.readerPollTimer.Stop();
+
+    /// <summary>The main screen names the reader whose card it inspected.</summary>
+    protected override void OnNavigatedTo(NavigationEventArgs args)
+    {
+        base.OnNavigatedTo(args);
+        this.requestedReader = args.Parameter as string;
+    }
 
     /// <summary>
     /// A tick lists readers only; the card is inspected again only when the
@@ -116,7 +149,7 @@ internal sealed partial class CardPage : Page
         string? reader = this.SelectedReader();
         if (reader is null)
         {
-            this.ShowError("Select a reader with a card first.");
+            this.ShowError(Strings.Get("SelectReaderWithCardFirst"));
             return;
         }
 
@@ -124,15 +157,9 @@ internal sealed partial class CardPage : Page
         this.CanBox.Password = string.Empty;
         await this.RunCardOperationAsync(async () =>
             {
-                ContactlessSnapshot result = await Task.Run(() =>
-                        LocalCardService.PrimeContactless(reader, can)
-                    )
+                _ = await Task.Run(() => LocalCardService.PrimeContactless(reader, can))
                     .ConfigureAwait(true);
-                this.NfcResultText.Text =
-                    $"{DisplayPerson(result.Person)}, serial {result.Serial}. "
-                    + $"PIN1: {FormatStatus(result.Pin1)}. PIN2: {FormatStatus(result.Pin2)}.";
-                this.NfcResultPanel.Visibility = Visibility.Visible;
-                this.ShowSuccess("NFC access enabled. The CAN is saved on this device.");
+                this.ShowSuccess(Strings.Get("NfcAccessEnabled"));
             })
             .ConfigureAwait(true);
     }
@@ -173,6 +200,107 @@ internal sealed partial class CardPage : Page
                 LocalCardService.UnblockPin(reader, serial, slot, puk, next, confirmation)
             )
             .ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Every activation entry keeps digits only and refreshes the marks
+    /// and the button as it is typed, so a wrong length or a mismatch
+    /// shows before anything is sent to the card.
+    /// </summary>
+    private void ActivationEntry_Changed(object sender, RoutedEventArgs args)
+    {
+        if (sender is PasswordBox box)
+        {
+            string digits = new(box.Password.Where(char.IsAsciiDigit).ToArray());
+            if (!string.Equals(digits, box.Password, StringComparison.Ordinal))
+            {
+                box.Password = digits;
+                return;
+            }
+        }
+
+        this.UpdateActivationForm();
+    }
+
+    /// <summary>
+    /// Marks each entry valid, invalid or differing from its pair, and
+    /// enables the button only when the activation code has the card's
+    /// length and both new PINs are valid and repeated.
+    /// </summary>
+    private void UpdateActivationForm()
+    {
+        string code = this.ActivationCodeBox.Password;
+        string pin1 = this.ActivationPin1Box.Password;
+        string pin1Again = this.ActivationPin1ConfirmationBox.Password;
+        string pin2 = this.ActivationPin2Box.Password;
+        string pin2Again = this.ActivationPin2ConfirmationBox.Password;
+
+        bool codeValid = this.snapshot?.ActivationCodeLength is int length && code.Length == length;
+        bool pin1Valid = IsPinLength(pin1, Pin1MinimumDigits);
+        bool pin1Repeated = pin1Valid && string.Equals(pin1Again, pin1, StringComparison.Ordinal);
+        bool pin1Differs = pin1Valid && IsPinLength(pin1Again, Pin1MinimumDigits) && !pin1Repeated;
+        bool pin2Valid = IsPinLength(pin2, Pin2MinimumDigits);
+        bool pin2Repeated = pin2Valid && string.Equals(pin2Again, pin2, StringComparison.Ordinal);
+        bool pin2Differs = pin2Valid && IsPinLength(pin2Again, Pin2MinimumDigits) && !pin2Repeated;
+
+        Mark(this.ActivationCodeBoxMark, codeValid, differs: false, isEmpty: code.Length == 0);
+        Mark(this.ActivationPin1BoxMark, pin1Valid, differs: false, isEmpty: pin1.Length == 0);
+        Mark(
+            this.ActivationPin1ConfirmationBoxMark,
+            pin1Repeated,
+            pin1Differs,
+            pin1Again.Length == 0
+        );
+        Mark(this.ActivationPin2BoxMark, pin2Valid, differs: false, isEmpty: pin2.Length == 0);
+        Mark(
+            this.ActivationPin2ConfirmationBoxMark,
+            pin2Repeated,
+            pin2Differs,
+            pin2Again.Length == 0
+        );
+        this.ActivateButton.IsEnabled = codeValid && pin1Repeated && pin2Repeated;
+    }
+
+    private static bool IsPinLength(string entry, int minimumDigits) =>
+        entry.Length >= minimumDigits && entry.Length <= PinMaximumDigits;
+
+    /// <summary>
+    /// A green check, a red cross, or an amber warning for a pair that
+    /// differs, each named for a screen reader. A theme without the brush
+    /// leaves the mark in the text colour.
+    /// </summary>
+    private static void Mark(FontIcon mark, bool valid, bool differs, bool isEmpty)
+    {
+        mark.Visibility = isEmpty ? Visibility.Collapsed : Visibility.Visible;
+        string brush;
+        string description;
+        if (valid)
+        {
+            mark.Glyph = ValidGlyph;
+            brush = "SystemFillColorSuccessBrush";
+            description = "EntryValid";
+        }
+        else if (differs)
+        {
+            mark.Glyph = DifferGlyph;
+            brush = "SystemFillColorCautionBrush";
+            description = "EntriesDiffer";
+        }
+        else
+        {
+            mark.Glyph = InvalidGlyph;
+            brush = "SystemFillColorCriticalBrush";
+            description = "EntryInvalid";
+        }
+
+        AutomationProperties.SetName(mark, Strings.Get(description));
+        if (
+            Application.Current.Resources.TryGetValue(brush, out object? resource)
+            && resource is Brush found
+        )
+        {
+            mark.Foreground = found;
+        }
     }
 
     private async void ActivateButton_Click(object sender, RoutedEventArgs args)
@@ -217,7 +345,8 @@ internal sealed partial class CardPage : Page
             return;
         }
 
-        string? previous = this.SelectedReader();
+        string? previous = this.SelectedReader() ?? this.requestedReader;
+        this.requestedReader = null;
         await this.RunCardOperationAsync(async () =>
             {
                 IReadOnlyList<string> readers = await Task.Run(LocalCardService.PresentReaders)
@@ -225,6 +354,8 @@ internal sealed partial class CardPage : Page
                 this.refreshingReaders = true;
                 try
                 {
+                    this.ReaderComboBox.Visibility =
+                        readers.Count > 1 ? Visibility.Visible : Visibility.Collapsed;
                     this.ReaderComboBox.ItemsSource = readers;
                     this.ReaderComboBox.SelectedItem =
                         previous is not null && readers.Contains(previous, StringComparer.Ordinal)
@@ -239,8 +370,15 @@ internal sealed partial class CardPage : Page
 
                 if (readers.Count == 0)
                 {
+                    // Without a card there is nothing to do here; the main
+                    // screen takes over, as it does on a first launch.
                     this.ClearCard();
                     this.StatusInfoBar.IsOpen = false;
+                    if (this.Frame.CanGoBack)
+                    {
+                        this.Frame.GoBack();
+                    }
+
                     return;
                 }
 
@@ -260,26 +398,57 @@ internal sealed partial class CardPage : Page
 
         LocalCardSnapshot inspected = await Task.Run(() => LocalCardService.Inspect(reader))
             .ConfigureAwait(true);
-        this.snapshot = inspected;
-        this.PersonText.Text = DisplayPerson(inspected.Person);
-        this.ModelText.Text = inspected.Model;
-        this.SerialText.Text = inspected.Serial;
-        this.Pin1StatusText.Text = FormatStatus(inspected.Pin1, inspected.Pin1Changed);
-        this.Pin2StatusText.Text = FormatStatus(inspected.Pin2, inspected.Pin2Changed);
-        this.PukStatusText.Text = FormatStatus(inspected.Puk);
-        this.GenerationText.Text = inspected.Generation switch
+        // Entries typed for one card do not carry over to another.
+        if (!string.Equals(this.snapshot?.Serial, inspected.Serial, StringComparison.Ordinal))
         {
-            "newer" => "Current single-use activation scheme",
-            "older" => "Legacy reusable activation scheme",
-            _ => "Unknown",
-        };
-        this.ActivationHintText.Text = inspected.ActivationCodeLength is int length
-            ? $"{length}-digit activation code."
-            : "Unknown activation code. Activation refused.";
-        this.CardPanel.Visibility = Visibility.Visible;
+            Clear(
+                this.ActivationCodeBox,
+                this.ActivationPin1Box,
+                this.ActivationPin1ConfirmationBox,
+                this.ActivationPin2Box,
+                this.ActivationPin2ConfirmationBox
+            );
+        }
+
+        this.snapshot = inspected;
+        // The code box takes no more digits than the card's code has.
+        if (inspected.ActivationCodeLength is int codeLength)
+        {
+            this.ActivationCodeBox.MaxLength = codeLength;
+        }
+
+        this.UpdateActivationForm();
         this.ManagementPanel.IsHitTestVisible = true;
         this.ManagementPanel.Opacity = 1;
         this.StatusInfoBar.IsOpen = false;
+        this.ShowActivationState(inspected);
+    }
+
+    /// <summary>
+    /// A card that waits for its activation gets the activation section
+    /// alone, opened: activation sets both PINs, so a PIN change, reset or
+    /// contactless setup has no place before it. An activated card gets
+    /// those, and the activation section goes, since the card service
+    /// refuses activation on it. Undecided evidence, or no card, shows
+    /// every section. The activation section takes the focus only when
+    /// it appears, so a re-inspection while the holder types, or after a
+    /// refused attempt, leaves the focus alone.
+    /// </summary>
+    private void ShowActivationState(LocalCardSnapshot? inspected)
+    {
+        bool unactivated = inspected?.LooksUnactivated ?? false;
+        bool activated = inspected?.LooksActivated ?? false;
+        Visibility managing = unactivated ? Visibility.Collapsed : Visibility.Visible;
+        this.NfcExpander.Visibility = managing;
+        this.ChangePinExpander.Visibility = managing;
+        this.UnblockPinExpander.Visibility = managing;
+        this.ActivationPanel.Visibility = activated ? Visibility.Collapsed : Visibility.Visible;
+        if (unactivated && !this.activationShown)
+        {
+            _ = this.ActivationCodeBox.Focus(FocusState.Programmatic);
+        }
+
+        this.activationShown = unactivated;
     }
 
     private async Task RunMutationAsync(Func<MutationResult> operation)
@@ -318,7 +487,7 @@ internal sealed partial class CardPage : Page
         }
         catch (JsonException)
         {
-            this.ShowError("The card service response could not be read.");
+            this.ShowError(Strings.Get("CardServiceResponseUnreadable"));
         }
         finally
         {
@@ -335,7 +504,7 @@ internal sealed partial class CardPage : Page
             return true;
         }
 
-        this.ShowError("Insert the card in a contact reader first.");
+        this.ShowError(Strings.Get("InsertCardInContactReaderFirst"));
         return false;
     }
 
@@ -343,36 +512,6 @@ internal sealed partial class CardPage : Page
 
     private static PinSlot SlotFrom(ComboBox box) =>
         box.SelectedIndex == 1 ? PinSlot.Pin2 : PinSlot.Pin1;
-
-    private static string DisplayPerson(string person) =>
-        string.IsNullOrWhiteSpace(person) ? "Not available" : person;
-
-    private static string FormatStatus(CredentialStatus? status, bool? changed = null)
-    {
-        if (status is null)
-        {
-            return "Not available";
-        }
-
-        string value = status.State switch
-        {
-            "verified" => "Verified in this card session",
-            "ready" when status.AttemptsRemaining is byte attempts =>
-                $"Ready, {attempts} attempts remaining",
-            "locked" => "Blocked",
-            "invalidated" => "Recovery unavailable",
-            "no_information" => "No counter information",
-            "other" when status.StatusWord is ushort statusWord => $"Card status 0x{statusWord:X4}",
-            _ => status.State,
-        };
-
-        return changed switch
-        {
-            true => $"{value}; changed from factory value",
-            false => $"{value}; still at factory value",
-            null => value,
-        };
-    }
 
     private static void Clear(params PasswordBox[] boxes)
     {
@@ -385,9 +524,9 @@ internal sealed partial class CardPage : Page
     private void ClearCard()
     {
         this.snapshot = null;
-        this.CardPanel.Visibility = Visibility.Collapsed;
         this.ManagementPanel.IsHitTestVisible = false;
         this.ManagementPanel.Opacity = 0.6;
+        this.ShowActivationState(null);
     }
 
     private void SetBusy(bool busy)
