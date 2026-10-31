@@ -37,8 +37,11 @@ internal sealed partial class PairingDialog : ContentDialog
     private const int GroupSize = 2;
     private const string Alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-    /// <summary>Placeholder groups, shaped like a code, as the Apple app shows them.</summary>
-    private static readonly string[] Prompts = ["7K", "X4", "M9"];
+    /// <summary>
+    /// What an empty group shows: two blanks the width of its symbols, so
+    /// nothing reads as a code before one is typed.
+    /// </summary>
+    private const string EmptyGroup = "\u00A0\u00A0";
 
     private readonly string requesterName;
     private readonly DispatcherQueueTimer timer;
@@ -118,8 +121,7 @@ internal sealed partial class PairingDialog : ContentDialog
 
     /// <summary>
     /// Shows `code` in its groups: a typed group in the text colour, an
-    /// empty one as its prompt, and the accent line under the group being
-    /// typed.
+    /// empty one blank, and the accent line under the group being typed.
     /// </summary>
     private void Render(string code)
     {
@@ -131,7 +133,7 @@ internal sealed partial class PairingDialog : ContentDialog
             int start = Math.Min(index * GroupSize, code.Length);
             string digits = code.Substring(start, Math.Min(GroupSize, code.Length - start));
             bool typedGroup = digits.Length > 0;
-            groups[index].Text = typedGroup ? digits : Prompts[index];
+            groups[index].Text = typedGroup ? digits : EmptyGroup;
             groups[index].Foreground = Brush(
                 typedGroup ? "TextFillColorPrimaryBrush" : "TextFillColorSecondaryBrush"
             );

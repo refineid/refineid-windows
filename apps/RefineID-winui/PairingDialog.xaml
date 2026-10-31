@@ -26,12 +26,11 @@
     mc:Ignorable="d"
 >
     <StackPanel MinWidth="320" Spacing="16">
-        <!--  The code as the phone shows it, three groups of two. A prompt
-              shaped like a code stands in for an empty group, and the group
-              being typed carries the accent line. One text box, kept
-              invisible over the groups, takes the typing, so paste and
-              Backspace work as in any field, and a complete code starts the
-              pairing at once.  -->
+        <!--  The code as the phone shows it, three groups of two, each
+              empty until typed, and the group being typed carries the
+              accent line. One text box, kept invisible over the groups,
+              takes the typing, so paste and Backspace work as in any
+              field, and a complete code starts the pairing at once.  -->
         <Grid HorizontalAlignment="Center">
             <StackPanel
                 AutomationProperties.AccessibilityView="Raw"
@@ -52,7 +51,7 @@
                         FontSize="28"
                         FontWeight="SemiBold"
                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                        Text="7K"
+                        Text="&#160;&#160;"
                     />
                 </Border>
                 <Border
@@ -69,7 +68,7 @@
                         FontSize="28"
                         FontWeight="SemiBold"
                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                        Text="X4"
+                        Text="&#160;&#160;"
                     />
                 </Border>
                 <Border
@@ -86,7 +85,7 @@
                         FontSize="28"
                         FontWeight="SemiBold"
                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                        Text="M9"
+                        Text="&#160;&#160;"
                     />
                 </Border>
             </StackPanel>

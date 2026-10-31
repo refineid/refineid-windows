@@ -75,6 +75,8 @@ internal sealed partial class MainPage : Page
         this.dispatcher = DispatcherQueue.GetForCurrentThread();
         this.cardPollTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
         this.cardPollTimer.Tick += (s, e) => this.CheckLocalCard();
+        // Wired here on purpose: a Click attribute on the toolkit's
+        // SettingsCard in the page markup makes the page fail to load.
         this.PersonCard.Click += this.ConnectRemoteReader_Click;
         this.DiagnosticsText.Text = DiagnosticsLabel();
 #if DEBUG
