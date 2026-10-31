@@ -991,7 +991,7 @@ impl<Stopped: Fn() -> bool> PairingCandidateSource for PairingServices<Stopped> 
             .found
             .iter()
             .find(|service| &service.instance == instance)?;
-        dial_pairing(&service.endpoints, self.receive_deadline)
+        dial_pairing(&service.endpoints, self.receive_deadline, &self.stopped)
     }
 }
 
@@ -1039,29 +1039,51 @@ impl PairingCandidateSource for PairingAddress {
     fn open(&mut self, _endpoint: &()) -> Option<PairingConnection<TcpFrameTransport>> {
         match self.opened.take() {
             Some(transport) => read_bootstrap_answer(transport).ok(),
-            None => dial_pairing(&self.endpoints, self.receive_deadline),
+            None => dial_pairing(&self.endpoints, self.receive_deadline, &|| false),
         }
     }
 }
 
+/// How long a found custodian is dialed before it counts as unreachable.
+///
+/// A phone whose Wi-Fi sleeps between short waking windows, about every
+/// thirty seconds on an Android saving power, accepts a connection only in
+/// those windows; one five-second attempt misses most of them, and the
+/// search does not try a custodian again once its attempt failed. Dialing
+/// through a whole cycle reaches such a phone.
+const PAIRING_DIAL_WINDOW: Duration = Duration::from_secs(35);
+
+/// The pause between two attempts that found the custodian unreachable.
+const PAIRING_DIAL_PAUSE: Duration = Duration::from_millis(500);
+
 /// Dials a pairing connection to `endpoints` and reads its bootstrap
 /// answer (section 4.2, Bootstrap Read Flow item 2); `None` when no
-/// connection opens or it answers nothing usable.
+/// connection opens within [`PAIRING_DIAL_WINDOW`], the search is
+/// `stopped` meanwhile, or the connection answers nothing usable.
 fn dial_pairing(
     endpoints: &[String],
     receive_deadline: Duration,
+    stopped: &dyn Fn() -> bool,
 ) -> Option<PairingConnection<TcpFrameTransport>> {
-    let transport = dial(
-        endpoints,
-        STREAM_CANDIDATE_ID,
-        receive_deadline,
-        DialPurpose::Pairing,
-    )
-    .inspect_err(|error| {
-        refineid_dev_errors::report!(Rapp, "pairing connection not opened", error);
-    })
-    .ok()?;
-    read_bootstrap_answer(transport).ok()
+    let started = Instant::now();
+    let error = loop {
+        match dial(
+            endpoints,
+            STREAM_CANDIDATE_ID,
+            receive_deadline,
+            DialPurpose::Pairing,
+        ) {
+            Ok(transport) => return read_bootstrap_answer(transport).ok(),
+            Err(StreamError::Unreachable)
+                if started.elapsed() < PAIRING_DIAL_WINDOW && !stopped() =>
+            {
+                std::thread::sleep(PAIRING_DIAL_PAUSE);
+            }
+            Err(error) => break error,
+        }
+    };
+    refineid_dev_errors::report!(Rapp, "pairing connection not opened", error);
+    None
 }
 
 /// Rejected stream-profile bytes, parameters, or connection steps.
