@@ -233,50 +233,126 @@
                                     TextWrapping="Wrap"
                                 />
                             </StackPanel>
-                            <PasswordBox
-                                x:Name="ActivationCodeBox"
-                                AutomationProperties.AutomationId="ActivationCodeBox"
-                                AutomationProperties.Name="Activation code"
-                                Header="Activation code"
-                                MaxLength="8"
-                                PasswordRevealMode="Peek"
-                            />
-                            <PasswordBox
-                                x:Name="ActivationPin1Box"
-                                AutomationProperties.AutomationId="ActivationPin1Box"
-                                AutomationProperties.Name="New PIN 1"
-                                Header="New PIN 1"
-                                MaxLength="12"
-                                PasswordRevealMode="Peek"
-                            />
-                            <PasswordBox
-                                x:Name="ActivationPin1ConfirmationBox"
-                                AutomationProperties.AutomationId="ActivationPin1ConfirmationBox"
-                                AutomationProperties.Name="Confirm new PIN 1"
-                                Header="Confirm new PIN 1"
-                                MaxLength="12"
-                                PasswordRevealMode="Peek"
-                            />
-                            <PasswordBox
-                                x:Name="ActivationPin2Box"
-                                AutomationProperties.AutomationId="ActivationPin2Box"
-                                AutomationProperties.Name="New PIN 2"
-                                Header="New PIN 2"
-                                MaxLength="12"
-                                PasswordRevealMode="Peek"
-                            />
-                            <PasswordBox
-                                x:Name="ActivationPin2ConfirmationBox"
-                                AutomationProperties.AutomationId="ActivationPin2ConfirmationBox"
-                                AutomationProperties.Name="Confirm new PIN 2"
-                                Header="Confirm new PIN 2"
-                                MaxLength="12"
-                                PasswordRevealMode="Peek"
-                            />
+                            <Grid ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <PasswordBox
+                                    x:Name="ActivationCodeBox"
+                                    AutomationProperties.AutomationId="ActivationCodeBox"
+                                    AutomationProperties.Name="Activation code"
+                                    Header="Activation code"
+                                    MaxLength="8"
+                                    PasswordRevealMode="Peek"
+                                    PasswordChanged="ActivationEntry_Changed"
+                                />
+                                <FontIcon
+                                    x:Name="ActivationCodeBoxMark"
+                                    Grid.Column="1"
+                                    Margin="0,0,0,8"
+                                    VerticalAlignment="Bottom"
+                                    AutomationProperties.AutomationId="ActivationCodeBoxMark"
+                                    Visibility="Collapsed"
+                                />
+                            </Grid>
+                            <Grid ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <PasswordBox
+                                    x:Name="ActivationPin1Box"
+                                    AutomationProperties.AutomationId="ActivationPin1Box"
+                                    AutomationProperties.Name="New PIN 1"
+                                    Header="New PIN 1"
+                                    MaxLength="12"
+                                    PasswordRevealMode="Peek"
+                                    PasswordChanged="ActivationEntry_Changed"
+                                />
+                                <FontIcon
+                                    x:Name="ActivationPin1BoxMark"
+                                    Grid.Column="1"
+                                    Margin="0,0,0,8"
+                                    VerticalAlignment="Bottom"
+                                    AutomationProperties.AutomationId="ActivationPin1BoxMark"
+                                    Visibility="Collapsed"
+                                />
+                            </Grid>
+                            <Grid ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <PasswordBox
+                                    x:Name="ActivationPin1ConfirmationBox"
+                                    AutomationProperties.AutomationId="ActivationPin1ConfirmationBox"
+                                    AutomationProperties.Name="Confirm new PIN 1"
+                                    Header="Confirm new PIN 1"
+                                    MaxLength="12"
+                                    PasswordRevealMode="Peek"
+                                    PasswordChanged="ActivationEntry_Changed"
+                                />
+                                <FontIcon
+                                    x:Name="ActivationPin1ConfirmationBoxMark"
+                                    Grid.Column="1"
+                                    Margin="0,0,0,8"
+                                    VerticalAlignment="Bottom"
+                                    AutomationProperties.AutomationId="ActivationPin1ConfirmationBoxMark"
+                                    Visibility="Collapsed"
+                                />
+                            </Grid>
+                            <Grid ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <PasswordBox
+                                    x:Name="ActivationPin2Box"
+                                    AutomationProperties.AutomationId="ActivationPin2Box"
+                                    AutomationProperties.Name="New PIN 2"
+                                    Header="New PIN 2"
+                                    MaxLength="12"
+                                    PasswordRevealMode="Peek"
+                                    PasswordChanged="ActivationEntry_Changed"
+                                />
+                                <FontIcon
+                                    x:Name="ActivationPin2BoxMark"
+                                    Grid.Column="1"
+                                    Margin="0,0,0,8"
+                                    VerticalAlignment="Bottom"
+                                    AutomationProperties.AutomationId="ActivationPin2BoxMark"
+                                    Visibility="Collapsed"
+                                />
+                            </Grid>
+                            <Grid ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <PasswordBox
+                                    x:Name="ActivationPin2ConfirmationBox"
+                                    AutomationProperties.AutomationId="ActivationPin2ConfirmationBox"
+                                    AutomationProperties.Name="Confirm new PIN 2"
+                                    Header="Confirm new PIN 2"
+                                    MaxLength="12"
+                                    PasswordRevealMode="Peek"
+                                    PasswordChanged="ActivationEntry_Changed"
+                                />
+                                <FontIcon
+                                    x:Name="ActivationPin2ConfirmationBoxMark"
+                                    Grid.Column="1"
+                                    Margin="0,0,0,8"
+                                    VerticalAlignment="Bottom"
+                                    AutomationProperties.AutomationId="ActivationPin2ConfirmationBoxMark"
+                                    Visibility="Collapsed"
+                                />
+                            </Grid>
                             <!--  The label comes from Strings/<language>/Resources.resw;
                                   the English here is the fallback.  -->
                             <Button
                                 x:Name="ActivateButton"
+                                IsEnabled="False"
                                 x:Uid="ActivateButton"
                                 HorizontalAlignment="Left"
                                 AutomationProperties.AutomationId="ActivateButton"

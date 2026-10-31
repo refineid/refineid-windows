@@ -19,6 +19,7 @@ using System.Linq;
 using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Navigation;
 
 /// <summary>
@@ -55,6 +56,20 @@ internal sealed partial class CardPage : Page
 
     /// <summary>Whether the activation section was shown at the last inspection.</summary>
     private bool activationShown;
+
+    /// <summary>
+    /// The digit counts a new PIN may have, as the card service's PIN
+    /// types bound them: PIN 1 takes four to twelve digits, PIN 2 six to
+    /// twelve.
+    /// </summary>
+    private const int Pin1MinimumDigits = 4;
+    private const int Pin2MinimumDigits = 6;
+    private const int PinMaximumDigits = 12;
+
+    /// <summary>Segoe Fluent Icons: CheckMark, Cancel and Warning.</summary>
+    private const string ValidGlyph = "\uE73E";
+    private const string InvalidGlyph = "\uE711";
+    private const string DifferGlyph = "\uE7BA";
 
     public CardPage()
     {
@@ -186,6 +201,92 @@ internal sealed partial class CardPage : Page
             .ConfigureAwait(true);
     }
 
+    /// <summary>
+    /// Every activation entry keeps digits only and refreshes the marks
+    /// and the button as it is typed, so a wrong length or a mismatch
+    /// shows before anything is sent to the card.
+    /// </summary>
+    private void ActivationEntry_Changed(object sender, RoutedEventArgs args)
+    {
+        if (sender is PasswordBox box)
+        {
+            string digits = new(box.Password.Where(char.IsAsciiDigit).ToArray());
+            if (!string.Equals(digits, box.Password, StringComparison.Ordinal))
+            {
+                box.Password = digits;
+                return;
+            }
+        }
+
+        this.UpdateActivationForm();
+    }
+
+    /// <summary>
+    /// Marks each entry valid, invalid or differing from its pair, and
+    /// enables the button only when the activation code has the card's
+    /// length and both new PINs are valid and repeated.
+    /// </summary>
+    private void UpdateActivationForm()
+    {
+        string code = this.ActivationCodeBox.Password;
+        string pin1 = this.ActivationPin1Box.Password;
+        string pin1Again = this.ActivationPin1ConfirmationBox.Password;
+        string pin2 = this.ActivationPin2Box.Password;
+        string pin2Again = this.ActivationPin2ConfirmationBox.Password;
+
+        bool codeValid = this.snapshot?.ActivationCodeLength is int length && code.Length == length;
+        bool pin1Valid = IsPinLength(pin1, Pin1MinimumDigits);
+        bool pin1Repeated = pin1Valid && string.Equals(pin1Again, pin1, StringComparison.Ordinal);
+        bool pin1Differs = pin1Valid && IsPinLength(pin1Again, Pin1MinimumDigits) && !pin1Repeated;
+        bool pin2Valid = IsPinLength(pin2, Pin2MinimumDigits);
+        bool pin2Repeated = pin2Valid && string.Equals(pin2Again, pin2, StringComparison.Ordinal);
+        bool pin2Differs = pin2Valid && IsPinLength(pin2Again, Pin2MinimumDigits) && !pin2Repeated;
+
+        Mark(this.ActivationCodeBoxMark, codeValid, differs: false, isEmpty: code.Length == 0);
+        Mark(this.ActivationPin1BoxMark, pin1Valid, differs: false, isEmpty: pin1.Length == 0);
+        Mark(
+            this.ActivationPin1ConfirmationBoxMark,
+            pin1Repeated,
+            pin1Differs,
+            pin1Again.Length == 0
+        );
+        Mark(this.ActivationPin2BoxMark, pin2Valid, differs: false, isEmpty: pin2.Length == 0);
+        Mark(
+            this.ActivationPin2ConfirmationBoxMark,
+            pin2Repeated,
+            pin2Differs,
+            pin2Again.Length == 0
+        );
+        this.ActivateButton.IsEnabled = codeValid && pin1Repeated && pin2Repeated;
+    }
+
+    private static bool IsPinLength(string entry, int minimumDigits) =>
+        entry.Length >= minimumDigits && entry.Length <= PinMaximumDigits;
+
+    /// <summary>A green check, a red cross, or an amber warning for a pair that differs.</summary>
+    private static void Mark(FontIcon mark, bool valid, bool differs, bool isEmpty)
+    {
+        mark.Visibility = isEmpty ? Visibility.Collapsed : Visibility.Visible;
+        string brush;
+        if (valid)
+        {
+            mark.Glyph = ValidGlyph;
+            brush = "SystemFillColorSuccessBrush";
+        }
+        else if (differs)
+        {
+            mark.Glyph = DifferGlyph;
+            brush = "SystemFillColorCautionBrush";
+        }
+        else
+        {
+            mark.Glyph = InvalidGlyph;
+            brush = "SystemFillColorCriticalBrush";
+        }
+
+        mark.Foreground = (Brush)Application.Current.Resources[brush];
+    }
+
     private async void ActivateButton_Click(object sender, RoutedEventArgs args)
     {
         if (!this.TryGetBoundCard(out string reader, out string serial))
@@ -276,12 +377,11 @@ internal sealed partial class CardPage : Page
             .ConfigureAwait(true);
         this.snapshot = inspected;
         // The card service refuses activation when it cannot tell the
-        // code's length, so the button follows the hint.
-        bool lengthKnown = inspected.ActivationCodeLength is int;
+        // code's length; without one, no entry can be complete.
         this.ActivationHintText.Text = inspected.ActivationCodeLength is int length
             ? $"{length}-digit activation code from letter"
             : string.Empty;
-        this.ActivateButton.IsEnabled = lengthKnown;
+        this.UpdateActivationForm();
         this.ManagementPanel.IsHitTestVisible = true;
         this.ManagementPanel.Opacity = 1;
         this.StatusInfoBar.IsOpen = false;
