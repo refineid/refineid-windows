@@ -25,7 +25,14 @@
     mc:Ignorable="d"
 >
     <Grid>
-        <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <!--  Hidden until the first card check, so a card that waits for
+              its activation opens on its own page with no flash of this
+              one.  -->
+        <ScrollViewer
+            x:Name="ContentRoot"
+            VerticalScrollBarVisibility="Auto"
+            Visibility="Collapsed"
+        >
             <StackPanel
                 MaxWidth="920"
                 Padding="32,20,32,40"

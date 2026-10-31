@@ -1953,6 +1953,16 @@ mod activate_tests {
             "a counter is activated",
         )?;
         check_true(
+            judge_activation(Some(PinStatus::Verified), CardGeneration::Older, None)
+                == ActivationEvidence::Activated,
+            "a verified PIN is activated",
+        )?;
+        check_true(
+            judge_activation(Some(PinStatus::Locked), CardGeneration::Older, None)
+                == ActivationEvidence::Activated,
+            "a locked PIN is activated",
+        )?;
+        check_true(
             judge_activation(Some(PinStatus::NoInfo), CardGeneration::Older, None)
                 == ActivationEvidence::Unactivated,
             "no information is unactivated",

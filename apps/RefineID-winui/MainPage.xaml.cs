@@ -90,14 +90,23 @@ internal sealed partial class MainPage : Page
         // The PIN page may have changed the card, so the card is inspected
         // again on every arrival, not only when the reader list changes.
         this.inspectedReaders = null;
-        this.CheckLocalCard();
-        this.cardPollTimer.Start();
         if (this.started)
         {
+            this.cardPollTimer.Start();
+            await this.CheckLocalCardAsync().ConfigureAwait(true);
             return;
         }
 
         this.started = true;
+        // The first check decides which page opens; this one stays hidden
+        // until it has, and stays hidden when the card led elsewhere.
+        await this.CheckLocalCardAsync().ConfigureAwait(true);
+        if (ReferenceEquals(this.Frame.Content, this))
+        {
+            this.ContentRoot.Visibility = Visibility.Visible;
+        }
+
+        this.cardPollTimer.Start();
         // Once per run: disable the inbound rule earlier releases opened for
         // the phone, when that needs no administrator rights.
         _ = Task.Run(FirewallService.DisableLegacyRule);
@@ -114,6 +123,16 @@ internal sealed partial class MainPage : Page
 
     /// <summary>The settings page polls the readers itself while it is shown.</summary>
     private void OnUnloaded(object sender, RoutedEventArgs args) => this.cardPollTimer.Stop();
+
+    /// <summary>A return to this page shows it at once; only the first arrival waits.</summary>
+    protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs args)
+    {
+        base.OnNavigatedTo(args);
+        if (this.started)
+        {
+            this.ContentRoot.Visibility = Visibility.Visible;
+        }
+    }
 
     private void Pins_Click(object sender, RoutedEventArgs args) =>
         this.Frame.Navigate(typeof(CardPage));
@@ -292,7 +311,7 @@ internal sealed partial class MainPage : Page
             this.SetBusy(false);
         }
 
-        this.CheckLocalCard();
+        await this.CheckLocalCardAsync().ConfigureAwait(true);
     }
 
     private async void ShowDriverLaneHintIfNeeded()
@@ -314,7 +333,9 @@ internal sealed partial class MainPage : Page
     /// card is inspected only when that list changes, so an idle window
     /// leaves the reader alone.
     /// </summary>
-    private async void CheckLocalCard()
+    private async void CheckLocalCard() => await this.CheckLocalCardAsync().ConfigureAwait(true);
+
+    private async Task CheckLocalCardAsync()
     {
         if (this.checkingLocalCard)
         {

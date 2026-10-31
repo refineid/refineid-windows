@@ -273,13 +273,16 @@
                                 MaxLength="12"
                                 PasswordRevealMode="Peek"
                             />
-                            <!--  The label comes from Strings/<language>/Resources.resw.  -->
+                            <!--  The label comes from Strings/<language>/Resources.resw;
+                                  the English here is the fallback.  -->
                             <Button
                                 x:Name="ActivateButton"
                                 x:Uid="ActivateButton"
                                 HorizontalAlignment="Left"
                                 AutomationProperties.AutomationId="ActivateButton"
+                                AutomationProperties.Name="Activate identity card"
                                 Click="ActivateButton_Click"
+                                Content="Activate identity card"
                             />
                         </StackPanel>
                     </StackPanel>
