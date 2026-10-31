@@ -272,13 +272,13 @@
                                 MaxLength="12"
                                 PasswordRevealMode="Peek"
                             />
+                            <!--  The label comes from Strings/<language>/Resources.resw.  -->
                             <Button
                                 x:Name="ActivateButton"
+                                x:Uid="ActivateButton"
                                 HorizontalAlignment="Left"
                                 AutomationProperties.AutomationId="ActivateButton"
-                                AutomationProperties.Name="Activate card"
                                 Click="ActivateButton_Click"
-                                Content="Activate card"
                             />
                         </StackPanel>
                     </StackPanel>
