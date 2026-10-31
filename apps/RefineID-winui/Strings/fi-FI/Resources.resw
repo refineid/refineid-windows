@@ -124,10 +124,10 @@
     <value>Kortinlukija</value>
   </data>
   <data name="NfcExpander.Header" xml:space="preserve">
-    <value>Etäluku (NFC)</value>
+    <value>Etäkäyttö (NFC)</value>
   </data>
   <data name="NfcExpander.AutomationProperties.Name" xml:space="preserve">
-    <value>Etäluku (NFC)</value>
+    <value>Etäkäyttö (NFC)</value>
   </data>
   <data name="NfcHintText.Text" xml:space="preserve">
     <value>Syötä korttiin painettu CAN.</value>
@@ -139,10 +139,10 @@
     <value>Kortin pääsykoodi (CAN)</value>
   </data>
   <data name="EnableNfcButton.Content" xml:space="preserve">
-    <value>Ota NFC käyttöön</value>
+    <value>Ota etäkäyttö käyttöön</value>
   </data>
   <data name="EnableNfcButton.AutomationProperties.Name" xml:space="preserve">
-    <value>Ota NFC käyttöön</value>
+    <value>Ota etäkäyttö käyttöön</value>
   </data>
   <data name="ChangePinExpander.Header" xml:space="preserve">
     <value>Vaihda tunnusluku</value>
@@ -280,7 +280,7 @@
     <value>Valitse ensin lukija, jossa on kortti.</value>
   </data>
   <data name="NfcAccessEnabled" xml:space="preserve">
-    <value>NFC otettu käyttöön. CAN on tallennettu tälle laitteelle.</value>
+    <value>Etäkäyttö otettu käyttöön. CAN on tallennettu tälle laitteelle.</value>
   </data>
   <data name="ActivationCodeHint" xml:space="preserve">
     <value>{0}-numeroinen aktivointikoodi kirjeestä</value>
