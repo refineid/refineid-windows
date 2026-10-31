@@ -110,6 +110,21 @@ internal sealed class LocalCardSnapshot
     [JsonPropertyName("activation_code_length")]
     public int? ActivationCodeLength { get; init; }
 
+    /// <summary>
+    /// The activation preflight verdict of the card service: the card
+    /// looks unactivated, or it looks activated already.
+    /// </summary>
+    [JsonPropertyName("activation_state")]
+    public string ActivationState { get; init; } = "unknown";
+
+    /// <summary>The verdict under which the card service accepts activation.</summary>
+    private const string UnactivatedState = "unactivated";
+
+    /// <summary>Whether the card still waits for its activation.</summary>
+    [JsonIgnore]
+    public bool LooksUnactivated =>
+        string.Equals(this.ActivationState, UnactivatedState, StringComparison.Ordinal);
+
     [JsonPropertyName("pin1")]
     public CredentialStatus? Pin1 { get; init; }
 

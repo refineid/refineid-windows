@@ -1138,7 +1138,7 @@ impl ActivatePreflightOutcome {
 ///   so the card is already activated; `Some(false)` or `None`
 ///   leaves the flow free to proceed. PIN1's flag dominates;
 ///   PIN2's flag is auxiliary.
-const fn classify_preflight(
+pub(crate) const fn classify_preflight(
     pin1: Option<PinStatus>,
     pin2: Option<PinStatus>,
     generation: CardGeneration,

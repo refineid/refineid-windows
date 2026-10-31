@@ -19,11 +19,14 @@ using System.Linq;
 using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Navigation;
 
 /// <summary>
 /// The PIN page: the card in the selected reader, its PIN and
 /// recovery status, PIN change and reset, activation, and the contactless
-/// CAN. Every modifying command is bound to the inspected reader and card
+/// CAN. A card that still waits for its activation shows the activation
+/// section alone, opened; an activated card shows PIN change and reset.
+/// Every modifying command is bound to the inspected reader and card
 /// serial; PINs are read from the boxes, cleared at once, and only ever
 /// handed to the native card service.
 /// </summary>
@@ -40,11 +43,19 @@ internal sealed partial class CardPage : Page
     /// </summary>
     private static readonly TimeSpan ReaderPollInterval = TimeSpan.FromSeconds(2);
 
+    /// <summary>What the page tells about a card that waits for activation.</summary>
+    private const string ActivationNotice =
+        "This card has not been activated yet. Enter the activation code from "
+        + "the letter and choose your PIN1 and PIN2.";
+
     private readonly DispatcherTimer readerPollTimer;
     private LocalCardSnapshot? snapshot;
     private bool busy;
     private bool refreshingReaders;
     private bool polling;
+
+    /// <summary>The reader the main screen opened this page for, used once.</summary>
+    private string? requestedReader;
 
     public CardPage()
     {
@@ -62,6 +73,13 @@ internal sealed partial class CardPage : Page
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs args) => this.readerPollTimer.Stop();
+
+    /// <summary>The main screen names the reader whose card it inspected.</summary>
+    protected override void OnNavigatedTo(NavigationEventArgs args)
+    {
+        base.OnNavigatedTo(args);
+        this.requestedReader = args.Parameter as string;
+    }
 
     /// <summary>
     /// A tick lists readers only; the card is inspected again only when the
@@ -217,7 +235,8 @@ internal sealed partial class CardPage : Page
             return;
         }
 
-        string? previous = this.SelectedReader();
+        string? previous = this.SelectedReader() ?? this.requestedReader;
+        this.requestedReader = null;
         await this.RunCardOperationAsync(async () =>
             {
                 IReadOnlyList<string> readers = await Task.Run(LocalCardService.PresentReaders)
@@ -280,6 +299,28 @@ internal sealed partial class CardPage : Page
         this.ManagementPanel.IsHitTestVisible = true;
         this.ManagementPanel.Opacity = 1;
         this.StatusInfoBar.IsOpen = false;
+        this.ShowActivationState(inspected.LooksUnactivated);
+    }
+
+    /// <summary>
+    /// An unactivated card gets the activation section alone, opened, with
+    /// the notice above the card; the card service would refuse a PIN change
+    /// or reset on it. An activated card gets PIN change and reset, and the
+    /// activation section goes, since activation would be refused.
+    /// </summary>
+    private void ShowActivationState(bool looksUnactivated)
+    {
+        Visibility managing = looksUnactivated ? Visibility.Collapsed : Visibility.Visible;
+        Visibility activating = looksUnactivated ? Visibility.Visible : Visibility.Collapsed;
+        this.ChangePinExpander.Visibility = managing;
+        this.UnblockPinExpander.Visibility = managing;
+        this.ActivationExpander.Visibility = activating;
+        this.ActivationExpander.IsExpanded = looksUnactivated;
+        if (looksUnactivated)
+        {
+            this.ShowStatus(InfoBarSeverity.Informational, ActivationNotice);
+            _ = this.ActivationCodeBox.Focus(FocusState.Programmatic);
+        }
     }
 
     private async Task RunMutationAsync(Func<MutationResult> operation)

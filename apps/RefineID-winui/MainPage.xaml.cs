@@ -393,6 +393,16 @@ internal sealed partial class MainPage : Page
     {
         this.SignCard.IsEnabled = true;
 
+        // A card that still waits for its activation cannot sign or
+        // authenticate, so the activation flow opens on the PIN page as
+        // soon as the card is seen, while this page is the one shown. The
+        // reader list is remembered with the snapshot, so returning here
+        // does not open the page again for the same insertion.
+        if (snapshot.LooksUnactivated && ReferenceEquals(this.Frame.Content, this))
+        {
+            this.Frame.Navigate(typeof(CardPage), snapshot.Reader);
+        }
+
         if (!string.IsNullOrWhiteSpace(snapshot.Person))
         {
             this.HolderText.Text = snapshot.Person;

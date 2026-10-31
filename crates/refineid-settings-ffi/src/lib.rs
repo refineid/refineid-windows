@@ -116,6 +116,7 @@ struct CardSnapshotDto {
     model: String,
     generation: &'static str,
     activation_code_length: Option<usize>,
+    activation_state: &'static str,
     pin1: Option<CredentialStatusDto>,
     pin2: Option<CredentialStatusDto>,
     puk: Option<CredentialStatusDto>,
@@ -165,6 +166,7 @@ impl From<CardSnapshot> for CardSnapshotDto {
             model,
             generation: generation_label(snapshot.generation),
             activation_code_length: snapshot.activation_code_length,
+            activation_state: activation_state_label(snapshot.activation),
             pin1: snapshot.pin1.map(CredentialStatusDto::from),
             pin2: snapshot.pin2.map(CredentialStatusDto::from),
             puk: snapshot.puk.map(CredentialStatusDto::from),
@@ -243,6 +245,14 @@ const fn generation_label(generation: CardGeneration) -> &'static str {
         CardGeneration::Newer => "newer",
         CardGeneration::Older => "older",
         CardGeneration::Unknown => "unknown",
+    }
+}
+
+/// The activation preflight verdict as the app's JSON names it.
+const fn activation_state_label(activation: ActivatePreflightOutcome) -> &'static str {
+    match activation {
+        ActivatePreflightOutcome::LooksUnactivated { .. } => "unactivated",
+        ActivatePreflightOutcome::LooksActivated { .. } => "activated",
     }
 }
 

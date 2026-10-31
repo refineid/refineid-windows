@@ -83,7 +83,8 @@ connected, opens the PIN page, a narrow C# UI over the Rust card-service DLL
 - change PIN1 or PIN2;
 - restore either PIN with the recovery code;
 - activate a new card while binding every modifying command to the inspected
-  reader and card serial; and
+  reader and card serial: a card that still waits for its activation opens
+  the PIN page with the activation section alone as soon as it is seen; and
 - prove and save the printed CAN for the experimental contactless path.
 
 PIN, recovery, and activation values cross the FFI as bounded byte arrays, are
