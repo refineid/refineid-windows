@@ -232,10 +232,10 @@
     <value>Activate a new card</value>
   </data>
   <data name="ActivationCodeBox.Header" xml:space="preserve">
-    <value>Activation code</value>
+    <value>Activation code from letter</value>
   </data>
   <data name="ActivationCodeBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Activation code</value>
+    <value>Activation code from letter</value>
   </data>
   <data name="ActivationPin1Box.Header" xml:space="preserve">
     <value>New basic PIN (PIN 1)</value>
@@ -275,9 +275,6 @@
   </data>
   <data name="NfcAccessEnabled" xml:space="preserve">
     <value>Contactless use is on.</value>
-  </data>
-  <data name="ActivationCodeHint" xml:space="preserve">
-    <value>{0}-digit activation code from letter</value>
   </data>
   <data name="CardServiceResponseUnreadable" xml:space="preserve">
     <value>The card service response could not be read.</value>

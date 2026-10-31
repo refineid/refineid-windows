@@ -232,10 +232,10 @@
     <value>Aktivera ett nytt kort</value>
   </data>
   <data name="ActivationCodeBox.Header" xml:space="preserve">
-    <value>Aktiveringskod</value>
+    <value>Aktiveringskod från brevet</value>
   </data>
   <data name="ActivationCodeBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Aktiveringskod</value>
+    <value>Aktiveringskod från brevet</value>
   </data>
   <data name="ActivationPin1Box.Header" xml:space="preserve">
     <value>Ny baskod (PIN 1)</value>
@@ -275,9 +275,6 @@
   </data>
   <data name="NfcAccessEnabled" xml:space="preserve">
     <value>Kontaktlös användning är på.</value>
-  </data>
-  <data name="ActivationCodeHint" xml:space="preserve">
-    <value>Aktiveringskod med {0} siffror från brevet</value>
   </data>
   <data name="CardServiceResponseUnreadable" xml:space="preserve">
     <value>Svaret från korttjänsten kunde inte läsas.</value>

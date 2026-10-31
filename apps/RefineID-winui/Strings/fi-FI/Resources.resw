@@ -232,10 +232,10 @@
     <value>Aktivoi uusi kortti</value>
   </data>
   <data name="ActivationCodeBox.Header" xml:space="preserve">
-    <value>Aktivointikoodi</value>
+    <value>Aktivointikoodi kirjeestä</value>
   </data>
   <data name="ActivationCodeBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Aktivointikoodi</value>
+    <value>Aktivointikoodi kirjeestä</value>
   </data>
   <data name="ActivationPin1Box.Header" xml:space="preserve">
     <value>Uusi perustunnusluku (PIN 1)</value>
@@ -275,9 +275,6 @@
   </data>
   <data name="NfcAccessEnabled" xml:space="preserve">
     <value>Etäkäyttö on päällä.</value>
-  </data>
-  <data name="ActivationCodeHint" xml:space="preserve">
-    <value>{0}-numeroinen aktivointikoodi kirjeestä</value>
   </data>
   <data name="CardServiceResponseUnreadable" xml:space="preserve">
     <value>Korttipalvelun vastausta ei voitu lukea.</value>

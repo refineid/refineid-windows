@@ -410,11 +410,6 @@ internal sealed partial class CardPage : Page
             this.ActivationCodeBox.MaxLength = codeLength;
         }
 
-        // The card service refuses activation when it cannot tell the
-        // code's length; without one, no entry can be complete.
-        this.ActivationHintText.Text = inspected.ActivationCodeLength is int length
-            ? Strings.Format("ActivationCodeHint", length)
-            : string.Empty;
         this.UpdateActivationForm();
         this.ManagementPanel.IsHitTestVisible = true;
         this.ManagementPanel.Opacity = 1;

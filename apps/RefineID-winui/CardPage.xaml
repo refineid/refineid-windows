@@ -237,24 +237,13 @@
                             AutomationProperties.Name="Activate a new card"
                             Spacing="10"
                         >
-                            <!--  The hint belongs to the heading, and the
-                                  pair stands off from the fields like a
-                                  title.  -->
-                            <StackPanel Margin="0,0,0,10" Spacing="2">
-                                <TextBlock
-                                    x:Uid="ActivationHeading"
-                                    AutomationProperties.HeadingLevel="Level2"
-                                    Style="{StaticResource BodyStrongTextBlockStyle}"
-                                    Text="Activate a new card"
-                                />
-                                <TextBlock
-                                    x:Name="ActivationHintText"
-                                    AutomationProperties.AutomationId="ActivationHintText"
-                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    Style="{StaticResource CaptionTextBlockStyle}"
-                                    TextWrapping="Wrap"
-                                />
-                            </StackPanel>
+                            <TextBlock
+                                x:Uid="ActivationHeading"
+                                Margin="0,0,0,10"
+                                AutomationProperties.HeadingLevel="Level2"
+                                Style="{StaticResource BodyStrongTextBlockStyle}"
+                                Text="Activate a new card"
+                            />
                             <Grid ColumnSpacing="8">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
@@ -264,8 +253,8 @@
                                     x:Name="ActivationCodeBox"
                                     x:Uid="ActivationCodeBox"
                                     AutomationProperties.AutomationId="ActivationCodeBox"
-                                    AutomationProperties.Name="Activation code"
-                                    Header="Activation code"
+                                    AutomationProperties.Name="Activation code from letter"
+                                    Header="Activation code from letter"
                                     MaxLength="8"
                                     PasswordRevealMode="Peek"
                                     PasswordChanged="ActivationEntry_Changed"
