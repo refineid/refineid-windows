@@ -85,7 +85,7 @@ internal sealed partial class DevErrorWindow : Window
     private const string ClearedFileName = "dev-errors-cleared";
 
     /// <summary>The window's size when it first opens, in pixels.</summary>
-    private static readonly SizeInt32 InitialSize = new(560, 320);
+    private static readonly SizeInt32 InitialSize = new(820, 320);
 
     /// <summary>
     /// The main window the log sits beside: at its right edge, or its
@@ -213,7 +213,22 @@ internal sealed partial class DevErrorWindow : Window
             .WorkArea;
         int width = this.AppWindow.Size.Width;
         int right = anchor.Position.X + anchor.Size.Width;
-        int x = right + width <= work.X + work.Width ? right : anchor.Position.X - width;
+        int x;
+        if (right + width <= work.X + work.Width)
+        {
+            x = right;
+        }
+        else if (anchor.Position.X - width >= work.X)
+        {
+            x = anchor.Position.X - width;
+        }
+        else
+        {
+            // No room on either side: the log keeps to the work area's
+            // right edge, over the main window's edge if it must.
+            x = work.X + work.Width - width;
+        }
+
         this.gluedPosition = new PointInt32(x, anchor.Position.Y);
         this.AppWindow.MoveAndResize(
             new RectInt32(x, anchor.Position.Y, width, anchor.Size.Height)
@@ -435,7 +450,7 @@ internal sealed partial class DevErrorWindow : Window
                 {
                     Text = string.Create(
                         CultureInfo.InvariantCulture,
-                        $"{entry.Time.ToLocalTime():HH:mm:ss}  {entry.Program}  "
+                        $"{entry.Time.ToLocalTime():HH:mm:ss}  "
                     ),
                     Foreground = secondary,
                 }
