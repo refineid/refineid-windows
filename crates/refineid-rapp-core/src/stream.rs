@@ -14,7 +14,7 @@
 //! touching stored state (specification section 10.1, class 1).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -589,7 +589,7 @@ const SRV_FIXED_BYTES: usize = 6;
 /// Largest mDNS response the browser reads.
 const MDNS_RESPONSE_BYTES: usize = 4096;
 /// The mDNS IPv4 group address (RFC 6762 section 3).
-const MDNS_GROUP_ADDRESS: std::net::Ipv4Addr = std::net::Ipv4Addr::new(224, 0, 0, 251);
+const MDNS_GROUP_ADDRESS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
 /// The mDNS port (RFC 6762 section 3).
 const MDNS_PORT: u16 = 5353;
 /// Where every browse question is sent.
@@ -609,9 +609,9 @@ const DNS_UNICAST_RESPONSE: u16 = 0x8000;
 #[derive(Debug, Default)]
 struct MdnsRecords {
     instances: Vec<String>,
-    services: BTreeMap<String, (u16, String, Option<std::net::Ipv4Addr>)>,
+    services: BTreeMap<String, (u16, String, Option<Ipv4Addr>)>,
     texts: BTreeMap<String, Vec<(String, String)>>,
-    addresses: BTreeMap<String, std::net::Ipv4Addr>,
+    addresses: BTreeMap<String, Ipv4Addr>,
 }
 
 impl MdnsRecords {
@@ -648,11 +648,7 @@ impl MdnsRecords {
 }
 
 /// Parses one mDNS response into `records`; malformed input is ignored.
-fn parse_mdns_response(
-    data: &[u8],
-    responder: Option<std::net::Ipv4Addr>,
-    records: &mut MdnsRecords,
-) {
+fn parse_mdns_response(data: &[u8], responder: Option<Ipv4Addr>, records: &mut MdnsRecords) {
     if data.len() < DNS_HEADER_BYTES {
         return;
     }
@@ -702,10 +698,9 @@ fn parse_mdns_response(
                 records.texts.insert(name, parse_txt(rdata));
             }
             RR_TYPE_A if rdata.len() == 4 => {
-                records.addresses.insert(
-                    name,
-                    std::net::Ipv4Addr::new(rdata[0], rdata[1], rdata[2], rdata[3]),
-                );
+                records
+                    .addresses
+                    .insert(name, Ipv4Addr::new(rdata[0], rdata[1], rdata[2], rdata[3]));
             }
             _ => {}
         }
@@ -736,53 +731,108 @@ fn parse_txt(rdata: &[u8]) -> Vec<(String, String)> {
     entries
 }
 
-/// The sockets one browse asks on.
+/// The IPv4 addresses of the interfaces a browse asks on: every interface
+/// but loopback that has one, each once.
+///
+/// The platform's default multicast interface is not enough: on a Windows
+/// host with Hyper-V, WSL or Docker Desktop the default is the virtual
+/// switch, and a question sent only there never reaches the phone on
+/// Wi-Fi. When no interface can be listed, the unspecified address keeps
+/// the browse on the default interface.
+fn browse_interfaces() -> Vec<Ipv4Addr> {
+    let listed = if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|interface| (interface.is_loopback(), interface.ip()));
+    browse_interfaces_among(listed)
+}
+
+/// [`browse_interfaces`] over `(is_loopback, address)` pairs.
+fn browse_interfaces_among(interfaces: impl Iterator<Item = (bool, IpAddr)>) -> Vec<Ipv4Addr> {
+    let addresses: BTreeSet<Ipv4Addr> = interfaces
+        .filter_map(|(is_loopback, address)| match address {
+            IpAddr::V4(v4) if !is_loopback => Some(v4),
+            IpAddr::V4(_) | IpAddr::V6(_) => None,
+        })
+        .collect();
+    if addresses.is_empty() {
+        return vec![Ipv4Addr::UNSPECIFIED];
+    }
+    addresses.into_iter().collect()
+}
+
+/// The sockets one browse asks on, and the interfaces it asks through.
 ///
 /// A responder answers an ordinary question by multicast (RFC 6762 section
 /// 6), which only a socket bound to the mDNS port and joined to the group
 /// hears; that port is shared with the system responder. A legacy question
 /// from an ephemeral port (section 6.7) asks for a unicast answer, which
 /// some responders give, and which still arrives where the mDNS port cannot
-/// be shared.
+/// be shared. Both questions go out through every interface in turn, and
+/// the group socket is joined on each, so a phone on any of them is heard.
 struct BrowseSockets {
     group: Option<std::net::UdpSocket>,
     legacy: std::net::UdpSocket,
+    interfaces: Vec<Ipv4Addr>,
 }
 
 impl BrowseSockets {
     fn open() -> Option<Self> {
-        let legacy = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+        let interfaces = browse_interfaces();
+        let legacy = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
         legacy.set_read_timeout(Some(MDNS_POLL)).ok()?;
         Some(Self {
-            group: Self::group_socket(),
+            group: Self::group_socket(&interfaces),
             legacy,
+            interfaces,
         })
     }
 
-    /// Binds the shared mDNS port and joins the group on the default
-    /// interface; `None` where the platform refuses either.
-    fn group_socket() -> Option<std::net::UdpSocket> {
+    /// Binds the shared mDNS port and joins the group on every interface
+    /// that accepts it; `None` where the platform refuses the port or every
+    /// join.
+    fn group_socket(interfaces: &[Ipv4Addr]) -> Option<std::net::UdpSocket> {
         use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).ok()?;
         socket.set_reuse_address(true).ok()?;
-        let port = std::net::SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, MDNS_PORT);
+        let port = std::net::SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, MDNS_PORT);
         socket.bind(&SockAddr::from(port)).ok()?;
-        socket
-            .join_multicast_v4(&MDNS_GROUP_ADDRESS, &std::net::Ipv4Addr::UNSPECIFIED)
-            .ok()?;
+        let joined = interfaces
+            .iter()
+            .filter(|interface| {
+                socket
+                    .join_multicast_v4(&MDNS_GROUP_ADDRESS, interface)
+                    .is_ok()
+            })
+            .count();
+        if joined == 0 {
+            return None;
+        }
         socket.set_read_timeout(Some(MDNS_POLL)).ok()?;
         Some(socket.into())
     }
 
-    /// Asks the browse question on every socket; false when none went out.
+    /// Asks the browse question on every socket through every interface;
+    /// false when none went out.
     fn ask(&self) -> bool {
-        let group_sent = self
-            .group
-            .as_ref()
-            .is_some_and(|socket| socket.send_to(&browse_query(false), MDNS_GROUP).is_ok());
-        let legacy_sent = self.legacy.send_to(&browse_query(true), MDNS_GROUP).is_ok();
-        group_sent || legacy_sent
+        let mut sent = false;
+        for interface in &self.interfaces {
+            if let Some(group) = &self.group {
+                sent |= Self::send_through(group, *interface, &browse_query(false));
+            }
+            sent |= Self::send_through(&self.legacy, *interface, &browse_query(true));
+        }
+        sent
+    }
+
+    /// Sends `question` to the group through `interface`; false when the
+    /// interface refuses multicast or the send fails.
+    fn send_through(socket: &std::net::UdpSocket, interface: Ipv4Addr, question: &[u8]) -> bool {
+        socket2::SockRef::from(socket)
+            .set_multicast_if_v4(&interface)
+            .is_ok()
+            && socket.send_to(question, MDNS_GROUP).is_ok()
     }
 
     /// Reads one datagram from whichever socket has one within its poll.
@@ -1078,11 +1128,12 @@ impl core::error::Error for StreamError {
     reason = "test fixtures are constructed to be infallible"
 )]
 mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;
 
     use super::{
         DialPurpose, DiscoveryMode, MdnsRecords, StreamAccept, StreamError, StreamListener,
-        StreamService, dial, parse_mdns_response,
+        StreamService, browse_interfaces_among, dial, parse_mdns_response,
     };
     use crate::ids::{GrantsHash, PairId};
     use crate::transport::FrameTransport;
@@ -1353,6 +1404,33 @@ mod tests {
         packet.extend(record(&full, super::RR_TYPE_TXT, &txt_rdata));
         packet.extend(record(&host, super::RR_TYPE_A, &[192, 0, 2, 10]));
         packet
+    }
+
+    #[test]
+    fn a_browse_asks_through_every_ipv4_interface_but_loopback() {
+        let listed = [
+            (true, IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            (false, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 215))),
+            (false, IpAddr::V4(Ipv4Addr::new(172, 20, 144, 1))),
+            (false, IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)),
+            (false, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 215))),
+        ];
+        assert_eq!(
+            browse_interfaces_among(listed.into_iter()),
+            vec![Ipv4Addr::new(10, 0, 0, 215), Ipv4Addr::new(172, 20, 144, 1)]
+        );
+    }
+
+    #[test]
+    fn a_browse_without_a_listed_interface_keeps_the_default_one() {
+        assert_eq!(
+            browse_interfaces_among(std::iter::empty()),
+            vec![Ipv4Addr::UNSPECIFIED]
+        );
+        assert_eq!(
+            browse_interfaces_among([(true, IpAddr::V4(Ipv4Addr::LOCALHOST))].into_iter()),
+            vec![Ipv4Addr::UNSPECIFIED]
+        );
     }
 
     #[test]

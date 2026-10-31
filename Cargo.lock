@@ -536,6 +536,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "if-addrs"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0a05c691e1fae256cf7013d99dad472dc52d5543322761f83ec8d47eab40d2b"
+dependencies = [
+ "libc",
+ "windows-sys",
+]
+
+[[package]]
 name = "inout"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -996,6 +1006,7 @@ name = "refineid-rapp-core"
 version = "26.10.31"
 dependencies = [
  "getrandom 0.4.3",
+ "if-addrs",
  "refineid-dev-errors",
  "refineid-lib-core",
  "refineid-rapp",

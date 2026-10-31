@@ -16,6 +16,7 @@ getrandom.workspace = true
 sha2.workspace = true
 zeroize.workspace = true
 socket2.workspace = true
+if-addrs.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = ["Win32_System_SystemInformation"] }
