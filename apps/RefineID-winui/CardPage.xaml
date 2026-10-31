@@ -61,11 +61,6 @@
                         Header="Contactless NFC"
                     >
                         <StackPanel Padding="0,12,0,4" Spacing="12">
-                            <TextBlock
-                                x:Uid="NfcHintText"
-                                Text="Enter the CAN printed on the card."
-                                TextWrapping="Wrap"
-                            />
                             <Grid ColumnSpacing="12">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="220" />
@@ -176,11 +171,6 @@
                             Header="Reset PIN (PUK)"
                         >
                             <StackPanel Padding="0,12,0,4" Spacing="10">
-                                <TextBlock
-                                    x:Uid="UnblockHintText"
-                                    Text="Wrong code uses one recovery attempt."
-                                    TextWrapping="Wrap"
-                                />
                                 <ComboBox
                                     x:Name="UnblockSlotBox"
                                     x:Uid="UnblockSlotBox"

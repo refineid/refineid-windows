@@ -129,9 +129,6 @@
   <data name="NfcExpander.AutomationProperties.Name" xml:space="preserve">
     <value>Kontaktlös NFC</value>
   </data>
-  <data name="NfcHintText.Text" xml:space="preserve">
-    <value>Ange den CAN som är tryckt på kortet.</value>
-  </data>
   <data name="CanBox.Header" xml:space="preserve">
     <value>Kortets åtkomstkod (CAN)</value>
   </data>
@@ -191,9 +188,6 @@
   </data>
   <data name="UnblockPinExpander.AutomationProperties.Name" xml:space="preserve">
     <value>Återställ PIN-kod (PUK)</value>
-  </data>
-  <data name="UnblockHintText.Text" xml:space="preserve">
-    <value>En felaktig kod förbrukar ett återställningsförsök.</value>
   </data>
   <data name="UnblockSlotBox.Header" xml:space="preserve">
     <value>Kod</value>
@@ -280,7 +274,7 @@
     <value>Välj först en läsare med ett kort.</value>
   </data>
   <data name="NfcAccessEnabled" xml:space="preserve">
-    <value>NFC-åtkomst aktiverad. CAN har sparats på den här enheten.</value>
+    <value>Kontaktlös användning är på.</value>
   </data>
   <data name="ActivationCodeHint" xml:space="preserve">
     <value>Aktiveringskod med {0} siffror från brevet</value>

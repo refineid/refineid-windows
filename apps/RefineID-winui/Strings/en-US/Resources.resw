@@ -129,9 +129,6 @@
   <data name="NfcExpander.AutomationProperties.Name" xml:space="preserve">
     <value>Contactless NFC</value>
   </data>
-  <data name="NfcHintText.Text" xml:space="preserve">
-    <value>Enter the CAN printed on the card.</value>
-  </data>
   <data name="CanBox.Header" xml:space="preserve">
     <value>Card access number (CAN)</value>
   </data>
@@ -191,9 +188,6 @@
   </data>
   <data name="UnblockPinExpander.AutomationProperties.Name" xml:space="preserve">
     <value>Reset PIN (PUK)</value>
-  </data>
-  <data name="UnblockHintText.Text" xml:space="preserve">
-    <value>Wrong code uses one recovery attempt.</value>
   </data>
   <data name="UnblockSlotBox.Header" xml:space="preserve">
     <value>Credential</value>
@@ -280,7 +274,7 @@
     <value>Select a reader with a card first.</value>
   </data>
   <data name="NfcAccessEnabled" xml:space="preserve">
-    <value>NFC access enabled. The CAN is saved on this device.</value>
+    <value>Contactless use is on.</value>
   </data>
   <data name="ActivationCodeHint" xml:space="preserve">
     <value>{0}-digit activation code from letter</value>

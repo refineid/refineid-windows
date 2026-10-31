@@ -129,9 +129,6 @@
   <data name="NfcExpander.AutomationProperties.Name" xml:space="preserve">
     <value>Etäkäyttö (NFC)</value>
   </data>
-  <data name="NfcHintText.Text" xml:space="preserve">
-    <value>Syötä korttiin painettu CAN.</value>
-  </data>
   <data name="CanBox.Header" xml:space="preserve">
     <value>Kortin pääsykoodi (CAN)</value>
   </data>
@@ -191,9 +188,6 @@
   </data>
   <data name="UnblockPinExpander.AutomationProperties.Name" xml:space="preserve">
     <value>Palauta tunnusluku (PUK)</value>
-  </data>
-  <data name="UnblockHintText.Text" xml:space="preserve">
-    <value>Väärä koodi kuluttaa yhden palautusyrityksen.</value>
   </data>
   <data name="UnblockSlotBox.Header" xml:space="preserve">
     <value>Tunnus</value>
@@ -280,7 +274,7 @@
     <value>Valitse ensin lukija, jossa on kortti.</value>
   </data>
   <data name="NfcAccessEnabled" xml:space="preserve">
-    <value>Etäkäyttö on päällä. CAN on tallennettu tälle laitteelle.</value>
+    <value>Etäkäyttö on päällä.</value>
   </data>
   <data name="ActivationCodeHint" xml:space="preserve">
     <value>{0}-numeroinen aktivointikoodi kirjeestä</value>
