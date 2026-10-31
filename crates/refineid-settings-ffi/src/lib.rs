@@ -53,7 +53,7 @@ use refineid_lib_core::pin::{
 };
 use refineid_lib_core::pkcs15::CardGeneration;
 use refineid_lib_pcsc::PcscBackend;
-use refineid_windows_credential_store::save_can;
+use refineid_windows_credential_store::{read_can, save_can};
 use refineid_windows_driver_probe::{self, LocalCardSupport};
 use serde::Serialize;
 use zeroize::Zeroize;
@@ -187,6 +187,27 @@ impl From<ContactlessSnapshot> for ContactlessSnapshotDto {
             pin1: snapshot.pin1.map(CredentialStatusDto::from),
             pin2: snapshot.pin2.map(CredentialStatusDto::from),
             puk: snapshot.puk.map(CredentialStatusDto::from),
+        }
+    }
+}
+
+/// A card read over contactless carries no model label and no PIN-changed
+/// flags; the rest reads as a contact card's snapshot.
+impl From<ContactlessSnapshot> for CardSnapshotDto {
+    fn from(snapshot: ContactlessSnapshot) -> Self {
+        Self {
+            reader: snapshot.reader.clone(),
+            serial: snapshot.serial.as_str().to_owned(),
+            person: snapshot.person.clone(),
+            model: "FINEID contactless".to_owned(),
+            generation: generation_label(snapshot.generation),
+            activation_code_length: snapshot.activation_code_length(),
+            activation_state: activation_state_label(snapshot.activation()),
+            pin1: snapshot.pin1.map(CredentialStatusDto::from),
+            pin2: snapshot.pin2.map(CredentialStatusDto::from),
+            puk: snapshot.puk.map(CredentialStatusDto::from),
+            pin1_changed: None,
+            pin2_changed: None,
         }
     }
 }
@@ -640,10 +661,39 @@ pub unsafe extern "C" fn refineid_settings_inspect(
         // value leaves this FFI frame.
         let reader = unsafe { copy_utf8(reader, reader_length, MAX_READER_NAME_BYTES, "reader") }?;
         let filter = service::reader_filter(reader);
-        service::inspect(Some(&filter))
-            .map(CardSnapshotDto::from)
-            .map_err(|error| ApiFailure::new("card_inspection_failed", error.to_string()))
+        match service::inspect(Some(&filter)) {
+            Ok(snapshot) => Ok(CardSnapshotDto::from(snapshot)),
+            Err(contact_error) => inspect_over_contactless(&filter, &contact_error.to_string()),
+        }
     })
+}
+
+/// A card on a contactless slot gives the contact inspection nothing, so it
+/// is read under PACE with the CAN this user stored for its card family.
+/// Without a stored CAN the caller is told to prime one; with no contactless
+/// card at all the contact inspection's own failure stands.
+fn inspect_over_contactless(
+    filter: &refineid_lib_core::backend::ReaderFilter,
+    contact_error: &str,
+) -> Result<CardSnapshotDto, ApiFailure> {
+    let contact_failure = || ApiFailure::new("card_inspection_failed", contact_error.to_owned());
+    let Some(atr) = service::contactless_lookup_atr(Some(filter)).map_err(|_| contact_failure())?
+    else {
+        return Err(contact_failure());
+    };
+    match read_can(&atr) {
+        Ok(Some(can)) => service::inspect_contactless(Some(filter), can)
+            .map(CardSnapshotDto::from)
+            .map_err(|error| ApiFailure::new("card_inspection_failed", error.to_string())),
+        Ok(None) => Err(ApiFailure::new(
+            "access_number_required",
+            "The card on the contactless reader needs its access number once.",
+        )),
+        Err(error) => Err(ApiFailure::new(
+            "contactless_storage_failed",
+            error.to_string(),
+        )),
+    }
 }
 
 /// Prove and enable contactless access with the selected reader and printed CAN.

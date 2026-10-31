@@ -358,4 +358,7 @@
   <data name="ConnectRemoteReader" xml:space="preserve">
     <value>Connect remote reader</value>
   </data>
+  <data name="ContactlessAccessNumber" xml:space="preserve">
+    <value>Enable contactless use</value>
+  </data>
 </root>

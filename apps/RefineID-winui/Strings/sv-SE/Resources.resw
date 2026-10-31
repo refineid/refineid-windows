@@ -358,4 +358,7 @@
   <data name="ConnectRemoteReader" xml:space="preserve">
     <value>Anslut fjärrläsare</value>
   </data>
+  <data name="ContactlessAccessNumber" xml:space="preserve">
+    <value>Aktivera kontaktlös användning</value>
+  </data>
 </root>

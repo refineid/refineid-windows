@@ -481,6 +481,12 @@ internal sealed partial class CardPage : Page
         {
             await operation().ConfigureAwait(true);
         }
+        catch (NativeRappException error) when (error.Code == "access_number_required")
+        {
+            // A card on the contactless antenna, not yet primed: the page's
+            // contactless entry is the way in, so no notice.
+            this.StatusInfoBar.IsOpen = false;
+        }
         catch (NativeRappException error)
         {
             this.ShowError(error.Message);

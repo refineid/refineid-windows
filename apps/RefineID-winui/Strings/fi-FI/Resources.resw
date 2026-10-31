@@ -358,4 +358,7 @@
   <data name="ConnectRemoteReader" xml:space="preserve">
     <value>Yhdistä etälukija</value>
   </data>
+  <data name="ContactlessAccessNumber" xml:space="preserve">
+    <value>Ota lähiluku käyttöön</value>
+  </data>
 </root>

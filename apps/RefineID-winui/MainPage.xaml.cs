@@ -50,6 +50,13 @@ internal sealed partial class MainPage : Page
     /// <summary>Whether the card in a local reader can sign.</summary>
     private bool localCardSigns;
 
+    /// <summary>
+    /// The reader whose card sits on the contactless antenna without a
+    /// stored access number, so the identity row leads to the entry that
+    /// proves and stores it; null otherwise.
+    /// </summary>
+    private string? contactlessReaderWithoutCan;
+
     /// <summary>Whether the device holds a pairing, read or not.</summary>
     private bool hasPairing;
     private string? selectedReader;
@@ -166,8 +173,18 @@ internal sealed partial class MainPage : Page
     /// succeeded, so pressing it pairs afresh: a new pairing replaces the
     /// stored one, which is the only way out when the phone forgot it.
     /// </summary>
-    private async void ConnectRemoteReader_Click(object sender, RoutedEventArgs args) =>
+    private async void ConnectRemoteReader_Click(object sender, RoutedEventArgs args)
+    {
+        if (this.contactlessReaderWithoutCan is string reader)
+        {
+            // The PIN page's contactless entry proves the access number and
+            // stores it; the card reads on the return here.
+            this.Frame.Navigate(typeof(CardPage), reader);
+            return;
+        }
+
         await this.PairAndReadAsync().ConfigureAwait(true);
+    }
 
     /// <summary>
     /// Reads the card through the pairing this device already holds. On
@@ -391,10 +408,10 @@ internal sealed partial class MainPage : Page
         // again on the next tick.
         this.inspectedReaders = null;
 
+        string? targetReader = null;
         try
         {
             // Prefer the last selected reader if still present.
-            string? targetReader = null;
             if (this.selectedReader is not null)
             {
                 targetReader = readers.FirstOrDefault(r =>
@@ -427,6 +444,17 @@ internal sealed partial class MainPage : Page
             }
 
             this.UpdateLocalCardDisconnected();
+            this.inspectedReaders = readers;
+        }
+        catch (NativeRappException error)
+            when (error.Code == "access_number_required" && targetReader is not null)
+        {
+            // A card on the contactless antenna, not yet primed on this
+            // computer: the row leads to the entry that primes it, and the
+            // reader list is recorded so the card is not asked again until
+            // something changes or the PIN page returns.
+            this.unactivatedSerial = null;
+            this.ShowAccessNumberNeeded(targetReader);
             this.inspectedReaders = readers;
         }
         catch (NativeRappException)
@@ -498,8 +526,23 @@ internal sealed partial class MainPage : Page
     /// <summary>The identity row is headed by its holder, as on the other platforms.</summary>
     private void ShowHolder(string holder)
     {
+        this.contactlessReaderWithoutCan = null;
         this.PersonCard.Header = holder;
         this.PersonCard.IsClickEnabled = false;
+    }
+
+    /// <summary>
+    /// A card on the contactless antenna without a stored access number:
+    /// the row is the way to prime it, and nothing signs until it is.
+    /// </summary>
+    private void ShowAccessNumberNeeded(string reader)
+    {
+        this.contactlessReaderWithoutCan = reader;
+        this.localCardSigns = false;
+        this.PersonCard.Header = Strings.Get("ContactlessAccessNumber");
+        this.PersonCard.IsClickEnabled = true;
+        this.ForgetIdentityButton.Visibility = this.ForgetVisibility();
+        this.RefreshSignEntry();
     }
 
     /// <summary>
@@ -508,6 +551,7 @@ internal sealed partial class MainPage : Page
     /// </summary>
     private void ShowNoHolder()
     {
+        this.contactlessReaderWithoutCan = null;
         this.PersonCard.Header = Strings.Get("ConnectRemoteReader");
         this.PersonCard.IsClickEnabled = true;
     }
