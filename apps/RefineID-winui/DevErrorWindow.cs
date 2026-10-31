@@ -471,7 +471,10 @@ internal sealed partial class DevErrorWindow : Window
             DevErrorEntry entry = this.entries[index];
             _ = text.Append(
                     CultureInfo.InvariantCulture,
-                    $"{entry.Time.ToString("O", CultureInfo.InvariantCulture)} {entry.Program} {entry.Text}"
+                    // Local time with its offset, as the rows are read: a
+                    // line copied beside a phone log or a browser net log
+                    // lines up without converting from UTC.
+                    $"{entry.Time.ToLocalTime().ToString("O", CultureInfo.InvariantCulture)} {entry.Program} {entry.Text}"
                 )
                 .Append('\n');
         }
