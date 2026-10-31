@@ -244,10 +244,10 @@
     <value>Ny baskod (PIN 1)</value>
   </data>
   <data name="ActivationPin1ConfirmationBox.Header" xml:space="preserve">
-    <value>Ny baskod (PIN 1) igen</value>
+    <value>Upprepa baskoden</value>
   </data>
   <data name="ActivationPin1ConfirmationBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Ny baskod (PIN 1) igen</value>
+    <value>Upprepa baskoden</value>
   </data>
   <data name="ActivationPin2Box.Header" xml:space="preserve">
     <value>Ny signaturkod (PIN 2)</value>
@@ -256,10 +256,10 @@
     <value>Ny signaturkod (PIN 2)</value>
   </data>
   <data name="ActivationPin2ConfirmationBox.Header" xml:space="preserve">
-    <value>Ny signaturkod (PIN 2) igen</value>
+    <value>Upprepa signaturkoden</value>
   </data>
   <data name="ActivationPin2ConfirmationBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Ny signaturkod (PIN 2) igen</value>
+    <value>Upprepa signaturkoden</value>
   </data>
   <data name="ActivateButton.Content" xml:space="preserve">
     <value>Aktivera identitetskort</value>

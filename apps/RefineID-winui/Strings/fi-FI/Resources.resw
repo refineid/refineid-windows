@@ -244,10 +244,10 @@
     <value>Uusi perustunnusluku (PIN 1)</value>
   </data>
   <data name="ActivationPin1ConfirmationBox.Header" xml:space="preserve">
-    <value>Uusi perustunnusluku (PIN 1) uudelleen</value>
+    <value>Toista perustunnusluku</value>
   </data>
   <data name="ActivationPin1ConfirmationBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Uusi perustunnusluku (PIN 1) uudelleen</value>
+    <value>Toista perustunnusluku</value>
   </data>
   <data name="ActivationPin2Box.Header" xml:space="preserve">
     <value>Uusi allekirjoitustunnusluku (PIN 2)</value>
@@ -256,10 +256,10 @@
     <value>Uusi allekirjoitustunnusluku (PIN 2)</value>
   </data>
   <data name="ActivationPin2ConfirmationBox.Header" xml:space="preserve">
-    <value>Uusi allekirjoitustunnusluku (PIN 2) uudelleen</value>
+    <value>Toista allekirjoitustunnusluku</value>
   </data>
   <data name="ActivationPin2ConfirmationBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Uusi allekirjoitustunnusluku (PIN 2) uudelleen</value>
+    <value>Toista allekirjoitustunnusluku</value>
   </data>
   <data name="ActivateButton.Content" xml:space="preserve">
     <value>Aktivoi henkilökortti</value>

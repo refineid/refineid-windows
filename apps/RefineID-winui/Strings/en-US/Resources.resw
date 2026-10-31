@@ -244,10 +244,10 @@
     <value>New basic PIN (PIN 1)</value>
   </data>
   <data name="ActivationPin1ConfirmationBox.Header" xml:space="preserve">
-    <value>Confirm new basic PIN (PIN 1)</value>
+    <value>Repeat basic PIN</value>
   </data>
   <data name="ActivationPin1ConfirmationBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Confirm new basic PIN (PIN 1)</value>
+    <value>Repeat basic PIN</value>
   </data>
   <data name="ActivationPin2Box.Header" xml:space="preserve">
     <value>New signature PIN (PIN 2)</value>
@@ -256,10 +256,10 @@
     <value>New signature PIN (PIN 2)</value>
   </data>
   <data name="ActivationPin2ConfirmationBox.Header" xml:space="preserve">
-    <value>Confirm new signature PIN (PIN 2)</value>
+    <value>Repeat signature PIN</value>
   </data>
   <data name="ActivationPin2ConfirmationBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Confirm new signature PIN (PIN 2)</value>
+    <value>Repeat signature PIN</value>
   </data>
   <data name="ActivateButton.Content" xml:space="preserve">
     <value>Activate identity card</value>
