@@ -64,6 +64,16 @@ internal sealed partial class MainPage : Page
 
     /// <summary>The readers holding a card at the last inspection.</summary>
     private IReadOnlyList<string>? inspectedReaders;
+
+    /// <summary>
+    /// When a card the last inspection could not read is tried again
+    /// unprompted: a card busy with a browser or a tool comes back on its
+    /// own, without a reinsert and without a refusal every tick.
+    /// </summary>
+    private DateTimeOffset? retryAt;
+
+    /// <summary>How long a card that could not be read is left alone.</summary>
+    private static readonly TimeSpan RetryInterval = TimeSpan.FromSeconds(30);
     private bool checkingLocalCard;
 
     /// <summary>
@@ -391,10 +401,13 @@ internal sealed partial class MainPage : Page
         if (
             this.inspectedReaders is not null
             && readers.SequenceEqual(this.inspectedReaders, StringComparer.Ordinal)
+            && (this.retryAt is null || DateTimeOffset.UtcNow < this.retryAt)
         )
         {
             return;
         }
+
+        this.retryAt = null;
 
         // The PIN page works on a reader attached to this computer, with or
         // without a card in it, so the entry follows the reader list alone.
@@ -462,17 +475,19 @@ internal sealed partial class MainPage : Page
         catch (NativeRappException)
         {
             // A card that cannot be read now is asked again when the
-            // reader list changes, as when it is lifted and put back, not
-            // every tick.
+            // reader list changes, as when it is lifted and put back, or
+            // after a while on its own; not every tick.
             this.unactivatedSerial = null;
             this.UpdateLocalCardDisconnected();
             this.inspectedReaders = readers;
+            this.retryAt = DateTimeOffset.UtcNow + RetryInterval;
         }
         catch (JsonException)
         {
             this.unactivatedSerial = null;
             this.UpdateLocalCardDisconnected();
             this.inspectedReaders = readers;
+            this.retryAt = DateTimeOffset.UtcNow + RetryInterval;
         }
 
         if (promptReader is string reader)
