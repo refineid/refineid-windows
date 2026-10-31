@@ -33,8 +33,12 @@ using Microsoft.UI.Xaml.Controls;
 )]
 internal sealed partial class MainPage : Page
 {
-    /// <summary>Requester label the phone shows during pairing.</summary>
-    private const string RequesterName = "RefineID Windows";
+    /// <summary>
+    /// The name the phone shows for this requester: the computer's name,
+    /// as a Mac and an iPhone send theirs. The phone names the platform
+    /// itself, so the name does not repeat it.
+    /// </summary>
+    private static readonly string RequesterName = Environment.MachineName;
 
     /// <summary>Pairing-state poll cadence.</summary>
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(700);
@@ -42,6 +46,9 @@ internal sealed partial class MainPage : Page
     private readonly DispatcherQueue dispatcher;
     private readonly DispatcherTimer cardPollTimer;
     private string? remoteHolder;
+
+    /// <summary>Whether the card in a local reader can sign.</summary>
+    private bool localCardSigns;
 
     /// <summary>Whether the device holds a pairing, read or not.</summary>
     private bool hasPairing;
@@ -68,6 +75,7 @@ internal sealed partial class MainPage : Page
         this.dispatcher = DispatcherQueue.GetForCurrentThread();
         this.cardPollTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
         this.cardPollTimer.Tick += (s, e) => this.CheckLocalCard();
+        this.PersonCard.Click += this.ConnectRemoteReader_Click;
         this.DiagnosticsText.Text = DiagnosticsLabel();
 #if DEBUG
         this.DiagnosticsText.Tapped += (sender, args) => DevErrorWindow.ShowWindow();
@@ -222,10 +230,6 @@ internal sealed partial class MainPage : Page
             this.ForgetIdentityButton.Visibility = Visibility.Visible;
             await this.ReadPairedCardAsync(pairedHandle, quiet: false).ConfigureAwait(true);
         }
-        else if (dialog.Failure is string failure)
-        {
-            this.ShowError(failure);
-        }
     }
 
     private async Task ReadPairedCardAsync(ulong handle, bool quiet)
@@ -243,9 +247,9 @@ internal sealed partial class MainPage : Page
 
             string holder = reading.Identity.DisplayName;
             this.remoteHolder = holder;
-            this.HolderText.Text = holder;
-            this.HolderText.Visibility = Visibility.Visible;
-            this.ConnectRemoteReaderButton.Visibility = Visibility.Collapsed;
+            this.ShowHolder(holder);
+            // The phone's card signs, whatever the local reader holds.
+            this.RefreshSignEntry();
             this.StatusInfoBar.IsOpen = false;
         }
         catch (NativeRappException error)
@@ -294,12 +298,11 @@ internal sealed partial class MainPage : Page
             this.StatusInfoBar.IsOpen = false;
             this.remoteHolder = null;
             this.hasPairing = false;
-            this.HolderText.Text = string.Empty;
-            this.HolderText.Visibility = Visibility.Collapsed;
             this.ForgetIdentityButton.Visibility = Visibility.Collapsed;
-            this.ConnectRemoteReaderButton.Visibility = Visibility.Visible;
-            // The focused button is gone; keyboard focus moves to its successor.
-            _ = this.ConnectRemoteReaderButton.Focus(FocusState.Programmatic);
+            this.ShowNoHolder();
+            this.RefreshSignEntry();
+            // The focused button is gone; keyboard focus moves to the row.
+            _ = this.PersonCard.Focus(FocusState.Programmatic);
         }
         catch (NativeRappException error)
         {
@@ -444,11 +447,9 @@ internal sealed partial class MainPage : Page
         // no pairing dialog is open over it. A card first seen from another
         // page is remembered too, so a return here does not send the holder
         // back to the page they just left.
-        // Sign is offered only while a card can sign; a card that waits for
-        // its activation cannot, and the entry is absent rather than grey.
-        this.SignCard.Visibility = snapshot.LooksUnactivated
-            ? Visibility.Collapsed
-            : Visibility.Visible;
+        // A card that waits for its activation cannot sign.
+        this.localCardSigns = !snapshot.LooksUnactivated;
+        this.RefreshSignEntry();
         if (snapshot.LooksUnactivated)
         {
             bool firstSight = !string.Equals(
@@ -465,39 +466,60 @@ internal sealed partial class MainPage : Page
 
         if (!string.IsNullOrWhiteSpace(snapshot.Person))
         {
-            this.HolderText.Text = snapshot.Person;
-            this.HolderText.Visibility = Visibility.Visible;
-            this.ConnectRemoteReaderButton.Visibility = Visibility.Collapsed;
+            this.ShowHolder(snapshot.Person);
             this.ForgetIdentityButton.Visibility = Visibility.Collapsed;
         }
         else if (this.remoteHolder is null)
         {
-            this.HolderText.Text = string.Empty;
-            this.HolderText.Visibility = Visibility.Collapsed;
-            this.ConnectRemoteReaderButton.Visibility = Visibility.Visible;
+            this.ShowNoHolder();
             this.ForgetIdentityButton.Visibility = this.ForgetVisibility();
         }
     }
 
     private void UpdateLocalCardDisconnected()
     {
+        this.localCardSigns = false;
         if (this.remoteHolder is null)
         {
-            this.HolderText.Text = string.Empty;
-            this.HolderText.Visibility = Visibility.Collapsed;
-            this.ConnectRemoteReaderButton.Visibility = Visibility.Visible;
+            this.ShowNoHolder();
             this.ForgetIdentityButton.Visibility = this.ForgetVisibility();
-            this.SignCard.Visibility = Visibility.Collapsed;
         }
         else
         {
-            this.HolderText.Text = this.remoteHolder;
-            this.HolderText.Visibility = Visibility.Visible;
-            this.ConnectRemoteReaderButton.Visibility = Visibility.Collapsed;
+            this.ShowHolder(this.remoteHolder);
             this.ForgetIdentityButton.Visibility = Visibility.Visible;
-            this.SignCard.Visibility = Visibility.Visible;
         }
+
+        this.RefreshSignEntry();
     }
+
+    /// <summary>The identity row is headed by its holder, as on the other platforms.</summary>
+    private void ShowHolder(string holder)
+    {
+        this.PersonCard.Header = holder;
+        this.PersonCard.IsClickEnabled = false;
+    }
+
+    /// <summary>
+    /// Without a holder the row is the way to get one: it connects the
+    /// remote reader.
+    /// </summary>
+    private void ShowNoHolder()
+    {
+        this.PersonCard.Header = Strings.Get("ConnectRemoteReader");
+        this.PersonCard.IsClickEnabled = true;
+    }
+
+    /// <summary>
+    /// Sign is offered while a card can sign: the card in a local reader
+    /// once activated, or the phone's card through the pairing. The entry
+    /// is absent rather than grey otherwise.
+    /// </summary>
+    private void RefreshSignEntry() =>
+        this.SignCard.Visibility =
+            this.localCardSigns || this.remoteHolder is not null
+                ? Visibility.Visible
+                : Visibility.Collapsed;
 
     /// <summary>The forget button stays while a pairing exists, read or not.</summary>
     private Visibility ForgetVisibility() =>

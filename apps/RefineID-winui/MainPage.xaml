@@ -96,12 +96,16 @@
                         Style="{StaticResource BodyStrongTextBlockStyle}"
                         Text="Identity"
                     />
+                    <!--  The row is headed by the holder's name, as on the
+                          other platforms. Without a holder its header is
+                          the way to get one, and the row connects the
+                          remote reader when clicked.  -->
                     <controls:SettingsCard
                         x:Name="PersonCard"
                         x:Uid="PersonCard"
                         AutomationProperties.AutomationId="PersonCard"
                         AutomationProperties.Name="Card holder identity"
-                        Header="Person"
+                        IsClickEnabled="False"
                     >
                         <controls:SettingsCard.HeaderIcon>
                             <FontIcon x:Name="PersonIcon" Glyph="&#xE77B;" />
@@ -111,24 +115,6 @@
                             Orientation="Horizontal"
                             Spacing="8"
                         >
-                            <HyperlinkButton
-                                x:Name="ConnectRemoteReaderButton"
-                                x:Uid="ConnectRemoteReaderButton"
-                                AutomationProperties.AutomationId="ConnectRemoteReaderButton"
-                                AutomationProperties.HelpText="Pair with mobile device running RefineID remote reader"
-                                AutomationProperties.Name="Connect remote reader"
-                                Click="ConnectRemoteReader_Click"
-                                Content="Connect Remote Reader"
-                            />
-                            <TextBlock
-                                x:Name="HolderText"
-                                x:Uid="HolderText"
-                                VerticalAlignment="Center"
-                                AutomationProperties.AutomationId="HolderText"
-                                AutomationProperties.Name="Card holder name"
-                                IsTextSelectionEnabled="True"
-                                Visibility="Collapsed"
-                            />
                             <!--  Forgetting is one visible action on the
                                    row while a pairing exists, and the click
                                    forgets at once.  -->

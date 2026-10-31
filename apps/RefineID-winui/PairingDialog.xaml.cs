@@ -17,14 +17,29 @@ namespace RefineID;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 
 /// <summary>
-/// Takes the code the phone shows, starts the pairing, polls its progress,
-/// hosts the on-screen confirmation, and reports the paired handle or the
-/// failure.
+/// Takes the code the phone shows, as the phone shows it: three groups of
+/// two, and a complete code starts the pairing at once. The dialog polls
+/// the pairing's progress, hosts the on-screen confirmation, and reports
+/// the paired handle. A pairing that does not complete says why under the
+/// code and takes the next one.
 /// </summary>
 internal sealed partial class PairingDialog : ContentDialog
 {
+    /// <summary>
+    /// A pairing code is six Crockford Base32 symbols, shown in groups of
+    /// two (RAPP v26.10.29 section 3.1). The alphabet leaves out I, L, O
+    /// and U.
+    /// </summary>
+    private const int CodeLength = 6;
+    private const int GroupSize = 2;
+    private const string Alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+    /// <summary>Placeholder groups, shaped like a code, as the Apple app shows them.</summary>
+    private static readonly string[] Prompts = ["7K", "X4", "M9"];
+
     private readonly string requesterName;
     private readonly DispatcherQueueTimer timer;
     private ulong? handle;
@@ -33,9 +48,6 @@ internal sealed partial class PairingDialog : ContentDialog
 
     /// <summary>The handle once the pairing completed, otherwise null.</summary>
     public ulong? PairedHandle { get; private set; }
-
-    /// <summary>A human-readable failure, set when pairing did not complete.</summary>
-    public string? Failure { get; private set; }
 
     public PairingDialog(string requesterName, DispatcherQueue dispatcher, TimeSpan pollInterval)
     {
@@ -46,22 +58,104 @@ internal sealed partial class PairingDialog : ContentDialog
         this.timer.Interval = pollInterval;
         this.timer.Tick += this.OnPoll;
 
-        this.PrimaryButtonClick += this.OnPair;
+        this.Opened += (sender, args) => this.FocusCode();
         this.Closing += this.OnClosing;
+        this.Render(string.Empty);
     }
 
-    private async void OnPair(ContentDialog sender, ContentDialogButtonClickEventArgs args)
+    private TextBlock[] Groups => [this.Group0, this.Group1, this.Group2];
+
+    private Border[] GroupLines => [this.Group0Line, this.Group1Line, this.Group2Line];
+
+    /// <summary>
+    /// Keeps the box to the code's own symbols: separators and anything
+    /// outside the alphabet fall away as typed or pasted, letters turn
+    /// upper case, and the sixth symbol starts the pairing.
+    /// </summary>
+    private async void CodeBox_TextChanged(object sender, TextChangedEventArgs args)
     {
-        // The dialog stays open while the pairing runs.
-        args.Cancel = true;
         if (this.handle is not null)
         {
             return;
         }
 
-        string code = this.CodeBox.Text;
-        this.IsPrimaryButtonEnabled = false;
+        string typed = this.CodeBox.Text;
+        string code = Normalize(typed);
+        if (!string.Equals(code, typed, StringComparison.Ordinal))
+        {
+            // Setting the text raises this event again with the clean code.
+            this.CodeBox.Text = code;
+            this.CodeBox.SelectionStart = code.Length;
+            return;
+        }
+
+        this.Render(code);
+        if (code.Length == CodeLength)
+        {
+            await this.BeginAsync(code).ConfigureAwait(true);
+        }
+    }
+
+    /// <summary>The code's symbols in `typed`, upper case, at most a code's worth.</summary>
+    private static string Normalize(string typed)
+    {
+        var code = new System.Text.StringBuilder(CodeLength);
+        foreach (char symbol in typed)
+        {
+            char upper = char.ToUpperInvariant(symbol);
+            if (Alphabet.Contains(upper, StringComparison.Ordinal))
+            {
+                code.Append(upper);
+                if (code.Length == CodeLength)
+                {
+                    break;
+                }
+            }
+        }
+
+        return code.ToString();
+    }
+
+    /// <summary>
+    /// Shows `code` in its groups: a typed group in the text colour, an
+    /// empty one as its prompt, and the accent line under the group being
+    /// typed.
+    /// </summary>
+    private void Render(string code)
+    {
+        int current = code.Length / GroupSize;
+        TextBlock[] groups = this.Groups;
+        Border[] lines = this.GroupLines;
+        for (int index = 0; index < groups.Length; index++)
+        {
+            int start = Math.Min(index * GroupSize, code.Length);
+            string digits = code.Substring(start, Math.Min(GroupSize, code.Length - start));
+            bool typedGroup = digits.Length > 0;
+            groups[index].Text = typedGroup ? digits : Prompts[index];
+            groups[index].Foreground = Brush(
+                typedGroup ? "TextFillColorPrimaryBrush" : "TextFillColorSecondaryBrush"
+            );
+            bool typing = index == current && code.Length < CodeLength;
+            lines[index].BorderBrush = Brush(
+                typing ? "AccentFillColorDefaultBrush" : "ControlStrokeColorDefaultBrush"
+            );
+        }
+    }
+
+    /// <summary>A theme brush by name; a theme without it leaves the element's own.</summary>
+    private static Brush? Brush(string key) =>
+        Application.Current.Resources.TryGetValue(key, out object? resource)
+        && resource is Brush brush
+            ? brush
+            : null;
+
+    private void FocusCode() => _ = this.CodeBox.Focus(FocusState.Programmatic);
+
+    /// <summary>Starts the pairing with `code`; the dialog stays open while it runs.</summary>
+    private async Task BeginAsync(string code)
+    {
         this.CodeBox.IsEnabled = false;
+        this.StatusText.Visibility = Visibility.Collapsed;
         BeginPairingResult begun;
         try
         {
@@ -70,17 +164,37 @@ internal sealed partial class PairingDialog : ContentDialog
         }
         catch (NativeRappException error)
         {
-            this.ShowStatus(error.Message);
-            this.IsPrimaryButtonEnabled = true;
-            this.CodeBox.IsEnabled = true;
+            this.TakeNextCode(error.Message);
             return;
         }
 
         this.handle = begun.Handle;
-        this.StatusText.Visibility = Visibility.Collapsed;
         this.WaitRing.IsActive = true;
         this.WaitRing.Visibility = Visibility.Visible;
         this.timer.Start();
+    }
+
+    /// <summary>
+    /// A pairing that did not complete: says why under the code, lets go
+    /// of the attempt, and takes the next code, as the Apple app does.
+    /// </summary>
+    private void TakeNextCode(string reason)
+    {
+        this.timer.Stop();
+        this.WaitRing.IsActive = false;
+        this.WaitRing.Visibility = Visibility.Collapsed;
+        if (this.handle is ulong current)
+        {
+            NativeRappService.EndPairing(current);
+        }
+
+        this.handle = null;
+        this.confirmed = false;
+        this.ShowStatus(reason);
+        this.CodeBox.IsEnabled = true;
+        this.CodeBox.Text = string.Empty;
+        this.Render(string.Empty);
+        this.FocusCode();
     }
 
     private void ShowStatus(string message)
@@ -103,7 +217,7 @@ internal sealed partial class PairingDialog : ContentDialog
         }
         catch (NativeRappException error)
         {
-            this.Settle(failure: error.Message);
+            this.TakeNextCode(error.Message);
             return;
         }
 
@@ -114,16 +228,16 @@ internal sealed partial class PairingDialog : ContentDialog
                 break;
             case "paired":
                 this.PairedHandle = current;
-                this.Settle(failure: null);
+                this.Settle();
                 break;
             case "denied":
-                this.Settle(Strings.Get("PairingDenied"));
+                this.TakeNextCode(Strings.Get("PairingDenied"));
                 break;
             case "cancelled":
-                this.Settle(Strings.Get("PairingCancelled"));
+                this.TakeNextCode(Strings.Get("PairingCancelled"));
                 break;
             case "failed":
-                this.Settle(state.Message ?? Strings.Get("PairingFailed"));
+                this.TakeNextCode(state.Message ?? Strings.Get("PairingFailed"));
                 break;
             default:
                 // "offer": keep waiting.
@@ -150,7 +264,7 @@ internal sealed partial class PairingDialog : ContentDialog
         }
         catch (NativeRappException error)
         {
-            this.Settle(failure: error.Message);
+            this.TakeNextCode(error.Message);
             return;
         }
 
@@ -160,7 +274,8 @@ internal sealed partial class PairingDialog : ContentDialog
         }
     }
 
-    private void Settle(string? failure)
+    /// <summary>The pairing completed; the dialog closes with its handle.</summary>
+    private void Settle()
     {
         if (this.settled)
         {
@@ -168,18 +283,12 @@ internal sealed partial class PairingDialog : ContentDialog
         }
 
         this.settled = true;
-        this.Failure = failure;
         this.timer.Stop();
         this.Hide();
     }
 
     private void OnClosing(ContentDialog sender, ContentDialogClosingEventArgs args)
     {
-        if (args.Result == ContentDialogResult.Primary && !this.settled)
-        {
-            return;
-        }
-
         this.timer.Stop();
         if (this.PairedHandle is null && this.handle is ulong current)
         {
