@@ -145,11 +145,6 @@ internal sealed partial class DevErrorWindow : Window
         this.Content = root;
 
         this.AppWindow.Resize(InitialSize);
-        if (this.AppWindow.Presenter is OverlappedPresenter presenter)
-        {
-            presenter.IsAlwaysOnTop = true;
-        }
-
         this.AppWindow.Closing += this.OnClosing;
         this.AppWindow.Changed += this.OnChanged;
     }
