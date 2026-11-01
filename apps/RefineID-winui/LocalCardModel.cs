@@ -104,28 +104,29 @@ internal sealed class LocalCardSnapshot
     [JsonPropertyName("model")]
     public string Model { get; init; } = string.Empty;
 
-    [JsonPropertyName("generation")]
-    public string Generation { get; init; } = "unknown";
+    /// <summary>
+    /// Whether the card answered to the organization card's PIN
+    /// numbering (FINEID S4-2 v4.0).
+    /// </summary>
+    [JsonPropertyName("organization_card")]
+    public bool OrganizationCard { get; init; }
 
     [JsonPropertyName("activation_code_length")]
     public int? ActivationCodeLength { get; init; }
 
     /// <summary>
     /// What the card service's counter-safe probes say about activation:
-    /// the card still waits for it, it has been done, or nothing decided
-    /// it. A missing or unknown value decides nothing either.
+    /// the card still waits for it, or it does not. A missing or unknown
+    /// value is neither.
     /// </summary>
     [JsonPropertyName("activation_state")]
-    public string ActivationState { get; init; } = InconclusiveState;
+    public string ActivationState { get; init; } = string.Empty;
 
     /// <summary>The probes show a card that still waits for its activation.</summary>
     private const string UnactivatedState = "unactivated";
 
     /// <summary>The probes show a card that was activated.</summary>
     private const string ActivatedState = "activated";
-
-    /// <summary>The probes decided nothing.</summary>
-    private const string InconclusiveState = "inconclusive";
 
     /// <summary>Whether the probes show a card that still waits for its activation.</summary>
     [JsonIgnore]
@@ -136,6 +137,14 @@ internal sealed class LocalCardSnapshot
     [JsonIgnore]
     public bool LooksActivated =>
         string.Equals(this.ActivationState, ActivatedState, StringComparison.Ordinal);
+
+    /// <summary>Whether PIN 1 still waits for its activation.</summary>
+    [JsonPropertyName("pin1_awaits_activation")]
+    public bool Pin1AwaitsActivation { get; init; }
+
+    /// <summary>Whether PIN 2 still waits for its activation.</summary>
+    [JsonPropertyName("pin2_awaits_activation")]
+    public bool Pin2AwaitsActivation { get; init; }
 
     [JsonPropertyName("pin1")]
     public CredentialStatus? Pin1 { get; init; }
@@ -164,9 +173,6 @@ internal sealed class ContactlessSnapshot
 
     [JsonPropertyName("person")]
     public string Person { get; init; } = string.Empty;
-
-    [JsonPropertyName("generation")]
-    public string Generation { get; init; } = "unknown";
 
     [JsonPropertyName("pin1")]
     public CredentialStatus? Pin1 { get; init; }

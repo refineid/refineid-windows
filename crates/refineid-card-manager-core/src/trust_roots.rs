@@ -27,10 +27,9 @@ const PINNED_ROOTS: &[(&str, &[u8])] = &[
     ),
 ];
 
-/// Return the official label for a root fingerprint.
-///
-/// Checks the dynamically cached on-card root certificates first, falling
-/// back to the known pinned DVV roots.
+/// Return the official label for a root fingerprint, when it is one of
+/// the pinned DVV roots. The in-memory certificate cache is never
+/// consulted.
 #[must_use]
 pub fn pinned_root_label(fingerprint: Sha256) -> Option<&'static str> {
     if fingerprint == refineid_lib_core::trust_roots::PINNED_DVV_G3_RSA_SHA256 {
@@ -38,11 +37,6 @@ pub fn pinned_root_label(fingerprint: Sha256) -> Option<&'static str> {
     }
     if fingerprint == refineid_lib_core::trust_roots::PINNED_DVV_G3_ECC_SHA256 {
         return Some("DVV Gov. Root CA - G3 ECC");
-    }
-    if let Some(cached) = refineid_lib_core::trust_roots::active_root_certificates()
-        && cached.contains_fingerprint(fingerprint)
-    {
-        return Some("On-Card Issuing Root CA");
     }
     PINNED_ROOTS
         .iter()

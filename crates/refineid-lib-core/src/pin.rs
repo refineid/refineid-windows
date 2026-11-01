@@ -31,6 +31,8 @@
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::activation::ActivationScheme;
+
 /// A syntactically valid FINEID PIN-family code: 4-12 ASCII digits.
 ///
 /// Role-specific types and operations may impose tighter bounds. For
@@ -244,12 +246,12 @@ impl PinBytes {
 }
 
 /// PUK code used by `card unblock-pin1` / `card unblock-pin2`
-/// for the `RESET RETRY COUNTER` APDU. A separately supplied PUK is
-/// exactly 7 or 8 digits, independent of card generation.
+/// for the `RESET RETRY COUNTER` APDU.
 ///
-/// Distinct from `ActivationPin` in the type system, even
-/// though the card-side mechanism may be the same slot
-/// (`0x83`).
+/// Distinct from [`ActivationCode`] in the type system: the
+/// activation code is "the code from the activation letter", this
+/// is "the code presented to unblock a PIN", even where FINEID S4-1
+/// v4.2 §4.6.1 makes the activation code the PUK.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub enum Puk {
     /// 7-digit PUK.
@@ -317,8 +319,8 @@ impl core::fmt::Debug for Puk {
     }
 }
 
-/// Activation PIN for FINEID cards issued **on or after
-/// 13 January 2026**. 7 ASCII digits exactly.
+/// Preset activation PIN of the FINEID S4-1 v4.2 §4.6.2 scheme.
+/// 7 ASCII digits exactly.
 ///
 /// **Single-use**: consumed by card activation; cannot
 /// subsequently unblock PIN1 / PIN2. After activation it has
@@ -327,9 +329,9 @@ impl core::fmt::Debug for Puk {
 ///
 /// Source: <https://dvv.fi/en/activation-of-the-citizen-certificate>.
 ///
-/// Distinct type from [`ActivationPinEight`] (older-card form)
+/// Distinct type from [`ActivationPinEight`] (§4.6.1 form)
 /// and [`Puk`] (unblock code) so the compiler enforces "this
-/// activation PIN is for the new-card single-use flow".
+/// activation PIN is for the §4.6.2 single-use flow".
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct ActivationPinSeven(PinBytes);
 
@@ -337,7 +339,7 @@ impl ActivationPinSeven {
     /// 7 ASCII digits exactly.
     pub const LENGTH: usize = 7;
 
-    /// Parse `bytes` as a new-card activation PIN.
+    /// Parse `bytes` as a §4.6.2 preset activation PIN.
     ///
     /// # Errors
     /// Empty, wrong length (not exactly 7), or any non-digit
@@ -367,21 +369,20 @@ impl core::fmt::Debug for ActivationPinSeven {
     }
 }
 
-/// Activation PIN for FINEID cards issued **before
-/// 13 January 2026**. 8 ASCII digits exactly.
+/// Activation code of the FINEID S4-1 v4.2 §4.6.1 scheme ("the
+/// activation code is the PUK"). 8 ASCII digits exactly.
 ///
 /// **Reusable**: the same 8-digit code from the activation
-/// letter doubles as the card's PUK -- it can unblock PIN1 /
+/// letter is the card's PUK -- it can unblock PIN1 /
 /// PIN2 after they get locked, in addition to its primary
-/// activation role. On these cards, exhausting this code via 5
-/// wrong activation attempts permanently locks the chip for
-/// e-services (the card still works as an ID document and
-/// travel document, but no online services). Recovery requires
-/// a new card from the Police.
+/// activation role. Exhausting this code via 5 wrong attempts
+/// permanently locks the chip for e-services (the card still
+/// works as an ID document and travel document, but no online
+/// services). Recovery requires a new card from the Police.
 ///
 /// Source: <https://dvv.fi/en/activation-of-the-citizen-certificate>.
 ///
-/// Distinct type from [`ActivationPinSeven`] (new-card form).
+/// Distinct type from [`ActivationPinSeven`] (§4.6.2 form).
 /// Wire-shape identical to [`Puk`] (both are 8 ASCII digits)
 /// but the operator-intent distinction is preserved at the
 /// type level -- this is "the code from the activation letter",
@@ -393,7 +394,7 @@ impl ActivationPinEight {
     /// 8 ASCII digits exactly.
     pub const LENGTH: usize = 8;
 
-    /// Parse `bytes` as an old-card activation PIN.
+    /// Parse `bytes` as a §4.6.1 activation code.
     ///
     /// # Errors
     /// Empty, wrong length (not exactly 8), or any non-digit
@@ -423,26 +424,36 @@ impl core::fmt::Debug for ActivationPinEight {
     }
 }
 
-/// API sum-type for "either activation PIN form".
+/// The activation entry from the letter, in the form the card's
+/// [`ActivationScheme`] takes.
 ///
-/// Consumers like `card_pin::activate_first` take this and
-/// dispatch based on which variant the operator constructed at
-/// the input-parsing boundary (the variant choice corresponds
-/// to the card's issuance date per DVV's 2026-01-13 cutoff).
-///
-/// The variants carry the two distinct types from this module;
-/// the enum exists only to give callers a single function
-/// parameter that can be either. Inside that function the
-/// match arms operate on the typed inner value.
+/// [`ActivationCode::for_scheme`] builds it from the scheme the card
+/// decided, so the variant matches the card.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub enum ActivationCode {
-    /// 7 ASCII digits; new-card single-use flow.
+    /// 7 ASCII digits; §4.6.2 single-use flow.
     Seven(ActivationPinSeven),
-    /// 8 ASCII digits; old-card reusable flow.
+    /// 8 ASCII digits; §4.6.1 reusable flow.
     Eight(ActivationPinEight),
 }
 
 impl ActivationCode {
+    /// Parse `bytes` as the activation entry `scheme` takes: exactly
+    /// [`ActivationScheme::activation_entry_digit_count`] digits.
+    ///
+    /// # Errors
+    /// Empty, wrong length for the scheme, or any non-digit byte.
+    pub fn for_scheme(scheme: ActivationScheme, bytes: PinBytes) -> Result<Self, PinRoleError> {
+        match scheme {
+            ActivationScheme::PresetActivationPin => {
+                ActivationPinSeven::new(bytes).map(Self::Seven)
+            }
+            ActivationScheme::ActivationCodeIsPuk => {
+                ActivationPinEight::new(bytes).map(Self::Eight)
+            }
+        }
+    }
+
     /// Borrow the inner secret bytes (length depends on
     /// variant; check via [`Self::variant_label`] if needed).
     #[must_use]
@@ -462,9 +473,7 @@ impl ActivationCode {
         }
     }
 
-    /// Human label for the variant. Useful in error messages
-    /// like "card-side generation mismatch: card is older but
-    /// you supplied an `ActivationPinSeven`."
+    /// Human label for the variant, for the redacted `Debug` form.
     #[must_use]
     pub const fn variant_label(&self) -> &'static str {
         match self {

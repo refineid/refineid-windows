@@ -157,7 +157,7 @@ struct AppState {
     readers: HWND,
     detail_reader: HWND,
     detail_atr: HWND,
-    identity_rows: [HWND; 9],
+    identity_rows: [HWND; IDENTITY_ROW_LABELS.len()],
     identity_status: HWND,
     photo: HWND,
     photo_caption: HWND,
@@ -773,7 +773,7 @@ fn on_create(main: HWND) -> windows::core::Result<()> {
         instance,
     )?;
     set_font(identity_status, font);
-    let mut identity_rows = [HWND(std::ptr::null_mut()); 9];
+    let mut identity_rows = [HWND(std::ptr::null_mut()); IDENTITY_ROW_LABELS.len()];
     for (index, label) in IDENTITY_ROW_LABELS.iter().enumerate() {
         identity_rows[index] = add_row(
             pages[1],
@@ -1723,10 +1723,8 @@ fn fill_identity_rows(view: &identity::IdentityView) {
     set_tint(rows[3], INK);
     set_text(rows[3], &view.card);
     set_tint(rows[4], INK);
-    set_text(rows[4], view.generation);
-    set_tint(rows[5], INK);
-    set_text(rows[5], view.activation.as_deref().unwrap_or("—"));
-    for (slot, state) in [(6, &view.pin1), (7, &view.pin2), (8, &view.puk)] {
+    set_text(rows[4], &view.activation);
+    for (slot, state) in [(5, &view.pin1), (6, &view.pin2), (7, &view.puk)] {
         set_tint(rows[slot], state_color(state.kind));
         set_text(rows[slot], &state.text);
     }
@@ -2549,12 +2547,11 @@ fn combo_add(combo: HWND, text: &str) {
     send(combo, CB_ADDSTRING, 0, wide.as_ptr() as isize);
 }
 
-const IDENTITY_ROW_LABELS: [&str; 9] = [
+const IDENTITY_ROW_LABELS: [&str; 8] = [
     "Reader",
     "Serial",
     "Holder",
     "Card",
-    "Generation",
     "Activation code",
     "PIN 1",
     "PIN 2",

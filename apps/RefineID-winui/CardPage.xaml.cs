@@ -231,10 +231,16 @@ internal sealed partial class CardPage : Page
     /// <summary>
     /// Marks each entry valid, invalid or differing from its pair, and
     /// enables the button only when the activation code has the card's
-    /// length and both new PINs are valid and repeated.
+    /// length and each new PIN the card asks for is valid and repeated.
+    /// The form asks only for the PINs that wait for their activation.
     /// </summary>
     private void UpdateActivationForm()
     {
+        bool askPin1 = this.snapshot?.Pin1AwaitsActivation ?? true;
+        bool askPin2 = this.snapshot?.Pin2AwaitsActivation ?? true;
+        this.ActivationPin1Group.Visibility = askPin1 ? Visibility.Visible : Visibility.Collapsed;
+        this.ActivationPin2Group.Visibility = askPin2 ? Visibility.Visible : Visibility.Collapsed;
+
         string code = this.ActivationCodeBox.Password;
         string pin1 = this.ActivationPin1Box.Password;
         string pin1Again = this.ActivationPin1ConfirmationBox.Password;
@@ -264,7 +270,8 @@ internal sealed partial class CardPage : Page
             pin2Differs,
             pin2Again.Length == 0
         );
-        this.ActivateButton.IsEnabled = codeValid && pin1Repeated && pin2Repeated;
+        this.ActivateButton.IsEnabled =
+            codeValid && (!askPin1 || pin1Repeated) && (!askPin2 || pin2Repeated);
     }
 
     private static bool IsPinLength(string entry, int minimumDigits) =>
@@ -316,11 +323,19 @@ internal sealed partial class CardPage : Page
             return;
         }
 
+        // A PIN the card does not ask for goes out empty, so nothing the
+        // holder cannot see is sent.
+        bool askPin1 = this.snapshot?.Pin1AwaitsActivation ?? true;
+        bool askPin2 = this.snapshot?.Pin2AwaitsActivation ?? true;
         string activationCode = this.ActivationCodeBox.Password;
-        string pin1 = this.ActivationPin1Box.Password;
-        string pin1Confirmation = this.ActivationPin1ConfirmationBox.Password;
-        string pin2 = this.ActivationPin2Box.Password;
-        string pin2Confirmation = this.ActivationPin2ConfirmationBox.Password;
+        string pin1 = askPin1 ? this.ActivationPin1Box.Password : string.Empty;
+        string pin1Confirmation = askPin1
+            ? this.ActivationPin1ConfirmationBox.Password
+            : string.Empty;
+        string pin2 = askPin2 ? this.ActivationPin2Box.Password : string.Empty;
+        string pin2Confirmation = askPin2
+            ? this.ActivationPin2ConfirmationBox.Password
+            : string.Empty;
         Clear(
             this.ActivationCodeBox,
             this.ActivationPin1Box,
@@ -435,8 +450,8 @@ internal sealed partial class CardPage : Page
     /// alone, opened: activation sets both PINs, so a PIN change, reset or
     /// contactless setup has no place before it. An activated card gets
     /// those, and the activation section goes, since the card service
-    /// refuses activation on it. Undecided evidence, or no card, shows
-    /// every section. The activation section takes the focus only when
+    /// refuses activation on it. A missing or unknown state, or no card,
+    /// shows every section. The activation section takes the focus only when
     /// it appears, so a re-inspection while the holder types, or after a
     /// refused attempt, leaves the focus alone.
     /// </summary>
@@ -456,6 +471,13 @@ internal sealed partial class CardPage : Page
     {
         bool unactivated = inspected?.LooksUnactivated ?? false;
         bool activated = inspected?.LooksActivated ?? false;
+        string title = Strings.Get(
+            inspected?.OrganizationCard ?? false
+                ? "OrganisationCardActivationHeading"
+                : "IdentityCardActivationHeading"
+        );
+        this.ActivationHeading.Text = title;
+        AutomationProperties.SetName(this.ActivationPanel, title);
         Visibility managing = unactivated ? Visibility.Collapsed : Visibility.Visible;
         this.NfcExpander.Visibility = managing;
         this.ChangePinExpander.Visibility = managing;

@@ -6,7 +6,7 @@ use refineid_lib_core::auth::{PinStatus, PukStatus};
 use refineid_lib_core::backend::{ReaderAccessCap, ReaderBackend as _};
 use refineid_lib_core::can::{Can, CanError};
 use refineid_lib_core::emrtd::{self, EmrtdError};
-use refineid_lib_core::pkcs15::{CardGeneration, FineidReaderPicker as _};
+use refineid_lib_core::pkcs15::FineidReaderPicker as _;
 use refineid_lib_pcsc::{PcscBackend, PcscError};
 use std::path::PathBuf;
 use zeroize::Zeroize;
@@ -56,10 +56,8 @@ pub struct IdentityView {
     pub holder: String,
     /// Card model rendering.
     pub card: String,
-    /// Generation label.
-    pub generation: &'static str,
-    /// Activation-code length rendering, when known.
-    pub activation: Option<String>,
+    /// Activation-code length rendering.
+    pub activation: String,
     /// PIN1 state.
     pub pin1: StateText,
     /// PIN2 state.
@@ -83,10 +81,7 @@ pub fn format_view(view: &IdentityView) -> String {
     line(&mut out, "Serial", &view.serial);
     line(&mut out, "Holder", &view.holder);
     line(&mut out, "Card", &view.card);
-    line(&mut out, "Generation", view.generation);
-    if let Some(length) = view.activation.as_ref() {
-        line(&mut out, "Activation code", length);
-    }
+    line(&mut out, "Activation code", &view.activation);
     line(&mut out, "PIN 1", &view.pin1.text);
     line(&mut out, "PIN 2", &view.pin2.text);
     line(&mut out, "PUK", &view.puk.text);
@@ -104,10 +99,7 @@ fn view(snapshot: &CardSnapshot) -> IdentityView {
             snapshot.model.fineid_specification(),
             snapshot.model.fineid_specification_version()
         ),
-        generation: generation_label(snapshot.generation),
-        activation: snapshot
-            .activation_code_length
-            .map(|length| format!("{length} digits")),
+        activation: format!("{} digits", snapshot.activation_code_length),
         pin1: StateText {
             text: credential_label(snapshot.pin1.as_ref(), snapshot.pin1_changed),
             kind: pin_kind(snapshot.pin1.as_ref()),
@@ -267,14 +259,6 @@ fn line(out: &mut String, label: &str, value: &str) {
     out.push_str(": ");
     out.push_str(value);
     out.push_str("\r\n");
-}
-
-const fn generation_label(generation: CardGeneration) -> &'static str {
-    match generation {
-        CardGeneration::Newer => "newer",
-        CardGeneration::Older => "older",
-        CardGeneration::Unknown => "unknown",
-    }
 }
 
 pub fn credential_label(status: Option<&PinStatus>, changed: Option<bool>) -> String {

@@ -21,6 +21,10 @@
 //!
 //! Aggressive in-memory caching is implemented using `OnceLock<Box<RootCertificates>>`
 //! to ensure thread safety and instant subsequent lookups across all platforms.
+//!
+//! The cache holds certificates for lookup and publication; it is never a
+//! source of trust. Trust comes from the pinned DVV G3 fingerprints
+//! ([`PINNED_DVV_G3_RSA_SHA256`], [`PINNED_DVV_G3_ECC_SHA256`]).
 
 use std::sync::OnceLock;
 
@@ -128,17 +132,11 @@ pub fn active_root_certificates() -> Option<&'static RootCertificates> {
     ROOT_CERTIFICATES.get().map(|b| &**b)
 }
 
-/// Checks whether a SHA-256 fingerprint matches a trusted root CA.
-///
-/// Checks the dynamic in-memory cache first, falling back to the known
-/// pinned DVV G3 roots if the cache is empty or does not contain the cert.
+/// Checks whether a SHA-256 fingerprint matches one of the pinned DVV G3
+/// roots. The in-memory cache holds certificates for lookup and is never
+/// a source of trust.
 #[must_use]
 pub fn is_trusted_root(fingerprint: Sha256) -> bool {
-    if let Some(cached) = active_root_certificates()
-        && cached.contains_fingerprint(fingerprint)
-    {
-        return true;
-    }
     fingerprint == PINNED_DVV_G3_RSA_SHA256 || fingerprint == PINNED_DVV_G3_ECC_SHA256
 }
 
