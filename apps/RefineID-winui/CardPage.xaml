@@ -133,19 +133,13 @@
                                 />
                                 <PasswordBox
                                     x:Name="NewPinBox"
-                                    x:Uid="NewPinBox"
                                     AutomationProperties.AutomationId="NewPinBox"
-                                    AutomationProperties.Name="New PIN"
-                                    Header="New PIN"
                                     MaxLength="12"
                                     PasswordRevealMode="Peek"
                                 />
                                 <PasswordBox
                                     x:Name="NewPinConfirmationBox"
-                                    x:Uid="NewPinConfirmationBox"
                                     AutomationProperties.AutomationId="NewPinConfirmationBox"
-                                    AutomationProperties.Name="Confirm new PIN"
-                                    Header="Confirm new PIN"
                                     MaxLength="12"
                                     PasswordRevealMode="Peek"
                                 />
@@ -199,19 +193,13 @@
                                 />
                                 <PasswordBox
                                     x:Name="UnblockNewPinBox"
-                                    x:Uid="UnblockNewPinBox"
                                     AutomationProperties.AutomationId="UnblockNewPinBox"
-                                    AutomationProperties.Name="New PIN for recovery"
-                                    Header="New PIN"
                                     MaxLength="12"
                                     PasswordRevealMode="Peek"
                                 />
                                 <PasswordBox
                                     x:Name="UnblockConfirmationBox"
-                                    x:Uid="UnblockConfirmationBox"
                                     AutomationProperties.AutomationId="UnblockConfirmationBox"
-                                    AutomationProperties.Name="Confirm new PIN for recovery"
-                                    Header="Confirm new PIN"
                                     MaxLength="12"
                                     PasswordRevealMode="Peek"
                                 />
@@ -279,8 +267,8 @@
                                         x:Name="ActivationPin1Box"
                                         x:Uid="ActivationPin1Box"
                                         AutomationProperties.AutomationId="ActivationPin1Box"
-                                        AutomationProperties.Name="New basic PIN (PIN 1)"
-                                        Header="New basic PIN (PIN 1)"
+                                        AutomationProperties.Name="New basic PIN 1"
+                                        Header="New basic PIN 1"
                                         MaxLength="12"
                                         PasswordRevealMode="Peek"
                                         PasswordChanged="ActivationEntry_Changed"
@@ -303,8 +291,8 @@
                                         x:Name="ActivationPin1ConfirmationBox"
                                         x:Uid="ActivationPin1ConfirmationBox"
                                         AutomationProperties.AutomationId="ActivationPin1ConfirmationBox"
-                                        AutomationProperties.Name="Repeat basic PIN"
-                                        Header="Repeat basic PIN"
+                                        AutomationProperties.Name="Repeat PIN 1"
+                                        Header="Repeat PIN 1"
                                         MaxLength="12"
                                         PasswordRevealMode="Peek"
                                         PasswordChanged="ActivationEntry_Changed"
@@ -330,8 +318,8 @@
                                         x:Name="ActivationPin2Box"
                                         x:Uid="ActivationPin2Box"
                                         AutomationProperties.AutomationId="ActivationPin2Box"
-                                        AutomationProperties.Name="New signature PIN (PIN 2)"
-                                        Header="New signature PIN (PIN 2)"
+                                        AutomationProperties.Name="New signature PIN 2"
+                                        Header="New signature PIN 2"
                                         MaxLength="12"
                                         PasswordRevealMode="Peek"
                                         PasswordChanged="ActivationEntry_Changed"
@@ -354,8 +342,8 @@
                                         x:Name="ActivationPin2ConfirmationBox"
                                         x:Uid="ActivationPin2ConfirmationBox"
                                         AutomationProperties.AutomationId="ActivationPin2ConfirmationBox"
-                                        AutomationProperties.Name="Repeat signature PIN"
-                                        Header="Repeat signature PIN"
+                                        AutomationProperties.Name="Repeat PIN 2"
+                                        Header="Repeat PIN 2"
                                         MaxLength="12"
                                         PasswordRevealMode="Peek"
                                         PasswordChanged="ActivationEntry_Changed"

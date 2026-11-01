@@ -75,6 +75,12 @@ internal sealed partial class CardPage : Page
     public CardPage()
     {
         this.InitializeComponent();
+        this.ChangeSlotBox.SelectionChanged += (s, e) =>
+            LabelPinFields(this.ChangeSlotBox, this.NewPinBox, this.NewPinConfirmationBox);
+        this.UnblockSlotBox.SelectionChanged += (s, e) =>
+            LabelPinFields(this.UnblockSlotBox, this.UnblockNewPinBox, this.UnblockConfirmationBox);
+        LabelPinFields(this.ChangeSlotBox, this.NewPinBox, this.NewPinConfirmationBox);
+        LabelPinFields(this.UnblockSlotBox, this.UnblockNewPinBox, this.UnblockConfirmationBox);
         this.readerPollTimer = new DispatcherTimer { Interval = ReaderPollInterval };
         this.readerPollTimer.Tick += (s, e) => this.PollReaders();
         this.Loaded += this.OnLoaded;
@@ -531,6 +537,21 @@ internal sealed partial class CardPage : Page
 
     private static PinSlot SlotFrom(ComboBox box) =>
         box.SelectedIndex == 1 ? PinSlot.Pin2 : PinSlot.Pin1;
+
+    /// <summary>
+    /// Names the new-PIN field and its repeat after the PIN the slot box
+    /// holds: "New basic PIN 1" and "Repeat PIN 1", or the PIN 2 pair.
+    /// </summary>
+    private static void LabelPinFields(ComboBox slotBox, PasswordBox newBox, PasswordBox repeatBox)
+    {
+        bool pin2 = SlotFrom(slotBox) == PinSlot.Pin2;
+        string newLabel = Strings.Get(pin2 ? "NewPin2Field" : "NewPin1Field");
+        string repeatLabel = Strings.Get(pin2 ? "RepeatPin2Field" : "RepeatPin1Field");
+        newBox.Header = newLabel;
+        AutomationProperties.SetName(newBox, newLabel);
+        repeatBox.Header = repeatLabel;
+        AutomationProperties.SetName(repeatBox, repeatLabel);
+    }
 
     private static void Clear(params PasswordBox[] boxes)
     {

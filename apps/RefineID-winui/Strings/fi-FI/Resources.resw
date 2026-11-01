@@ -144,18 +144,6 @@
   <data name="CurrentPinBox.AutomationProperties.Name" xml:space="preserve">
     <value>Nykyinen tunnusluku</value>
   </data>
-  <data name="NewPinBox.Header" xml:space="preserve">
-    <value>Uusi tunnusluku</value>
-  </data>
-  <data name="NewPinBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Uusi tunnusluku</value>
-  </data>
-  <data name="NewPinConfirmationBox.Header" xml:space="preserve">
-    <value>Uusi tunnusluku uudelleen</value>
-  </data>
-  <data name="NewPinConfirmationBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Uusi tunnusluku uudelleen</value>
-  </data>
   <data name="ChangePinButton.Content" xml:space="preserve">
     <value>Vaihda tunnusluku</value>
   </data>
@@ -186,18 +174,6 @@
   <data name="PukBox.AutomationProperties.Name" xml:space="preserve">
     <value>Palautuskoodi (PUK)</value>
   </data>
-  <data name="UnblockNewPinBox.Header" xml:space="preserve">
-    <value>Uusi tunnusluku</value>
-  </data>
-  <data name="UnblockNewPinBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Uusi tunnusluku palautukseen</value>
-  </data>
-  <data name="UnblockConfirmationBox.Header" xml:space="preserve">
-    <value>Uusi tunnusluku uudelleen</value>
-  </data>
-  <data name="UnblockConfirmationBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Uusi tunnusluku uudelleen palautukseen</value>
-  </data>
   <data name="ResetPinButton.Content" xml:space="preserve">
     <value>Palauta tunnusluku</value>
   </data>
@@ -223,10 +199,10 @@
     <value>Uusi perustunnusluku (PIN 1)</value>
   </data>
   <data name="ActivationPin1ConfirmationBox.Header" xml:space="preserve">
-    <value>Toista perustunnusluku</value>
+    <value>Toista PIN 1</value>
   </data>
   <data name="ActivationPin1ConfirmationBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Toista perustunnusluku</value>
+    <value>Toista PIN 1</value>
   </data>
   <data name="ActivationPin2Box.Header" xml:space="preserve">
     <value>Uusi allekirjoitustunnusluku (PIN 2)</value>
@@ -235,10 +211,10 @@
     <value>Uusi allekirjoitustunnusluku (PIN 2)</value>
   </data>
   <data name="ActivationPin2ConfirmationBox.Header" xml:space="preserve">
-    <value>Toista allekirjoitustunnusluku</value>
+    <value>Toista PIN 2</value>
   </data>
   <data name="ActivationPin2ConfirmationBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Toista allekirjoitustunnusluku</value>
+    <value>Toista PIN 2</value>
   </data>
   <data name="ActivateButton.Content" xml:space="preserve">
     <value>Aktivoi henkilökortti</value>
@@ -372,5 +348,17 @@
   </data>
   <data name="AccessNumberWaitRing.AutomationProperties.Name" xml:space="preserve">
     <value>Pääsykoodia tarkistetaan</value>
+  </data>
+  <data name="NewPin1Field" xml:space="preserve">
+    <value>Uusi perustunnusluku (PIN 1)</value>
+  </data>
+  <data name="NewPin2Field" xml:space="preserve">
+    <value>Uusi allekirjoitustunnusluku (PIN 2)</value>
+  </data>
+  <data name="RepeatPin1Field" xml:space="preserve">
+    <value>Toista PIN 1</value>
+  </data>
+  <data name="RepeatPin2Field" xml:space="preserve">
+    <value>Toista PIN 2</value>
   </data>
 </root>
