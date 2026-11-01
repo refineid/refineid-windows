@@ -1098,7 +1098,7 @@ where
     let printed_serial = derive_printed_serial(&token_full);
 
     // Cert read for human-readable identity. Best effort.
-    let (surname, given_names, peuin) = transport
+    let (surname, given_names, peuin, organization) = transport
         .read_certificate(CertSlot::Authentication)
         .ok()
         .and_then(|der| {
@@ -1106,7 +1106,12 @@ where
                 .ok()
                 .map(|cert| {
                     let subject = cert.subject;
-                    (subject.surname(), subject.given_names(), subject.peuin())
+                    (
+                        subject.surname(),
+                        subject.given_names(),
+                        subject.peuin(),
+                        subject.organization_name(),
+                    )
                 })
         })
         .unwrap_or_default();
@@ -1124,6 +1129,9 @@ where
     id = id.with_additional_names(given_names.additional);
     if let Some(p) = peuin {
         id = id.with_peuin(p);
+    }
+    if let Some(o) = organization {
+        id = id.with_organization(o);
     }
     if let Some(s) = printed_serial {
         id = id.with_printed_serial(s);

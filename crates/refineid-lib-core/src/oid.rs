@@ -283,6 +283,10 @@ pub mod known {
     /// `2.5.4.42` -- id-at-givenName.
     pub const GIVEN_NAME: Oid<'static> = oid_dotted!("2.5.4.42");
 
+    /// `2.5.4.10` -- id-at-organizationName; an organization card's
+    /// certificate subject carries it, a citizen certificate does not.
+    pub const ORGANIZATION_NAME: Oid<'static> = oid_dotted!("2.5.4.10");
+
     // ---- ICAO PKD ----
 
     /// `2.23.136.1.1.1` -- id-icao-mrtd-security-ldsSecurityObject
