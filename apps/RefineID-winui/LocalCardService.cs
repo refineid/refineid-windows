@@ -33,6 +33,10 @@ internal static partial class LocalCardService
     [LibraryImport(Library, EntryPoint = "refineid_settings_present_readers")]
     private static partial nint PresentReadersNative();
 
+    [LibraryImport(Library, EntryPoint = "refineid_settings_card_in_a_reader")]
+    [return: MarshalAs(UnmanagedType.U1)]
+    private static partial bool CardInAReaderNative();
+
     [LibraryImport(Library, EntryPoint = "refineid_settings_detect_local_card_support")]
     private static partial nint DetectLocalCardSupportNative();
 
@@ -135,12 +139,12 @@ internal static partial class LocalCardService
     internal static DocumentSignReport SignDocument(
         string path,
         DocumentFormat format,
-        string pin,
+        string? pin,
         string reason
     )
     {
         byte[] pathBytes = Encoding.UTF8.GetBytes(path);
-        byte[] pinBytes = Encoding.UTF8.GetBytes(pin);
+        byte[] pinBytes = pin is null ? [] : Encoding.UTF8.GetBytes(pin);
         byte[] reasonBytes = Encoding.UTF8.GetBytes(reason);
         try
         {
@@ -164,6 +168,9 @@ internal static partial class LocalCardService
             Zero(pinBytes);
         }
     }
+
+    /// <summary>Whether a reader here holds a card, so the document signs under the PIN 2 typed here rather than on the paired phone.</summary>
+    internal static bool CardInAReader() => CardInAReaderNative();
 
     /// <summary>Lists the readers that currently hold a card; empty on failure.</summary>
     internal static IReadOnlyList<string> PresentReaders()

@@ -48,7 +48,7 @@ use refineid_lib_core::pin::{
 };
 use refineid_lib_core::pkcs15::CardGeneration;
 use refineid_windows_credential_store::{read_can, save_can};
-use refineid_windows_doc_sign::phone::{SigningSource, current_source};
+use refineid_windows_doc_sign::phone::{SigningSource, card_in_a_reader, current_source};
 use refineid_windows_doc_sign::sign::{DocumentSignRequest, sign};
 use refineid_windows_doc_sign::verify::{render, verify_file};
 use refineid_windows_driver_probe::{self, LocalCardSupport};
@@ -304,6 +304,14 @@ pub extern "C" fn refineid_settings_present_readers() -> *mut c_char {
             .map(|readers| ReaderList { readers })
             .map_err(|error| ApiFailure::new("reader_enumeration_failed", error.to_string()))
     })
+}
+
+/// Whether a reader attached to this computer holds a card: the fact
+/// by which [`refineid_settings_sign_document`] signs with that card
+/// under the PIN 2 given here rather than on the paired phone.
+#[unsafe(no_mangle)]
+pub extern "C" fn refineid_settings_card_in_a_reader() -> bool {
+    catch_unwind(card_in_a_reader).unwrap_or(false)
 }
 
 /// Probe whether this machine has a usable local FINEID card stack.

@@ -536,6 +536,7 @@ fn query_text(request: *mut core::ffi::c_void, info: u32) -> Result<String, Http
     let mut buffer = vec![0u16; len as usize / size_of::<u16>() + 1];
     let mut len2 = u32::try_from(buffer.len().saturating_mul(size_of::<u16>()))
         .map_err(|_| HttpError::BadStatusLine("header length out of range".to_owned()))?;
+    index = 0;
     unsafe {
         WinHttpQueryHeaders(
             request,

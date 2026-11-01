@@ -2177,7 +2177,7 @@ fn start_doc_sign() {
             }
         },
         SigningSource::Phone(_) => {
-            edit_secret(pin_edit).zeroize();
+            set_text(pin_edit, "");
             None
         }
     };

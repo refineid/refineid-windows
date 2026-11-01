@@ -359,13 +359,11 @@ const fn algorithm(algorithm: RemoteSignatureAlgorithm) -> SignatureAlgorithm {
 pub fn refusal_of(error: &PhoneLinkError) -> PhoneRefusal {
     match error {
         PhoneLinkError::Ended(outcome) => match outcome.as_ref() {
-            OperationOutcome::Rejected(result) | OperationOutcome::Cancelled(result) => {
-                refusal_of_result(*result)
-            }
+            OperationOutcome::Rejected(result)
+            | OperationOutcome::Cancelled(result)
+            | OperationOutcome::Refused(result) => refusal_of_result(*result),
             OperationOutcome::Lost => PhoneRefusal::Unreachable,
-            OperationOutcome::Refused(_) | OperationOutcome::Completed(_) => {
-                PhoneRefusal::PhoneFailed
-            }
+            OperationOutcome::Completed(_) => PhoneRefusal::PhoneFailed,
         },
         PhoneLinkError::Admission(AdmissionError::ProfileNotGranted) => PhoneRefusal::NotGranted,
         PhoneLinkError::Admission(_) => PhoneRefusal::PhoneFailed,
@@ -786,6 +784,18 @@ mod tests {
             (
                 PhoneLinkError::Ended(Box::new(OperationOutcome::Refused(ResultError::Busy))),
                 PhoneRefusal::PhoneFailed,
+            ),
+            (
+                PhoneLinkError::Ended(Box::new(OperationOutcome::Refused(
+                    ResultError::DuplicateOperation,
+                ))),
+                PhoneRefusal::PhoneFailed,
+            ),
+            (
+                PhoneLinkError::Ended(Box::new(OperationOutcome::Refused(
+                    ResultError::Unauthorized,
+                ))),
+                PhoneRefusal::NotGranted,
             ),
             (
                 PhoneLinkError::Ended(Box::new(OperationOutcome::Lost)),

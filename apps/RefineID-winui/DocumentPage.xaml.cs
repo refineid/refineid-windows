@@ -38,12 +38,68 @@ internal sealed partial class DocumentPage : Page
     /// <summary>The reason bytes the native service accepts.</summary>
     private const int ReasonMaximumBytes = 256;
 
+    /// <summary>How often the page looks for a card in a reader here.</summary>
+    private static readonly TimeSpan CardPollInterval = TimeSpan.FromSeconds(2);
+
+    private readonly DispatcherTimer cardPollTimer;
     private DocumentMode mode;
     private bool busy;
+    private bool polling;
 
     public DocumentPage()
     {
         this.InitializeComponent();
+        this.cardPollTimer = new DispatcherTimer { Interval = CardPollInterval };
+        this.cardPollTimer.Tick += (s, e) => this.PollCard();
+        this.Loaded += this.OnLoaded;
+        this.Unloaded += this.OnUnloaded;
+    }
+
+    private void OnLoaded(object sender, RoutedEventArgs args)
+    {
+        this.PollCard();
+        this.cardPollTimer.Start();
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs args) => this.cardPollTimer.Stop();
+
+    /// <summary>
+    /// The PIN box shows while a reader here holds a card; without one the
+    /// paired phone signs and takes PIN 2 on its own screen.
+    /// </summary>
+    private async void PollCard()
+    {
+        if (this.busy || this.polling)
+        {
+            return;
+        }
+
+        this.polling = true;
+        try
+        {
+            bool cardHere = await Task.Run(LocalCardService.CardInAReader).ConfigureAwait(true);
+            this.ShowPinBox(cardHere);
+        }
+        catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException)
+        {
+#if DEBUG
+            DevErrorLog.Report("card service not loaded", error);
+#endif
+        }
+        finally
+        {
+            this.polling = false;
+        }
+    }
+
+    private void ShowPinBox(bool cardHere)
+    {
+        if (!cardHere)
+        {
+            this.PinBox.Password = string.Empty;
+        }
+
+        this.PinBox.Visibility = cardHere ? Visibility.Visible : Visibility.Collapsed;
     }
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
@@ -131,21 +187,8 @@ internal sealed partial class DocumentPage : Page
 
         DocumentFormat format =
             this.FormatBox.SelectedIndex == 1 ? DocumentFormat.AsicE : DocumentFormat.Pades;
-        string pin = this.PinBox.Password;
         string reason = this.ReasonBox.Text;
         this.ClearOutcome();
-        // A card in a reader attached to this computer signs under the PIN
-        // typed here; without one the paired phone signs and asks for PIN 2
-        // on its own screen.
-        if (LocalCardService.PresentReaders().Count > 0 && !IsPin(pin))
-        {
-            this.ShowStatus(
-                InfoBarSeverity.Warning,
-                Strings.Format("Pin2LengthRule", PinMinimumLength, PinMaximumLength)
-            );
-            return;
-        }
-
         if (Encoding.UTF8.GetByteCount(reason) > ReasonMaximumBytes)
         {
             this.ShowStatus(InfoBarSeverity.Warning, Strings.Get("ReasonTooLong"));
@@ -154,6 +197,21 @@ internal sealed partial class DocumentPage : Page
 
         await this.RunAsync(async () =>
             {
+                // A card in a reader attached to this computer signs under the
+                // PIN typed here; without one the paired phone signs and asks
+                // for PIN 2 on its own screen, and no PIN is read here.
+                bool cardHere = await Task.Run(LocalCardService.CardInAReader).ConfigureAwait(true);
+                this.ShowPinBox(cardHere);
+                string? pin = cardHere ? this.PinBox.Password : null;
+                if (pin is not null && !IsPin(pin))
+                {
+                    this.ShowStatus(
+                        InfoBarSeverity.Warning,
+                        Strings.Format("Pin2LengthRule", PinMinimumLength, PinMaximumLength)
+                    );
+                    return;
+                }
+
                 DocumentSignReport report;
                 try
                 {
