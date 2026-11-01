@@ -218,6 +218,9 @@ fn prepare_change(
     Ok((current, new))
 }
 
+/// The PUK's accepted length, as the form states it.
+const PUK_HINT: &str = "8-12 digits";
+
 fn prepare_unblock(
     mut fields: Vec<Vec<u8>>,
     labels: PinFields,
@@ -228,8 +231,8 @@ fn prepare_unblock(
         zeroize_all(&mut fields);
         return Err(String::from("Internal error: wrong field count."));
     }
-    let raw = take_digit_buffer(&mut fields, 0, "PUK", 7, "7-8 digits")?;
-    let puk = Puk::new(raw).map_err(|error| role_error("The PUK", "7-8 digits", error))?;
+    let raw = take_digit_buffer(&mut fields, 0, "PUK", Puk::MIN_LENGTH, PUK_HINT)?;
+    let puk = Puk::new(raw).map_err(|error| role_error("The PUK", PUK_HINT, error))?;
     let new = take_digit_buffer(&mut fields, 1, labels.new, role_min, hint)?;
     let confirm = take_digit_buffer(&mut fields, 2, labels.repeat, role_min, hint)?;
     if new.as_bytes() != confirm.as_bytes() {

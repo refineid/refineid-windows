@@ -253,63 +253,40 @@ impl PinBytes {
 /// is "the code presented to unblock a PIN", even where FINEID S4-1
 /// v4.2 §4.6.1 makes the activation code the PUK.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
-pub enum Puk {
-    /// 7-digit PUK.
-    Seven(PinBytes),
-    /// 8-digit PUK.
-    Eight(PinBytes),
-}
+pub struct Puk(PinBytes);
 
 impl Puk {
-    /// Shorter accepted PUK length.
-    pub const MIN_LENGTH: usize = 7;
-    /// Longer accepted PUK length.
-    pub const MAX_LENGTH: usize = 8;
+    /// Shortest accepted PUK length (FINEID S4-1 v4.2 §4.1).
+    pub const MIN_LENGTH: usize = 8;
+    /// Longest accepted PUK length: the stored (padded) block length.
+    pub const MAX_LENGTH: usize = 12;
 
     /// Parse `bytes` as a PUK code.
     ///
     /// # Errors
-    /// Empty, unsupported length, or any non-digit byte.
+    /// Empty, a length outside [`Self::MIN_LENGTH`]..=[`Self::MAX_LENGTH`],
+    /// or any non-digit byte.
     pub fn new(bytes: PinBytes) -> Result<Self, PinRoleError> {
-        match bytes.digit_count() {
-            Self::MIN_LENGTH => {
-                bytes.validate_digits(Self::MIN_LENGTH, Self::MIN_LENGTH)?;
-                Ok(Self::Seven(bytes))
-            }
-            Self::MAX_LENGTH => {
-                bytes.validate_digits(Self::MAX_LENGTH, Self::MAX_LENGTH)?;
-                Ok(Self::Eight(bytes))
-            }
-            got => Err(PinRoleError::WrongLength {
-                expected_min: Self::MIN_LENGTH,
-                expected_max: Self::MAX_LENGTH,
-                got,
-            }),
-        }
+        bytes.validate_digits(Self::MIN_LENGTH, Self::MAX_LENGTH)?;
+        Ok(Self(bytes))
     }
 
     /// Borrow the inner secret bytes.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        match self {
-            Self::Seven(bytes) | Self::Eight(bytes) => bytes.as_bytes(),
-        }
+        self.0.as_bytes()
     }
 
     /// Copy the validated code into the generic PIN-family type.
     #[must_use]
     pub fn to_pin_bytes(&self) -> PinBytes {
-        match self {
-            Self::Seven(bytes) | Self::Eight(bytes) => bytes.clone(),
-        }
+        self.0.clone()
     }
 
     /// Number of ASCII digits in the PUK.
     #[must_use]
     pub const fn digit_count(&self) -> usize {
-        match self {
-            Self::Seven(bytes) | Self::Eight(bytes) => bytes.digit_count(),
-        }
+        self.0.digit_count()
     }
 }
 
@@ -549,21 +526,22 @@ mod tests {
     }
 
     #[test]
-    fn puk_accepts_seven_digits() {
-        let p = Puk::new(pin(b"1234567")).expect("seven-digit PUK is valid");
-        assert_eq!(p.digit_count(), 7);
-        assert_eq!(p.as_bytes(), b"1234567");
+    fn puk_accepts_twelve_digits() {
+        let p = Puk::new(pin(b"123456789012")).expect("twelve-digit PUK is valid");
+        assert_eq!(p.digit_count(), 12);
+        assert_eq!(p.as_bytes(), b"123456789012");
     }
 
     #[test]
-    fn puk_rejects_lengths_outside_seven_or_eight() {
+    fn puk_rejects_lengths_outside_eight_to_twelve() {
+        // Seven digits is the §4.6.2 preset activation PIN, not a PUK.
+        assert!(matches!(
+            Puk::new(pin(b"1234567")),
+            Err(PinRoleError::WrongLength { got: 7, .. })
+        ));
         assert!(matches!(
             Puk::new(pin(b"123456")),
             Err(PinRoleError::WrongLength { got: 6, .. })
-        ));
-        assert!(matches!(
-            Puk::new(pin(b"123456789")),
-            Err(PinRoleError::WrongLength { got: 9, .. })
         ));
     }
 

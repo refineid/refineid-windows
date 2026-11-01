@@ -39,12 +39,9 @@ use crate::document::{self, DocumentError, DocumentPlan, Format};
 use crate::pades::SignatureMetadata;
 use crate::timestamp::{self, TimestampError, VerifiedTimestampToken};
 use crate::validation::ValidationMaterial;
-use refineid_lib_core::apdu::iso7816::ApduClass;
 use refineid_lib_core::apdu::status_word::StatusWord;
-use refineid_lib_core::auth::commands::VerifyMode;
 use refineid_lib_core::auth::{
-    AuthError, PIN_PAD_BYTE, PinOps as _, PinPolicyReason, PinReferenceScheme, PinSlot,
-    VerifyOutcome, classify_verify_sw,
+    AuthError, PinOps as _, PinPolicyReason, PinReferenceScheme, PinSlot, VerifyOutcome,
 };
 use refineid_lib_core::backend::{
     ReaderAccessCap, ReaderBackend as _, ReaderBackendOps as _, ReaderPickError,
@@ -653,11 +650,6 @@ impl From<ReaderPickError> for SignErrorKind {
     }
 }
 
-/// Organizational PIN minimum length (S4-2 v4.0 §4.2).
-const ORGANIZATIONAL_PIN_MIN_LENGTH: usize = 4;
-/// Organizational PIN stored (padded) length.
-const ORGANIZATIONAL_PIN_STORED_LENGTH: usize = 8;
-
 /// Apply the retry floor to the signing PIN under `scheme`, from its
 /// counter-safe status probe, before any VERIFY can spend an attempt.
 fn signing_pin_retry_floor<T: CardTransport>(
@@ -671,64 +663,6 @@ fn signing_pin_retry_floor<T: CardTransport>(
             AuthError::PinPolicy(reason) => SignErrorKind::PinPolicy { reason },
         })?;
     check_retry_floor(SIGNING_PIN.into(), status).map_err(SignErrorKind::RetryFloor)
-}
-
-/// VERIFY `pin` for `slot` under the resolved `scheme`.
-///
-/// The citizen path delegates to the core [`PinOps::verify_pin`]
-/// (same P2 bytes, same padding); the organizational path
-/// speaks its own P2 with its own length window.
-fn verify_pin_with_scheme<T: CardTransport>(
-    transport: &mut T,
-    slot: PinSlot,
-    scheme: PinReferenceScheme,
-    pin: PinBytes,
-) -> Result<VerifyOutcome, AuthError<TransportDispatchError<T::Error>>> {
-    if scheme == PinReferenceScheme::Citizen {
-        return transport.verify_pin(slot, pin);
-    }
-    let pin_ascii = pin.as_bytes();
-    validate_org_pin_policy(pin_ascii)?;
-    let mut padded = vec![PIN_PAD_BYTE; ORGANIZATIONAL_PIN_STORED_LENGTH];
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "validate_org_pin_policy above proves pin_ascii.len() in [min, stored]; padded was allocated at length stored, so padded[..pin_ascii.len()] is in-bounds."
-    )]
-    padded[..pin_ascii.len()].copy_from_slice(pin_ascii);
-    let mut out = Vec::with_capacity(padded.len().saturating_add(5));
-    out.push(ApduClass::Plain.as_byte());
-    out.push(0x20); // INS VERIFY
-    out.push(VerifyMode::Verify.as_p1());
-    out.push(scheme.reference(slot));
-    let Ok(lc) = u8::try_from(padded.len()) else {
-        unreachable!("VERIFY PIN block exceeds short-form Lc")
-    };
-    out.push(lc);
-    out.extend_from_slice(&padded);
-    let r = transport.transmit(&out).map_err(AuthError::Transport)?;
-    // Wipe the padded buffer; it still carries the typed PIN
-    // bytes in the leading slice.
-    zeroize::Zeroize::zeroize(&mut padded);
-    Ok(classify_verify_sw(r.status_word()))
-}
-
-/// Organizational length window plus ASCII-digit shape. A
-/// rejection here doesn't burn a card-side retry counter slot.
-fn validate_org_pin_policy<TE>(ascii: &[u8]) -> Result<(), AuthError<TE>> {
-    if ascii.len() < ORGANIZATIONAL_PIN_MIN_LENGTH || ascii.len() > ORGANIZATIONAL_PIN_STORED_LENGTH
-    {
-        return Err(AuthError::PinPolicy(PinPolicyReason::WrongLength {
-            got: ascii.len(),
-            min: ORGANIZATIONAL_PIN_MIN_LENGTH,
-            max: ORGANIZATIONAL_PIN_STORED_LENGTH,
-        }));
-    }
-    if let Some(off) = ascii.iter().position(|b| !b.is_ascii_digit()) {
-        return Err(AuthError::PinPolicy(PinPolicyReason::NonDigit {
-            byte_offset: off,
-        }));
-    }
-    Ok(())
 }
 
 /// Organizational form of the SHA-256 + RSA-PKCS1v15 chain: no
@@ -1064,7 +998,8 @@ fn sign_chain<T: CardTransport>(
             AuthError::PinPolicy(reason) => SignErrorKind::PinPolicy { reason },
         })?;
     signing_pin_retry_floor(transport, scheme)?;
-    let outcome = verify_pin_with_scheme(transport, SIGNING_PIN, scheme, options.pin.clone())
+    let outcome = transport
+        .verify_pin_with_scheme(scheme, SIGNING_PIN, options.pin.clone())
         .map_err(|e| match e {
             AuthError::Transport(t) => SignErrorKind::Transport(format!("{t}")),
             AuthError::PinPolicy(reason) => SignErrorKind::PinPolicy { reason },

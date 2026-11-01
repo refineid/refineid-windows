@@ -94,10 +94,10 @@ pub const PIN2_MIN_LENGTH: usize = 6;
 /// activation scheme the activation code from the letter is this PUK.
 /// See `pin::ActivationCode` / `pin::Puk`.
 pub const PUK_STORED_LENGTH: usize = 12;
-/// Minimum PUK length.
-pub const PUK_MIN_LENGTH: usize = 7;
-/// Maximum PUK length.
-pub const PUK_MAX_LENGTH: usize = 8;
+/// Minimum PUK length (FINEID S4-1 v4.2 §4.1).
+pub const PUK_MIN_LENGTH: usize = 8;
+/// Maximum PUK length: the stored (padded) block length.
+pub const PUK_MAX_LENGTH: usize = PUK_STORED_LENGTH;
 
 /// Which PIN slot a `verify_pin` call targets.
 ///
@@ -1510,7 +1510,7 @@ mod tests {
     }
 
     #[test]
-    fn unblock_pin1_apdu_layout_7puk_4pin() {
+    fn unblock_pin1_apdu_layout_12puk_4pin() {
         const PLAIN_CLASS: u8 = 0x00;
         const RESET_RETRY_COUNTER_INSTRUCTION: u8 = 0x2C;
         const RESET_AND_REPLACE_MODE: u8 = 0x00;
@@ -1523,8 +1523,7 @@ mod tests {
             PIN1_REFERENCE_PKCS15,
             PADDED_PAIR_LENGTH,
         ];
-        expected.extend_from_slice(b"4907123");
-        expected.extend_from_slice(&[PAD_BYTE; 5]);
+        expected.extend_from_slice(b"490712349071");
         expected.extend_from_slice(b"4907");
         expected.extend_from_slice(&[PAD_BYTE; 8]);
         let mut tx = MockTx {
@@ -1533,8 +1532,8 @@ mod tests {
             seen: false,
         };
         let outcome = tx
-            .unblock_pin1(pb(b"4907123"), pb(b"4907"))
-            .expect("seven-digit PUK reaches PIN1 unblock");
+            .unblock_pin1(pb(b"490712349071"), pb(b"4907"))
+            .expect("twelve-digit PUK reaches PIN1 unblock");
         assert_eq!(outcome, UnblockOutcome::Ok);
         assert!(tx.seen);
     }
@@ -1561,7 +1560,6 @@ mod tests {
     #[test]
     fn unblock_pin1_short_puk_rejected_locally() {
         let mut tx = ShouldNotTransmitTx;
-        // 6 < PUK_MIN_LENGTH=7
         let err = tx
             .unblock_pin1(pb(b"123456"), pb(b"4321"))
             .expect_err("short PUK is rejected locally");
@@ -1580,15 +1578,15 @@ mod tests {
     }
 
     #[test]
-    fn unblock_pin1_long_puk_rejected_locally() {
+    fn unblock_pin1_seven_digit_puk_rejected_locally() {
         let mut tx = ShouldNotTransmitTx;
         let err = tx
-            .unblock_pin1(pb(b"123456789"), pb(b"4321"))
-            .expect_err("long PUK is rejected locally");
+            .unblock_pin1(pb(b"1234567"), pb(b"4321"))
+            .expect_err("a seven-digit code is not a PUK");
         assert!(matches!(
             err,
             AuthError::PinPolicy(PinPolicyReason::WrongLength {
-                got: 9,
+                got: 7,
                 min: PUK_MIN_LENGTH,
                 max: PUK_MAX_LENGTH
             })
@@ -1781,6 +1779,76 @@ mod tests {
             .expect("sent");
         assert_eq!(outcome, UnblockOutcome::WrongPuk { retries_left: two });
         assert_eq!(tx.sent.len(), ONE_COMMAND, "no reset after a refused PUK");
+    }
+
+    /// Synthetic PIN of `len` digits.
+    fn digits(len: usize) -> Vec<u8> {
+        vec![b'0'; len]
+    }
+
+    #[test]
+    fn organization_verify_sends_twelve_bare_digits_for_both_pins() {
+        for slot in [PinSlot::Pin1, PinSlot::Pin2] {
+            let pin = digits(slot.stored_length());
+            let mut tx = RecordingTx::new(&[StatusWord::Success]);
+            let outcome = tx
+                .verify_pin_with_scheme(PinReferenceScheme::Organizational, slot, secret(&pin))
+                .expect("sent");
+            assert_eq!(outcome, VerifyOutcome::Ok);
+            let command = &tx.sent[FIRST];
+            assert_eq!(command[INS_INDEX], commands::Verify::INS);
+            assert_eq!(
+                command[P2_INDEX],
+                PinReferenceScheme::Organizational.reference(slot)
+            );
+            assert_eq!(&command[DATA_INDEX..], pin.as_slice());
+        }
+    }
+
+    #[test]
+    fn organization_change_sends_twelve_bare_digits() {
+        let current = digits(PIN2_STORED_LENGTH);
+        let new = digits(PIN2_STORED_LENGTH);
+        let mut tx = RecordingTx::new(&[StatusWord::Success]);
+        tx.change_pin_with_scheme(
+            PinReferenceScheme::Organizational,
+            PinSlot::Pin2,
+            secret(&current),
+            secret(&new),
+        )
+        .expect("sent");
+        let command = &tx.sent[FIRST];
+        assert_eq!(command[P2_INDEX], PIN2_REFERENCE_ORGANIZATIONAL);
+        let mut expected = current;
+        expected.extend_from_slice(&new);
+        assert_eq!(&command[DATA_INDEX..], expected.as_slice());
+    }
+
+    #[test]
+    fn organization_unblock_resets_with_twelve_bare_digits() {
+        let new = digits(PIN1_STORED_LENGTH);
+        let mut tx = RecordingTx::new(&[StatusWord::Success, StatusWord::Success]);
+        tx.reset_retry_counter_with_scheme(
+            PinReferenceScheme::Organizational,
+            PinSlot::Pin1,
+            secret(ORG_PUK),
+            secret(&new),
+        )
+        .expect("sent");
+        let reset = &tx.sent[SECOND];
+        assert_eq!(reset[P2_INDEX], PIN1_REFERENCE_ORGANIZATIONAL);
+        assert_eq!(&reset[DATA_INDEX..], new.as_slice());
+    }
+
+    #[test]
+    fn thirteen_digits_are_refused_before_any_command() {
+        for slot in [PinSlot::Pin1, PinSlot::Pin2] {
+            let long = digits(slot.stored_length().saturating_add(1));
+            assert!(
+                PinBytes::new(long).is_err(),
+                "no PIN value, so no command, past the stored length"
+            );
+        }
     }
 
     #[test]
