@@ -193,10 +193,10 @@
     <value>Organisation card activation</value>
   </data>
   <data name="ActivationCodeBox.Header" xml:space="preserve">
-    <value>Activation code from letter</value>
+    <value>Activation PIN from letter</value>
   </data>
   <data name="ActivationCodeBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Activation code from letter</value>
+    <value>Activation PIN from letter</value>
   </data>
   <data name="ActivationPin1Box.Header" xml:space="preserve">
     <value>New basic PIN 1</value>

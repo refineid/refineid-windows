@@ -15,7 +15,7 @@
 //! Card activation: which procedure a card takes and whether each PIN
 //! still awaits it (FINEID S4-1 v4.2 §4.6).
 //!
-//! - §4.6.1, "activation code is the PUK": PIN 1 and PIN 2 ship
+//! - §4.6.1, "activation PIN is the PUK": PIN 1 and PIN 2 ship
 //!   blocked, and `RESET RETRY COUNTER` with the 8-digit activation
 //!   code sets each.
 //! - §4.6.2, "preset activation PIN": PIN 1 and PIN 2 ship set to one
@@ -41,7 +41,7 @@ const PRESET_PIN_CUTOVER_DAY: u8 = 13;
 /// How a card is activated (FINEID S4-1 v4.2 §4.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivationScheme {
-    /// §4.6.1: the PINs ship blocked and the 8-digit activation code
+    /// §4.6.1: the PINs ship blocked and the 8-digit activation PIN
     /// is the PUK.
     ActivationCodeIsPuk,
     /// §4.6.2: the PINs ship set to the 7-digit preset activation PIN.

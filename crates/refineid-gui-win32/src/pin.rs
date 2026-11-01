@@ -71,7 +71,7 @@ pub const FIELDS: [[&str; 5]; 5] = [
     ["PUK:", "New basic PIN 1:", "Repeat PIN 1:", "", ""],
     ["PUK:", "New signature PIN 2:", "Repeat PIN 2:", "", ""],
     [
-        "Activation code:",
+        "Activation PIN:",
         "New basic PIN 1:",
         "Repeat PIN 1:",
         "New signature PIN 2:",
@@ -354,12 +354,12 @@ fn take_digit_buffer(
     Ok(pin)
 }
 
-/// Move the activation code into a validated [`PinBytes`]. Its exact
+/// Move the activation PIN into a validated [`PinBytes`]. Its exact
 /// length is the card's scheme to decide; here it only has to be digits
 /// no shorter than any scheme takes.
 fn take_code_buffer(fields: &mut [Vec<u8>], index: usize) -> Result<PinBytes, String> {
     const HINT: &str = "7 or 8 digits";
-    const LABEL: &str = "Activation code";
+    const LABEL: &str = "Activation PIN";
     let code = take_buffer(fields, index, LABEL, HINT)?;
     if code.digit_count() < ActivationPinSeven::LENGTH {
         zeroize_all(fields);
@@ -528,11 +528,11 @@ fn render_unblock(report: &UnblockPinReport) -> String {
     }
 }
 
-/// The refusal for an activation code of the wrong length for the
+/// The refusal for an activation PIN of the wrong length for the
 /// card's scheme.
 fn activation_length_error(expected: usize) -> String {
     format!(
-        "The activation code must have {expected} digits for this card; nothing was sent to the card."
+        "The activation PIN must have {expected} digits for this card; nothing was sent to the card."
     )
 }
 
@@ -558,7 +558,7 @@ fn activate_line(outcome: Option<&UnblockOutcome>) -> String {
         None => String::from("not attempted"),
         Some(UnblockOutcome::Ok) => String::from("set"),
         Some(UnblockOutcome::WrongPuk { retries_left }) => {
-            format!("wrong activation code; {retries_left} tries left")
+            format!("wrong activation PIN; {retries_left} tries left")
         }
         Some(UnblockOutcome::PukLocked) => String::from("code locked"),
         Some(UnblockOutcome::Invalidated) => {

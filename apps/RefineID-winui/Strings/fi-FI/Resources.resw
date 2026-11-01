@@ -193,10 +193,10 @@
     <value>Organisaatiokortin aktivointi</value>
   </data>
   <data name="ActivationCodeBox.Header" xml:space="preserve">
-    <value>Aktivointikoodi kirjeestä</value>
+    <value>Aktivointitunnusluku kirjeestä</value>
   </data>
   <data name="ActivationCodeBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Aktivointikoodi kirjeestä</value>
+    <value>Aktivointitunnusluku kirjeestä</value>
   </data>
   <data name="ActivationPin1Box.Header" xml:space="preserve">
     <value>Uusi perustunnusluku (PIN 1)</value>

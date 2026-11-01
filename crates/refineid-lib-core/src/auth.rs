@@ -103,7 +103,7 @@ pub const FINEID_PIN2_MIN_LENGTH: usize = 6;
 /// The PUK uses the same 12-byte padded slot as the PIN1 / PIN2
 /// references. "PUK" here is the unblocking code the `RESET RETRY
 /// COUNTER` surface presents; under the FINEID S4-1 v4.2 §4.6.1
-/// activation scheme the activation code from the letter is this PUK.
+/// activation scheme the activation PIN from the letter is this PUK.
 /// See `pin::ActivationCode` / `pin::Puk`.
 pub const PUK_STORED_LENGTH: usize = 12;
 /// Minimum PUK length (FINEID S4-1 v4.2 §4.1).
