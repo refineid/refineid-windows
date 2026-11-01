@@ -191,7 +191,7 @@
                                     AutomationProperties.AutomationId="PukBox"
                                     AutomationProperties.Name="Recovery code (PUK)"
                                     Header="Recovery code (PUK)"
-                                    MaxLength="8"
+                                    MaxLength="12"
                                     PasswordRevealMode="Peek"
                                 />
                                 <PasswordBox
