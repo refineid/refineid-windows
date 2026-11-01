@@ -1373,8 +1373,7 @@ impl<'a> SpkiDer<'a> {
     /// so there is no re-parse and no `Option`.
     ///
     /// Crate-internal: the raw key material is reached only through
-    /// typed operations ([`Self::ec_public_key_point`],
-    /// [`crate::ocsp::IssuerKeyHash::from_subject_public_key`]) so
+    /// typed operations ([`Self::ec_public_key_point`]) so
     /// no external caller names a bare `&[u8]` of a public key.
     #[must_use]
     #[inline]

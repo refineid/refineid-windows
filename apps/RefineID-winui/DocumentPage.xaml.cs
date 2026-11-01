@@ -134,7 +134,10 @@ internal sealed partial class DocumentPage : Page
         string pin = this.PinBox.Password;
         string reason = this.ReasonBox.Text;
         this.ClearOutcome();
-        if (!IsPin(pin))
+        // A card in a reader attached to this computer signs under the PIN
+        // typed here; without one the paired phone signs and asks for PIN 2
+        // on its own screen.
+        if (LocalCardService.PresentReaders().Count > 0 && !IsPin(pin))
         {
             this.ShowStatus(
                 InfoBarSeverity.Warning,

@@ -1,0 +1,29 @@
+[package]
+name = "refineid-windows-doc-sign"
+description = "Document signing and verification on Windows over refineid-doc-sign: the WinHTTP transport, the card in a local reader, and the paired phone as the signer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+refineid-dev-errors.workspace = true
+refineid-doc-sign.workspace = true
+refineid-pcsc.workspace = true
+refineid-rapp-core.workspace = true
+refineid-remote.workspace = true
+refineid-windows-credential-store.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinHttp",
+] }
+
+[dev-dependencies]
+refineid-doc-sign = { workspace = true, features = ["testkit"] }
+
+[lints]
+workspace = true

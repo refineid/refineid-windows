@@ -129,7 +129,7 @@ internal static partial class LocalCardService
         );
     }
 
-    /// <summary>Signs a document with the qualified signature key of the card in the attached reader, under PIN 2; a PDF carries the verification stamp in the user's interface language.</summary>
+    /// <summary>Signs a document with the card's qualified signature key: the card in the attached reader under the PIN 2 given, or the card on the paired phone when no reader holds one, the phone asking for PIN 2 itself; a PDF carries the verification stamp in the user's interface language.</summary>
     /// <exception cref="NativeRappException">The card or the service refused.</exception>
     /// <exception cref="JsonException">The service reply was malformed.</exception>
     internal static DocumentSignReport SignDocument(

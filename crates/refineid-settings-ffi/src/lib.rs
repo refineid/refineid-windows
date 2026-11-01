@@ -35,15 +35,10 @@ use refineid_card_manager_core::card_pin::{
     UnblockPinOptions,
 };
 use refineid_card_manager_core::service::{self, CardSnapshot, ContactlessSnapshot};
-use refineid_doc_sign::asic_verify::{DocumentVerifyReport, verify_document};
-use refineid_doc_sign::cades::SigningTime;
 use refineid_doc_sign::document::Format;
-use refineid_doc_sign::pades::{SignatureMetadata, StampLanguage, VisibleSignature};
-use refineid_doc_sign::service::{
-    DEFAULT_TIMESTAMP_AUTHORITY, DocumentRequest, LocalVerifyOutcome, SignOptions, SignReport,
-    sign_qualified,
-};
-use refineid_doc_sign::verify::VerifyOptions;
+use refineid_doc_sign::pades::StampLanguage;
+use refineid_doc_sign::service::{LocalVerifyOutcome, SignReport};
+use refineid_doc_sign::verification::DocumentReport;
 use refineid_lib_core::apdu::status_word::PinRetries;
 use refineid_lib_core::auth::{ChangePinOutcome, PinStatus, PukStatus, UnblockOutcome};
 use refineid_lib_core::can::{CAN_DIGITS, Can};
@@ -52,8 +47,10 @@ use refineid_lib_core::pin::{
     ActivationCode, ActivationPinEight, ActivationPinSeven, PinBytes, Puk,
 };
 use refineid_lib_core::pkcs15::CardGeneration;
-use refineid_lib_pcsc::PcscBackend;
 use refineid_windows_credential_store::{read_can, save_can};
+use refineid_windows_doc_sign::phone::{SigningSource, current_source};
+use refineid_windows_doc_sign::sign::{DocumentSignRequest, sign};
+use refineid_windows_doc_sign::verify::{render, verify_file};
 use refineid_windows_driver_probe::{self, LocalCardSupport};
 use serde::Serialize;
 use zeroize::Zeroize;
@@ -336,75 +333,8 @@ fn detect_local_card_support() -> LocalCardSupportReport {
     }
 }
 
-/// Verify a document signature offline (no card needed).
-///
-/// `cert`, `message`, and `signature` are UTF-8 file paths. The function
-/// loads the certificate (PEM or DER), the original message bytes, and the
-/// raw RSA-PKCS1v15-SHA256 signature, then verifies the signature against
-/// the certificate's public key. Returns a JSON report with the result.
-///
-/// # Safety
-///
-/// Each pointer must point to `*_length` readable bytes of valid UTF-8.
-/// The buffers must not exceed the documented maximums.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn refineid_settings_verify_document(
-    cert: *const u8,
-    cert_length: usize,
-    message: *const u8,
-    message_length: usize,
-    signature: *const u8,
-    signature_length: usize,
-) -> *mut c_char {
-    reply_json(|| {
-        let cert_path = unsafe { copy_utf8(cert, cert_length, MAX_READER_NAME_BYTES, "cert")? };
-        let message_path =
-            unsafe { copy_utf8(message, message_length, MAX_READER_NAME_BYTES, "message")? };
-        let signature_path = unsafe {
-            copy_utf8(
-                signature,
-                signature_length,
-                MAX_READER_NAME_BYTES,
-                "signature",
-            )?
-        };
-
-        let options = VerifyOptions {
-            cert: cert_path.into(),
-            message: message_path.into(),
-            signature: signature_path.into(),
-        };
-
-        match refineid_doc_sign::verify::verify_offline(&options) {
-            Ok(report) => Ok(VerifyReportJson {
-                cert_path: report.cert_path,
-                cert_subject_cn: report.cert_subject_cn.map(|cn| cn.to_string()),
-                message_path: report.message_path,
-                message_len: report.message_len,
-                signature_path: report.signature_path,
-                signature_len: report.signature_len,
-                ok: report.ok,
-                failure_reason: report.failure_reason.map(|e| e.to_string()),
-            }),
-            Err(e) => Err(ApiFailure::new("verify_failed", e.to_string())),
-        }
-    })
-}
-
-#[derive(Serialize)]
-struct VerifyReportJson {
-    cert_path: PathBuf,
-    cert_subject_cn: Option<String>,
-    message_path: PathBuf,
-    message_len: u64,
-    signature_path: PathBuf,
-    signature_len: usize,
-    ok: bool,
-    failure_reason: Option<String>,
-}
-
-/// A verified container: its verdict and the report as the crate renders
-/// it, file by file and signature by signature.
+/// A verified document: its verdict and the report as rendered, one
+/// record per signature.
 #[derive(Serialize)]
 struct ContainerVerifyJson {
     container: String,
@@ -412,18 +342,24 @@ struct ContainerVerifyJson {
     report: String,
 }
 
-impl From<DocumentVerifyReport> for ContainerVerifyJson {
-    fn from(report: DocumentVerifyReport) -> Self {
+impl ContainerVerifyJson {
+    /// The report of `file`, named by its file name.
+    fn of(file: &std::path::Path, report: &DocumentReport) -> Self {
+        let container = file.file_name().map_or_else(
+            || file.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
         Self {
-            report: report.render(),
-            container: report.container,
-            ok: report.ok,
+            report: render(&container, report),
+            ok: report.is_valid(),
+            container,
         }
     }
 }
 
-/// Verify a signed container (`.asice`, `.bdoc`) or a signed PDF offline:
-/// no card, no PIN, no network.
+/// Verify a signed container (`.asice`, `.bdoc`) or a signed PDF: no
+/// card, no PIN; the network is asked only about a signer's revocation
+/// the file does not answer.
 ///
 /// # Safety
 ///
@@ -437,8 +373,9 @@ pub unsafe extern "C" fn refineid_settings_verify_container(
     reply_json(|| {
         // SAFETY: The pointer and bound are validated before the read.
         let path = unsafe { copy_utf8(path, path_length, MAX_PATH_BYTES, "path") }?;
-        verify_document(std::path::Path::new(&path))
-            .map(ContainerVerifyJson::from)
+        let file = std::path::Path::new(&path);
+        verify_file(file, refineid_doc_sign::now_date_time())
+            .map(|report| ContainerVerifyJson::of(file, &report))
             .map_err(|error| ApiFailure::new("verify_failed", error.to_string()))
     })
 }
@@ -471,21 +408,27 @@ impl From<SignReport> for DocumentSignJson {
     }
 }
 
-/// Sign a document with the qualified signature key of the card in the
-/// single attached reader, under PIN 2.
+/// Sign a document with the card's qualified signature key.
+///
+/// The card in the single attached reader signs under `pin`, PIN 2; when
+/// no reader holds a card, the card on the paired phone signs, and the
+/// phone asks for PIN 2 on its own screen and takes none from here.
+/// `pin_length` 0 gives no PIN.
 ///
 /// `PAdES` goes into a copy of the PDF beside it, carrying the round
 /// verification stamp in the language `language` names (a Windows
 /// language identifier), an `ASiC-E` container beside any file. The
 /// signature is timestamped by the default authority and carries its
-/// validation material and an archive timestamp. `format` is
+/// validation material and an archive timestamp; the output is named by
+/// the signature's time and never replaces a file. `format` is
 /// `FORMAT_PADES` or `FORMAT_ASICE`; `reason` may be empty.
 ///
 /// # Safety
 ///
 /// `path` and `reason` must point to as many readable bytes of valid UTF-8
-/// as their lengths say, within the documented bounds; `pin` must point to
-/// `pin_length` readable bytes within the PIN bound.
+/// as their lengths say, within the documented bounds; a non-zero
+/// `pin_length` means `pin` points to that many readable bytes within the
+/// PIN bound.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn refineid_settings_sign_document(
     path: *const u8,
@@ -501,9 +444,6 @@ pub unsafe extern "C" fn refineid_settings_sign_document(
         // SAFETY: The pointer and bound are validated before the read.
         let path = unsafe { copy_utf8(path, path_length, MAX_PATH_BYTES, "path") }?;
         let format = parse_format(format)?;
-        // SAFETY: The secret is copied into PinBytes, whose constructor
-        // zeroizes its temporary Vec on both success and failure.
-        let pin = unsafe { copy_pin(pin, pin_length, "PIN") }?;
         let reason = if reason_length == 0 {
             None
         } else {
@@ -517,18 +457,25 @@ pub unsafe extern "C" fn refineid_settings_sign_document(
                 "A PDF signature needs a .pdf file; other files go into a container.",
             ));
         }
-        let output = derive_output(&input, format)?;
-        let request = document_request(format, reason, language);
-        let options = SignOptions {
-            input,
-            output,
-            pin,
-            save_cert: None,
-            reader_filter: None,
-            can: None,
-            document: Some(request),
+        let source = current_source();
+        // With no PIN the reader path reports the missing card before it
+        // would ask for one.
+        let pin = match source {
+            SigningSource::Reader if pin_length > 0 => {
+                // SAFETY: The secret is copied into PinBytes, whose
+                // constructor zeroizes its temporary Vec on both success and
+                // failure.
+                Some(unsafe { copy_signing_pin(pin, pin_length) }?)
+            }
+            SigningSource::Reader | SigningSource::Phone(_) => None,
         };
-        sign_qualified(PcscBackend, options)
+        let request = DocumentSignRequest {
+            input,
+            format,
+            reason,
+            stamp_language: StampLanguage::for_windows_language(language),
+        };
+        sign(source, request, pin)
             .map(DocumentSignJson::from)
             .map_err(|error| ApiFailure::new("sign_failed", error.to_string()))
     })
@@ -543,93 +490,6 @@ fn parse_format(format: u8) -> Result<Format, ApiFailure> {
             "invalid_format",
             format!("format {other} is not a document format"),
         )),
-    }
-}
-
-/// The last ordinal tried for a free output name.
-const MAX_OUTPUT_ORDINAL: u32 = 1_000;
-
-/// Output beside the input, under a name no file holds yet.
-///
-/// A PDF signature of `name.pdf` is `name-signed.pdf`; a container made
-/// from a file that is not one is `name.asice`; a container signed again
-/// is `name-signed.asice`. A `-signed` or `-signed-N` the input already
-/// carries is counted up, and a taken name moves on to `-2`, `-3` and so
-/// on after the `-signed` or the `.asice`.
-///
-/// # Errors
-/// `invalid_path` when the input has no file name or every name is taken.
-fn derive_output(input: &std::path::Path, format: Format) -> Result<PathBuf, ApiFailure> {
-    let name = input
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .ok_or_else(|| ApiFailure::new("invalid_path", "The path names no file"))?;
-    let (base, suffix) = if format == Format::Pades {
-        let stem = name.strip_suffix_ignore_case(".pdf").unwrap_or(name);
-        (format!("{}-signed", strip_signed(stem)), ".pdf")
-    } else if let Some(stem) = name.strip_suffix_ignore_case(".asice") {
-        (format!("{}-signed", strip_signed(stem)), ".asice")
-    } else {
-        (name.to_owned(), ".asice")
-    };
-    std::iter::once(format!("{base}{suffix}"))
-        .chain((2..=MAX_OUTPUT_ORDINAL).map(|ordinal| format!("{base}-{ordinal}{suffix}")))
-        .map(|candidate| input.with_file_name(candidate))
-        .find(|candidate| !candidate.exists())
-        .ok_or_else(|| ApiFailure::new("invalid_path", "No free output name"))
-}
-
-/// The stem without a trailing `-signed` or `-signed-N`.
-fn strip_signed(stem: &str) -> &str {
-    if let Some(base) = stem.strip_suffix("-signed") {
-        return base;
-    }
-    stem.rsplit_once("-signed-")
-        .filter(|(_, ordinal)| {
-            !ordinal.is_empty() && ordinal.bytes().all(|byte| byte.is_ascii_digit())
-        })
-        .map_or(stem, |(base, _)| base)
-}
-
-/// Case-insensitive suffix removal for file names.
-trait StripSuffixIgnoreCase {
-    fn strip_suffix_ignore_case<'a>(&'a self, suffix: &str) -> Option<&'a str>;
-}
-
-impl StripSuffixIgnoreCase for str {
-    fn strip_suffix_ignore_case<'a>(&'a self, suffix: &str) -> Option<&'a str> {
-        let cut = self.len().checked_sub(suffix.len())?;
-        self.is_char_boundary(cut)
-            .then(|| &self[cut..])
-            .filter(|tail| tail.eq_ignore_ascii_case(suffix))
-            .map(|_| &self[..cut])
-    }
-}
-
-/// The document signature the app asks for: timestamped by the default
-/// authority, with validation material and an archive timestamp, and
-/// for `PAdES` the verification stamp in the user's interface language.
-fn document_request(format: Format, reason: Option<String>, language: u16) -> DocumentRequest {
-    DocumentRequest {
-        format,
-        additional_inputs: Vec::new(),
-        signing_time: SigningTime::now(),
-        metadata: SignatureMetadata {
-            reason,
-            location: None,
-            contact: None,
-            name: None,
-            signing_time: None,
-            visible_signature: (format == Format::Pades).then(|| {
-                VisibleSignature::verification(StampLanguage::for_windows_language(language))
-            }),
-        },
-        expected_serial: None,
-        archive: true,
-        long_term: true,
-        timestamp_authorities: vec![DEFAULT_TIMESTAMP_AUTHORITY.to_owned()],
-        timestamp_credentials: None,
     }
 }
 
@@ -1129,6 +989,18 @@ unsafe fn copy_pin(
     PinBytes::new(bytes).map_err(pin_role_error)
 }
 
+/// The PIN 2 of a signing, copied once into the signing service's
+/// zeroizing type.
+unsafe fn copy_signing_pin(
+    input: *const u8,
+    length: usize,
+) -> Result<refineid_doc_sign::pin::PinBytes, ApiFailure> {
+    // SAFETY: copy_bytes validates null, length, and the public maximum before
+    // creating the temporary slice.
+    let bytes = unsafe { copy_bytes(input, length, MAX_SECRET_BYTES, "PIN") }?;
+    refineid_doc_sign::pin::PinBytes::new(bytes).map_err(pin_role_error)
+}
+
 unsafe fn copy_utf8(
     input: *const u8,
     length: usize,
@@ -1222,41 +1094,11 @@ fn serialize_envelope<T: Serialize>(envelope: &ApiEnvelope<'_, T>) -> String {
 )]
 mod tests {
     use super::{
-        FORMAT_ASICE, FORMAT_PADES, PIN1_SLOT, PIN2_SLOT, derive_output, document_request, is_pdf,
-        parse_format, parse_slot,
+        FORMAT_ASICE, FORMAT_PADES, PIN1_SLOT, PIN2_SLOT, is_pdf, parse_format, parse_slot,
     };
     use refineid_card_manager_core::card_pin::PinManageSlot;
     use refineid_doc_sign::document::Format;
-    use refineid_doc_sign::pades::{StampLanguage, VisibleSignature};
-    use refineid_doc_sign::service::DEFAULT_TIMESTAMP_AUTHORITY;
     use std::path::Path;
-
-    /// The Windows language identifier of Finnish (Finland), winnt.h.
-    const FINNISH_FINLAND: u16 = 0x040b;
-
-    #[test]
-    fn the_request_is_timestamped_archived_and_stamped() {
-        let pdf = document_request(Format::Pades, None, FINNISH_FINLAND);
-        assert_eq!(
-            pdf.timestamp_authorities,
-            vec![DEFAULT_TIMESTAMP_AUTHORITY.to_owned()]
-        );
-        assert!(pdf.archive);
-        assert!(pdf.long_term);
-        assert_eq!(
-            pdf.metadata.visible_signature,
-            Some(VisibleSignature::verification(StampLanguage::Finnish))
-        );
-        let container = document_request(Format::AsicECades, Some("review".to_owned()), 0);
-        assert!(container.metadata.visible_signature.is_none());
-        assert!(container.archive);
-        assert!(container.long_term);
-        assert_eq!(container.metadata.reason.as_deref(), Some("review"));
-        assert_eq!(
-            container.timestamp_authorities,
-            vec![DEFAULT_TIMESTAMP_AUTHORITY.to_owned()]
-        );
-    }
 
     #[test]
     fn slot_values_are_closed() {
@@ -1275,52 +1117,9 @@ mod tests {
     }
 
     #[test]
-    fn the_output_is_named_beside_the_input_under_a_free_name() {
-        let directory =
-            std::env::temp_dir().join(format!("refineid-settings-ffi-{}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
-        let pdf = |name: &str| derive_output(&directory.join(name), Format::Pades).unwrap();
-        let container =
-            |name: &str| derive_output(&directory.join(name), Format::AsicECades).unwrap();
-        let taken = |name: &str| std::fs::write(directory.join(name), b"taken").unwrap();
-
-        assert_eq!(pdf("contract.pdf"), directory.join("contract-signed.pdf"));
-        taken("contract-signed.pdf");
-        assert_eq!(pdf("contract.pdf"), directory.join("contract-signed-2.pdf"));
-        assert_eq!(
-            pdf("contract-signed.pdf"),
-            directory.join("contract-signed-2.pdf")
-        );
-        taken("contract-signed-2.pdf");
-        assert_eq!(
-            pdf("contract-signed-2.pdf"),
-            directory.join("contract-signed-3.pdf")
-        );
-
-        assert_eq!(container("notes.txt"), directory.join("notes.txt.asice"));
-        taken("notes.txt.asice");
-        assert_eq!(container("notes.txt"), directory.join("notes.txt-2.asice"));
-        assert_eq!(
-            container("notes.txt.asice"),
-            directory.join("notes.txt-signed.asice")
-        );
-        taken("notes.txt-signed.asice");
-        assert_eq!(
-            container("notes.txt.asice"),
-            directory.join("notes.txt-signed-2.asice")
-        );
-        assert_eq!(
-            container("notes.txt-signed.asice"),
-            directory.join("notes.txt-signed-2.asice")
-        );
-        assert_eq!(
-            container("notes.txt-signed-7.asice"),
-            directory.join("notes.txt-signed-2.asice")
-        );
-
-        assert!(derive_output(Path::new(".."), Format::Pades).is_err());
+    fn a_pdf_is_known_by_its_extension_in_any_case() {
         assert!(is_pdf(Path::new("CONTRACT.PDF")));
+        assert!(is_pdf(Path::new("contract.pdf")));
         assert!(!is_pdf(Path::new("notes.txt")));
-        std::fs::remove_dir_all(&directory).unwrap();
     }
 }

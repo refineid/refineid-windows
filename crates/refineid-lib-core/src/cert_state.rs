@@ -255,7 +255,7 @@ impl<'a> PathValidatedCert<'a> {
     /// Promote to [`RevocationCheckedCert`] with an
     /// already-decided revocation verdict. Callers are
     /// expected to have run an actual CRL or OCSP check
-    /// (`crate::crl` / `crate::ocsp`) and decide the
+    /// and decide the
     /// `RevocationStatus` based on that, against
     /// `validation_time` (S2 §2 distinguishes signing time
     /// vs revocation time -- the validation must use a

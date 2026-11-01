@@ -48,16 +48,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR, w};
 
-use refineid_doc_sign::asic_verify::verify_document;
-use refineid_doc_sign::cades::SigningTime;
 use refineid_doc_sign::document::Format;
-use refineid_doc_sign::pades::{SignatureMetadata, StampLanguage, VisibleSignature};
-use refineid_doc_sign::service::{
-    DEFAULT_TIMESTAMP_AUTHORITY, DocumentRequest, SignOptions, SignReport, sign_qualified,
-};
-use refineid_lib_core::identity::CommonName;
-use refineid_lib_core::pin::PinBytes;
-use refineid_lib_pcsc::PcscBackend;
+use refineid_doc_sign::identity::CommonName;
+use refineid_doc_sign::pades::StampLanguage;
+use refineid_doc_sign::pin::PinBytes;
+use refineid_doc_sign::service::SignReport;
 use refineid_rapp_core::engine::{PairingError, PairingSearchError, Requester, RequesterConfig};
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::limits::OFFER_TTL_MS;
@@ -65,6 +60,9 @@ use refineid_rapp_core::offer::normalize_pairing_code;
 use refineid_rapp_core::store::{PairingRecord, PairingState, PairingStore as _, forget_pairing};
 use refineid_rapp_core::stream::PairingServices;
 use refineid_windows_credential_store::ProtectedPairingStore;
+use refineid_windows_doc_sign::phone::{SigningSource, current_source};
+use refineid_windows_doc_sign::sign::{DocumentSignRequest, sign};
+use refineid_windows_doc_sign::verify::{render, verify_file};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -2130,10 +2128,12 @@ fn set_verify_result(text: &str) {
 }
 
 /// Gather the Document page and sign on a worker thread; the
-/// refresh timer picks the outcome up from `INBOX`. The PIN is
-/// read into a zeroizing buffer on the main thread and moved
-/// into the worker; it never touches the result text. Baseline
-/// level only: no TSA, no long-term material yet.
+/// refresh timer picks the outcome up from `INBOX`. A card in a
+/// reader attached to this computer signs under the PIN typed on
+/// the page, read into a zeroizing buffer on the main thread and
+/// moved into the worker; without one the paired phone signs and
+/// asks for PIN 2 on its own screen. No PIN touches the result
+/// text.
 fn start_doc_sign() {
     let snapshot = STATE.with(|cell| {
         cell.borrow().as_ref().map(|state| {
@@ -2167,52 +2167,31 @@ fn start_doc_sign() {
         set_doc_result("PDF signing needs a .pdf file. Pick an ASiC-E container for other files.");
         return;
     }
-    let pin = match PinBytes::new(edit_secret(pin_edit)) {
-        Ok(pin) => pin,
-        Err(error) => {
-            set_doc_result(&format!("PIN rejected: {error}"));
-            return;
+    let source = current_source();
+    let pin = match source {
+        SigningSource::Reader => match PinBytes::new(edit_secret(pin_edit)) {
+            Ok(pin) => Some(pin),
+            Err(error) => {
+                set_doc_result(&format!("PIN rejected: {error}"));
+                return;
+            }
+        },
+        SigningSource::Phone(_) => {
+            edit_secret(pin_edit).zeroize();
+            None
         }
     };
     let reason = get_text(reason_edit);
-    let metadata = SignatureMetadata {
-        reason: if reason.trim().is_empty() {
-            None
-        } else {
-            Some(reason)
-        },
-        location: None,
-        contact: None,
-        name: None,
-        signing_time: None,
-        visible_signature: (format == Format::Pades)
-            .then(|| VisibleSignature::verification(user_interface_language())),
-    };
-    let output = derive_output(&input, format);
-    let request = DocumentRequest {
-        format,
-        additional_inputs: Vec::new(),
-        signing_time: SigningTime::now(),
-        metadata,
-        expected_serial: None,
-        archive: true,
-        long_term: true,
-        timestamp_authorities: vec![DEFAULT_TIMESTAMP_AUTHORITY.to_owned()],
-        timestamp_credentials: None,
-    };
-    let options = SignOptions {
+    let request = DocumentSignRequest {
         input,
-        output,
-        pin,
-        save_cert: None,
-        reader_filter: None,
-        can: None,
-        document: Some(request),
+        format,
+        reason: (!reason.trim().is_empty()).then_some(reason),
+        stamp_language: user_interface_language(),
     };
     set_doc_result("Signing…");
     set_card_busy(true);
     std::thread::spawn(move || {
-        let text = match sign_qualified(PcscBackend, options) {
+        let text = match sign(source, request, pin) {
             Ok(report) => render_sign_report(&report),
             Err(error) => format!("Signing failed:\r\n{error}"),
         };
@@ -2223,8 +2202,9 @@ fn start_doc_sign() {
 }
 
 /// Verify a signed container on a worker thread; the refresh
-/// timer picks the outcome up from `INBOX`. Verify is offline:
-/// no card, no PIN, no network.
+/// timer picks the outcome up from `INBOX`. Verify needs no card
+/// and no PIN; the network is asked only about a signer's
+/// revocation the file does not answer.
 fn start_doc_verify() {
     let snapshot = STATE.with(|cell| {
         cell.borrow()
@@ -2245,8 +2225,12 @@ fn start_doc_verify() {
     set_verify_result("Verifying…");
     set_card_busy(true);
     std::thread::spawn(move || {
-        let text = match verify_document(Path::new(&path)) {
-            Ok(report) => report.render(),
+        let file = Path::new(&path);
+        let name = file
+            .file_name()
+            .map_or_else(|| path.clone(), |name| name.to_string_lossy().into_owned());
+        let text = match verify_file(file, refineid_doc_sign::now_date_time()) {
+            Ok(report) => render(&name, &report).replace('\n', "\r\n"),
             Err(error) => format!("Verify failed:\r\n{error}"),
         };
         if let Ok(mut inbox) = INBOX.lock() {
@@ -2516,24 +2500,6 @@ fn render_sign_report(report: &SignReport) -> String {
         report.local_verify,
         signer = signer,
     )
-}
-
-/// Output next to the input: `-signed.pdf` for PDF signatures,
-/// `.asice` appended for containers.
-fn derive_output(input: &Path, format: Format) -> PathBuf {
-    if format == Format::Pades {
-        let stem = input
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("document");
-        input.with_file_name(format!("{stem}-signed.pdf"))
-    } else {
-        let name = input
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("document");
-        input.with_file_name(format!("{name}.asice"))
-    }
 }
 
 /// `true` for a `.pdf` extension in any ASCII case.

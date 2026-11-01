@@ -271,8 +271,7 @@ pub struct SignerInfo<'a> {
 /// BER decode failures or shape mismatches.
 /// Owning wrapper around a parsed CMS `SignedData`.
 ///
-/// Same pattern as [`crate::x509::OwnedCert`] /
-/// [`crate::crl::OwnedCrl`] / [`crate::ocsp::OwnedOcspResponse`]:
+/// Same pattern as [`crate::x509::OwnedCert`]:
 /// holds the input DER plus a re-parseable view. Public entry
 /// point under typing-discipline rule D; free `parse_signed_data`
 /// is `pub(crate)` because it returns a borrowed view tied to

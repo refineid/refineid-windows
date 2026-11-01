@@ -5,7 +5,6 @@ members = [
     "crates/refineid-agent-pipe",
     "crates/refineid-card-manager-core",
     "crates/refineid-dev-errors",
-    "crates/refineid-doc-sign",
     "crates/refineid-windows-driver-probe",
     "crates/refineid-gui-win32",
     "crates/refineid-lib-core",
@@ -20,6 +19,7 @@ members = [
     "crates/refineid-settings-ffi",
     "crates/refineid-stamp",
     "crates/refineid-windows-credential-store",
+    "crates/refineid-windows-doc-sign",
 ]
 
 [workspace.package]
@@ -36,15 +36,17 @@ refineid-lib-core = { path = "crates/refineid-lib-core", version = "26" }
 refineid-lib-pcsc = { path = "crates/refineid-lib-pcsc", version = "26" }
 refineid-card-manager-core = { path = "crates/refineid-card-manager-core", version = "26" }
 refineid-dev-errors = { path = "crates/refineid-dev-errors", version = "26" }
-refineid-doc-sign = { path = "crates/refineid-doc-sign", version = "26" }
 refineid-gui-win32 = { path = "crates/refineid-gui-win32", version = "26" }
 refineid-rapp-core = { path = "crates/refineid-rapp-core", version = "26" }
 refineid-rapp-ble = { path = "crates/refineid-rapp-ble", version = "26" }
 refineid-stamp = { path = "crates/refineid-stamp", version = "26" }
 refineid-windows-credential-store = { path = "crates/refineid-windows-credential-store", version = "26" }
+refineid-windows-doc-sign = { path = "crates/refineid-windows-doc-sign", version = "26" }
 refineid-windows-driver-probe = { path = "crates/refineid-windows-driver-probe", version = "26" }
 
 refineid-digest = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
+refineid-doc-sign = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
+refineid-pcsc = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
 refineid-rapp = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
 refineid-remote = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
 
@@ -58,7 +60,6 @@ hex = "0.4"
 # Terminal QR rendering for the RAPP pairing offer in the requester CLI.
 # Pure Rust; the image and SVG render features stay off.
 hmac = "0.13"
-miniz_oxide = "0.9"
 pcsc = "2.9"
 proptest = "1"
 serde = { version = "1", features = ["derive"] }

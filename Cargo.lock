@@ -158,6 +158,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bp384"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc61f3a96b44a33fbb971e9917b81f4207d6dae9a6b0715845c785a48e73d9c2"
+dependencies = [
+ "elliptic-curve",
+ "primefield",
+ "primeorder",
+]
+
+[[package]]
 name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -900,12 +911,62 @@ dependencies = [
 ]
 
 [[package]]
+name = "refineid-apdu"
+version = "26.11.1"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#286356dfe23cd196daecb5c8ec6937ae2cc164f0"
+dependencies = [
+ "refineid-build-number",
+ "zeroize",
+]
+
+[[package]]
+name = "refineid-atr"
+version = "26.11.1"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#286356dfe23cd196daecb5c8ec6937ae2cc164f0"
+
+[[package]]
+name = "refineid-auth"
+version = "26.11.1"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#286356dfe23cd196daecb5c8ec6937ae2cc164f0"
+dependencies = [
+ "hmac",
+ "refineid-apdu",
+ "sha2 0.11.1",
+ "zeroize",
+]
+
+[[package]]
+name = "refineid-ber"
+version = "26.11.1"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#286356dfe23cd196daecb5c8ec6937ae2cc164f0"
+
+[[package]]
+name = "refineid-build-number"
+version = "26.11.1"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#286356dfe23cd196daecb5c8ec6937ae2cc164f0"
+
+[[package]]
 name = "refineid-card-manager-core"
 version = "26.11.1"
 dependencies = [
  "refineid-dev-errors",
  "refineid-lib-core",
  "refineid-lib-pcsc",
+]
+
+[[package]]
+name = "refineid-cms"
+version = "26.11.1"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#286356dfe23cd196daecb5c8ec6937ae2cc164f0"
+dependencies = [
+ "const-oid",
+ "crypto-bigint",
+ "refineid-ber",
+ "refineid-digest",
+ "sha1",
+ "sha2 0.11.1",
+ "spki",
+ "x509-cert",
 ]
 
 [[package]]
@@ -917,8 +978,8 @@ dependencies = [
 
 [[package]]
 name = "refineid-digest"
-version = "26.10.30"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#a1b0dbf307c504cf88035a08d12e67676cec8686"
+version = "26.11.1"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#286356dfe23cd196daecb5c8ec6937ae2cc164f0"
 dependencies = [
  "sha1",
  "sha2 0.11.1",
@@ -927,18 +988,27 @@ dependencies = [
 [[package]]
 name = "refineid-doc-sign"
 version = "26.11.1"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#286356dfe23cd196daecb5c8ec6937ae2cc164f0"
 dependencies = [
  "const-oid",
  "crypto-bigint",
+ "getrandom 0.4.3",
  "hex",
  "miniz_oxide",
- "refineid-dev-errors",
- "refineid-lib-core",
- "refineid-lib-pcsc",
+ "refineid-apdu",
+ "refineid-auth",
+ "refineid-ber",
+ "refineid-cms",
+ "refineid-digest",
+ "refineid-pace",
+ "refineid-pcsc",
+ "refineid-pkcs15",
+ "refineid-remote",
+ "refineid-sign",
  "sha1",
  "sha2 0.11.1",
  "spki",
- "windows",
+ "x509-cert",
  "zeroize",
 ]
 
@@ -954,6 +1024,7 @@ dependencies = [
  "refineid-rapp-core",
  "refineid-stamp",
  "refineid-windows-credential-store",
+ "refineid-windows-doc-sign",
  "windows",
  "zeroize",
 ]
@@ -1009,6 +1080,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "refineid-pace"
+version = "26.11.1"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#286356dfe23cd196daecb5c8ec6937ae2cc164f0"
+dependencies = [
+ "aes 0.9.3",
+ "bp384",
+ "cbc",
+ "cmac",
+ "getrandom 0.4.3",
+ "refineid-apdu",
+ "refineid-ber",
+ "sha2 0.11.1",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "refineid-pcsc"
+version = "26.11.1"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#286356dfe23cd196daecb5c8ec6937ae2cc164f0"
+dependencies = [
+ "pcsc",
+ "refineid-apdu",
+ "refineid-atr",
+]
+
+[[package]]
 name = "refineid-pkcs11"
 version = "26.11.1"
 dependencies = [
@@ -1022,9 +1120,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "refineid-pkcs15"
+version = "26.11.1"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#286356dfe23cd196daecb5c8ec6937ae2cc164f0"
+dependencies = [
+ "refineid-apdu",
+ "refineid-ber",
+ "refineid-x509",
+]
+
+[[package]]
 name = "refineid-rapp"
-version = "26.10.30"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#a1b0dbf307c504cf88035a08d12e67676cec8686"
+version = "26.11.1"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#286356dfe23cd196daecb5c8ec6937ae2cc164f0"
 dependencies = [
  "chacha20poly1305",
  "curve25519-dalek",
@@ -1098,8 +1206,8 @@ dependencies = [
 
 [[package]]
 name = "refineid-remote"
-version = "26.10.30"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#a1b0dbf307c504cf88035a08d12e67676cec8686"
+version = "26.11.1"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#286356dfe23cd196daecb5c8ec6937ae2cc164f0"
 dependencies = [
  "refineid-digest",
 ]
@@ -1112,11 +1220,20 @@ dependencies = [
  "refineid-dev-errors",
  "refineid-doc-sign",
  "refineid-lib-core",
- "refineid-lib-pcsc",
  "refineid-windows-credential-store",
+ "refineid-windows-doc-sign",
  "refineid-windows-driver-probe",
  "serde",
  "serde_json",
+ "zeroize",
+]
+
+[[package]]
+name = "refineid-sign"
+version = "26.11.1"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#286356dfe23cd196daecb5c8ec6937ae2cc164f0"
+dependencies = [
+ "refineid-apdu",
  "zeroize",
 ]
 
@@ -1136,11 +1253,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "refineid-windows-doc-sign"
+version = "26.11.1"
+dependencies = [
+ "refineid-dev-errors",
+ "refineid-doc-sign",
+ "refineid-pcsc",
+ "refineid-rapp-core",
+ "refineid-remote",
+ "refineid-windows-credential-store",
+ "windows",
+]
+
+[[package]]
 name = "refineid-windows-driver-probe"
 version = "26.11.1"
 dependencies = [
  "pcsc",
  "windows-sys",
+]
+
+[[package]]
+name = "refineid-x509"
+version = "26.11.1"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#286356dfe23cd196daecb5c8ec6937ae2cc164f0"
+dependencies = [
+ "refineid-ber",
 ]
 
 [[package]]
