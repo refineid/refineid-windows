@@ -46,7 +46,7 @@ use refineid_doc_sign::service::{
 use refineid_doc_sign::verify::VerifyOptions;
 use refineid_lib_core::activation::PinActivation;
 use refineid_lib_core::apdu::status_word::PinRetries;
-use refineid_lib_core::auth::PinReferenceScheme;
+use refineid_lib_core::auth::{CardPinLengths, PasswordLengthRange, PinReferenceScheme};
 use refineid_lib_core::auth::{ChangePinOutcome, PinStatus, PukStatus, UnblockOutcome};
 use refineid_lib_core::can::{CAN_DIGITS, Can};
 use refineid_lib_core::identity::TokenSerial;
@@ -116,6 +116,9 @@ struct CardSnapshotDto {
     model: String,
     organization_card: bool,
     activation_code_length: usize,
+    pin1_lengths: Option<LengthRangeDto>,
+    pin2_lengths: Option<LengthRangeDto>,
+    puk_lengths: Option<LengthRangeDto>,
     activation_state: &'static str,
     pin1_awaits_activation: bool,
     pin2_awaits_activation: bool,
@@ -124,6 +127,23 @@ struct CardSnapshotDto {
     puk: Option<CredentialStatusDto>,
     pin1_changed: Option<bool>,
     pin2_changed: Option<bool>,
+}
+
+/// The digit counts the card accepts for one credential, which the form
+/// takes its limits from. Absent when the card accepts no length.
+#[derive(Serialize)]
+struct LengthRangeDto {
+    min: usize,
+    max: usize,
+}
+
+impl From<PasswordLengthRange> for LengthRangeDto {
+    fn from(range: PasswordLengthRange) -> Self {
+        Self {
+            min: range.min(),
+            max: range.max(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -167,6 +187,9 @@ impl From<CardSnapshot> for CardSnapshotDto {
             model,
             organization_card: snapshot.numbering == PinReferenceScheme::Organizational,
             activation_code_length: snapshot.activation_code_length,
+            pin1_lengths: snapshot.lengths.pin1().map(LengthRangeDto::from),
+            pin2_lengths: snapshot.lengths.pin2().map(LengthRangeDto::from),
+            puk_lengths: snapshot.lengths.puk().map(LengthRangeDto::from),
             activation_state: activation_state_label(snapshot.activation),
             pin1_awaits_activation: snapshot.pin1_activation == PinActivation::AwaitsActivation,
             pin2_awaits_activation: snapshot.pin2_activation == PinActivation::AwaitsActivation,
@@ -192,10 +215,12 @@ impl From<ContactlessSnapshot> for ContactlessSnapshotDto {
     }
 }
 
-/// A card read over contactless carries no model label and no PIN-changed
-/// flags; the rest reads as a contact card's snapshot.
+/// A card read over contactless carries no model label, no PIN-changed
+/// flags and no read of its PIN lengths, so the FINEID bounds stand for
+/// them; the rest reads as a contact card's snapshot.
 impl From<ContactlessSnapshot> for CardSnapshotDto {
     fn from(snapshot: ContactlessSnapshot) -> Self {
+        let lengths = CardPinLengths::not_listed(PinReferenceScheme::Citizen);
         Self {
             reader: snapshot.reader.clone(),
             serial: snapshot.serial.as_str().to_owned(),
@@ -203,6 +228,9 @@ impl From<ContactlessSnapshot> for CardSnapshotDto {
             model: "FINEID contactless".to_owned(),
             organization_card: false,
             activation_code_length: snapshot.activation_code_length(),
+            pin1_lengths: lengths.pin1().map(LengthRangeDto::from),
+            pin2_lengths: lengths.pin2().map(LengthRangeDto::from),
+            puk_lengths: lengths.puk().map(LengthRangeDto::from),
             activation_state: activation_state_label(snapshot.activation()),
             pin1_awaits_activation: snapshot.pin1_activation() == PinActivation::AwaitsActivation,
             pin2_awaits_activation: snapshot.pin2_activation() == PinActivation::AwaitsActivation,

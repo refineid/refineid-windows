@@ -31,8 +31,8 @@ use alloc::fmt;
 
 use refineid_lib_core::activation::{ActivationScheme, PinActivation};
 use refineid_lib_core::auth::{
-    AuthError, ChangePinOutcome, PinOps as _, PinPolicyReason, PinReferenceScheme, PinSlot,
-    PinStatus, UnblockOutcome,
+    AuthError, CardPinLengths, ChangePinOutcome, PinOps as _, PinPolicyReason, PinReferenceScheme,
+    PinSlot, PinStatus, UnblockOutcome,
 };
 use refineid_lib_core::backend::{
     ReaderAccessCap, ReaderBackend as _, ReaderFilter, ReaderPickError,
@@ -627,6 +627,9 @@ pub fn change_pin_first(
         .select_pkcs15_application()
         .map_err(|e| CardPinError::Pkcs15Select(format!("{e}")))?;
     re_verify_session(&mut transport, ctx.bound_serial())?;
+    let lengths = transport
+        .read_card_pin_lengths()
+        .map_err(auth_to_card_pin)?;
 
     // Counter-safe probes: the PIN must show activated, and its
     // counter must clear the retry floor.
@@ -637,12 +640,7 @@ pub fn change_pin_first(
     re_verify_session(&mut transport, ctx.bound_serial())?;
 
     let outcome = transport
-        .change_pin_with_scheme(
-            ctx.numbering(),
-            slot,
-            options.current.clone(),
-            options.new.clone(),
-        )
+        .change_pin(&lengths, slot, options.current.clone(), options.new.clone())
         .map_err(auth_to_card_pin)?;
     let report = ChangePinReport {
         reader: ctx.reader_id().as_str().to_owned(),
@@ -687,6 +685,9 @@ pub fn unblock_pin_first(
         .select_pkcs15_application()
         .map_err(|e| CardPinError::Pkcs15Select(format!("{e}")))?;
     re_verify_session(&mut transport, ctx.bound_serial())?;
+    let lengths = transport
+        .read_card_pin_lengths()
+        .map_err(auth_to_card_pin)?;
 
     let slot = options.slot.as_pin_slot();
     require_activated(&mut transport, &ctx, options.slot)?;
@@ -700,7 +701,7 @@ pub fn unblock_pin_first(
     // secret material.
     let puk_bytes = options.puk.to_pin_bytes();
     let outcome = transport
-        .reset_retry_counter_with_scheme(ctx.numbering(), slot, puk_bytes, options.new_pin.clone())
+        .reset_retry_counter(&lengths, slot, puk_bytes, options.new_pin.clone())
         .map_err(auth_to_card_pin)?;
     Ok(UnblockPinReport {
         reader: ctx.reader_id().as_str().to_owned(),
@@ -900,10 +901,10 @@ pub struct ActivateOptions {
     /// take is reported as [`CardPinError::ActivationLengthMismatch`]
     /// before any command is sent.
     pub activation_code: PinBytes,
-    /// New basic PIN (PIN1, 4-12 digits), given exactly when PIN1
+    /// New basic PIN (PIN1, of a length the card accepts), given exactly when PIN1
     /// awaits activation.
     pub new_pin1: Option<PinBytes>,
-    /// New signature PIN (PIN2, 6-12 digits), given exactly when PIN2
+    /// New signature PIN (PIN2, of a length the card accepts), given exactly when PIN2
     /// awaits activation.
     pub new_pin2: Option<PinBytes>,
     /// Override the pre-flight refusal when no PIN awaits its
@@ -1077,7 +1078,7 @@ fn puk_retry_floor<T: refineid_lib_core::transport::CardTransport>(
 /// zeroizes on drop.
 fn activate_slot_setup<T: refineid_lib_core::transport::CardTransport>(
     transport: &mut T,
-    numbering: PinReferenceScheme,
+    lengths: &CardPinLengths,
     slot: PinSlot,
     activation_code: &ActivationCode,
     new_pin: PinBytes,
@@ -1087,28 +1088,53 @@ fn activate_slot_setup<T: refineid_lib_core::transport::CardTransport>(
             // The activation PIN is the slot's current PIN: a wrong one
             // spends that slot's tries, so the retry floor applies.
             let status = transport
-                .pin_status_with_scheme(numbering, slot)
+                .pin_status_with_scheme(lengths.numbering(), slot)
                 .map_err(auth_to_card_pin)?;
             check_retry_floor(slot.into(), status).map_err(CardPinError::RetryFloor)?;
             transport
-                .change_pin_with_scheme(numbering, slot, activation_code.to_pin_bytes(), new_pin)
+                .change_pin(lengths, slot, activation_code.to_pin_bytes(), new_pin)
                 .map(change_to_unblock)
                 .map_err(auth_to_card_pin)
         }
         ActivationCode::Eight(_) => {
             // The activation PIN is presented as the PUK, under the
             // PUK's counter.
-            puk_retry_floor(transport, numbering)?;
+            puk_retry_floor(transport, lengths.numbering())?;
             transport
-                .reset_retry_counter_with_scheme(
-                    numbering,
-                    slot,
-                    activation_code.to_pin_bytes(),
-                    new_pin,
-                )
+                .reset_retry_counter(lengths, slot, activation_code.to_pin_bytes(), new_pin)
                 .map_err(auth_to_card_pin)
         }
     }
+}
+
+/// Check every activation entry against the card's lengths before any
+/// command: each new PIN given, and the activation code in the role it is
+/// presented as -- the PIN's current value under the preset activation
+/// PIN scheme, the PUK otherwise.
+///
+/// # Errors
+/// [`CardPinError::PinPolicy`] for an entry the card does not accept.
+fn check_activation_entries(
+    lengths: &CardPinLengths,
+    activation_code: &ActivationCode,
+    new_pin1: Option<&PinBytes>,
+    new_pin2: Option<&PinBytes>,
+) -> Result<(), CardPinError> {
+    let code_length = activation_code.to_pin_bytes().digit_count();
+    for (slot, pin) in [(PinSlot::Pin1, new_pin1), (PinSlot::Pin2, new_pin2)] {
+        let Some(pin) = pin else {
+            continue;
+        };
+        match activation_code {
+            ActivationCode::Seven(_) => lengths.check_pin(slot, code_length),
+            ActivationCode::Eight(_) => lengths.check_puk(code_length),
+        }
+        .map_err(CardPinError::PinPolicy)?;
+        lengths
+            .check_pin(slot, pin.digit_count())
+            .map_err(CardPinError::PinPolicy)?;
+    }
+    Ok(())
 }
 
 const fn activation_continues_after_pin1(outcome: UnblockOutcome) -> bool {
@@ -1198,6 +1224,9 @@ pub fn activate_first(
     // open and here revokes the session before any modify APDU
     // lands.
     re_verify_session(&mut transport, &ctx.bound_serial)?;
+    let lengths = transport
+        .read_card_pin_lengths()
+        .map_err(auth_to_card_pin)?;
 
     let (_, pin1) = probe_pin_activation(&mut transport, ctx.numbering, ctx.scheme, PinSlot::Pin1);
     let (_, pin2) = probe_pin_activation(&mut transport, ctx.numbering, ctx.scheme, PinSlot::Pin2);
@@ -1218,6 +1247,12 @@ pub fn activate_first(
         options.new_pin2.is_some(),
         options.allow_reactivate,
     )?;
+    check_activation_entries(
+        &lengths,
+        &activation_code,
+        options.new_pin1.as_ref(),
+        options.new_pin2.as_ref(),
+    )?;
 
     let mut pin1_outcome = None;
     if let Some(new_pin1) = options.new_pin1 {
@@ -1225,7 +1260,7 @@ pub fn activate_first(
         re_verify_session(&mut transport, &ctx.bound_serial)?;
         let outcome = activate_slot_setup(
             &mut transport,
-            ctx.numbering,
+            &lengths,
             PinSlot::Pin1,
             &activation_code,
             new_pin1,
@@ -1252,7 +1287,7 @@ pub fn activate_first(
         re_verify_session(&mut transport, &ctx.bound_serial)?;
         Some(activate_slot_setup(
             &mut transport,
-            ctx.numbering,
+            &lengths,
             PinSlot::Pin2,
             &activation_code,
             new_pin2,
@@ -1524,7 +1559,7 @@ mod activate_tests {
         let new_pin = PinBytes::new(NEW_PIN.to_vec())?;
         Ok(activate_slot_setup(
             transport,
-            numbering,
+            &refineid_lib_core::auth::CardPinLengths::not_listed(numbering),
             PinSlot::Pin1,
             &code(scheme)?,
             new_pin,
