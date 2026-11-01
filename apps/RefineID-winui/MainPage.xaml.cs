@@ -548,7 +548,7 @@ internal sealed partial class MainPage : Page
             this.unactivatedSerial = snapshot.Serial;
             if (firstSight && !this.pairing && ReferenceEquals(this.Frame.Content, this))
             {
-                this.Frame.Navigate(typeof(CardPage), snapshot.Reader);
+                this.Frame.Navigate(typeof(CardPage), snapshot);
             }
         }
 

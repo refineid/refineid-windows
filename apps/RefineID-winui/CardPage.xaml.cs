@@ -55,6 +55,9 @@ internal sealed partial class CardPage : Page
     /// <summary>The reader the main screen opened this page for, used once.</summary>
     private string? requestedReader;
 
+    /// <summary>The main screen's inspection of that reader's card, shown once on loading.</summary>
+    private LocalCardSnapshot? handedOver;
+
     /// <summary>Whether the activation section was shown at the last inspection.</summary>
     private bool activationShown;
 
@@ -89,17 +92,34 @@ internal sealed partial class CardPage : Page
 
     private async void OnLoaded(object sender, RoutedEventArgs args)
     {
+        if (this.handedOver is LocalCardSnapshot inspected)
+        {
+            this.handedOver = null;
+            this.ShowInspected(inspected);
+        }
+
         await this.RefreshReadersAsync().ConfigureAwait(true);
         this.readerPollTimer.Start();
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs args) => this.readerPollTimer.Stop();
 
-    /// <summary>The main screen names the reader whose card it inspected.</summary>
+    /// <summary>
+    /// The main screen names the reader whose card it inspected, or hands
+    /// over that inspection, which decides the page before its first draw.
+    /// </summary>
     protected override void OnNavigatedTo(NavigationEventArgs args)
     {
         base.OnNavigatedTo(args);
-        this.requestedReader = args.Parameter as string;
+        if (args.Parameter is LocalCardSnapshot inspected)
+        {
+            this.requestedReader = inspected.Reader;
+            this.handedOver = inspected;
+        }
+        else
+        {
+            this.requestedReader = args.Parameter as string;
+        }
     }
 
     /// <summary>
@@ -431,6 +451,13 @@ internal sealed partial class CardPage : Page
             );
         }
 
+        this.ShowInspected(inspected);
+        this.StatusInfoBar.IsOpen = false;
+    }
+
+    /// <summary>The page for an inspected card: its sections, heading and form.</summary>
+    private void ShowInspected(LocalCardSnapshot inspected)
+    {
         this.snapshot = inspected;
         // The code box takes no more digits than the card's code has.
         if (inspected.ActivationCodeLength is int codeLength)
@@ -441,20 +468,9 @@ internal sealed partial class CardPage : Page
         this.UpdateActivationForm();
         this.ManagementPanel.IsHitTestVisible = true;
         this.ManagementPanel.Opacity = 1;
-        this.StatusInfoBar.IsOpen = false;
         this.ShowActivationState(inspected);
     }
 
-    /// <summary>
-    /// A card that waits for its activation gets the activation section
-    /// alone, opened: activation sets both PINs, so a PIN change, reset or
-    /// contactless setup has no place before it. An activated card gets
-    /// those, and the activation section goes, since the card service
-    /// refuses activation on it. A missing or unknown state, or no card,
-    /// shows every section. The activation section takes the focus only when
-    /// it appears, so a re-inspection while the holder types, or after a
-    /// refused attempt, leaves the focus alone.
-    /// </summary>
     /// <summary>
     /// A contactless card without a stored access number: only the entry
     /// that primes it; nothing else on the page applies before that.
@@ -467,12 +483,34 @@ internal sealed partial class CardPage : Page
         this.ActivationPanel.Visibility = Visibility.Collapsed;
     }
 
+    /// <summary>
+    /// A card that waits for its activation gets the activation section
+    /// alone, opened: activation sets both PINs, so a PIN change, reset or
+    /// contactless setup has no place before it. An activated card gets
+    /// those, and the activation section goes, since the card service
+    /// refuses activation on it. An inspected card in an unknown state
+    /// shows every section. Without an inspected card nothing that depends
+    /// on the card is shown; the heading is named from the same inspection
+    /// that shows the section. The activation section takes the focus only
+    /// when it appears, so a re-inspection while the holder types, or after
+    /// a refused attempt, leaves the focus alone.
+    /// </summary>
     private void ShowActivationState(LocalCardSnapshot? inspected)
     {
-        bool unactivated = inspected?.LooksUnactivated ?? false;
-        bool activated = inspected?.LooksActivated ?? false;
+        if (inspected is null)
+        {
+            this.NfcExpander.Visibility = Visibility.Collapsed;
+            this.ChangePinExpander.Visibility = Visibility.Collapsed;
+            this.UnblockPinExpander.Visibility = Visibility.Collapsed;
+            this.ActivationPanel.Visibility = Visibility.Collapsed;
+            this.activationShown = false;
+            return;
+        }
+
+        bool unactivated = inspected.LooksUnactivated;
+        bool activated = inspected.LooksActivated;
         string title = Strings.Get(
-            inspected?.OrganizationCard ?? false
+            inspected.OrganizationCard
                 ? "OrganisationCardActivationHeading"
                 : "IdentityCardActivationHeading"
         );
