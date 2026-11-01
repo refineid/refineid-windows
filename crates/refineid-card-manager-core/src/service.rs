@@ -223,7 +223,7 @@ fn inspected(reader_filter: Option<&ReaderFilter>) -> Result<CardSnapshot, CardP
     Ok(CardSnapshot {
         reader: context.reader_id.as_str().to_owned(),
         serial: context.bound_serial,
-        person: context.identity.person_string(),
+        person: context.identity.holder_line(),
         model: context.model,
         numbering,
         scheme,
@@ -314,7 +314,7 @@ fn inspected_contactless(
                 })?;
         let cert = cert_owned.view();
         let scheme = ActivationScheme::from_validity_start(cert.not_before);
-        let person = identity_from_certificate(&cert).person_string();
+        let person = identity_from_certificate(&cert).holder_line();
 
         transport
             .select_pkcs15_application()
@@ -367,6 +367,9 @@ fn identity_from_certificate(
     identity = identity.with_additional_names(given_names.additional);
     if let Some(value) = subject.peuin() {
         identity = identity.with_peuin(value);
+    }
+    if let Some(value) = subject.organization_name() {
+        identity = identity.with_organization(value);
     }
     identity
 }

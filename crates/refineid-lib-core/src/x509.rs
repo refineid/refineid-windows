@@ -96,6 +96,8 @@ const OID_SURNAME: Oid<'static> = known::SURNAME;
 const OID_DN_SERIAL_NUMBER: Oid<'static> = known::SERIAL_NUMBER;
 /// `OID_GIVEN_NAME` constant.
 const OID_GIVEN_NAME: Oid<'static> = known::GIVEN_NAME;
+/// `OID_ORGANIZATION_NAME` constant.
+const OID_ORGANIZATION_NAME: Oid<'static> = known::ORGANIZATION_NAME;
 /// `OID_KEY_USAGE` constant.
 const OID_KEY_USAGE: Oid<'static> = known::KEY_USAGE;
 /// `OID_BASIC_CONSTRAINTS` constant.
@@ -342,6 +344,14 @@ impl<'a> Name<'a> {
                 )
             },
         )
+    }
+
+    /// `organizationName` (X.520 `o`, OID 2.5.4.10), verbatim. Present
+    /// on an organization card's certificate, absent on a citizen's.
+    #[must_use]
+    #[inline]
+    pub fn organization_name(&self) -> Option<crate::identity::OrganizationName> {
+        crate::identity::OrganizationName::new(self.dn_attribute(OID_ORGANIZATION_NAME)?).ok()
     }
 
     /// PEUIN / SATU from the `serialNumber` DN attribute (OID 2.5.4.5).
@@ -2164,6 +2174,67 @@ mod tests {
         push_len(&mut v, tlv.value.len());
         v.extend_from_slice(tlv.value);
         v
+    }
+
+    /// One DER TLV of `tag` around `value`.
+    fn to_tlv(tag: spki::der::Tag, value: &[u8]) -> Vec<u8> {
+        use spki::der::Encode as _;
+        use spki::der::asn1::AnyRef;
+        AnyRef::new(tag, value)
+            .expect("fixture value fits a TLV")
+            .to_der()
+            .expect("TLV encodes")
+    }
+
+    /// One relative name holding one `UTF8String` attribute.
+    fn to_utf8_attribute(oid: crate::oid::Oid<'_>, value: &str) -> Vec<u8> {
+        use spki::der::asn1::{ObjectIdentifier, Utf8StringRef};
+        use spki::der::{Encode as _, Tag};
+        let mut atv_body = ObjectIdentifier::from_bytes(oid.as_bytes())
+            .expect("fixture OID is valid")
+            .to_der()
+            .expect("OID encodes");
+        atv_body.extend(
+            Utf8StringRef::new(value)
+                .expect("fixture value is UTF-8")
+                .to_der()
+                .expect("UTF8String encodes"),
+        );
+        to_tlv(Tag::Set, &to_tlv(Tag::Sequence, &atv_body))
+    }
+
+    /// A Name of the given relative names, in order.
+    fn to_name(relative_names: &[Vec<u8>]) -> Vec<u8> {
+        to_tlv(spki::der::Tag::Sequence, &relative_names.concat())
+    }
+
+    #[test]
+    fn an_organization_card_subject_names_its_organization() {
+        use crate::oid::known;
+        let dn = to_name(&[
+            to_utf8_attribute(known::COUNTRY_NAME, "FI"),
+            to_utf8_attribute(known::ORGANIZATION_NAME, "Testiorganisaatio Oy"),
+            to_utf8_attribute(known::GIVEN_NAME, "Denis"),
+            to_utf8_attribute(known::SURNAME, "Juutilainen"),
+            to_utf8_attribute(known::COMMON_NAME, "Juutilainen Denis 99905322A"),
+        ]);
+        let name = super::Name::try_from(dn.as_slice()).expect("Name parses");
+        assert_eq!(
+            name.organization_name().as_deref(),
+            Some("Testiorganisaatio Oy")
+        );
+    }
+
+    #[test]
+    fn a_citizen_subject_names_no_organization() {
+        use crate::oid::known;
+        let dn = to_name(&[
+            to_utf8_attribute(known::COUNTRY_NAME, "FI"),
+            to_utf8_attribute(known::SURNAME, "MEIKALAINEN"),
+            to_utf8_attribute(known::COMMON_NAME, "MEIKALAINEN MATTI 12345678A"),
+        ]);
+        let name = super::Name::try_from(dn.as_slice()).expect("Name parses");
+        assert_eq!(name.organization_name(), None);
     }
 
     /// `CN=Hello`.

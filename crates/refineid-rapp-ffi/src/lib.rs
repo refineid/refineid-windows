@@ -51,6 +51,7 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
+use refineid_lib_core::identity::holder_line;
 use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate, extract_key_usage};
 use refineid_rapp::ProfileName;
 use refineid_rapp_core::clock::unix_time_ms;
@@ -799,9 +800,12 @@ fn read_paired_card(handle_id: u64, paired: &mut Paired) -> Result<CardReadDto, 
         CardOperationResult::Identity(identity) => {
             let certificate =
                 authentication_certificate(session.card_status(), identity.certificates);
+            let organization = certificate
+                .as_ref()
+                .and_then(|certificate| certificate.view().subject.organization_name());
             (
                 IdentityDto {
-                    display_name: identity.holder_name,
+                    display_name: holder_line(identity.holder_name, organization.as_ref()),
                     person_id: identity.card_id,
                 },
                 certificate,
