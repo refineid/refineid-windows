@@ -45,6 +45,7 @@ refineid-windows-credential-store = { path = "crates/refineid-windows-credential
 refineid-windows-driver-probe = { path = "crates/refineid-windows-driver-probe", version = "26" }
 
 refineid-digest = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
+refineid-pkcs15 = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
 refineid-rapp = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
 refineid-remote = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
 

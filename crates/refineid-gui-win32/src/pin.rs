@@ -12,7 +12,9 @@ use refineid_card_manager_core::card_pin::{
     PinManageSlot, UnblockPinOptions, UnblockPinReport,
 };
 use refineid_card_manager_core::service;
-use refineid_lib_core::auth::{ChangePinOutcome, UnblockOutcome};
+use refineid_lib_core::auth::{
+    CardPinLengths, ChangePinOutcome, PasswordLengthRange, UnblockOutcome,
+};
 use refineid_lib_core::pin::{ActivationPinSeven, PinBytes, PinRoleError, Puk};
 use zeroize::Zeroize;
 
@@ -111,6 +113,9 @@ pub struct PinStatusView {
     pub pin2: StateText,
     /// PUK state.
     pub puk: StateText,
+    /// The PIN 1, PIN 2 and PUK lengths the card accepts, which the PIN
+    /// form validates its entries against.
+    pub lengths: CardPinLengths,
 }
 
 /// Read the structured PIN status panel for one reader.
@@ -132,6 +137,7 @@ pub fn read_status_view(reader: &str) -> Result<PinStatusView, String> {
             text: puk_label(snapshot.puk.as_ref()),
             kind: puk_kind(snapshot.puk.as_ref()),
         },
+        lengths: snapshot.lengths,
     })
 }
 
@@ -139,11 +145,16 @@ pub fn read_status_view(reader: &str) -> Result<PinStatusView, String> {
 /// thread so typos surface without touching the card: no APDU
 /// goes out, and no retry counter moves, before this returns
 /// `Ok`. Every buffer is either moved into a zeroizing type or
-/// wiped on the error path.
-pub fn prepare(mode: usize, fields: Vec<Vec<u8>>) -> Result<PinJob, String> {
+/// wiped on the error path. Each entry is checked against the lengths
+/// the card accepts for its credential.
+pub fn prepare(
+    mode: usize,
+    fields: Vec<Vec<u8>>,
+    lengths: &CardPinLengths,
+) -> Result<PinJob, String> {
     match mode {
         0 => {
-            let (current, new) = prepare_change(fields, PIN1_FIELDS, 4, "4-12 digits")?;
+            let (current, new) = prepare_change(fields, PIN1_FIELDS, lengths.pin1())?;
             Ok(PinJob::Change {
                 slot: PinManageSlot::Pin1,
                 current,
@@ -151,7 +162,7 @@ pub fn prepare(mode: usize, fields: Vec<Vec<u8>>) -> Result<PinJob, String> {
             })
         }
         1 => {
-            let (current, new) = prepare_change(fields, PIN2_FIELDS, 6, "6-12 digits")?;
+            let (current, new) = prepare_change(fields, PIN2_FIELDS, lengths.pin2())?;
             Ok(PinJob::Change {
                 slot: PinManageSlot::Pin2,
                 current,
@@ -159,7 +170,7 @@ pub fn prepare(mode: usize, fields: Vec<Vec<u8>>) -> Result<PinJob, String> {
             })
         }
         2 => {
-            let (puk, new) = prepare_unblock(fields, PIN1_FIELDS, 4, "4-12 digits")?;
+            let (puk, new) = prepare_unblock(fields, PIN1_FIELDS, lengths.puk(), lengths.pin1())?;
             Ok(PinJob::Unblock {
                 slot: PinManageSlot::Pin1,
                 puk,
@@ -167,16 +178,18 @@ pub fn prepare(mode: usize, fields: Vec<Vec<u8>>) -> Result<PinJob, String> {
             })
         }
         3 => {
-            let (puk, new) = prepare_unblock(fields, PIN2_FIELDS, 6, "6-12 digits")?;
+            let (puk, new) = prepare_unblock(fields, PIN2_FIELDS, lengths.puk(), lengths.pin2())?;
             Ok(PinJob::Unblock {
                 slot: PinManageSlot::Pin2,
                 puk,
                 new,
             })
         }
-        4 => {
-            prepare_activate(fields).map(|(code, pin1, pin2)| PinJob::Activate { code, pin1, pin2 })
-        }
+        4 => prepare_activate(fields, lengths).map(|(code, pin1, pin2)| PinJob::Activate {
+            code,
+            pin1,
+            pin2,
+        }),
         _ => {
             let mut fields = fields;
             zeroize_all(&mut fields);
@@ -197,19 +210,31 @@ pub fn run_job(job: PinJob, reader: &str) -> Result<String, String> {
     }
 }
 
+/// The accepted range of a credential, or the refusal when the card
+/// accepts no length for it.
+fn accepted(
+    fields: &mut [Vec<u8>],
+    range: Option<PasswordLengthRange>,
+) -> Result<PasswordLengthRange, String> {
+    range.ok_or_else(|| {
+        zeroize_all(fields);
+        String::from("This card lists no PIN length that can be set; nothing was sent to the card.")
+    })
+}
+
 fn prepare_change(
     mut fields: Vec<Vec<u8>>,
     labels: PinFields,
-    role_min: usize,
-    hint: &str,
+    pin: Option<PasswordLengthRange>,
 ) -> Result<(PinBytes, PinBytes), String> {
     if fields.len() != 3 {
         zeroize_all(&mut fields);
         return Err(String::from("Internal error: wrong field count."));
     }
-    let current = take_digit_buffer(&mut fields, 0, labels.current, role_min, hint)?;
-    let new = take_digit_buffer(&mut fields, 1, labels.new, role_min, hint)?;
-    let confirm = take_digit_buffer(&mut fields, 2, labels.repeat, role_min, hint)?;
+    let pin = accepted(&mut fields, pin)?;
+    let current = take_digit_buffer(&mut fields, 0, labels.current, pin)?;
+    let new = take_digit_buffer(&mut fields, 1, labels.new, pin)?;
+    let confirm = take_digit_buffer(&mut fields, 2, labels.repeat, pin)?;
     if new.as_bytes() != confirm.as_bytes() {
         return Err(String::from(
             "The new PIN entries do not match; nothing was sent to the card.",
@@ -218,23 +243,25 @@ fn prepare_change(
     Ok((current, new))
 }
 
-/// The PUK's accepted length, as the form states it.
-const PUK_HINT: &str = "8-12 digits";
-
 fn prepare_unblock(
     mut fields: Vec<Vec<u8>>,
     labels: PinFields,
-    role_min: usize,
-    hint: &str,
+    puk: Option<PasswordLengthRange>,
+    pin: Option<PasswordLengthRange>,
 ) -> Result<(Puk, PinBytes), String> {
     if fields.len() != 3 {
         zeroize_all(&mut fields);
         return Err(String::from("Internal error: wrong field count."));
     }
-    let raw = take_digit_buffer(&mut fields, 0, "PUK", Puk::MIN_LENGTH, PUK_HINT)?;
-    let puk = Puk::new(raw).map_err(|error| role_error("The PUK", PUK_HINT, error))?;
-    let new = take_digit_buffer(&mut fields, 1, labels.new, role_min, hint)?;
-    let confirm = take_digit_buffer(&mut fields, 2, labels.repeat, role_min, hint)?;
+    let puk_range = accepted(&mut fields, puk)?;
+    let pin = accepted(&mut fields, pin)?;
+    let raw = take_digit_buffer(&mut fields, 0, "PUK", puk_range)?;
+    let puk = Puk::new(raw).map_err(|error| {
+        zeroize_all(&mut fields);
+        role_error("The PUK", &digits_hint(puk_range), error)
+    })?;
+    let new = take_digit_buffer(&mut fields, 1, labels.new, pin)?;
+    let confirm = take_digit_buffer(&mut fields, 2, labels.repeat, pin)?;
     if new.as_bytes() != confirm.as_bytes() {
         return Err(String::from(
             "The new PIN entries do not match; nothing was sent to the card.",
@@ -251,32 +278,25 @@ fn prepare_unblock(
 /// name exactly the PINs that await activation.
 fn prepare_activate(
     mut fields: Vec<Vec<u8>>,
+    lengths: &CardPinLengths,
 ) -> Result<(PinBytes, Option<PinBytes>, Option<PinBytes>), String> {
     if fields.len() != 5 {
         zeroize_all(&mut fields);
         return Err(String::from("Internal error: wrong field count."));
     }
-    let code = take_digit_buffer(
-        &mut fields,
-        0,
-        "Activation code",
-        ActivationPinSeven::LENGTH,
-        "7 or 8 digits",
-    )?;
+    let code = take_code_buffer(&mut fields, 0)?;
     let pin1 = take_optional_pair(
         &mut fields,
         1,
         PIN1_FIELDS,
-        4,
-        "4-12 digits",
+        lengths.pin1(),
         "The PIN 1 entries do not match; nothing was sent to the card.",
     )?;
     let pin2 = take_optional_pair(
         &mut fields,
         3,
         PIN2_FIELDS,
-        6,
-        "6-12 digits",
+        lengths.pin2(),
         "The PIN 2 entries do not match; nothing was sent to the card.",
     )?;
     Ok((code, pin1, pin2))
@@ -289,8 +309,7 @@ fn take_optional_pair(
     fields: &mut [Vec<u8>],
     index: usize,
     labels: PinFields,
-    role_min: usize,
-    hint: &str,
+    range: Option<PasswordLengthRange>,
     mismatch: &str,
 ) -> Result<Option<PinBytes>, String> {
     let repeat_index = index.saturating_add(1);
@@ -299,8 +318,9 @@ fn take_optional_pair(
     if both_empty {
         return Ok(None);
     }
-    let pin = take_digit_buffer(fields, index, labels.new, role_min, hint)?;
-    let repeat = take_digit_buffer(fields, repeat_index, labels.repeat, role_min, hint)?;
+    let range = accepted(fields, range)?;
+    let pin = take_digit_buffer(fields, index, labels.new, range)?;
+    let repeat = take_digit_buffer(fields, repeat_index, labels.repeat, range)?;
     if pin.as_bytes() != repeat.as_bytes() {
         zeroize_all(fields);
         return Err(String::from(mismatch));
@@ -308,14 +328,51 @@ fn take_optional_pair(
     Ok(Some(pin))
 }
 
-/// Move one buffer into a validated [`PinBytes`]. The role minimum
-/// (4 for PIN1-family, 6 for PIN2) is enforced locally so a short
-/// typo is rejected before it can burn a card-side retry.
+/// The accepted length of a credential, as the form states it.
+fn digits_hint(range: PasswordLengthRange) -> String {
+    format!("{}-{} digits", range.min(), range.max())
+}
+
+/// Move one buffer into a validated [`PinBytes`] whose length the card
+/// accepts, so a typo is rejected before it can burn a card-side retry.
 fn take_digit_buffer(
     fields: &mut [Vec<u8>],
     index: usize,
     label: &str,
-    role_min: usize,
+    range: PasswordLengthRange,
+) -> Result<PinBytes, String> {
+    let hint = digits_hint(range);
+    let pin = take_buffer(fields, index, label, &hint)?;
+    if pin.digit_count() < range.min() {
+        zeroize_all(fields);
+        return Err(format!("{label} is too short ({hint})."));
+    }
+    if !range.contains(pin.digit_count()) {
+        zeroize_all(fields);
+        return Err(format!("{label} has the wrong length ({hint})."));
+    }
+    Ok(pin)
+}
+
+/// Move the activation code into a validated [`PinBytes`]. Its exact
+/// length is the card's scheme to decide; here it only has to be digits
+/// no shorter than any scheme takes.
+fn take_code_buffer(fields: &mut [Vec<u8>], index: usize) -> Result<PinBytes, String> {
+    const HINT: &str = "7 or 8 digits";
+    const LABEL: &str = "Activation code";
+    let code = take_buffer(fields, index, LABEL, HINT)?;
+    if code.digit_count() < ActivationPinSeven::LENGTH {
+        zeroize_all(fields);
+        return Err(format!("{LABEL} is too short ({HINT})."));
+    }
+    Ok(code)
+}
+
+/// Move one buffer into a [`PinBytes`] of digits.
+fn take_buffer(
+    fields: &mut [Vec<u8>],
+    index: usize,
+    label: &str,
     hint: &str,
 ) -> Result<PinBytes, String> {
     let Some(slot) = fields.get_mut(index) else {
@@ -323,15 +380,10 @@ fn take_digit_buffer(
         return Err(String::from("Internal error: missing PIN field."));
     };
     let bytes = std::mem::take(slot);
-    let pin = PinBytes::new(bytes).map_err(|error| {
+    PinBytes::new(bytes).map_err(|error| {
         zeroize_all(fields);
         role_error(label, hint, error)
-    })?;
-    if pin.digit_count() < role_min {
-        zeroize_all(fields);
-        return Err(format!("{label} is too short ({hint})."));
-    }
-    Ok(pin)
+    })
 }
 
 /// Render a credential-policy rejection using only static policy
