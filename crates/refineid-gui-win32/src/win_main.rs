@@ -55,6 +55,7 @@ use refineid_doc_sign::pades::{SignatureMetadata, StampLanguage, VisibleSignatur
 use refineid_doc_sign::service::{
     DEFAULT_TIMESTAMP_AUTHORITY, DocumentRequest, SignOptions, SignReport, sign_qualified,
 };
+use refineid_lib_core::auth::{CardPinLengths, PinReferenceScheme};
 use refineid_lib_core::identity::CommonName;
 use refineid_lib_core::pin::PinBytes;
 use refineid_lib_pcsc::PcscBackend;
@@ -171,6 +172,9 @@ struct AppState {
     pin_fields: [HWND; 5],
     pin_result: HWND,
     pin_result_ok: Option<bool>,
+    /// The lengths the card on the PIN page accepts, from its last status
+    /// read.
+    pin_lengths: Option<CardPinLengths>,
     doc_file: HWND,
     doc_format: HWND,
     doc_pin: HWND,
@@ -367,10 +371,11 @@ fn smoke_selftest() {
         ),
         (9, &[b"1234"], false),
     ];
+    let lengths = CardPinLengths::not_listed(PinReferenceScheme::Citizen);
     let mut failures = 0;
     for (index, (mode, fields, want_ok)) in cases.iter().enumerate() {
         let buffers: Vec<Vec<u8>> = fields.iter().map(|field| field.to_vec()).collect();
-        let got_ok = pin::prepare(*mode, buffers).is_ok();
+        let got_ok = pin::prepare(*mode, buffers, &lengths).is_ok();
         let pass = got_ok == *want_ok;
         if !pass {
             failures += 1;
@@ -1356,6 +1361,7 @@ fn on_create(main: HWND) -> windows::core::Result<()> {
             pin_fields,
             pin_result,
             pin_result_ok: None,
+            pin_lengths: None,
             doc_file,
             doc_format,
             doc_pin,
@@ -1670,9 +1676,13 @@ fn poll_inbox() {
             match outcome {
                 Ok(view) => {
                     fill_pin_rows(&view);
+                    set_pin_lengths(Some(view.lengths));
                     set_pin_status_msg("", INK);
                 }
-                Err(error) => set_pin_status_msg(&error, ERROR),
+                Err(error) => {
+                    set_pin_lengths(None);
+                    set_pin_status_msg(&error, ERROR);
+                }
             }
             set_card_busy(false);
         }
@@ -1751,6 +1761,14 @@ fn set_identity_status(text: &str, color: u32) {
         set_tint(status, color);
         set_text(status, text);
     }
+}
+
+fn set_pin_lengths(lengths: Option<CardPinLengths>) {
+    STATE.with(|cell| {
+        if let Some(state) = cell.borrow_mut().as_mut() {
+            state.pin_lengths = lengths;
+        }
+    });
 }
 
 fn set_pin_status_msg(text: &str, color: u32) {
@@ -1973,10 +1991,11 @@ fn start_pin_execute() {
                 state.pin_fields,
                 state.card_busy,
                 state.last_detail_for.clone(),
+                state.pin_lengths,
             )
         })
     });
-    let Some((mode, fields, busy, selected)) = snapshot else {
+    let Some((mode, fields, busy, selected, lengths)) = snapshot else {
         return;
     };
     if busy {
@@ -2002,7 +2021,11 @@ fn start_pin_execute() {
     for field in &fields {
         set_text(*field, "");
     }
-    let job = match pin::prepare(usize::try_from(index).unwrap_or(0), buffers) {
+    // Before the card's status is read, the FINEID bounds stand; the card
+    // session checks every entry against the card's own lengths again.
+    let lengths =
+        lengths.unwrap_or_else(|| CardPinLengths::not_listed(PinReferenceScheme::Citizen));
+    let job = match pin::prepare(usize::try_from(index).unwrap_or(0), buffers, &lengths) {
         Ok(job) => job,
         Err(error) => {
             set_pin_result(&error, Some(false));

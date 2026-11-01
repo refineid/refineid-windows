@@ -62,13 +62,10 @@ internal sealed partial class CardPage : Page
     private bool activationShown;
 
     /// <summary>
-    /// The digit counts a new PIN may have, as the card service's PIN
-    /// types bound them: PIN 1 takes four to twelve digits, PIN 2 six to
-    /// twelve.
+    /// The most digits a PIN or PUK entry takes when the card accepts no
+    /// length for it: the stored length the card service's commands carry.
     /// </summary>
-    private const int Pin1MinimumDigits = 4;
-    private const int Pin2MinimumDigits = 6;
-    private const int PinMaximumDigits = 12;
+    private const int CommandDigitCapacity = 12;
 
     /// <summary>Segoe Fluent Icons: CheckMark, Cancel and Warning.</summary>
     private const string ValidGlyph = "\uE73E";
@@ -79,9 +76,15 @@ internal sealed partial class CardPage : Page
     {
         this.InitializeComponent();
         this.ChangeSlotBox.SelectionChanged += (s, e) =>
+        {
             LabelPinFields(this.ChangeSlotBox, this.NewPinBox, this.NewPinConfirmationBox);
+            this.ApplyPinLimits();
+        };
         this.UnblockSlotBox.SelectionChanged += (s, e) =>
+        {
             LabelPinFields(this.UnblockSlotBox, this.UnblockNewPinBox, this.UnblockConfirmationBox);
+            this.ApplyPinLimits();
+        };
         LabelPinFields(this.ChangeSlotBox, this.NewPinBox, this.NewPinConfirmationBox);
         LabelPinFields(this.UnblockSlotBox, this.UnblockNewPinBox, this.UnblockConfirmationBox);
         this.readerPollTimer = new DispatcherTimer { Interval = ReaderPollInterval };
@@ -268,12 +271,14 @@ internal sealed partial class CardPage : Page
         string pin2Again = this.ActivationPin2ConfirmationBox.Password;
 
         bool codeValid = this.snapshot?.ActivationCodeLength is int length && code.Length == length;
-        bool pin1Valid = IsPinLength(pin1, Pin1MinimumDigits);
+        LengthRange? pin1Lengths = this.snapshot?.Pin1Lengths;
+        LengthRange? pin2Lengths = this.snapshot?.Pin2Lengths;
+        bool pin1Valid = IsPinLength(pin1, pin1Lengths);
         bool pin1Repeated = pin1Valid && string.Equals(pin1Again, pin1, StringComparison.Ordinal);
-        bool pin1Differs = pin1Valid && IsPinLength(pin1Again, Pin1MinimumDigits) && !pin1Repeated;
-        bool pin2Valid = IsPinLength(pin2, Pin2MinimumDigits);
+        bool pin1Differs = pin1Valid && IsPinLength(pin1Again, pin1Lengths) && !pin1Repeated;
+        bool pin2Valid = IsPinLength(pin2, pin2Lengths);
         bool pin2Repeated = pin2Valid && string.Equals(pin2Again, pin2, StringComparison.Ordinal);
-        bool pin2Differs = pin2Valid && IsPinLength(pin2Again, Pin2MinimumDigits) && !pin2Repeated;
+        bool pin2Differs = pin2Valid && IsPinLength(pin2Again, pin2Lengths) && !pin2Repeated;
 
         Mark(this.ActivationCodeBoxMark, codeValid, differs: false, isEmpty: code.Length == 0);
         Mark(this.ActivationPin1BoxMark, pin1Valid, differs: false, isEmpty: pin1.Length == 0);
@@ -294,8 +299,34 @@ internal sealed partial class CardPage : Page
             codeValid && (!askPin1 || pin1Repeated) && (!askPin2 || pin2Repeated);
     }
 
-    private static bool IsPinLength(string entry, int minimumDigits) =>
-        entry.Length >= minimumDigits && entry.Length <= PinMaximumDigits;
+    /// <summary>Whether the entry has a length the card accepts for its credential.</summary>
+    private static bool IsPinLength(string entry, LengthRange? lengths) =>
+        lengths?.Accepts(entry.Length) ?? false;
+
+    /// <summary>The most digits the card accepts for a credential.</summary>
+    private static int MaximumDigits(LengthRange? lengths) => lengths?.Max ?? CommandDigitCapacity;
+
+    /// <summary>
+    /// Each PIN and PUK box takes no more digits than the inspected card
+    /// accepts for its credential, for the PIN the slot box names.
+    /// </summary>
+    private void ApplyPinLimits()
+    {
+        LengthRange? pin1 = this.snapshot?.Pin1Lengths;
+        LengthRange? pin2 = this.snapshot?.Pin2Lengths;
+        int changing = MaximumDigits(SlotFrom(this.ChangeSlotBox) == PinSlot.Pin2 ? pin2 : pin1);
+        this.CurrentPinBox.MaxLength = changing;
+        this.NewPinBox.MaxLength = changing;
+        this.NewPinConfirmationBox.MaxLength = changing;
+        int resetting = MaximumDigits(SlotFrom(this.UnblockSlotBox) == PinSlot.Pin2 ? pin2 : pin1);
+        this.PukBox.MaxLength = MaximumDigits(this.snapshot?.PukLengths);
+        this.UnblockNewPinBox.MaxLength = resetting;
+        this.UnblockConfirmationBox.MaxLength = resetting;
+        this.ActivationPin1Box.MaxLength = MaximumDigits(pin1);
+        this.ActivationPin1ConfirmationBox.MaxLength = MaximumDigits(pin1);
+        this.ActivationPin2Box.MaxLength = MaximumDigits(pin2);
+        this.ActivationPin2ConfirmationBox.MaxLength = MaximumDigits(pin2);
+    }
 
     /// <summary>
     /// A green check, a red cross, or an amber warning for a pair that
@@ -465,6 +496,7 @@ internal sealed partial class CardPage : Page
             this.ActivationCodeBox.MaxLength = codeLength;
         }
 
+        this.ApplyPinLimits();
         this.UpdateActivationForm();
         this.ManagementPanel.IsHitTestVisible = true;
         this.ManagementPanel.Opacity = 1;

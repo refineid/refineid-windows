@@ -141,7 +141,8 @@ use cardmod::{CardCapabilityModel, CardModel, ContainerDescriptor, Ctx, KeyAlgor
 use ffi::*;
 #[cfg(windows)]
 use refineid_lib_core::auth::{
-    ChangePinOutcome, PinOps, PinReferenceScheme, PinSlot, PinStatus, UnblockOutcome, VerifyOutcome,
+    AuthError, CardPinLengths, ChangePinOutcome, PinOps, PinReferenceScheme, PinSlot, PinStatus,
+    UnblockOutcome, VerifyOutcome,
 };
 #[cfg(windows)]
 use refineid_lib_core::crypto::container::{Ciphertext, RsaPkcs1};
@@ -277,6 +278,32 @@ fn puk_floor_answer(tx: &mut CardSessionTransport) -> Result<(), DWORD> {
             SCARD_F_INTERNAL_ERROR
         }
     })
+}
+
+/// Read the lengths the card accepts for its PINs and the PUK, once per
+/// PIN change or reset; the card is addressed under the numbering they
+/// were read by.
+#[cfg(windows)]
+fn card_pin_lengths(tx: &mut CardSessionTransport) -> Result<CardPinLengths, DWORD> {
+    tx.read_card_pin_lengths().map_err(|_error| {
+        refineid_dev_errors::report!(
+            CardModule,
+            "PIN lengths not read",
+            "the card session failed"
+        );
+        SCARD_F_INTERNAL_ERROR
+    })
+}
+
+/// The answer for a PIN change or reset the card service refused: an
+/// entry of a length the card does not accept is an invalid parameter,
+/// as a malformed entry is; a transport failure is internal.
+#[cfg(windows)]
+fn manage_error_answer<TE>(error: &AuthError<TE>) -> DWORD {
+    match error {
+        AuthError::PinPolicy(_reason) => SCARD_E_INVALID_PARAMETER,
+        AuthError::Transport(_error) => SCARD_F_INTERNAL_ERROR,
+    }
 }
 
 /// Read the live status of `slot` and apply [`retry_floor_answer`].
@@ -2627,14 +2654,15 @@ unsafe extern "system" fn CardUnblockPin(
     if let Err(error) = puk_floor_answer(&mut tx) {
         return error;
     }
-    let outcome = match target_slot {
-        PinSlot::Pin1 => tx.unblock_pin1(puk, new_pin),
-        PinSlot::Pin2 => tx.reset_retry_counter(PinSlot::Pin2, puk, new_pin),
+    let lengths = match card_pin_lengths(&mut tx) {
+        Ok(lengths) => lengths,
+        Err(error) => return error,
     };
+    let outcome = tx.reset_retry_counter(&lengths, target_slot, puk, new_pin);
     drop(tx);
     match outcome {
         Ok(o) => map_unblock_outcome(ctx, target_pin_id, o),
-        Err(_e) => SCARD_F_INTERNAL_ERROR,
+        Err(error) => manage_error_answer(&error),
     }
 }
 
@@ -2686,10 +2714,11 @@ unsafe extern "system" fn CardChangeAuthenticator(
         return SCARD_W_WRONG_CHV;
     }
 
-    let outcome = match slot {
-        PinSlot::Pin1 => tx.change_pin1(current_pin.clone(), new_pin),
-        PinSlot::Pin2 => tx.change_pin(PinSlot::Pin2, current_pin.clone(), new_pin),
+    let lengths = match card_pin_lengths(&mut tx) {
+        Ok(lengths) => lengths,
+        Err(error) => return error,
     };
+    let outcome = tx.change_pin(&lengths, slot, current_pin.clone(), new_pin);
     drop(tx);
     match outcome {
         Ok(o) => {
@@ -2700,7 +2729,7 @@ unsafe extern "system" fn CardChangeAuthenticator(
             }
             map_change_pin_outcome(ctx, pin_id, o, pcAttemptsRemaining)
         }
-        Err(_e) => SCARD_F_INTERNAL_ERROR,
+        Err(error) => manage_error_answer(&error),
     }
 }
 
@@ -2879,14 +2908,15 @@ unsafe extern "system" fn CardChangeAuthenticatorEx(
         if let Err(error) = puk_floor_answer(&mut tx) {
             return error;
         }
-        let outcome = match target_slot {
-            PinSlot::Pin1 => tx.unblock_pin1(puk, new_pin),
-            PinSlot::Pin2 => tx.reset_retry_counter(PinSlot::Pin2, puk, new_pin),
+        let lengths = match card_pin_lengths(&mut tx) {
+            Ok(lengths) => lengths,
+            Err(error) => return error,
         };
+        let outcome = tx.reset_retry_counter(&lengths, target_slot, puk, new_pin);
         drop(tx);
         return match outcome {
             Ok(o) => map_unblock_outcome(ctx, dwTargetPinId, o),
-            Err(_) => SCARD_F_INTERNAL_ERROR,
+            Err(error) => manage_error_answer(&error),
         };
     }
 
@@ -2926,10 +2956,11 @@ unsafe extern "system" fn CardChangeAuthenticatorEx(
     if is_rejected {
         return SCARD_W_WRONG_CHV;
     }
-    let outcome = match target_slot {
-        PinSlot::Pin1 => tx.change_pin1(current_pin.clone(), new_pin),
-        PinSlot::Pin2 => tx.change_pin(PinSlot::Pin2, current_pin.clone(), new_pin),
+    let lengths = match card_pin_lengths(&mut tx) {
+        Ok(lengths) => lengths,
+        Err(error) => return error,
     };
+    let outcome = tx.change_pin(&lengths, target_slot, current_pin.clone(), new_pin);
     drop(tx);
     match outcome {
         Ok(o) => {
@@ -2940,7 +2971,7 @@ unsafe extern "system" fn CardChangeAuthenticatorEx(
             }
             map_change_pin_outcome(ctx, dwTargetPinId, o, pcAttemptsRemaining)
         }
-        Err(_) => SCARD_F_INTERNAL_ERROR,
+        Err(error) => manage_error_answer(&error),
     }
 }
 
