@@ -37,7 +37,6 @@ use refineid_lib_core::auth::{
 use refineid_lib_core::backend::{
     ReaderAccessCap, ReaderBackend as _, ReaderFilter, ReaderPickError,
 };
-use refineid_lib_core::crypto::digest::Sha256;
 use refineid_lib_core::fineid_card::{CardClassificationError, FineidCardModel};
 use refineid_lib_core::pin::{ActivationCode, PinBytes, PinRoleError, Puk};
 use refineid_lib_core::pin_retry_risk::{
@@ -110,7 +109,7 @@ pub struct ChangePinReport {
     /// `String` from `ReaderId::as_str().to_owned()`; tighter
     /// form would be `ReaderId`.
     pub reader: String,
-    /// `CredentialIdentity::best_serial()` of the trust-gated
+    /// `CredentialIdentity::best_serial()` of the bound
     /// card: PKCS#15 token serial when present, else printed /
     /// PEUIN form. Empty string when nothing was readable.
     /// Surfaced so the operator can confirm which physical card
@@ -203,23 +202,17 @@ pub enum CardPinError {
         /// ([`ActivationScheme::activation_entry_digit_count`]).
         expected: usize,
     },
-    /// The card's data couldn't be authenticated against a pinned
-    /// anchor. The PIN flows refuse to use untrusted card-side data
-    /// (certificate validity start, etc.) for scheme selection --
-    /// without a verified chain anchor the data could be from a
-    /// counterfeit card.
-    CardDataUntrusted {
-        /// Human-readable detail from
-        /// `CardTrustAttestation::describe` explaining which
-        /// trust gate failed (no pinned root match, cert read
-        /// error, etc.). Tier 0 `String`; presentational.
+    /// The card published no PKCS#15 serial to bind the session to.
+    CardSerialUnavailable {
+        /// Human-readable detail naming where the serial was missing.
+        /// Tier 0 `String`; presentational.
         description: String,
     },
-    /// The trusted card session was invalidated between the
-    /// trust gate and the operation. Possible causes: card
+    /// The bound card session was invalidated between session
+    /// open and the operation. Possible causes: card
     /// removed from reader mid-flow, reader unplugged, a
     /// different card inserted, the same physical port re-
-    /// enumerated as a different reader. Trust does not survive
+    /// enumerated as a different reader. The binding does not survive
     /// any of these; the operator must re-run.
     CardSessionRevoked {
         /// Human-readable detail from
@@ -279,17 +272,13 @@ impl fmt::Display for CardPinError {
                  expects {expected} digits. Sending it anyway would \
                  burn a card-side try; refusing"
             ),
-            Self::CardDataUntrusted { description } => write!(
-                f,
-                "card-side data not trusted -- {description}. The activation \
-                 flow refuses to use unverified card data; verify you're using \
-                 a real DVV-issued FINEID card, or update PINNED_ROOT_SHA256 \
-                 to include this card's root if it's a genuine new generation"
-            ),
+            Self::CardSerialUnavailable { description } => {
+                write!(f, "card serial unavailable -- {description}")
+            }
             Self::CardSessionRevoked { reason } => write!(
                 f,
-                "trusted card session revoked between trust gate and operation: \
-                 {reason}. Trust does not survive card removal, reader unplug, \
+                "card session revoked before the operation: \
+                 {reason}. The session does not survive card removal, reader unplug, \
                  reader rename, or card swap. Re-run the command after restoring \
                  the original reader + card."
             ),
@@ -357,41 +346,34 @@ fn auth_to_card_pin(e: AuthError<impl fmt::Display>) -> CardPinError {
     }
 }
 
-/// Trust-gated card session.
+/// Bound card session.
 ///
-/// The trust gate has passed, a long-serial has been bound, and the
-/// card's reference numbering and activation scheme are known.
+/// A long-serial has been bound, and the card's reference numbering
+/// and activation scheme are known.
 /// Activation-state is *not* yet known; downstream
 /// operations must promote this into either
 /// [`ActivationCardContext`] (for `card activate`) or
 /// [`PinManagementCardContext`] (for `card change-pin*` /
 /// `card unblock-pin*`).
 ///
-/// Built by `establish_trusted_session`: card is identified
-/// by ATR against the recognised FINEID model set, its on-card
-/// root is pinned against `PINNED_ROOT_SHA256`, and its
+/// Built by `establish_card_session`: card is identified
+/// by ATR against the recognised FINEID model set, and its
 /// PKCS#15 long serial is captured so any later step can
 /// detect a card swap mid-flow.
 #[derive(Debug, Clone)]
-pub struct TrustedCardSession {
-    /// PC/SC reader id captured at trust-gate time; every
+pub struct BoundCardSession {
+    /// PC/SC reader id captured at session open; every
     /// subsequent re-open in the flow uses exactly this id.
     pub reader_id: refineid_lib_core::backend::ReaderId,
     /// Person identity extracted from the auth cert's subject DN
-    /// (FINEID S2 §6.3.8.3). Read once at trust-gate time so PIN
+    /// (FINEID S2 §6.3.8.3). Read once at session open so PIN
     /// reports can show "who" without re-reading the cert.
     pub identity: refineid_lib_core::identity::CredentialIdentity,
-    /// Attestation that justified using this card's data.
-    /// `is_trusted()` returns `true` only for
-    /// `PinnedRootMatched`.
-    pub trust: CardTrustAttestation,
-    /// PKCS#15 long serial bound at trust-gate time; every
+    /// PKCS#15 long serial bound at session open; every
     /// subsequent step re-reads and compares against this value
     /// to detect a card swap.
     pub bound_serial: refineid_lib_core::identity::TokenSerial,
     /// ATR-classified FINEID card model from the recognised set.
-    /// Not a trust signal on its own; the trust signal is
-    /// [`trust`](Self::trust).
     pub model: FineidCardModel,
     /// The credential-reference numbering the card answered to.
     pub numbering: PinReferenceScheme,
@@ -399,8 +381,8 @@ pub struct TrustedCardSession {
     pub scheme: ActivationScheme,
 }
 
-impl TrustedCardSession {
-    /// Promote a trusted session into the
+impl BoundCardSession {
+    /// Promote a bound session into the
     /// [`PinManagementCardContext`] typestate, the input
     /// shape for `change_pin_first` and
     /// `unblock_pin_first`. By calling this constructor the
@@ -423,25 +405,25 @@ impl TrustedCardSession {
     }
 }
 
-/// Card session promoted from a trusted base into the
+/// Card session promoted from a bound base into the
 /// "operator intends a PIN-management operation on an
 /// already-activated card" typestate.
 ///
 /// The type is opaque: there is no public field set, only a
-/// borrow path back to the inner [`TrustedCardSession`].
+/// borrow path back to the inner [`BoundCardSession`].
 /// Construct via
-/// [`TrustedCardSession::into_pin_management_context`] from
+/// [`BoundCardSession::into_pin_management_context`] from
 /// the CLI's `card change-pin*` / `card unblock-pin*`
 /// dispatch. Code in the `card activate` dispatch cannot
 /// produce this typestate by construction.
 #[derive(Debug, Clone)]
 pub struct PinManagementCardContext {
-    /// Inner trusted session this context was promoted from.
+    /// Inner bound session this context was promoted from.
     /// Held privately so callers can only reach
     /// reader id / identity / serial via the inherent methods,
     /// preventing accidental construction of an unrelated
     /// `PinManagementCardContext` from a stale session value.
-    session: TrustedCardSession,
+    session: BoundCardSession,
 }
 
 impl PinManagementCardContext {
@@ -450,74 +432,63 @@ impl PinManagementCardContext {
     pub const fn reader_id(&self) -> &refineid_lib_core::backend::ReaderId {
         &self.session.reader_id
     }
-    /// Borrow the person identity captured at trust-gate time.
+    /// Borrow the person identity captured at session open.
     #[must_use]
     pub const fn identity(&self) -> &refineid_lib_core::identity::CredentialIdentity {
         &self.session.identity
     }
-    /// Borrow the trust attestation that justified building this
-    /// context (always `PinnedRootMatched` once the type is
-    /// constructed; other variants short-circuit in
-    /// `establish_trusted_session`).
-    #[must_use]
-    pub const fn trust(&self) -> &CardTrustAttestation {
-        &self.session.trust
-    }
-    /// Borrow the PKCS#15 long serial bound at trust-gate time.
+    /// Borrow the PKCS#15 long serial bound at session open.
     /// `re_verify_session` compares the on-card serial against
     /// this value before every modify APDU.
     #[must_use]
     pub const fn bound_serial(&self) -> &refineid_lib_core::identity::TokenSerial {
         &self.session.bound_serial
     }
-    /// ATR-classified FINEID card model captured at trust-gate
-    /// time. `Copy` because [`FineidCardModel`] is a small enum.
+    /// ATR-classified FINEID card model captured at session
+    /// open. `Copy` because [`FineidCardModel`] is a small enum.
     #[must_use]
     pub const fn model(&self) -> FineidCardModel {
         self.session.model
     }
-    /// The credential-reference numbering captured at trust-gate time.
+    /// The credential-reference numbering captured at session open.
     #[must_use]
     pub const fn numbering(&self) -> PinReferenceScheme {
         self.session.numbering
     }
-    /// The activation scheme captured at trust-gate time.
+    /// The activation scheme captured at session open.
     #[must_use]
     pub const fn scheme(&self) -> ActivationScheme {
         self.session.scheme
     }
 }
 
-/// Run the trust-gate setup against the picked reader.
+/// Open and bind a card session on the picked reader.
 ///
 /// Phases (in order):
 /// 1. Pick the FINEID-shape reader (or apply `reader_filter`).
 /// 2. Open the transport, read the ATR, classify against the
 ///    recognised `FineidCardModel` set.
 /// 3. SELECT the PKCS#15 application.
-/// 4. Read the on-card root cert (`EF.4334`), hash, match
-///    against the pinned set.
-/// 5. Capture the PKCS#15 long serial for session binding.
-/// 6. Resolve the card's reference numbering with the counter-safe
+/// 4. Capture the PKCS#15 long serial for session binding.
+/// 5. Resolve the card's reference numbering with the counter-safe
 ///    VERIFY probe, and decide its activation scheme: the
 ///    organization numbering means §4.6.1; under the citizen
 ///    numbering the authentication certificate's validity start
 ///    decides it.
 ///
-/// Returns a [`TrustedCardSession`] the caller flows into the
+/// Returns a [`BoundCardSession`] the caller flows into the
 /// modify step. The transport from this call is dropped; the
 /// caller re-opens against `session.reader_id` and uses
 /// `re_verify_session` before each modify APDU.
 ///
 /// # Errors
 /// - `CardModelNotSupported` -- ATR didn't classify.
-/// - `CardDataUntrusted` -- on-card root not pinned, or
-///   PKCS#15 serial unavailable.
+/// - `CardSerialUnavailable` -- PKCS#15 serial unavailable.
 /// - PC/SC / SELECT / cert-read failures.
-pub fn establish_trusted_session(
+pub fn establish_card_session(
     backend: PcscBackend,
     reader_filter: Option<&ReaderFilter>,
-) -> Result<TrustedCardSession, CardPinError> {
+) -> Result<BoundCardSession, CardPinError> {
     use refineid_lib_core::transport::CardTransport as _;
 
     let FineidReaderPick {
@@ -539,37 +510,6 @@ pub fn establish_trusted_session(
         .select_pkcs15_application()
         .map_err(|e| CardPinError::Pkcs15Select(format!("{e}")))?;
 
-    // Pinned-root trust gate: hash the on-card root and match it
-    // against the pinned DVV roots alone. Only a pinned root, with the
-    // card's issuing intermediate, enters the in-memory certificate
-    // cache.
-    let trust = match transport.read_certificate(CertSlot::RootCa) {
-        Ok(root_der) => {
-            let trust = CardTrustAttestation::of_root(root_der.as_bytes());
-            if trust.is_trusted() {
-                let intermediate_ca = transport
-                    .read_certificate(CertSlot::IssuingCaEcc)
-                    .ok()
-                    .map(refineid_lib_core::cert_state::CertDer::into_bytes);
-                let _ = refineid_lib_core::trust_roots::set_root_certificates(
-                    refineid_lib_core::trust_roots::RootCertificates::new(
-                        Some(root_der.into_bytes()),
-                        intermediate_ca,
-                    ),
-                );
-            }
-            trust
-        }
-        Err(e) => CardTrustAttestation::RootCertUnavailable {
-            reason: format!("{e}"),
-        },
-    };
-    if !trust.is_trusted() {
-        return Err(CardPinError::CardDataUntrusted {
-            description: trust.describe(),
-        });
-    }
-
     // Bind the PKCS#15 long serial; `re_verify_session` checks
     // against this on every subsequent step. The serial is
     // session state (binds this transport to a specific
@@ -582,7 +522,7 @@ pub fn establish_trusted_session(
     let bound_serial = match token.serial_number_hex {
         Some(hex) => refineid_lib_core::identity::render_token_serial(hex),
         None => {
-            return Err(CardPinError::CardDataUntrusted {
+            return Err(CardPinError::CardSerialUnavailable {
                 description: "card did not publish a PKCS#15 serial; can't pin session identity"
                     .to_owned(),
             });
@@ -609,10 +549,9 @@ pub fn establish_trusted_session(
     let scheme = ActivationScheme::for_card(numbering, validity_start)
         .ok_or_else(|| CardPinError::Transport("auth cert gives no validity start".to_owned()))?;
 
-    Ok(TrustedCardSession {
+    Ok(BoundCardSession {
         reader_id,
         identity,
-        trust,
         bound_serial,
         model,
         numbering,
@@ -682,7 +621,7 @@ pub fn change_pin_first(
 
     // Re-open against the bound reader, SELECT, and re-verify
     // the bound serial -- catches a card swap between the
-    // trust gate and the modify APDU.
+    // session open and the modify APDU.
     let mut transport = backend.open_exclusive(ctx.reader_id(), ReaderAccessCap::Read)?;
     transport
         .select_pkcs15_application()
@@ -842,142 +781,38 @@ impl fmt::Display for UnblockPinReport {
 
 // ---- card activate -- first-time setup flow --------------------
 
-/// Outcome of verifying that card-side data can be trusted
-/// before it drives type selection.
-///
-/// Per the typing-discipline rule "you cannot pass on
-/// information that is not verified": the PIN flows must not use
-/// `cert.not_before` to choose an [`ActivationScheme`] until the
-/// card itself has been authenticated against a pinned anchor.
-///
-/// The gate is the on-card root cert's SHA-256 matching a pinned
-/// root (`trust_roots::pinned_root_label`).
-#[derive(Debug, Clone)]
-pub enum CardTrustAttestation {
-    /// On-card root cert's SHA-256 matched a pinned anchor.
-    /// Card data may be used for type selection.
-    PinnedRootMatched {
-        /// Human-readable label of the pinned root that matched
-        /// (e.g. "DVV CA Generation 3 RSA"). Sourced from
-        /// `trust_roots::pinned_root_label`; the value
-        /// is a compile-time string set so `&'static str` is
-        /// acceptable.
-        root_label: &'static str,
-        /// SHA-256 of the on-card root DER -- the digest that
-        /// matched the pin. Surfaced so logs can audit which
-        /// fingerprint passed.
-        root_sha256: Sha256,
-    },
-    /// On-card root cert was read but its SHA-256 doesn't match
-    /// any pinned anchor. Card data MUST NOT be used.
-    PinnedRootMismatch {
-        /// Actual SHA-256 of the on-card root DER. Reported so
-        /// the operator can confirm whether they're looking at a
-        /// genuinely new generation (update the pin list) or a
-        /// counterfeit / corrupted card.
-        actual_sha256: Sha256,
-    },
-    /// On-card root cert couldn't be read at all (file absent,
-    /// transport error). Card data MUST NOT be used.
-    RootCertUnavailable {
-        /// Underlying transport / parse error rendered via
-        /// `to_string()`. Tier 0 `String`; presentational.
-        reason: String,
-    },
-}
-
-impl CardTrustAttestation {
-    /// Attest an on-card root certificate: matched when its SHA-256 is
-    /// one of the pinned DVV roots (`trust_roots::pinned_root_label`),
-    /// mismatched otherwise.
-    #[must_use]
-    pub fn of_root(root_der: &[u8]) -> Self {
-        let actual = Sha256::of(root_der);
-        crate::trust_roots::pinned_root_label(actual).map_or(
-            Self::PinnedRootMismatch {
-                actual_sha256: actual,
-            },
-            |label| Self::PinnedRootMatched {
-                root_label: label,
-                root_sha256: actual,
-            },
-        )
-    }
-
-    /// `true` only when card data may be passed forward to
-    /// type-selection logic.
-    #[must_use]
-    pub const fn is_trusted(&self) -> bool {
-        matches!(self, Self::PinnedRootMatched { .. })
-    }
-
-    /// Render the trust attestation as a one-line human
-    /// string for the PIN-flow reports.
-    ///
-    /// Three shapes: positive (pinned to a labelled root with
-    /// SHA-256), negative-pinning (root present but
-    /// fingerprint unpinned), unavailable (could not read the
-    /// root). The positive case is the only one with
-    /// [`Self::is_trusted`] returning `true`.
-    fn describe(&self) -> String {
-        match self {
-            Self::PinnedRootMatched {
-                root_label,
-                root_sha256,
-            } => format!("on-card root pinned to {root_label} (sha256 {root_sha256})"),
-            Self::PinnedRootMismatch { actual_sha256 } => format!(
-                "ON-CARD ROOT NOT PINNED (actual sha256 {actual_sha256}); refusing to trust card data"
-            ),
-            Self::RootCertUnavailable { reason } => {
-                format!("on-card root cert unreadable ({reason}); refusing to trust card data")
-            }
-        }
-    }
-}
-
 /// Pre-activation card context.
 ///
-/// Built only after [`CardTrustAttestation`] verifies the card
-/// can be trusted. The activation flow uses its
-/// [`ActivationScheme`] to name the expected activation-code length
-/// and to choose the activation command.
+/// The activation flow uses its [`ActivationScheme`] to name the
+/// expected activation-code length and to choose the activation
+/// command.
 ///
 /// The context also pins the **session identity** -- reader
-/// name + card's long serial -- captured at trust-gate time.
+/// name + card's long serial -- captured at session open.
 /// Any subsequent step in the activation flow re-reads the
 /// card's serial and refuses to continue if it doesn't match
 /// (or if the transport fails outright, which covers card
-/// removal / reader unplug / reader rename). Trust does not
+/// removal / reader unplug / reader rename). The binding does not
 /// survive a physical-state change.
 #[derive(Debug, Clone)]
 pub struct ActivationCardContext {
-    /// PC/SC reader id captured at trust-gate time; subsequent
+    /// PC/SC reader id captured at session open; subsequent
     /// re-opens in the activate flow use exactly this id.
     pub reader_id: refineid_lib_core::backend::ReaderId,
     /// Person identity extracted from the auth cert's subject DN
-    /// at trust-gate time. Surfaced in activate report output.
+    /// at session open. Surfaced in activate report output.
     pub identity: refineid_lib_core::identity::CredentialIdentity,
     /// The credential-reference numbering the card answered to.
     pub numbering: PinReferenceScheme,
     /// The card's activation scheme ([`ActivationScheme::for_card`]).
     pub scheme: ActivationScheme,
-    /// Attestation that justified using the card data.
-    pub trust: CardTrustAttestation,
     /// PKCS#15 EF.TokenInfo serial (long form) captured at
-    /// trust-gate time. Any subsequent operation re-reads this
+    /// session open. Any subsequent operation re-reads this
     /// and must match -- a different value means a card swap
-    /// happened mid-flow, which revokes the trust.
+    /// happened mid-flow, which revokes the session.
     pub bound_serial: refineid_lib_core::identity::TokenSerial,
     /// The FINEID card model identified by ATR matching at
     /// session open, from refineid's recognised set.
-    ///
-    /// ATR is a protocol-level public value -- the card emits
-    /// it at electrical reset, before any application is
-    /// selected. It is classified before the pinned-root
-    /// trust gate so a non-FINEID card gets rejected at the
-    /// earliest possible point. ATR matching is **not** a trust
-    /// signal on its own; the pinned-root SHA-256 in
-    /// [`trust`](Self::trust) is.
     pub model: FineidCardModel,
 }
 
@@ -989,45 +824,38 @@ impl ActivationCardContext {
     }
 }
 
-/// Run the trust gate on the picked FINEID reader and carry its
-/// session -- reference numbering and activation scheme included --
-/// into the activation typestate.
-///
-/// Per typing-discipline: we cannot pass on information that
-/// hasn't been verified. The on-card root pin is the minimum
-/// trust gate; until it matches, the certificate's validity start
-/// isn't trustworthy enough to drive scheme selection.
+/// Open and bind a session on the picked FINEID reader and carry it
+/// -- reference numbering and activation scheme included -- into the
+/// activation typestate.
 ///
 /// # Errors
-/// - `CardDataUntrusted` when the on-card root doesn't match a
-///   pinned anchor (or can't be read).
-/// - PC/SC / PKCS#15 / cert-read / reader-pick failures.
+/// PC/SC / PKCS#15 / cert-read / reader-pick failures, and
+/// `CardSerialUnavailable` when the card publishes no PKCS#15 serial.
 pub fn classify_card_for_activation(
     backend: PcscBackend,
     reader_filter: Option<&ReaderFilter>,
 ) -> Result<ActivationCardContext, CardPinError> {
-    let session = establish_trusted_session(backend, reader_filter)?;
+    let session = establish_card_session(backend, reader_filter)?;
     Ok(ActivationCardContext {
         reader_id: session.reader_id,
         identity: session.identity,
         numbering: session.numbering,
         scheme: session.scheme,
-        trust: session.trust,
         bound_serial: session.bound_serial,
         model: session.model,
     })
 }
 
-/// Re-verify the trusted card session: the reader's still the
+/// Re-verify the bound card session: the reader's still the
 /// one we picked, the card's still there, and its long serial
-/// still matches what we pinned at trust-gate time.
+/// still matches what we bound at session open.
 ///
 /// Called before every card-touching step in the activation
 /// flow so a card swap / reader unplug / card removal between
-/// the trust gate and the modify APDU is detected and refused.
+/// session open and the modify APDU is detected and refused.
 ///
 /// # Errors
-/// `CardSessionRevoked` on any divergence. Trust state cannot
+/// `CardSessionRevoked` on any divergence. The binding cannot
 /// be re-established by retrying -- the operator must re-run
 /// the whole command.
 pub(crate) fn re_verify_session<T: refineid_lib_core::transport::CardTransport>(
@@ -1309,7 +1137,7 @@ fn activation_code_for(
     })
 }
 
-/// Drive the `card activate` flow: trust-gated card -> activation
+/// Drive the `card activate` flow: bound card -> activation
 /// code from the letter -> fresh PIN1/PIN2.
 ///
 /// Two activation schemes per FINEID S4-1 v4.2 §4.6, sent under the
@@ -1329,7 +1157,7 @@ fn activation_code_for(
 ///   1. Read the typed code as the scheme takes it; a wrong length
 ///      is refused before the reader is opened.
 ///   2. Open a transport session against the bound reader and
-///      re-verify the trusted-session binding.
+///      re-verify the session binding.
 ///   3. Judge each PIN from its counter-safe probes (PIN changed
 ///      flag and status, [`PinActivation::judge`]).
 ///   4. Refuse without `--allow-reactivate` when no PIN awaits its
@@ -1365,10 +1193,10 @@ pub fn activate_first(
         .map_err(|e| CardPinError::Pkcs15Select(format!("{e}")))?;
 
     // Session re-verification: the card we are about to touch
-    // must be the same physical card the trust gate matched
-    // against the pinned root. A card swap / reader rename /
-    // reader unplug between the trust gate and here revokes
-    // trust before any modify APDU lands.
+    // must be the same physical card the session was bound to.
+    // A card swap / reader rename / reader unplug between session
+    // open and here revokes the session before any modify APDU
+    // lands.
     re_verify_session(&mut transport, &ctx.bound_serial)?;
 
     let (_, pin1) = probe_pin_activation(&mut transport, ctx.numbering, ctx.scheme, PinSlot::Pin1);
@@ -1535,10 +1363,10 @@ mod activate_tests {
     };
 
     use super::{
-        ActivatePreflightOutcome, ActivationEvidence, CardPinError, CardTrustAttestation,
-        ChangePinOutcome, PinSlot, RetryFloorRefusal, UnblockOutcome, activate_slot_setup,
-        activation_code_for, activation_continues_after_pin1, activation_targets,
-        change_to_unblock, classify_preflight, judge_activation, probe_pin_activation,
+        ActivatePreflightOutcome, ActivationEvidence, CardPinError, ChangePinOutcome, PinSlot,
+        RetryFloorRefusal, UnblockOutcome, activate_slot_setup, activation_code_for,
+        activation_continues_after_pin1, activation_targets, change_to_unblock, classify_preflight,
+        judge_activation, probe_pin_activation,
     };
     use crate::test_util::{TestResult, check_true};
 
@@ -1711,47 +1539,6 @@ mod activate_tests {
     ) -> PinActivation {
         let mut transport = ProbeTransport::new(status, changed);
         probe_pin_activation(&mut transport, numbering, scheme, PinSlot::Pin1).1
-    }
-
-    /// A self-signed certificate naming a DVV issuing CA, pinned nowhere.
-    const UNPINNED_SELF_SIGNED_ROOT: &[u8] =
-        include_bytes!("../../refineid-rapp-cli/src/mock_ca.der");
-
-    #[test]
-    fn an_unpinned_self_signed_root_is_refused_even_once_cached() -> TestResult {
-        // As the first card in the process, and again after the same
-        // root sits in the in-memory certificate cache.
-        check_true(
-            !CardTrustAttestation::of_root(UNPINNED_SELF_SIGNED_ROOT).is_trusted(),
-            "an unpinned root is refused",
-        )?;
-        let _ = refineid_lib_core::trust_roots::set_root_certificates(
-            refineid_lib_core::trust_roots::RootCertificates::new(
-                Some(UNPINNED_SELF_SIGNED_ROOT.to_vec()),
-                None,
-            ),
-        );
-        check_true(
-            matches!(
-                CardTrustAttestation::of_root(UNPINNED_SELF_SIGNED_ROOT),
-                CardTrustAttestation::PinnedRootMismatch { .. }
-            ),
-            "a cached root is still refused",
-        )
-    }
-
-    #[test]
-    fn a_pinned_dvv_root_is_trusted() -> TestResult {
-        for root in [
-            include_bytes!("../trust-anchors/dvv-gov-root-ca-g3-rsa.der").as_slice(),
-            include_bytes!("../trust-anchors/dvv-gov-root-ca-g3-ecc.der").as_slice(),
-        ] {
-            check_true(
-                CardTrustAttestation::of_root(root).is_trusted(),
-                "a pinned DVV root is trusted",
-            )?;
-        }
-        Ok(())
     }
 
     #[test]

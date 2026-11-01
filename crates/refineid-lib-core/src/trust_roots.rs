@@ -22,27 +22,14 @@
 //! Aggressive in-memory caching is implemented using `OnceLock<Box<RootCertificates>>`
 //! to ensure thread safety and instant subsequent lookups across all platforms.
 //!
-//! The cache holds certificates for lookup and publication; it is never a
-//! source of trust. Trust comes from the pinned DVV G3 fingerprints
-//! ([`PINNED_DVV_G3_RSA_SHA256`], [`PINNED_DVV_G3_ECC_SHA256`]).
+//! The cache holds the certificates the card carries, for lookup and
+//! publication.
 
 use std::sync::OnceLock;
 
 use crate::crypto::digest::Sha256;
 use crate::pkcs15::{CertSlot, Pkcs15Ops};
 use crate::transport::CardTransport;
-
-/// Well-known pinned DVV Gov. Root CA - G3 RSA SHA-256 fingerprint.
-pub const PINNED_DVV_G3_RSA_SHA256: Sha256 = Sha256::from_bytes([
-    0xD3, 0xED, 0x3F, 0xC4, 0x0A, 0xD2, 0x6B, 0x52, 0xE0, 0x01, 0xE1, 0xE1, 0x8F, 0x4B, 0x94, 0x49,
-    0x52, 0x9D, 0xEB, 0x75, 0xA8, 0x1D, 0x5E, 0xB6, 0x80, 0xD7, 0xB6, 0x2D, 0xB2, 0x3B, 0xA9, 0x6D,
-]);
-
-/// Well-known pinned DVV Gov. Root CA - G3 ECC SHA-256 fingerprint.
-pub const PINNED_DVV_G3_ECC_SHA256: Sha256 = Sha256::from_bytes([
-    0x55, 0x46, 0xA5, 0x25, 0x04, 0xFB, 0xA7, 0x4F, 0x61, 0xFF, 0xD4, 0x89, 0x00, 0x67, 0x52, 0x9A,
-    0xDE, 0x3B, 0x9C, 0x9D, 0x07, 0xE5, 0x02, 0x59, 0x28, 0x31, 0xCC, 0xDA, 0x9B, 0x36, 0x9F, 0xD3,
-]);
 
 /// Global in-memory dynamic root certificate cache.
 static ROOT_CERTIFICATES: OnceLock<Box<RootCertificates>> = OnceLock::new();
@@ -130,14 +117,6 @@ pub fn set_root_certificates(roots: RootCertificates) -> Result<(), &'static str
 #[must_use]
 pub fn active_root_certificates() -> Option<&'static RootCertificates> {
     ROOT_CERTIFICATES.get().map(|b| &**b)
-}
-
-/// Checks whether a SHA-256 fingerprint matches one of the pinned DVV G3
-/// roots. The in-memory cache holds certificates for lookup and is never
-/// a source of trust.
-#[must_use]
-pub fn is_trusted_root(fingerprint: Sha256) -> bool {
-    fingerprint == PINNED_DVV_G3_RSA_SHA256 || fingerprint == PINNED_DVV_G3_ECC_SHA256
 }
 
 /// Reads the root CA and intermediate CA from the card if available, and
@@ -259,12 +238,5 @@ mod tests {
         let bundle = build_pkcs7_certs_bundle(&[&cert]);
         assert_eq!(bundle[0], 0x30);
         assert!(bundle.windows(cert.len()).any(|w| w == cert.as_slice()));
-    }
-
-    #[test]
-    fn test_is_trusted_root_fallback() {
-        assert!(is_trusted_root(PINNED_DVV_G3_RSA_SHA256));
-        assert!(is_trusted_root(PINNED_DVV_G3_ECC_SHA256));
-        assert!(!is_trusted_root(Sha256::from_bytes([0u8; 32])));
     }
 }

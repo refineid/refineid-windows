@@ -63,7 +63,7 @@ use core::ops::Deref;
 /// string via [`render_token_serial`]. Format varies by chip
 /// generation (ASCII on v4.0+ cards, hex-of-BCD on v3.1), but
 /// the value is stable per physical card and serves as the
-/// "session identity" binding for trust-gated flows: read once
+/// "session identity" binding for bound card flows: read once
 /// at session open, re-read before each modify APDU, compare
 /// for equality. Different physical card => different value =>
 /// session revocation.
@@ -2936,7 +2936,7 @@ pub struct CredentialIdentity {
     /// Note: `CredentialIdentity` no longer carries the full
     /// chip-side serial ([`TokenSerial`]). That value is
     /// session state, not person identity, and lives on the
-    /// trust-gated card session (`bound_serial` field).
+    /// bound card session (`bound_serial` field).
     pub printed_serial: Option<PrintedSerial>,
 }
 
@@ -3014,7 +3014,7 @@ impl CredentialIdentity {
     /// Best available serial for human-facing render paths.
     /// Now just the printed form (the full chip serial moved
     /// out of `CredentialIdentity`); callers that want the
-    /// full serial pull `bound_serial` from the trust-gated
+    /// full serial pull `bound_serial` from the bound
     /// session.
     #[must_use]
     pub fn best_serial(&self) -> Option<&str> {
@@ -3450,7 +3450,7 @@ mod tests {
     fn display_omits_serial_when_printed_none() {
         // After CredentialIdentity dropped token_serial_full,
         // a printed-None identity has no serial to render. The
-        // chip-side full form lives on the trust-gated session,
+        // chip-side full form lives on the bound session,
         // not in CredentialIdentity.
         assert_eq!(
             format!("{}", full_full_serial_only()),

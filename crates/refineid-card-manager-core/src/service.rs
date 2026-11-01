@@ -18,7 +18,6 @@ use refineid_lib_core::activation::{ActivationScheme, PinActivation};
 use refineid_lib_core::auth::{PinOps as _, PinReferenceScheme, PinSlot, PinStatus, PukStatus};
 use refineid_lib_core::backend::{ReaderAccessCap, ReaderBackend as _, ReaderFilter};
 use refineid_lib_core::can::Can;
-use refineid_lib_core::crypto::digest::Sha256;
 use refineid_lib_core::fineid_card::FineidCardModel;
 use refineid_lib_core::identity::{CredentialIdentity, TokenSerial, render_token_serial};
 use refineid_lib_core::pace::run_pace_with_can;
@@ -86,7 +85,7 @@ pub struct ContactlessSnapshot {
     pub serial: TokenSerial,
     /// Certificate-derived holder label.
     pub person: String,
-    /// Activation scheme derived from the trusted auth certificate's
+    /// Activation scheme derived from the auth certificate's
     /// validity start.
     pub scheme: ActivationScheme,
     /// Side-effect-free PIN1 status inside secure messaging.
@@ -176,7 +175,7 @@ pub fn present_readers() -> Result<Vec<String>, PcscError> {
 /// Inspect one FINEID card without sending credential-bearing commands.
 ///
 /// # Errors
-/// Returns reader, card-classification, trust, certificate, or PC/SC failures.
+/// Returns reader, card-classification, card-serial, certificate, or PC/SC failures.
 pub fn inspect(reader_filter: Option<&ReaderFilter>) -> Result<CardSnapshot, CardPinError> {
     inspected(reader_filter).inspect_err(|error| {
         refineid_dev_errors::report!(CardService, "card inspection failed", error);
@@ -239,7 +238,7 @@ fn inspected(reader_filter: Option<&ReaderFilter>) -> Result<CardSnapshot, CardP
 /// CAN is consumed by PACE and does not enter logs or the returned snapshot.
 ///
 /// # Errors
-/// Returns reader, PACE, secure-messaging, trust, certificate, or PC/SC
+/// Returns reader, PACE, secure-messaging, card-serial, certificate, or PC/SC
 /// failures.
 pub fn inspect_contactless(
     reader_filter: Option<&ReaderFilter>,
@@ -284,31 +283,13 @@ fn inspected_contactless(
         transport
             .select_pkcs15_application()
             .map_err(|error| CardPinError::Pkcs15Select(format!("{error}")))?;
-
-        let root_der = transport
-            .read_certificate(CertSlot::RootCa)
-            .map_err(|error| CardPinError::CardDataUntrusted {
-                description: format!("protected root certificate read failed: {error}"),
-            })?;
-        let root_sha256 = Sha256::of(root_der.as_bytes());
-        if crate::trust_roots::pinned_root_label(root_sha256).is_none() {
-            return Err(CardPinError::CardDataUntrusted {
-                description: format!(
-                    "protected root certificate did not match a pinned DVV root (sha256 {root_sha256})"
-                ),
-            });
-        }
-
-        transport
-            .select_pkcs15_application()
-            .map_err(|error| CardPinError::Pkcs15Select(format!("{error}")))?;
         let token = transport.read_token_info().map_err(|error| {
             CardPinError::Transport(format!("protected EF.TokenInfo read: {error}"))
         })?;
         let serial = token
             .serial_number_hex
             .map(render_token_serial)
-            .ok_or_else(|| CardPinError::CardDataUntrusted {
+            .ok_or_else(|| CardPinError::CardSerialUnavailable {
                 description: "protected EF.TokenInfo did not publish a card serial".to_owned(),
             })?;
 
@@ -384,7 +365,7 @@ fn identity_from_certificate(
 /// Activate the card after binding the action to the displayed serial.
 ///
 /// # Errors
-/// Returns trust, card-swap, policy, PC/SC, or activation failures.
+/// Returns card-serial, card-swap, policy, PC/SC, or activation failures.
 pub fn activate(
     expected_serial: &TokenSerial,
     reader_filter: Option<&ReaderFilter>,
@@ -407,7 +388,7 @@ fn activated(
 /// Change PIN1 or PIN2 on the card currently shown by the UI.
 ///
 /// # Errors
-/// Returns trust, card-swap, retry-floor, policy, PC/SC, or card failures.
+/// Returns card-serial, card-swap, retry-floor, policy, PC/SC, or card failures.
 pub fn change_pin(
     expected_serial: &TokenSerial,
     options: ChangePinOptions,
@@ -421,7 +402,7 @@ fn changed_pin(
     options: ChangePinOptions,
 ) -> Result<ChangePinReport, CardPinError> {
     let reader_filter = options.reader_filter.as_deref().map(ReaderFilter::new);
-    let session = crate::card_pin::establish_trusted_session(PcscBackend, reader_filter.as_ref())?;
+    let session = crate::card_pin::establish_card_session(PcscBackend, reader_filter.as_ref())?;
     ensure_serial(expected_serial, &session.bound_serial)?;
     crate::card_pin::change_pin_first(PcscBackend, session.into_pin_management_context(), options)
 }
@@ -429,7 +410,7 @@ fn changed_pin(
 /// Unblock PIN1 or PIN2 with the shared recovery code.
 ///
 /// # Errors
-/// Returns trust, card-swap, policy, PC/SC, or recovery failures.
+/// Returns card-serial, card-swap, policy, PC/SC, or recovery failures.
 pub fn unblock_pin(
     expected_serial: &TokenSerial,
     options: UnblockPinOptions,
@@ -443,7 +424,7 @@ fn unblocked_pin(
     options: UnblockPinOptions,
 ) -> Result<UnblockPinReport, CardPinError> {
     let reader_filter = options.reader_filter.as_deref().map(ReaderFilter::new);
-    let session = crate::card_pin::establish_trusted_session(PcscBackend, reader_filter.as_ref())?;
+    let session = crate::card_pin::establish_card_session(PcscBackend, reader_filter.as_ref())?;
     ensure_serial(expected_serial, &session.bound_serial)?;
     crate::card_pin::unblock_pin_first(PcscBackend, session.into_pin_management_context(), options)
 }
