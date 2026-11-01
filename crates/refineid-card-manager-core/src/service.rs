@@ -14,17 +14,14 @@
 
 //! UI-toolkit-independent card-management facade.
 
-use refineid_lib_core::auth::{PinOps as _, PinSlot, PinStatus, PukStatus};
+use refineid_lib_core::activation::{ActivationScheme, PinActivation};
+use refineid_lib_core::auth::{PinOps as _, PinReferenceScheme, PinSlot, PinStatus, PukStatus};
 use refineid_lib_core::backend::{ReaderAccessCap, ReaderBackend as _, ReaderFilter};
 use refineid_lib_core::can::Can;
-use refineid_lib_core::crypto::digest::Sha256;
 use refineid_lib_core::fineid_card::FineidCardModel;
 use refineid_lib_core::identity::{CredentialIdentity, TokenSerial, render_token_serial};
 use refineid_lib_core::pace::run_pace_with_can;
-use refineid_lib_core::pkcs15::{
-    CardGeneration, CertSlot, FineidReaderPicker as _, Pkcs15Ops as _,
-    classify_card_generation_by_issuance,
-};
+use refineid_lib_core::pkcs15::{CertSlot, FineidReaderPicker as _, Pkcs15Ops as _};
 use refineid_lib_core::secure_messaging::SmTransport;
 use refineid_lib_core::transport::CardTransport as _;
 use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
@@ -46,23 +43,31 @@ pub struct CardSnapshot {
     pub person: String,
     /// ATR-classified FINEID card model.
     pub model: FineidCardModel,
-    /// Activation scheme selected from the authenticated certificate.
-    pub generation: CardGeneration,
-    /// Expected activation-code length, when classification succeeded.
-    pub activation_code_length: Option<usize>,
+    /// The credential-reference numbering the card answered to; the
+    /// organization numbering marks an organization card.
+    pub numbering: PinReferenceScheme,
+    /// The card's activation scheme ([`ActivationScheme::for_card`]).
+    pub scheme: ActivationScheme,
+    /// Exact activation-code length for the scheme.
+    pub activation_code_length: usize,
     /// What the counter-safe probes say about the card's activation, so
     /// the app opens the activation flow only on evidence that the card
     /// still waits for it.
     pub activation: ActivationEvidence,
+    /// Whether PIN1 awaits its activation ([`PinActivation::judge`]).
+    pub pin1_activation: PinActivation,
+    /// Whether PIN2 awaits its activation.
+    pub pin2_activation: PinActivation,
     /// Side-effect-free PIN1 status.
     pub pin1: Option<PinStatus>,
     /// Side-effect-free PIN2 status.
     pub pin2: Option<PinStatus>,
     /// Side-effect-free shared-PUK status.
     pub puk: Option<PukStatus>,
-    /// New-card PIN1 changed flag, when supported.
+    /// PIN1 changed flag (FINEID S1 v4.2 §3.15.3), when the card
+    /// returns it.
     pub pin1_changed: Option<bool>,
-    /// New-card PIN2 changed flag, when supported.
+    /// PIN2 changed flag, when the card returns it.
     pub pin2_changed: Option<bool>,
 }
 
@@ -80,8 +85,9 @@ pub struct ContactlessSnapshot {
     pub serial: TokenSerial,
     /// Certificate-derived holder label.
     pub person: String,
-    /// Activation generation derived from the trusted auth certificate.
-    pub generation: CardGeneration,
+    /// Activation scheme derived from the auth certificate's
+    /// validity start.
+    pub scheme: ActivationScheme,
     /// Side-effect-free PIN1 status inside secure messaging.
     pub pin1: Option<PinStatus>,
     /// Side-effect-free PIN2 status inside secure messaging.
@@ -93,18 +99,31 @@ pub struct ContactlessSnapshot {
 }
 
 impl ContactlessSnapshot {
-    /// What the counter-safe PIN 1 status says about the card's activation.
-    /// The PIN-changed flag is not read over contactless, so a newer card
-    /// is judged by its PIN 1 status alone.
+    /// What the counter-safe PIN statuses say about the card's
+    /// activation. The PIN changed flag is not read over contactless,
+    /// so each PIN is judged as a card without the flag
+    /// ([`PinActivation::judge`]).
     #[must_use]
     pub const fn activation(&self) -> ActivationEvidence {
-        crate::card_pin::judge_activation(self.pin1, self.generation, None)
+        crate::card_pin::judge_activation(self.pin1_activation(), self.pin2_activation())
     }
 
-    /// Expected activation-code length for the card's generation.
+    /// Whether PIN1 awaits its activation, judged without the flag.
     #[must_use]
-    pub const fn activation_code_length(&self) -> Option<usize> {
-        self.generation.activation_pin_length()
+    pub const fn pin1_activation(&self) -> PinActivation {
+        PinActivation::judge(self.scheme, None, self.pin1)
+    }
+
+    /// Whether PIN2 awaits its activation, judged without the flag.
+    #[must_use]
+    pub const fn pin2_activation(&self) -> PinActivation {
+        PinActivation::judge(self.scheme, None, self.pin2)
+    }
+
+    /// Exact activation-code length for the card's scheme.
+    #[must_use]
+    pub const fn activation_code_length(&self) -> usize {
+        self.scheme.activation_entry_digit_count()
     }
 }
 
@@ -156,7 +175,7 @@ pub fn present_readers() -> Result<Vec<String>, PcscError> {
 /// Inspect one FINEID card without sending credential-bearing commands.
 ///
 /// # Errors
-/// Returns reader, card-classification, trust, certificate, or PC/SC failures.
+/// Returns reader, card-classification, card-serial, certificate, or PC/SC failures.
 pub fn inspect(reader_filter: Option<&ReaderFilter>) -> Result<CardSnapshot, CardPinError> {
     inspected(reader_filter).inspect_err(|error| {
         refineid_dev_errors::report!(CardService, "card inspection failed", error);
@@ -171,22 +190,39 @@ fn inspected(reader_filter: Option<&ReaderFilter>) -> Result<CardSnapshot, CardP
         .map_err(|error| CardPinError::Pkcs15Select(format!("{error}")))?;
     crate::card_pin::re_verify_session(&mut transport, &context.bound_serial)?;
 
-    let pin1 = transport.pin_status(PinSlot::Pin1).ok();
-    let pin2 = transport.pin_status(PinSlot::Pin2).ok();
-    let puk = transport.puk_status().ok();
-    let pin1_changed = transport.pin_changed_flag(PinSlot::Pin1).ok().flatten();
-    let pin2_changed = transport.pin_changed_flag(PinSlot::Pin2).ok().flatten();
+    let numbering = context.numbering;
+    let scheme = context.scheme;
+    let pin1 = transport
+        .pin_status_with_scheme(numbering, PinSlot::Pin1)
+        .ok();
+    let pin2 = transport
+        .pin_status_with_scheme(numbering, PinSlot::Pin2)
+        .ok();
+    let puk = transport.puk_status_with_scheme(numbering).ok();
+    let pin1_changed = transport
+        .pin_changed_flag_with_scheme(numbering, PinSlot::Pin1)
+        .ok()
+        .flatten();
+    let pin2_changed = transport
+        .pin_changed_flag_with_scheme(numbering, PinSlot::Pin2)
+        .ok()
+        .flatten();
     let activation_code_length = context.expected_activation_pin_length();
-    let activation = crate::card_pin::judge_activation(pin1, context.generation, pin1_changed);
+    let pin1_activation = PinActivation::judge(scheme, pin1_changed, pin1);
+    let pin2_activation = PinActivation::judge(scheme, pin2_changed, pin2);
+    let activation = crate::card_pin::judge_activation(pin1_activation, pin2_activation);
 
     Ok(CardSnapshot {
         reader: context.reader_id.as_str().to_owned(),
         serial: context.bound_serial,
         person: context.identity.person_string(),
         model: context.model,
-        generation: context.generation,
+        numbering,
+        scheme,
         activation_code_length,
         activation,
+        pin1_activation,
+        pin2_activation,
         pin1,
         pin2,
         puk,
@@ -202,7 +238,7 @@ fn inspected(reader_filter: Option<&ReaderFilter>) -> Result<CardSnapshot, CardP
 /// CAN is consumed by PACE and does not enter logs or the returned snapshot.
 ///
 /// # Errors
-/// Returns reader, PACE, secure-messaging, trust, certificate, or PC/SC
+/// Returns reader, PACE, secure-messaging, card-serial, certificate, or PC/SC
 /// failures.
 pub fn inspect_contactless(
     reader_filter: Option<&ReaderFilter>,
@@ -247,31 +283,13 @@ fn inspected_contactless(
         transport
             .select_pkcs15_application()
             .map_err(|error| CardPinError::Pkcs15Select(format!("{error}")))?;
-
-        let root_der = transport
-            .read_certificate(CertSlot::RootCa)
-            .map_err(|error| CardPinError::CardDataUntrusted {
-                description: format!("protected root certificate read failed: {error}"),
-            })?;
-        let root_sha256 = Sha256::of(root_der.as_bytes());
-        if crate::trust_roots::pinned_root_label(root_sha256).is_none() {
-            return Err(CardPinError::CardDataUntrusted {
-                description: format!(
-                    "protected root certificate did not match a pinned DVV root (sha256 {root_sha256})"
-                ),
-            });
-        }
-
-        transport
-            .select_pkcs15_application()
-            .map_err(|error| CardPinError::Pkcs15Select(format!("{error}")))?;
         let token = transport.read_token_info().map_err(|error| {
             CardPinError::Transport(format!("protected EF.TokenInfo read: {error}"))
         })?;
         let serial = token
             .serial_number_hex
             .map(render_token_serial)
-            .ok_or_else(|| CardPinError::CardDataUntrusted {
+            .ok_or_else(|| CardPinError::CardSerialUnavailable {
                 description: "protected EF.TokenInfo did not publish a card serial".to_owned(),
             })?;
 
@@ -286,7 +304,7 @@ fn inspected_contactless(
                     CardPinError::Transport(format!("protected auth cert parse: {error}"))
                 })?;
         let cert = cert_owned.view();
-        let generation = classify_card_generation_by_issuance(cert.not_before);
+        let scheme = ActivationScheme::from_validity_start(cert.not_before);
         let person = identity_from_certificate(&cert).person_string();
 
         transport
@@ -304,7 +322,7 @@ fn inspected_contactless(
             lookup_atr,
             serial,
             person,
-            generation,
+            scheme,
             pin1,
             pin2,
             puk,
@@ -347,7 +365,7 @@ fn identity_from_certificate(
 /// Activate the card after binding the action to the displayed serial.
 ///
 /// # Errors
-/// Returns trust, card-swap, policy, PC/SC, or activation failures.
+/// Returns card-serial, card-swap, policy, PC/SC, or activation failures.
 pub fn activate(
     expected_serial: &TokenSerial,
     reader_filter: Option<&ReaderFilter>,
@@ -370,7 +388,7 @@ fn activated(
 /// Change PIN1 or PIN2 on the card currently shown by the UI.
 ///
 /// # Errors
-/// Returns trust, card-swap, retry-floor, policy, PC/SC, or card failures.
+/// Returns card-serial, card-swap, retry-floor, policy, PC/SC, or card failures.
 pub fn change_pin(
     expected_serial: &TokenSerial,
     options: ChangePinOptions,
@@ -384,7 +402,7 @@ fn changed_pin(
     options: ChangePinOptions,
 ) -> Result<ChangePinReport, CardPinError> {
     let reader_filter = options.reader_filter.as_deref().map(ReaderFilter::new);
-    let session = crate::card_pin::establish_trusted_session(PcscBackend, reader_filter.as_ref())?;
+    let session = crate::card_pin::establish_card_session(PcscBackend, reader_filter.as_ref())?;
     ensure_serial(expected_serial, &session.bound_serial)?;
     crate::card_pin::change_pin_first(PcscBackend, session.into_pin_management_context(), options)
 }
@@ -392,7 +410,7 @@ fn changed_pin(
 /// Unblock PIN1 or PIN2 with the shared recovery code.
 ///
 /// # Errors
-/// Returns trust, card-swap, policy, PC/SC, or recovery failures.
+/// Returns card-serial, card-swap, policy, PC/SC, or recovery failures.
 pub fn unblock_pin(
     expected_serial: &TokenSerial,
     options: UnblockPinOptions,
@@ -406,7 +424,7 @@ fn unblocked_pin(
     options: UnblockPinOptions,
 ) -> Result<UnblockPinReport, CardPinError> {
     let reader_filter = options.reader_filter.as_deref().map(ReaderFilter::new);
-    let session = crate::card_pin::establish_trusted_session(PcscBackend, reader_filter.as_ref())?;
+    let session = crate::card_pin::establish_card_session(PcscBackend, reader_filter.as_ref())?;
     ensure_serial(expected_serial, &session.bound_serial)?;
     crate::card_pin::unblock_pin_first(PcscBackend, session.into_pin_management_context(), options)
 }

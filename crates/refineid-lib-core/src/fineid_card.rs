@@ -130,6 +130,7 @@ impl Atr {
     pub fn classify(&self) -> Result<FineidCardModel, CardClassificationError> {
         self.fineid_pre_issuing()
             .and_then(FineidCardModel::from_pre_issuing)
+            .or_else(|| FineidCardModel::from_exact_atr(&self.to_wire_bytes()))
             .ok_or_else(|| CardClassificationError::UnknownOrUnsupportedAtr {
                 observed: self.clone(),
             })
@@ -210,20 +211,16 @@ impl fmt::Display for Ats {
 
 /// DVV's category label for a certificate card.
 ///
-/// Three values, only [`Self::CitizenEid`] is currently in
-/// scope for refineid. The labels here are exactly the
-/// strings DVV uses in the ATR/ATS technology note, minus
-/// the trailing "card" / "cards" plural.
+/// The labels here are exactly the strings DVV uses in the
+/// ATR/ATS technology note, minus the trailing "card" / "cards"
+/// plural.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CardType {
-    /// DVV's "Citizen eID" category -- the only in-scope card
-    /// type for refineid.
+    /// DVV's "Citizen eID" category.
     CitizenEid,
     /// DVV's "Social welfare and organizational" category.
-    /// Out of scope today.
     SocialWelfareAndOrganizational,
-    /// DVV's "Health care and organizational" category. Out
-    /// of scope today.
+    /// DVV's "Health care and organizational" category.
     HealthCareAndOrganizational,
 }
 
@@ -259,6 +256,8 @@ pub enum CardVendor {
     /// Gemalto (pre-2019 acquisition); preserved as a distinct
     /// variant so older-card identification stays exact.
     Gemalto,
+    /// Idemia.
+    Idemia,
 }
 
 impl CardVendor {
@@ -268,6 +267,7 @@ impl CardVendor {
         match self {
             Self::Thales => "Thales",
             Self::Gemalto => "Gemalto",
+            Self::Idemia => "Idemia",
         }
     }
 }
@@ -301,7 +301,23 @@ pub enum FineidCardModel {
     /// Gemalto `MultiApp` v4.2 -- Citizen eID, FINEID S4-1 v3.1.
     /// In production 2021-01-11 - 2023-03-12.
     GemaltoMultiAppV4_2,
+    /// Idemia Cosmo X -- Social welfare and organizational, FINEID
+    /// S1 v5.0.
+    IdemiaCosmoX,
 }
+
+/// Idemia Cosmo X contact ATR, from DVV's technology note on ATR
+/// bytes (v1.0, 2024-08-12), section "Idemia Cosmo X".
+const IDEMIA_COSMO_X_CONTACT_ATR: &[u8] = &[
+    0x3B, 0xDD, 0x96, 0x00, 0x80, 0x31, 0xFE, 0x45, 0x00, 0x31, 0xB8, 0x64, 0x04, 0x29, 0xEC, 0xC1,
+    0x73, 0x94, 0x01, 0x80, 0x83, 0x49,
+];
+
+/// Idemia Cosmo X contactless ATS, from the same DVV note and section.
+const IDEMIA_COSMO_X_CONTACTLESS_ATS: &[u8] = &[
+    0x3B, 0x89, 0x80, 0x01, 0x00, 0x31, 0xB8, 0x64, 0x04, 0x29, 0xEC, 0xC1, 0x73, 0x94, 0x01, 0x80,
+    0x83,
+];
 
 /// FINEID pre-issuing family-name marker (byte 1) on observed
 /// `MultiApp` cards (FINEID S4-1 §3.3.1).
@@ -317,7 +333,21 @@ impl FineidCardModel {
     /// All in-scope models, in no particular order.
     #[must_use]
     pub const fn all_known() -> &'static [Self] {
-        &[Self::ThalesMultiAppV5_0, Self::GemaltoMultiAppV4_2]
+        &[
+            Self::ThalesMultiAppV5_0,
+            Self::GemaltoMultiAppV4_2,
+            Self::IdemiaCosmoX,
+        ]
+    }
+
+    /// Identify a model whose ATR carries no FINEID pre-issuing data
+    /// by its full contact ATR, as DVV's note lists it.
+    #[must_use]
+    pub fn from_exact_atr(atr: &[u8]) -> Option<Self> {
+        Self::IdemiaCosmoX
+            .contact_atr_byte_sets()
+            .contains(&atr)
+            .then_some(Self::IdemiaCosmoX)
     }
 
     /// Identify the model from the FINEID pre-issuing data markers
@@ -348,6 +378,7 @@ impl FineidCardModel {
     pub const fn card_type(self) -> CardType {
         match self {
             Self::ThalesMultiAppV5_0 | Self::GemaltoMultiAppV4_2 => CardType::CitizenEid,
+            Self::IdemiaCosmoX => CardType::SocialWelfareAndOrganizational,
         }
     }
 
@@ -357,20 +388,22 @@ impl FineidCardModel {
         match self {
             Self::ThalesMultiAppV5_0 => CardVendor::Thales,
             Self::GemaltoMultiAppV4_2 => CardVendor::Gemalto,
+            Self::IdemiaCosmoX => CardVendor::Idemia,
         }
     }
 
     /// Vendor's product family name (`"MultiApp"` for both
-    /// in-scope models -- pre/post Gemalto -> Thales rebrand
-    /// is the same product line).
+    /// Thales and Gemalto models -- pre/post Gemalto -> Thales
+    /// rebrand is the same product line).
     #[must_use]
     pub const fn vendor_product(self) -> &'static str {
         match self {
             Self::ThalesMultiAppV5_0 | Self::GemaltoMultiAppV4_2 => "MultiApp",
+            Self::IdemiaCosmoX => "Cosmo",
         }
     }
 
-    /// Vendor's product version, bare ("5.0", "4.2"). The
+    /// Vendor's product version, bare ("5.0", "4.2", "X"). The
     /// "v" prefix DVV uses in prose (e.g. "v5.0") is not
     /// part of the version value; the wire field name
     /// announces "this is a version" already.
@@ -379,6 +412,7 @@ impl FineidCardModel {
         match self {
             Self::ThalesMultiAppV5_0 => "5.0",
             Self::GemaltoMultiAppV4_2 => "4.2",
+            Self::IdemiaCosmoX => "X",
         }
     }
 
@@ -388,6 +422,7 @@ impl FineidCardModel {
     pub const fn fineid_specification(self) -> &'static str {
         match self {
             Self::ThalesMultiAppV5_0 | Self::GemaltoMultiAppV4_2 => "S4-1",
+            Self::IdemiaCosmoX => "S1",
         }
     }
 
@@ -398,6 +433,7 @@ impl FineidCardModel {
         match self {
             Self::ThalesMultiAppV5_0 => "4.0",
             Self::GemaltoMultiAppV4_2 => "3.1",
+            Self::IdemiaCosmoX => "5.0",
         }
     }
 
@@ -442,6 +478,7 @@ impl FineidCardModel {
                     0x1B, 0x12, 0x00, 0xF6, 0x82, 0x90, 0x00,
                 ],
             ],
+            Self::IdemiaCosmoX => &[IDEMIA_COSMO_X_CONTACT_ATR],
         }
     }
 
@@ -459,6 +496,7 @@ impl FineidCardModel {
                 0x14, 0x78, 0x77, 0x95, 0x02, 0x80, 0x31, 0xB8, 0x65, 0xB0, 0x85, 0x04, 0x02, 0x1B,
                 0x12, 0x00, 0xF6, 0x82, 0x90, 0x00,
             ]],
+            Self::IdemiaCosmoX => &[IDEMIA_COSMO_X_CONTACTLESS_ATS],
         }
     }
 }
@@ -466,10 +504,9 @@ impl FineidCardModel {
 /// Error returned by [`Atr::classify`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CardClassificationError {
-    /// Observed ATR didn't match any in-scope FINEID card
-    /// model. Out-of-scope DVV cards (expired older
-    /// generations, social welfare / organizational, health
-    /// care) land here, as does any non-FINEID smartcard.
+    /// Observed ATR didn't match any FINEID card model in
+    /// [`FineidCardModel::all_known`]. Expired DVV card models
+    /// land here, as does any non-FINEID smartcard.
     UnknownOrUnsupportedAtr {
         /// The ATR bytes that didn't classify. Surfaced so the
         /// operator can compare against DVV's technology note on ATR bytes.
@@ -659,18 +696,19 @@ mod tests {
     }
 
     #[test]
-    fn social_welfare_atr_is_rejected_in_citizen_classifier() {
-        // Idemia Cosmo X (FINEID S1 v5.0), Social welfare /
-        // organizational -- out of scope.
-        let bytes: [u8; 22] = [
-            0x3B, 0xDD, 0x96, 0x00, 0x80, 0x31, 0xFE, 0x45, 0x00, 0x31, 0xB8, 0x64, 0x04, 0x29,
-            0xEC, 0xC1, 0x73, 0x94, 0x01, 0x80, 0x83, 0x49,
-        ];
-        let atr = Atr::new(bytes).expect("social welfare ATR fixture parses");
-        assert!(matches!(
-            atr.classify(),
-            Err(CardClassificationError::UnknownOrUnsupportedAtr { .. })
-        ));
+    fn idemia_cosmo_x_atr_classifies() {
+        for bytes in FineidCardModel::IdemiaCosmoX.contact_atr_byte_sets() {
+            let atr = Atr::new(*bytes).expect("Idemia Cosmo X ATR parses");
+            assert_eq!(
+                atr.classify().expect("Idemia Cosmo X ATR classifies"),
+                FineidCardModel::IdemiaCosmoX
+            );
+        }
+        let m = FineidCardModel::IdemiaCosmoX;
+        assert_eq!(m.card_type(), CardType::SocialWelfareAndOrganizational);
+        assert_eq!(m.vendor().as_dvv_label(), "Idemia");
+        assert_eq!(m.fineid_specification(), "S1");
+        assert_eq!(m.fineid_specification_version(), "5.0");
     }
 
     #[test]
@@ -712,11 +750,18 @@ mod tests {
     fn card_vendor_all_dvv_labels() {
         assert_eq!(CardVendor::Thales.as_dvv_label(), "Thales");
         assert_eq!(CardVendor::Gemalto.as_dvv_label(), "Gemalto");
+        assert_eq!(CardVendor::Idemia.as_dvv_label(), "Idemia");
     }
 
     #[test]
-    fn all_known_covers_two_in_scope_models() {
-        assert_eq!(FineidCardModel::all_known().len(), 2);
+    fn all_known_lists_every_model() {
+        for model in [
+            FineidCardModel::ThalesMultiAppV5_0,
+            FineidCardModel::GemaltoMultiAppV4_2,
+            FineidCardModel::IdemiaCosmoX,
+        ] {
+            assert!(FineidCardModel::all_known().contains(&model));
+        }
     }
 
     #[test]

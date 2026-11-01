@@ -44,14 +44,13 @@ use refineid_doc_sign::service::{
     sign_qualified,
 };
 use refineid_doc_sign::verify::VerifyOptions;
+use refineid_lib_core::activation::PinActivation;
 use refineid_lib_core::apdu::status_word::PinRetries;
+use refineid_lib_core::auth::PinReferenceScheme;
 use refineid_lib_core::auth::{ChangePinOutcome, PinStatus, PukStatus, UnblockOutcome};
 use refineid_lib_core::can::{CAN_DIGITS, Can};
 use refineid_lib_core::identity::TokenSerial;
-use refineid_lib_core::pin::{
-    ActivationCode, ActivationPinEight, ActivationPinSeven, PinBytes, Puk,
-};
-use refineid_lib_core::pkcs15::CardGeneration;
+use refineid_lib_core::pin::{PinBytes, Puk};
 use refineid_lib_pcsc::PcscBackend;
 use refineid_windows_credential_store::{read_can, save_can};
 use refineid_windows_driver_probe::{self, LocalCardSupport};
@@ -115,9 +114,11 @@ struct CardSnapshotDto {
     serial: String,
     person: String,
     model: String,
-    generation: &'static str,
-    activation_code_length: Option<usize>,
+    organization_card: bool,
+    activation_code_length: usize,
     activation_state: &'static str,
+    pin1_awaits_activation: bool,
+    pin2_awaits_activation: bool,
     pin1: Option<CredentialStatusDto>,
     pin2: Option<CredentialStatusDto>,
     puk: Option<CredentialStatusDto>,
@@ -130,7 +131,6 @@ struct ContactlessSnapshotDto {
     reader: String,
     serial: String,
     person: String,
-    generation: &'static str,
     pin1: Option<CredentialStatusDto>,
     pin2: Option<CredentialStatusDto>,
     puk: Option<CredentialStatusDto>,
@@ -165,9 +165,11 @@ impl From<CardSnapshot> for CardSnapshotDto {
             serial: snapshot.serial.as_str().to_owned(),
             person: snapshot.person,
             model,
-            generation: generation_label(snapshot.generation),
+            organization_card: snapshot.numbering == PinReferenceScheme::Organizational,
             activation_code_length: snapshot.activation_code_length,
             activation_state: activation_state_label(snapshot.activation),
+            pin1_awaits_activation: snapshot.pin1_activation == PinActivation::AwaitsActivation,
+            pin2_awaits_activation: snapshot.pin2_activation == PinActivation::AwaitsActivation,
             pin1: snapshot.pin1.map(CredentialStatusDto::from),
             pin2: snapshot.pin2.map(CredentialStatusDto::from),
             puk: snapshot.puk.map(CredentialStatusDto::from),
@@ -183,7 +185,6 @@ impl From<ContactlessSnapshot> for ContactlessSnapshotDto {
             reader: snapshot.reader,
             serial: snapshot.serial.as_str().to_owned(),
             person: snapshot.person,
-            generation: generation_label(snapshot.generation),
             pin1: snapshot.pin1.map(CredentialStatusDto::from),
             pin2: snapshot.pin2.map(CredentialStatusDto::from),
             puk: snapshot.puk.map(CredentialStatusDto::from),
@@ -200,9 +201,11 @@ impl From<ContactlessSnapshot> for CardSnapshotDto {
             serial: snapshot.serial.as_str().to_owned(),
             person: snapshot.person.clone(),
             model: "FINEID contactless".to_owned(),
-            generation: generation_label(snapshot.generation),
+            organization_card: false,
             activation_code_length: snapshot.activation_code_length(),
             activation_state: activation_state_label(snapshot.activation()),
+            pin1_awaits_activation: snapshot.pin1_activation() == PinActivation::AwaitsActivation,
+            pin2_awaits_activation: snapshot.pin2_activation() == PinActivation::AwaitsActivation,
             pin1: snapshot.pin1.map(CredentialStatusDto::from),
             pin2: snapshot.pin2.map(CredentialStatusDto::from),
             puk: snapshot.puk.map(CredentialStatusDto::from),
@@ -262,20 +265,11 @@ impl CredentialStatusDto {
     }
 }
 
-const fn generation_label(generation: CardGeneration) -> &'static str {
-    match generation {
-        CardGeneration::Newer => "newer",
-        CardGeneration::Older => "older",
-        CardGeneration::Unknown => "unknown",
-    }
-}
-
 /// The activation evidence as the app's JSON names it.
 const fn activation_state_label(activation: ActivationEvidence) -> &'static str {
     match activation {
         ActivationEvidence::Unactivated => "unactivated",
         ActivationEvidence::Activated => "activated",
-        ActivationEvidence::Inconclusive => "inconclusive",
     }
 }
 
@@ -851,7 +845,9 @@ pub unsafe extern "C" fn refineid_settings_unblock_pin(
     })
 }
 
-/// Activate a card and set its initial PIN1 and PIN2 values.
+/// Activate a card and set the initial value of each PIN that awaits
+/// activation. A new PIN and its confirmation are both empty for a PIN
+/// that does not await it.
 ///
 /// # Safety
 ///
@@ -882,36 +878,35 @@ pub unsafe extern "C" fn refineid_settings_activate(
         // SAFETY: See the comment above.
         let serial = unsafe { copy_utf8(serial, serial_length, MAX_SERIAL_BYTES, "card serial") }?;
         // SAFETY: Secret inputs are copied into zeroizing domain types.
-        let activation = unsafe { copy_activation_code(activation_code, activation_code_length) }?;
+        let activation_code =
+            unsafe { copy_pin(activation_code, activation_code_length, "activation code") }?;
         // SAFETY: As above.
-        let new_pin1 = unsafe { copy_pin(new_pin1, new_pin1_length, "new PIN1") }?;
-        // SAFETY: As above.
-        let pin1_confirmation = unsafe {
-            copy_pin(
-                pin1_confirmation,
-                pin1_confirmation_length,
+        // SAFETY: As above; an empty pair names a PIN the card does not
+        // ask for.
+        let new_pin1 = unsafe {
+            copy_optional_pin_pair(
+                (new_pin1, new_pin1_length),
+                (pin1_confirmation, pin1_confirmation_length),
+                "new PIN1",
                 "PIN1 confirmation",
             )
         }?;
-        require_confirmation(&new_pin1, &pin1_confirmation)?;
         // SAFETY: As above.
-        let new_pin2 = unsafe { copy_pin(new_pin2, new_pin2_length, "new PIN2") }?;
-        // SAFETY: As above.
-        let pin2_confirmation = unsafe {
-            copy_pin(
-                pin2_confirmation,
-                pin2_confirmation_length,
+        let new_pin2 = unsafe {
+            copy_optional_pin_pair(
+                (new_pin2, new_pin2_length),
+                (pin2_confirmation, pin2_confirmation_length),
+                "new PIN2",
                 "PIN2 confirmation",
             )
         }?;
-        require_confirmation(&new_pin2, &pin2_confirmation)?;
 
         let filter = service::reader_filter(reader);
         let report = service::activate(
             &TokenSerial::new(serial),
             Some(&filter),
             ActivateOptions {
-                activation_pin: activation,
+                activation_code,
                 new_pin1,
                 new_pin2,
                 allow_reactivate: allow_reactivate != 0,
@@ -1022,8 +1017,9 @@ fn activation_result(
 ) -> MutationResult {
     let refused = matches!(
         report.preflight,
-        ActivatePreflightOutcome::LooksActivated { .. }
-    ) && report.pin1_outcome.is_none();
+        ActivatePreflightOutcome::NothingAwaits { .. }
+    ) && report.pin1_outcome.is_none()
+        && report.pin2_outcome.is_none();
     if refused {
         return MutationResult {
             succeeded: false,
@@ -1034,7 +1030,8 @@ fn activation_result(
         };
     }
     match (report.pin1_outcome, report.pin2_outcome) {
-        (Some(UnblockOutcome::Ok), Some(UnblockOutcome::Ok)) => MutationResult {
+        (Some(UnblockOutcome::Ok) | None, Some(UnblockOutcome::Ok))
+        | (Some(UnblockOutcome::Ok), None) => MutationResult {
             succeeded: true,
             outcome: "activated",
             message: "The card was activated and both PIN values were set.".to_owned(),
@@ -1062,13 +1059,19 @@ fn activation_result(
                 status_word,
             }
         }
-        (None, _) => MutationResult {
-            succeeded: false,
-            outcome: "activation_incomplete",
-            message: "The card did not accept the activation request.".to_owned(),
-            attempts_remaining: None,
-            status_word: None,
-        },
+        (None, pin2) => {
+            let second = pin2.map(|value| unblock_result(value, PinManageSlot::Pin2));
+            MutationResult {
+                succeeded: false,
+                outcome: "activation_incomplete",
+                message: second.as_ref().map_or_else(
+                    || "The card did not accept the activation request.".to_owned(),
+                    |value| value.message.clone(),
+                ),
+                attempts_remaining: second.as_ref().and_then(|value| value.attempts_remaining),
+                status_word: second.as_ref().and_then(|value| value.status_word),
+            }
+        }
     }
 }
 
@@ -1098,24 +1101,28 @@ fn pin_role_error(error: impl core::fmt::Display) -> ApiFailure {
     ApiFailure::new("invalid_secret_shape", error.to_string())
 }
 
-unsafe fn copy_activation_code(
-    input: *const u8,
-    length: usize,
-) -> Result<ActivationCode, ApiFailure> {
-    // SAFETY: copy_pin applies the pointer and length checks before reading.
-    let bytes = unsafe { copy_pin(input, length, "activation code") }?;
-    match length {
-        ActivationPinSeven::LENGTH => ActivationPinSeven::new(bytes)
-            .map(ActivationCode::Seven)
-            .map_err(pin_role_error),
-        ActivationPinEight::LENGTH => ActivationPinEight::new(bytes)
-            .map(ActivationCode::Eight)
-            .map_err(pin_role_error),
-        _ => Err(ApiFailure::new(
-            "invalid_activation_code_shape",
-            "The activation code must contain seven or eight digits.",
-        )),
+/// Copy a new PIN and its confirmation, or `None` when both are empty:
+/// the activation form asks only for the PINs that await activation.
+///
+/// # Safety
+///
+/// Each non-null pointer must address its accompanying number of
+/// readable bytes for the duration of the call.
+unsafe fn copy_optional_pin_pair(
+    (pin, pin_length): (*const u8, usize),
+    (confirmation, confirmation_length): (*const u8, usize),
+    pin_label: &'static str,
+    confirmation_label: &'static str,
+) -> Result<Option<PinBytes>, ApiFailure> {
+    if pin_length == 0 && confirmation_length == 0 {
+        return Ok(None);
     }
+    // SAFETY: copy_pin applies the pointer and length checks before reading.
+    let pin = unsafe { copy_pin(pin, pin_length, pin_label) }?;
+    // SAFETY: As above.
+    let confirmation = unsafe { copy_pin(confirmation, confirmation_length, confirmation_label) }?;
+    require_confirmation(&pin, &confirmation)?;
+    Ok(Some(pin))
 }
 
 unsafe fn copy_pin(

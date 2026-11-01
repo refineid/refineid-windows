@@ -181,10 +181,16 @@
     <value>Återställ PIN-kod</value>
   </data>
   <data name="ActivationPanel.AutomationProperties.Name" xml:space="preserve">
-    <value>Aktivera ett nytt kort</value>
+    <value>Aktivering av identitetskortet</value>
   </data>
   <data name="ActivationHeading.Text" xml:space="preserve">
-    <value>Aktivera ett nytt kort</value>
+    <value>Aktivering av identitetskortet</value>
+  </data>
+  <data name="IdentityCardActivationHeading" xml:space="preserve">
+    <value>Aktivering av identitetskortet</value>
+  </data>
+  <data name="OrganisationCardActivationHeading" xml:space="preserve">
+    <value>Aktivering av organisationskortet</value>
   </data>
   <data name="ActivationCodeBox.Header" xml:space="preserve">
     <value>Aktiveringskod från brevet</value>

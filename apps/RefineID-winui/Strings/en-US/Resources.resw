@@ -181,10 +181,16 @@
     <value>Reset PIN</value>
   </data>
   <data name="ActivationPanel.AutomationProperties.Name" xml:space="preserve">
-    <value>Activate a new card</value>
+    <value>Identity card activation</value>
   </data>
   <data name="ActivationHeading.Text" xml:space="preserve">
-    <value>Activate a new card</value>
+    <value>Identity card activation</value>
+  </data>
+  <data name="IdentityCardActivationHeading" xml:space="preserve">
+    <value>Identity card activation</value>
+  </data>
+  <data name="OrganisationCardActivationHeading" xml:space="preserve">
+    <value>Organisation card activation</value>
   </data>
   <data name="ActivationCodeBox.Header" xml:space="preserve">
     <value>Activation code from letter</value>

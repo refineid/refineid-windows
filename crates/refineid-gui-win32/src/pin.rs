@@ -2,9 +2,8 @@
 //! PIN screen backend: status reads plus change, unblock, and
 //! activate operations.
 //!
-//! Secrets cross this module only as validated [`PinBytes`],
-//! [`Puk`], or [`ActivationCode`] values built from raw digit
-//! buffers at the UI boundary. They are never held in `String`,
+//! Secrets cross this module only as validated [`PinBytes`] or
+//! [`Puk`] values built from raw digit buffers at the UI boundary. They are never held in `String`,
 //! never formatted (not even their lengths), and never logged;
 //! retry counts are the only numbers that reach the display.
 use refineid_card_manager_core::card_pin::ActivatePreflightOutcome;
@@ -14,9 +13,7 @@ use refineid_card_manager_core::card_pin::{
 };
 use refineid_card_manager_core::service;
 use refineid_lib_core::auth::{ChangePinOutcome, UnblockOutcome};
-use refineid_lib_core::pin::{
-    ActivationCode, ActivationPinEight, ActivationPinSeven, PinBytes, PinRoleError, Puk,
-};
+use refineid_lib_core::pin::{ActivationPinSeven, PinBytes, PinRoleError, Puk};
 use zeroize::Zeroize;
 
 use crate::identity::{StateText, credential_label, pin_kind, puk_kind, puk_label, short_error};
@@ -94,9 +91,9 @@ pub enum PinJob {
         new: PinBytes,
     },
     Activate {
-        code: ActivationCode,
-        pin1: PinBytes,
-        pin2: PinBytes,
+        code: PinBytes,
+        pin1: Option<PinBytes>,
+        pin2: Option<PinBytes>,
     },
 }
 
@@ -243,42 +240,69 @@ fn prepare_unblock(
     Ok((puk, new))
 }
 
+/// Validate the activation fields. The code's exact length is the
+/// card's to decide ([`run_activate`] checks it against the card's
+/// scheme before any command); here it only has to be digits no
+/// shorter than any scheme takes. A PIN whose two fields are both
+/// empty is not entered; the card service refuses unless the entries
+/// name exactly the PINs that await activation.
 fn prepare_activate(
     mut fields: Vec<Vec<u8>>,
-) -> Result<(ActivationCode, PinBytes, PinBytes), String> {
+) -> Result<(PinBytes, Option<PinBytes>, Option<PinBytes>), String> {
     if fields.len() != 5 {
         zeroize_all(&mut fields);
         return Err(String::from("Internal error: wrong field count."));
     }
-    let raw = take_digit_buffer(&mut fields, 0, "Activation code", 7, "7 or 8 digits")?;
-    let code = match raw.digit_count() {
-        7 => ActivationPinSeven::new(raw)
-            .map(ActivationCode::Seven)
-            .map_err(|error| role_error("The activation code", "7 or 8 digits", error))?,
-        8 => ActivationPinEight::new(raw)
-            .map(ActivationCode::Eight)
-            .map_err(|error| role_error("The activation code", "7 or 8 digits", error))?,
-        _ => {
-            return Err(String::from(
-                "The activation code has the wrong length (7 or 8 digits).",
-            ));
-        }
-    };
-    let pin1 = take_digit_buffer(&mut fields, 1, PIN1_FIELDS.new, 4, "4-12 digits")?;
-    let confirm1 = take_digit_buffer(&mut fields, 2, PIN1_FIELDS.repeat, 4, "4-12 digits")?;
-    if pin1.as_bytes() != confirm1.as_bytes() {
-        return Err(String::from(
-            "The PIN 1 entries do not match; nothing was sent to the card.",
-        ));
-    }
-    let pin2 = take_digit_buffer(&mut fields, 3, PIN2_FIELDS.new, 6, "6-12 digits")?;
-    let confirm2 = take_digit_buffer(&mut fields, 4, PIN2_FIELDS.repeat, 6, "6-12 digits")?;
-    if pin2.as_bytes() != confirm2.as_bytes() {
-        return Err(String::from(
-            "The PIN 2 entries do not match; nothing was sent to the card.",
-        ));
-    }
+    let code = take_digit_buffer(
+        &mut fields,
+        0,
+        "Activation code",
+        ActivationPinSeven::LENGTH,
+        "7 or 8 digits",
+    )?;
+    let pin1 = take_optional_pair(
+        &mut fields,
+        1,
+        PIN1_FIELDS,
+        4,
+        "4-12 digits",
+        "The PIN 1 entries do not match; nothing was sent to the card.",
+    )?;
+    let pin2 = take_optional_pair(
+        &mut fields,
+        3,
+        PIN2_FIELDS,
+        6,
+        "6-12 digits",
+        "The PIN 2 entries do not match; nothing was sent to the card.",
+    )?;
     Ok((code, pin1, pin2))
+}
+
+/// Move a new PIN and its repeat, at `index` and the next field, into
+/// a validated [`PinBytes`]; `None` when both fields are empty. Two
+/// entries that differ give `mismatch`.
+fn take_optional_pair(
+    fields: &mut [Vec<u8>],
+    index: usize,
+    labels: PinFields,
+    role_min: usize,
+    hint: &str,
+    mismatch: &str,
+) -> Result<Option<PinBytes>, String> {
+    let repeat_index = index.saturating_add(1);
+    let both_empty = fields.get(index).is_some_and(Vec::is_empty)
+        && fields.get(repeat_index).is_some_and(Vec::is_empty);
+    if both_empty {
+        return Ok(None);
+    }
+    let pin = take_digit_buffer(fields, index, labels.new, role_min, hint)?;
+    let repeat = take_digit_buffer(fields, repeat_index, labels.repeat, role_min, hint)?;
+    if pin.as_bytes() != repeat.as_bytes() {
+        zeroize_all(fields);
+        return Err(String::from(mismatch));
+    }
+    Ok(Some(pin))
 }
 
 /// Move one buffer into a validated [`PinBytes`]. The role minimum
@@ -367,16 +391,18 @@ fn run_unblock(
 
 fn run_activate(
     reader: &str,
-    code: ActivationCode,
-    pin1: PinBytes,
-    pin2: PinBytes,
+    code: PinBytes,
+    pin1: Option<PinBytes>,
+    pin2: Option<PinBytes>,
 ) -> Result<String, String> {
     let filter = service::reader_filter(reader.to_owned());
-    let serial = service::inspect(Some(&filter))
-        .map_err(|error| op_error(&error))?
-        .serial;
+    let snapshot = service::inspect(Some(&filter)).map_err(|error| op_error(&error))?;
+    if code.digit_count() != snapshot.activation_code_length {
+        return Err(activation_length_error(snapshot.activation_code_length));
+    }
+    let serial = snapshot.serial;
     let options = ActivateOptions {
-        activation_pin: code,
+        activation_code: code,
         new_pin1: pin1,
         new_pin2: pin2,
         allow_reactivate: false,
@@ -447,13 +473,21 @@ fn render_unblock(report: &UnblockPinReport) -> String {
     }
 }
 
+/// The refusal for an activation code of the wrong length for the
+/// card's scheme.
+fn activation_length_error(expected: usize) -> String {
+    format!(
+        "The activation code must have {expected} digits for this card; nothing was sent to the card."
+    )
+}
+
 fn render_activate(report: &ActivateReport) -> String {
     let mut out = String::new();
     match report.preflight {
-        ActivatePreflightOutcome::LooksUnactivated { .. } => {
+        ActivatePreflightOutcome::AwaitsActivation { .. } => {
             out.push_str("Card looks unactivated; activation proceeded.\r\n");
         }
-        ActivatePreflightOutcome::LooksActivated { .. } => {
+        ActivatePreflightOutcome::NothingAwaits { .. } => {
             out.push_str("Card already looks activated.\r\n");
         }
     }
@@ -493,6 +527,9 @@ fn op_error(error: &CardPinError) -> String {
         CardPinError::CardSessionRevoked { .. } => String::from(
             "The card or reader changed during the operation. Check the card and retry.",
         ),
+        CardPinError::ActivationLengthMismatch { expected, .. } => {
+            activation_length_error(*expected)
+        }
         other => flatten(&other.to_string(), 400),
     }
 }

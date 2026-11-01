@@ -43,8 +43,8 @@ use refineid_lib_core::apdu::iso7816::ApduClass;
 use refineid_lib_core::apdu::status_word::StatusWord;
 use refineid_lib_core::auth::commands::VerifyMode;
 use refineid_lib_core::auth::{
-    AuthError, PIN_PAD_BYTE, PinOps as _, PinPolicyReason, PinSlot, PinStatus, VerifyOutcome,
-    classify_pin_status_sw, classify_verify_sw,
+    AuthError, PIN_PAD_BYTE, PinOps as _, PinPolicyReason, PinReferenceScheme, PinSlot,
+    VerifyOutcome, classify_verify_sw,
 };
 use refineid_lib_core::backend::{
     ReaderAccessCap, ReaderBackend as _, ReaderBackendOps as _, ReaderPickError,
@@ -653,100 +653,10 @@ impl From<ReaderPickError> for SignErrorKind {
     }
 }
 
-/// Drive the sign chain for `slot` on the first reader with a
-/// card. `options` is taken by value so the embedded
-/// [`PinBytes`] drops (and zeroes) when this function returns,
-/// regardless of branch.
-///
-/// # Errors
-/// PC/SC enumeration / connect failure, PIN policy / verify
-/// failure, sign-chain SW failure, signature-length mismatch,
-/// cert read or parse failure, local-verify failure, or
-/// input / output I/O failure.
-// sign_with_slot is a flat sequence of open -> read input -> hash
-// -> read cert -> VERIFY PIN -> sign chain -> local verify ->
-// write. Splitting into helpers would just shuttle locals across
-// boundaries; the body reads top-to-bottom as one operation.
-/// PIN reference numbering: whose P2 bytes VERIFY speaks.
-///
-/// Ported from the sibling `refineid-unix` `auth` module
-/// (Apache-2.0, same copyright holder); the Windows port of
-/// `refineid-lib-core` only numbers the citizen slots, so the
-/// organizational numbering and the scheme-aware VERIFY path
-/// live here until the core port catches up.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PinReferenceScheme {
-    /// FINEID S1 v4.2 §3.5.2 numbering -- the citizen cards.
-    Citizen,
-    /// FINEID S4-2 v4.0 §4.2 numbering -- the organization cards.
-    Organizational,
-}
-
-/// Citizen PIN1 VERIFY P2 (FINEID S1 v4.2 §3.5.2).
-const PIN1_REFERENCE_CITIZEN: u8 = 0x11;
-/// Citizen PIN2 VERIFY P2.
-const PIN2_REFERENCE_CITIZEN: u8 = 0x82;
-/// Organizational PIN1 VERIFY P2 (FINEID S4-2 v4.0 §4.2).
-const PIN1_REFERENCE_ORGANIZATIONAL: u8 = 0x03;
-/// Organizational PIN2 VERIFY P2.
-const PIN2_REFERENCE_ORGANIZATIONAL: u8 = 0x04;
 /// Organizational PIN minimum length (S4-2 v4.0 §4.2).
 const ORGANIZATIONAL_PIN_MIN_LENGTH: usize = 4;
 /// Organizational PIN stored (padded) length.
 const ORGANIZATIONAL_PIN_STORED_LENGTH: usize = 8;
-
-impl PinReferenceScheme {
-    /// VERIFY P2 byte for `slot` under this numbering.
-    const fn p2_reference(self, slot: PinSlot) -> u8 {
-        match (self, slot) {
-            (Self::Citizen, PinSlot::Pin1) => PIN1_REFERENCE_CITIZEN,
-            (Self::Citizen, PinSlot::Pin2) => PIN2_REFERENCE_CITIZEN,
-            (Self::Organizational, PinSlot::Pin1) => PIN1_REFERENCE_ORGANIZATIONAL,
-            (Self::Organizational, PinSlot::Pin2) => PIN2_REFERENCE_ORGANIZATIONAL,
-        }
-    }
-}
-
-/// Ask the card which reference numbering it speaks.
-///
-/// A VERIFY status probe against an absent reference answers
-/// `SW=6A88` without touching any retry counter, so the probe
-/// costs one command and no risk.
-fn resolve_pin_reference_scheme<T: CardTransport>(
-    transport: &mut T,
-) -> Result<PinReferenceScheme, AuthError<TransportDispatchError<T::Error>>> {
-    let citizen = reference_probe_sw(transport, PinReferenceScheme::Citizen, PinSlot::Pin1)?;
-    if !matches!(citizen, StatusWord::ReferenceDataNotFound) {
-        return Ok(PinReferenceScheme::Citizen);
-    }
-    let organizational =
-        reference_probe_sw(transport, PinReferenceScheme::Organizational, PinSlot::Pin1)?;
-    Ok(match classify_pin_status_sw(organizational) {
-        PinStatus::Verified | PinStatus::Remaining(_) | PinStatus::Locked | PinStatus::NoInfo => {
-            PinReferenceScheme::Organizational
-        }
-        PinStatus::Other(_) => PinReferenceScheme::Citizen,
-    })
-}
-
-/// Counter-safe VERIFY status probe (`Lc=0`) against `slot` under
-/// `scheme`. Wire-identical to the core `pin_status` probe
-/// except for the P2 source.
-fn reference_probe_sw<T: CardTransport>(
-    transport: &mut T,
-    scheme: PinReferenceScheme,
-    slot: PinSlot,
-) -> Result<StatusWord, AuthError<TransportDispatchError<T::Error>>> {
-    let apdu = [
-        ApduClass::Plain.as_byte(),
-        0x20, // INS VERIFY
-        VerifyMode::Verify.as_p1(),
-        scheme.p2_reference(slot),
-        0x00, // Lc=0 probe form
-    ];
-    let r = transport.transmit(&apdu).map_err(AuthError::Transport)?;
-    Ok(r.status_word())
-}
 
 /// Apply the retry floor to the signing PIN under `scheme`, from its
 /// counter-safe status probe, before any VERIFY can spend an attempt.
@@ -754,8 +664,8 @@ fn signing_pin_retry_floor<T: CardTransport>(
     transport: &mut T,
     scheme: PinReferenceScheme,
 ) -> Result<(), SignErrorKind> {
-    let status = reference_probe_sw(transport, scheme, SIGNING_PIN)
-        .map(classify_pin_status_sw)
+    let status = transport
+        .pin_status_with_scheme(scheme, SIGNING_PIN)
         .map_err(|e| match e {
             AuthError::Transport(t) => SignErrorKind::Transport(format!("{t}")),
             AuthError::PinPolicy(reason) => SignErrorKind::PinPolicy { reason },
@@ -789,7 +699,7 @@ fn verify_pin_with_scheme<T: CardTransport>(
     out.push(ApduClass::Plain.as_byte());
     out.push(0x20); // INS VERIFY
     out.push(VerifyMode::Verify.as_p1());
-    out.push(scheme.p2_reference(slot));
+    out.push(scheme.reference(slot));
     let Ok(lc) = u8::try_from(padded.len()) else {
         unreachable!("VERIFY PIN block exceeds short-form Lc")
     };
@@ -1147,10 +1057,12 @@ fn sign_chain<T: CardTransport>(
     // The reference numbering is the card's to declare (citizen
     // S1 v4.2 vs organizational S4-2 v4.0), resolved by
     // counter-safe probes before the typed PIN is spent.
-    let scheme = resolve_pin_reference_scheme(transport).map_err(|e| match e {
-        AuthError::Transport(t) => SignErrorKind::Transport(format!("{t}")),
-        AuthError::PinPolicy(reason) => SignErrorKind::PinPolicy { reason },
-    })?;
+    let scheme = transport
+        .resolve_pin_reference_scheme()
+        .map_err(|e| match e {
+            AuthError::Transport(t) => SignErrorKind::Transport(format!("{t}")),
+            AuthError::PinPolicy(reason) => SignErrorKind::PinPolicy { reason },
+        })?;
     signing_pin_retry_floor(transport, scheme)?;
     let outcome = verify_pin_with_scheme(transport, SIGNING_PIN, scheme, options.pin.clone())
         .map_err(|e| match e {
@@ -2851,7 +2763,7 @@ mod tests {
                 check_true(sent.len() == 1, "one counter-safe probe")?;
                 check_true(
                     sent.first().and_then(|apdu| apdu.get(P2_OFFSET)).copied()
-                        == Some(scheme.p2_reference(SIGNING_PIN)),
+                        == Some(scheme.reference(SIGNING_PIN)),
                     "the probe targets the signing PIN",
                 )?;
             }

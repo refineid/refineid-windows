@@ -181,10 +181,16 @@
     <value>Palauta tunnusluku</value>
   </data>
   <data name="ActivationPanel.AutomationProperties.Name" xml:space="preserve">
-    <value>Aktivoi uusi kortti</value>
+    <value>Henkilökortin aktivointi</value>
   </data>
   <data name="ActivationHeading.Text" xml:space="preserve">
-    <value>Aktivoi uusi kortti</value>
+    <value>Henkilökortin aktivointi</value>
+  </data>
+  <data name="IdentityCardActivationHeading" xml:space="preserve">
+    <value>Henkilökortin aktivointi</value>
+  </data>
+  <data name="OrganisationCardActivationHeading" xml:space="preserve">
+    <value>Organisaatiokortin aktivointi</value>
   </data>
   <data name="ActivationCodeBox.Header" xml:space="preserve">
     <value>Aktivointikoodi kirjeestä</value>

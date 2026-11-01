@@ -222,15 +222,16 @@
                             x:Uid="ActivationPanel"
                             Padding="16,12,16,16"
                             AutomationProperties.AutomationId="ActivationPanel"
-                            AutomationProperties.Name="Activate a new card"
+                            AutomationProperties.Name="Identity card activation"
                             Spacing="10"
                         >
                             <TextBlock
+                                x:Name="ActivationHeading"
                                 x:Uid="ActivationHeading"
                                 Margin="0,0,0,10"
                                 AutomationProperties.HeadingLevel="Level2"
                                 Style="{StaticResource BodyStrongTextBlockStyle}"
-                                Text="Activate a new card"
+                                Text="Identity card activation"
                             />
                             <Grid ColumnSpacing="8">
                                 <Grid.ColumnDefinitions>
@@ -257,7 +258,7 @@
                                 />
                             </Grid>
                             <!--  A PIN and its repeat stand as one thing, apart from the next.  -->
-                            <StackPanel Margin="0,10,0,0" Spacing="10">
+                            <StackPanel x:Name="ActivationPin1Group" Margin="0,10,0,0" Spacing="10">
                                 <Grid ColumnSpacing="8">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*" />
@@ -308,7 +309,7 @@
                                 </Grid>
                             </StackPanel>
                             <!--  A PIN and its repeat stand as one thing, apart from the next.  -->
-                            <StackPanel Margin="0,10,0,0" Spacing="10">
+                            <StackPanel x:Name="ActivationPin2Group" Margin="0,10,0,0" Spacing="10">
                                 <Grid ColumnSpacing="8">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*" />
