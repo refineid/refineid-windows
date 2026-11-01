@@ -206,11 +206,13 @@ impl ProtectedPairingStore {
         write_pairing_set(&self.directory, &blob)
     }
 
-    /// Re-reads the stored set, applies `change`, and writes it.
+    /// Re-reads the stored set, applies `change`, and writes it, under the
+    /// set's lock, so no other process writes between the read and the write.
     fn change(
         &mut self,
         change: impl FnOnce(&mut Vec<PairingRecord>) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
+        let _lock = lock_set(&self.directory)?;
         self.refresh()?;
         change(&mut self.records)?;
         self.persist().map_err(|_error| StoreError::WriteRefused)
@@ -303,6 +305,7 @@ impl PairingStore for ProtectedPairingStore {
         now_ms: u64,
         session_established: bool,
     ) -> Result<SweepOutcome, SweepError<StoreError>> {
+        let _lock = lock_set(&self.directory).map_err(SweepError::Store)?;
         self.refresh().map_err(SweepError::Store)?;
         let index = self
             .records
@@ -330,6 +333,29 @@ const PROFILE_DIRECTORY: &str = "RefineID";
 /// The protected pairing set.
 #[cfg(windows)]
 const PAIRING_SET_FILE: &str = "pairing-set.dpapi";
+/// The file whose exclusive lock every change to the set holds.
+///
+/// The app, the agent and the card module each re-read the set, change it
+/// and write it back. Without the lock one process could write back a set
+/// it read before another stored a record, and the record would be gone: a
+/// pairing stored unconfirmed by the app vanished that way before its
+/// confirmation, so the phone kept a pairing the computer did not.
+const PAIRING_SET_LOCK_FILE: &str = "pairing-set.lock";
+
+/// Takes the set's exclusive lock, waiting for another process to release
+/// it; the lock lasts as long as the returned file is open.
+fn lock_set(directory: &Path) -> Result<std::fs::File, StoreError> {
+    std::fs::create_dir_all(directory).map_err(|_error| StoreError::WriteRefused)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(directory.join(PAIRING_SET_LOCK_FILE))
+        .map_err(|_error| StoreError::WriteRefused)?;
+    file.lock().map_err(|_error| StoreError::WriteRefused)?;
+    Ok(file)
+}
+
 /// The directory of the last card a session heard present for each
 /// pairing, one unprotected file per pairing: nothing in it is secret.
 const CARD_SIGHTINGS_DIRECTORY: &str = "card-sightings";
@@ -919,6 +945,34 @@ mod tests {
         );
         delete_pairing_set_in(&directory.0).expect("delete");
         assert!(!directory.0.join(PAIRING_SET_FILE).exists());
+    }
+
+    #[test]
+    fn a_record_stored_once_survives_another_store_writing_meanwhile() {
+        // One store adds pairings, each exactly once, as the app stores a
+        // new pairing; another store over the same directory keeps
+        // rewriting the set, as the agent does. No pairing may be lost.
+        const ADDED: u8 = 30;
+        const REWRITES: usize = 60;
+        let directory = TestDirectory::new("concurrent");
+        let rewriter = {
+            let path = directory.0.clone();
+            std::thread::spawn(move || {
+                let mut store = ProtectedPairingStore::load_from(path).expect("load");
+                for _ in 0..REWRITES {
+                    store.insert(record(SECOND_PAIR)).expect("rewrite");
+                }
+            })
+        };
+        let mut adder = ProtectedPairingStore::load_from(directory.0.clone()).expect("load");
+        for index in 0..ADDED {
+            let mut id = *b"added pairing   ";
+            id[15] = index;
+            adder.insert(record(PairId::from_array(id))).expect("add");
+        }
+        rewriter.join().expect("rewriter");
+        let reloaded = ProtectedPairingStore::load_from(directory.0.clone()).expect("reload");
+        assert_eq!(reloaded.len(), usize::from(ADDED) + 1);
     }
 
     #[test]
