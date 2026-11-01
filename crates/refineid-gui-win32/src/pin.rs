@@ -354,7 +354,7 @@ fn take_digit_buffer(
     Ok(pin)
 }
 
-/// Move the activation code into a validated [`PinBytes`]. Its exact
+/// Move the activation PIN into a validated [`PinBytes`]. Its exact
 /// length is the card's scheme to decide; here it only has to be digits
 /// no shorter than any scheme takes.
 fn take_code_buffer(fields: &mut [Vec<u8>], index: usize) -> Result<PinBytes, String> {

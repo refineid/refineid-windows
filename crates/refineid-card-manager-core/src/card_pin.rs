@@ -1108,7 +1108,7 @@ fn activate_slot_setup<T: refineid_lib_core::transport::CardTransport>(
 }
 
 /// Check every activation entry against the card's lengths before any
-/// command: each new PIN given, and the activation code in the role it is
+/// command: each new PIN given, and the activation PIN in the role it is
 /// presented as -- the PIN's current value under the preset activation
 /// PIN scheme, the PUK otherwise.
 ///
