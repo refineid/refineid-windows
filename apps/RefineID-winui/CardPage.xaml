@@ -59,6 +59,7 @@
                         AutomationProperties.AutomationId="NfcExpander"
                         AutomationProperties.Name="Contactless NFC"
                         Header="Contactless NFC"
+                        Visibility="Collapsed"
                     >
                         <StackPanel Padding="0,12,0,4" Spacing="12">
                             <Grid ColumnSpacing="12">
@@ -103,6 +104,7 @@
                             AutomationProperties.AutomationId="ChangePinExpander"
                             AutomationProperties.Name="Change PIN"
                             Header="Change PIN"
+                            Visibility="Collapsed"
                         >
                             <StackPanel Padding="0,12,0,4" Spacing="10">
                                 <ComboBox
@@ -163,6 +165,7 @@
                             AutomationProperties.AutomationId="UnblockPinExpander"
                             AutomationProperties.Name="Reset PIN (PUK)"
                             Header="Reset PIN (PUK)"
+                            Visibility="Collapsed"
                         >
                             <StackPanel Padding="0,12,0,4" Spacing="10">
                                 <ComboBox
@@ -216,14 +219,16 @@
                         </Expander>
 
                         <!--  A plain section, not a fold: for a card that waits
-                              for its activation it is the whole page.  -->
+                              for its activation it is the whole page. It and
+                              the sections above appear only from an inspected
+                              card, which also names the heading.  -->
                         <StackPanel
                             x:Name="ActivationPanel"
                             x:Uid="ActivationPanel"
                             Padding="16,12,16,16"
                             AutomationProperties.AutomationId="ActivationPanel"
-                            AutomationProperties.Name="Identity card activation"
                             Spacing="10"
+                            Visibility="Collapsed"
                         >
                             <TextBlock
                                 x:Name="ActivationHeading"
@@ -231,7 +236,6 @@
                                 Margin="0,0,0,10"
                                 AutomationProperties.HeadingLevel="Level2"
                                 Style="{StaticResource BodyStrongTextBlockStyle}"
-                                Text="Identity card activation"
                             />
                             <Grid ColumnSpacing="8">
                                 <Grid.ColumnDefinitions>
