@@ -144,18 +144,6 @@
   <data name="CurrentPinBox.AutomationProperties.Name" xml:space="preserve">
     <value>Current PIN</value>
   </data>
-  <data name="NewPinBox.Header" xml:space="preserve">
-    <value>New PIN</value>
-  </data>
-  <data name="NewPinBox.AutomationProperties.Name" xml:space="preserve">
-    <value>New PIN</value>
-  </data>
-  <data name="NewPinConfirmationBox.Header" xml:space="preserve">
-    <value>Confirm new PIN</value>
-  </data>
-  <data name="NewPinConfirmationBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Confirm new PIN</value>
-  </data>
   <data name="ChangePinButton.Content" xml:space="preserve">
     <value>Change PIN</value>
   </data>
@@ -186,18 +174,6 @@
   <data name="PukBox.AutomationProperties.Name" xml:space="preserve">
     <value>Recovery code (PUK)</value>
   </data>
-  <data name="UnblockNewPinBox.Header" xml:space="preserve">
-    <value>New PIN</value>
-  </data>
-  <data name="UnblockNewPinBox.AutomationProperties.Name" xml:space="preserve">
-    <value>New PIN for recovery</value>
-  </data>
-  <data name="UnblockConfirmationBox.Header" xml:space="preserve">
-    <value>Confirm new PIN</value>
-  </data>
-  <data name="UnblockConfirmationBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Confirm new PIN for recovery</value>
-  </data>
   <data name="ResetPinButton.Content" xml:space="preserve">
     <value>Reset PIN</value>
   </data>
@@ -217,28 +193,28 @@
     <value>Activation code from letter</value>
   </data>
   <data name="ActivationPin1Box.Header" xml:space="preserve">
-    <value>New basic PIN (PIN 1)</value>
+    <value>New basic PIN 1</value>
   </data>
   <data name="ActivationPin1Box.AutomationProperties.Name" xml:space="preserve">
-    <value>New basic PIN (PIN 1)</value>
+    <value>New basic PIN 1</value>
   </data>
   <data name="ActivationPin1ConfirmationBox.Header" xml:space="preserve">
-    <value>Repeat basic PIN</value>
+    <value>Repeat PIN 1</value>
   </data>
   <data name="ActivationPin1ConfirmationBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Repeat basic PIN</value>
+    <value>Repeat PIN 1</value>
   </data>
   <data name="ActivationPin2Box.Header" xml:space="preserve">
-    <value>New signature PIN (PIN 2)</value>
+    <value>New signature PIN 2</value>
   </data>
   <data name="ActivationPin2Box.AutomationProperties.Name" xml:space="preserve">
-    <value>New signature PIN (PIN 2)</value>
+    <value>New signature PIN 2</value>
   </data>
   <data name="ActivationPin2ConfirmationBox.Header" xml:space="preserve">
-    <value>Repeat signature PIN</value>
+    <value>Repeat PIN 2</value>
   </data>
   <data name="ActivationPin2ConfirmationBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Repeat signature PIN</value>
+    <value>Repeat PIN 2</value>
   </data>
   <data name="ActivateButton.Content" xml:space="preserve">
     <value>Activate identity card</value>
@@ -372,5 +348,17 @@
   </data>
   <data name="AccessNumberWaitRing.AutomationProperties.Name" xml:space="preserve">
     <value>Proving the access number</value>
+  </data>
+  <data name="NewPin1Field" xml:space="preserve">
+    <value>New basic PIN 1</value>
+  </data>
+  <data name="NewPin2Field" xml:space="preserve">
+    <value>New signature PIN 2</value>
+  </data>
+  <data name="RepeatPin1Field" xml:space="preserve">
+    <value>Repeat PIN 1</value>
+  </data>
+  <data name="RepeatPin2Field" xml:space="preserve">
+    <value>Repeat PIN 2</value>
   </data>
 </root>

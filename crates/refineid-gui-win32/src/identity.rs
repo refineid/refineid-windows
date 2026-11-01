@@ -87,8 +87,8 @@ pub fn format_view(view: &IdentityView) -> String {
     if let Some(length) = view.activation.as_ref() {
         line(&mut out, "Activation code", length);
     }
-    line(&mut out, "PIN1", &view.pin1.text);
-    line(&mut out, "PIN2", &view.pin2.text);
+    line(&mut out, "PIN 1", &view.pin1.text);
+    line(&mut out, "PIN 2", &view.pin2.text);
     line(&mut out, "PUK", &view.puk.text);
     out
 }

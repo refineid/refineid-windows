@@ -24,26 +24,59 @@ use crate::identity::{StateText, credential_label, pin_kind, puk_kind, puk_label
 /// Combobox entries, in dispatch order. The UI and [`prepare`]
 /// share these indices.
 pub const MODES: [&str; 5] = [
-    "Change PIN1",
-    "Change PIN2",
-    "Unblock PIN1 (PUK)",
-    "Unblock PIN2 (PUK)",
+    "Change PIN 1",
+    "Change PIN 2",
+    "Unblock PIN 1 (PUK)",
+    "Unblock PIN 2 (PUK)",
     "Activate new card",
 ];
+
+/// The labels of one PIN's fields, as the form shows them and as the
+/// validation messages name them.
+#[derive(Clone, Copy)]
+struct PinFields {
+    current: &'static str,
+    new: &'static str,
+    repeat: &'static str,
+}
+
+const PIN1_FIELDS: PinFields = PinFields {
+    current: "Current PIN 1",
+    new: "New basic PIN 1",
+    repeat: "Repeat PIN 1",
+};
+
+const PIN2_FIELDS: PinFields = PinFields {
+    current: "Current PIN 2",
+    new: "New signature PIN 2",
+    repeat: "Repeat PIN 2",
+};
 
 /// Field labels per mode, top to bottom. An empty label hides
 /// that row.
 pub const FIELDS: [[&str; 5]; 5] = [
-    ["Current PIN1:", "New PIN:", "Confirm new PIN:", "", ""],
-    ["Current PIN2:", "New PIN:", "Confirm new PIN:", "", ""],
-    ["PUK:", "New PIN1:", "Confirm new PIN1:", "", ""],
-    ["PUK:", "New PIN2:", "Confirm new PIN2:", "", ""],
+    [
+        "Current PIN 1:",
+        "New basic PIN 1:",
+        "Repeat PIN 1:",
+        "",
+        "",
+    ],
+    [
+        "Current PIN 2:",
+        "New signature PIN 2:",
+        "Repeat PIN 2:",
+        "",
+        "",
+    ],
+    ["PUK:", "New basic PIN 1:", "Repeat PIN 1:", "", ""],
+    ["PUK:", "New signature PIN 2:", "Repeat PIN 2:", "", ""],
     [
         "Activation code:",
-        "New PIN1:",
-        "Confirm PIN1:",
-        "New PIN2:",
-        "Confirm PIN2:",
+        "New basic PIN 1:",
+        "Repeat PIN 1:",
+        "New signature PIN 2:",
+        "Repeat PIN 2:",
     ],
 ];
 
@@ -113,7 +146,7 @@ pub fn read_status_view(reader: &str) -> Result<PinStatusView, String> {
 pub fn prepare(mode: usize, fields: Vec<Vec<u8>>) -> Result<PinJob, String> {
     match mode {
         0 => {
-            let (current, new) = prepare_change(fields, "Current PIN1", 4, "4-12 digits")?;
+            let (current, new) = prepare_change(fields, PIN1_FIELDS, 4, "4-12 digits")?;
             Ok(PinJob::Change {
                 slot: PinManageSlot::Pin1,
                 current,
@@ -121,7 +154,7 @@ pub fn prepare(mode: usize, fields: Vec<Vec<u8>>) -> Result<PinJob, String> {
             })
         }
         1 => {
-            let (current, new) = prepare_change(fields, "Current PIN2", 6, "6-12 digits")?;
+            let (current, new) = prepare_change(fields, PIN2_FIELDS, 6, "6-12 digits")?;
             Ok(PinJob::Change {
                 slot: PinManageSlot::Pin2,
                 current,
@@ -129,7 +162,7 @@ pub fn prepare(mode: usize, fields: Vec<Vec<u8>>) -> Result<PinJob, String> {
             })
         }
         2 => {
-            let (puk, new) = prepare_unblock(fields, "New PIN1", 4, "4-12 digits")?;
+            let (puk, new) = prepare_unblock(fields, PIN1_FIELDS, 4, "4-12 digits")?;
             Ok(PinJob::Unblock {
                 slot: PinManageSlot::Pin1,
                 puk,
@@ -137,7 +170,7 @@ pub fn prepare(mode: usize, fields: Vec<Vec<u8>>) -> Result<PinJob, String> {
             })
         }
         3 => {
-            let (puk, new) = prepare_unblock(fields, "New PIN2", 6, "6-12 digits")?;
+            let (puk, new) = prepare_unblock(fields, PIN2_FIELDS, 6, "6-12 digits")?;
             Ok(PinJob::Unblock {
                 slot: PinManageSlot::Pin2,
                 puk,
@@ -169,7 +202,7 @@ pub fn run_job(job: PinJob, reader: &str) -> Result<String, String> {
 
 fn prepare_change(
     mut fields: Vec<Vec<u8>>,
-    current_label: &str,
+    labels: PinFields,
     role_min: usize,
     hint: &str,
 ) -> Result<(PinBytes, PinBytes), String> {
@@ -177,12 +210,12 @@ fn prepare_change(
         zeroize_all(&mut fields);
         return Err(String::from("Internal error: wrong field count."));
     }
-    let current = take_digit_buffer(&mut fields, 0, current_label, role_min, hint)?;
-    let new = take_digit_buffer(&mut fields, 1, "New PIN", role_min, hint)?;
-    let confirm = take_digit_buffer(&mut fields, 2, "Confirm new PIN", role_min, hint)?;
+    let current = take_digit_buffer(&mut fields, 0, labels.current, role_min, hint)?;
+    let new = take_digit_buffer(&mut fields, 1, labels.new, role_min, hint)?;
+    let confirm = take_digit_buffer(&mut fields, 2, labels.repeat, role_min, hint)?;
     if new.as_bytes() != confirm.as_bytes() {
         return Err(String::from(
-            "New PIN entries do not match; nothing was sent to the card.",
+            "The new PIN entries do not match; nothing was sent to the card.",
         ));
     }
     Ok((current, new))
@@ -190,7 +223,7 @@ fn prepare_change(
 
 fn prepare_unblock(
     mut fields: Vec<Vec<u8>>,
-    new_label: &str,
+    labels: PinFields,
     role_min: usize,
     hint: &str,
 ) -> Result<(Puk, PinBytes), String> {
@@ -200,11 +233,11 @@ fn prepare_unblock(
     }
     let raw = take_digit_buffer(&mut fields, 0, "PUK", 7, "7-8 digits")?;
     let puk = Puk::new(raw).map_err(|error| role_error("The PUK", "7-8 digits", error))?;
-    let new = take_digit_buffer(&mut fields, 1, new_label, role_min, hint)?;
-    let confirm = take_digit_buffer(&mut fields, 2, "Confirm new PIN", role_min, hint)?;
+    let new = take_digit_buffer(&mut fields, 1, labels.new, role_min, hint)?;
+    let confirm = take_digit_buffer(&mut fields, 2, labels.repeat, role_min, hint)?;
     if new.as_bytes() != confirm.as_bytes() {
         return Err(String::from(
-            "New PIN entries do not match; nothing was sent to the card.",
+            "The new PIN entries do not match; nothing was sent to the card.",
         ));
     }
     Ok((puk, new))
@@ -231,18 +264,18 @@ fn prepare_activate(
             ));
         }
     };
-    let pin1 = take_digit_buffer(&mut fields, 1, "New PIN1", 4, "4-12 digits")?;
-    let confirm1 = take_digit_buffer(&mut fields, 2, "Confirm PIN1", 4, "4-12 digits")?;
+    let pin1 = take_digit_buffer(&mut fields, 1, PIN1_FIELDS.new, 4, "4-12 digits")?;
+    let confirm1 = take_digit_buffer(&mut fields, 2, PIN1_FIELDS.repeat, 4, "4-12 digits")?;
     if pin1.as_bytes() != confirm1.as_bytes() {
         return Err(String::from(
-            "New PIN1 entries do not match; nothing was sent to the card.",
+            "The PIN 1 entries do not match; nothing was sent to the card.",
         ));
     }
-    let pin2 = take_digit_buffer(&mut fields, 3, "New PIN2", 6, "6-12 digits")?;
-    let confirm2 = take_digit_buffer(&mut fields, 4, "Confirm PIN2", 6, "6-12 digits")?;
+    let pin2 = take_digit_buffer(&mut fields, 3, PIN2_FIELDS.new, 6, "6-12 digits")?;
+    let confirm2 = take_digit_buffer(&mut fields, 4, PIN2_FIELDS.repeat, 6, "6-12 digits")?;
     if pin2.as_bytes() != confirm2.as_bytes() {
         return Err(String::from(
-            "New PIN2 entries do not match; nothing was sent to the card.",
+            "The PIN 2 entries do not match; nothing was sent to the card.",
         ));
     }
     Ok((code, pin1, pin2))
@@ -424,7 +457,7 @@ fn render_activate(report: &ActivateReport) -> String {
             out.push_str("Card already looks activated.\r\n");
         }
     }
-    out.push_str("PIN1: ");
+    out.push_str("PIN 1: ");
     out.push_str(&activate_line(report.pin1_outcome.as_ref()));
     out.push_str("\r\nPIN2: ");
     out.push_str(&activate_line(report.pin2_outcome.as_ref()));
