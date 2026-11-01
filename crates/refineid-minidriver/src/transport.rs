@@ -36,6 +36,7 @@ use refineid_lib_core::transport::{
 use refineid_rapp_core::engine::{
     OperationOutcome, Requester, RequesterConfig, SessionEnd, SessionError,
 };
+use refineid_rapp_core::host::local_host_name;
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::message::{CloseReason, ResultError};
 use refineid_rapp_core::operations::{CardOperation, CardOperationResult};
@@ -366,7 +367,7 @@ impl RemoteCardTransport {
         let transport = self.connect_session_transport(&store)?;
         let mut requester = Requester::new(
             RequesterConfig {
-                display_name: "RefineID Windows Remote Arm".into(),
+                display_name: local_host_name(),
                 platform: "Windows".into(),
             },
             store,

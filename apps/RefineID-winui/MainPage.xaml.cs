@@ -33,13 +33,6 @@ using Microsoft.UI.Xaml.Controls;
 )]
 internal sealed partial class MainPage : Page
 {
-    /// <summary>
-    /// The name the phone shows for this requester: the computer's name,
-    /// as a Mac and an iPhone send theirs. The phone names the platform
-    /// itself, so the name does not repeat it.
-    /// </summary>
-    private static readonly string RequesterName = Environment.MachineName;
-
     /// <summary>Pairing-state poll cadence.</summary>
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(700);
 
@@ -207,8 +200,7 @@ internal sealed partial class MainPage : Page
         try
         {
             handle = (
-                await Task.Run(() => NativeRappService.OpenPairing(RequesterName))
-                    .ConfigureAwait(true)
+                await Task.Run(() => NativeRappService.OpenPairing()).ConfigureAwait(true)
             ).Handle;
         }
         catch (NativeRappException error) when (error.Code == "no_pairing")
@@ -239,10 +231,7 @@ internal sealed partial class MainPage : Page
 
     private async Task PairAndReadAsync()
     {
-        var dialog = new PairingDialog(RequesterName, this.dispatcher, PollInterval)
-        {
-            XamlRoot = this.XamlRoot,
-        };
+        var dialog = new PairingDialog(this.dispatcher, PollInterval) { XamlRoot = this.XamlRoot };
         this.pairing = true;
         try
         {

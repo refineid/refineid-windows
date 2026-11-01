@@ -18,6 +18,7 @@ use refineid_rapp_core::engine::{
     OperationOutcome, PairingCandidateSource, PairingConnection, PeerIntroduction, Requester,
     RequesterConfig,
 };
+use refineid_rapp_core::host::local_host_name;
 use refineid_rapp_core::message::{CloseReason, ResultError};
 use refineid_rapp_core::offer::{BootstrapAnswer, normalize_pairing_code};
 use refineid_rapp_core::operations::{
@@ -52,7 +53,7 @@ struct BleOptions {
 fn parse(arguments: &[String]) -> Result<BleOptions, String> {
     let mut options = BleOptions {
         code: None,
-        name: "RefineID Windows".to_owned(),
+        name: local_host_name(),
         auto_confirm: false,
         seconds: DEFAULT_SCAN_SECONDS,
     };

@@ -21,7 +21,6 @@ windows-sys = { workspace = true, features = [
     "Win32_System_IO",
     "Win32_System_Pipes",
     "Win32_System_RemoteDesktop",
-    "Win32_System_SystemInformation",
     "Win32_System_Threading",
 ] }
 

@@ -48,8 +48,7 @@ pub fn unix_time_seconds() -> u64 {
 #[cfg(windows)]
 mod platform {
     /// `GetTickCount64` takes no arguments, reads no memory the caller
-    /// owns, and cannot fail; the call is the one unsafe line of the
-    /// requester core.
+    /// owns, and cannot fail.
     #[allow(
         unsafe_code,
         reason = "GetTickCount64 has no pointer arguments and no failure mode"

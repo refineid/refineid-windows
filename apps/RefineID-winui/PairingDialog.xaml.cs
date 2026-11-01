@@ -43,7 +43,6 @@ internal sealed partial class PairingDialog : ContentDialog
     /// </summary>
     private const string EmptyGroup = "\u00A0\u00A0";
 
-    private readonly string requesterName;
     private readonly DispatcherQueueTimer timer;
     private ulong? handle;
     private bool confirmed;
@@ -52,10 +51,9 @@ internal sealed partial class PairingDialog : ContentDialog
     /// <summary>The handle once the pairing completed, otherwise null.</summary>
     public ulong? PairedHandle { get; private set; }
 
-    public PairingDialog(string requesterName, DispatcherQueue dispatcher, TimeSpan pollInterval)
+    public PairingDialog(DispatcherQueue dispatcher, TimeSpan pollInterval)
     {
         this.InitializeComponent();
-        this.requesterName = requesterName;
 
         this.timer = dispatcher.CreateTimer();
         this.timer.Interval = pollInterval;
@@ -161,8 +159,7 @@ internal sealed partial class PairingDialog : ContentDialog
         BeginPairingResult begun;
         try
         {
-            begun = await Task.Run(() => NativeRappService.BeginPairing(code, this.requesterName))
-                .ConfigureAwait(true);
+            begun = await Task.Run(() => NativeRappService.BeginPairing(code)).ConfigureAwait(true);
         }
         catch (NativeRappException error)
         {

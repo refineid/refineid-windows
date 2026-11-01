@@ -31,6 +31,7 @@ use refineid_rapp_core::engine::{
     OperationOutcome, PairingError, PairingSearchError, PeerIntroduction, Requester,
     RequesterConfig,
 };
+use refineid_rapp_core::host::local_host_name;
 use refineid_rapp_core::ids::{Challenge, PairId};
 use refineid_rapp_core::message::{CloseReason, ResultError};
 use refineid_rapp_core::offer::normalize_pairing_code;
@@ -148,7 +149,7 @@ struct DemoOptions {
 
 fn parse_options(arguments: &[String]) -> Result<DemoOptions, String> {
     let mut connect = None;
-    let mut name = "RefineID Windows".to_owned();
+    let mut name = local_host_name();
     let mut code = None;
     let mut auto_confirm = false;
     let mut count = None;
@@ -679,7 +680,7 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
 
     let mut requester = Requester::new(
         RequesterConfig {
-            display_name: "RefineID Windows".into(),
+            display_name: local_host_name(),
             platform: "Windows".into(),
         },
         store,

@@ -5,7 +5,6 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel}
 use std::thread;
 use std::time::{Duration, Instant};
 
-use refineid_agent_pipe::identity::computer_name;
 use refineid_agent_pipe::server::{AgentLock, PipeServer};
 use refineid_agent_pipe::wire::{SignAnswer, SignRequest};
 use refineid_agent_pipe::{
@@ -20,6 +19,7 @@ use refineid_rapp_core::clock::unix_time_ms;
 use refineid_rapp_core::engine::{
     OperationOutcome, Requester, RequesterConfig, Session, SessionEnd, SessionError, Withdrawal,
 };
+use refineid_rapp_core::host::{dns_host_name, local_host_name};
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::message::{
     CardPresence, CardStatusMessage, CertificateFingerprint, CloseReason, ResultError,
@@ -142,7 +142,7 @@ pub fn run() -> ExitCode {
     }
     let (jobs, inbox) = channel();
     thread::spawn(move || serve_phone(&inbox, &withdrawal));
-    let computer = computer_name();
+    let computer = dns_host_name().unwrap_or_default();
     loop {
         let mut client = match server.accept() {
             Ok(client) => client,
@@ -213,7 +213,7 @@ fn quit(withdrawal: &Withdrawal) {
 fn requester_over(store: ProtectedPairingStore, withdrawal: &Withdrawal) -> AgentRequester {
     Requester::new(
         RequesterConfig {
-            display_name: "RefineID Windows".to_owned(),
+            display_name: local_host_name(),
             platform: "Windows".to_owned(),
         },
         store,

@@ -63,8 +63,11 @@ impl fmt::Display for DocumentSignError {
 
 impl core::error::Error for DocumentSignError {}
 
-/// The signature the apps ask for: timestamped by the default authority,
-/// with validation material and an archive timestamp, and for a PDF the
+/// The signature the apps ask for.
+///
+/// Timestamped by the default authority, with validation material, an
+/// archive timestamp for every format that has an archive construction
+/// (all but `ASiC-E` with `XAdES`, which stops at LT), and for a PDF the
 /// verification seal in `stamp_language`.
 #[must_use]
 pub fn document_request(
@@ -83,7 +86,7 @@ pub fn document_request(
                 .then(|| VisibleSignature::verification(stamp_language)),
             ..SignatureMetadata::default()
         },
-        archive: true,
+        archive: format != Format::AsicEXades,
         long_term: true,
         timestamp_authorities: vec![DEFAULT_TIMESTAMP_AUTHORITY.to_owned()],
         timestamp_credentials: None,
@@ -229,6 +232,17 @@ mod tests {
         assert!(container.archive);
         assert!(container.long_term);
         assert_eq!(container.metadata.reason.as_deref(), Some("review"));
+        let xades = document_request(
+            Format::AsicEXades,
+            None,
+            StampLanguage::for_windows_language(FINNISH_FINLAND),
+            SIGNING_TIME,
+        );
+        assert!(
+            !xades.archive,
+            "ASiC-E with XAdES has no archive construction"
+        );
+        assert!(xades.long_term);
     }
 
     #[test]

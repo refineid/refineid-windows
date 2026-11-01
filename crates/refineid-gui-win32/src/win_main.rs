@@ -54,6 +54,7 @@ use refineid_doc_sign::pades::StampLanguage;
 use refineid_doc_sign::pin::PinBytes;
 use refineid_doc_sign::service::SignReport;
 use refineid_rapp_core::engine::{PairingError, PairingSearchError, Requester, RequesterConfig};
+use refineid_rapp_core::host::local_host_name;
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::limits::OFFER_TTL_MS;
 use refineid_rapp_core::offer::normalize_pairing_code;
@@ -2309,7 +2310,7 @@ fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<S
     post_pair_status("Looking for the phone…");
     let mut requester = Requester::new(
         RequesterConfig {
-            display_name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows PC".to_owned()),
+            display_name: local_host_name(),
             platform: "Windows".into(),
         },
         ProtectedPairingStore::load()

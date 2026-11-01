@@ -10,6 +10,7 @@
 
 pub mod clock;
 pub mod engine;
+pub mod host;
 pub mod ids;
 pub mod message;
 pub mod offer;

@@ -58,6 +58,7 @@ use refineid_rapp_core::engine::{
     OperationOutcome, PairingError, PairingSearchError, PeerIntroduction, Requester,
     RequesterConfig, Session, SessionEnd, SessionError,
 };
+use refineid_rapp_core::host::local_host_name;
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::message::{
     CardPresence, CardReader, CardStatusMessage, CertificateFingerprint, CloseReason,
@@ -92,9 +93,6 @@ const OPERATION_EXPIRY_MS: u64 = 300_000;
 
 /// Longest typed pairing code accepted, in bytes, before normalization.
 const MAX_CODE_BYTES: usize = 64;
-
-/// Longest requester display name accepted, in bytes.
-const MAX_NAME_BYTES: usize = 256;
 
 /// Longest granted-profile JSON array accepted, in bytes.
 const MAX_GRANTED_BYTES: usize = 4_096;
@@ -392,22 +390,9 @@ fn background_requester(store: ProtectedPairingStore) -> StreamRequester {
 /// [`refineid_rapp_read_card`] drives the card through the stored pairing,
 /// or `no_pairing` when the store holds no usable one. The handle is
 /// released with [`refineid_rapp_end_pairing`] like any other.
-///
-/// # Safety
-///
-/// `name` must address `name_length` readable UTF-8 bytes for the duration
-/// of the call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn refineid_rapp_open_pairing(
-    name: *const u8,
-    name_length: usize,
-) -> *mut c_char {
-    reply_json(|| {
-        // SAFETY: The input is pointer- and bound-checked before the slice
-        // is formed, then copied into owned Rust before use.
-        let name = unsafe { copy_utf8(name, name_length, MAX_NAME_BYTES, "name") }?;
-        open_pairing(name)
-    })
+pub extern "C" fn refineid_rapp_open_pairing() -> *mut c_char {
+    reply_json(open_pairing)
 }
 
 /// Begin a pairing with the code the phone shows.
@@ -420,25 +405,21 @@ pub unsafe extern "C" fn refineid_rapp_open_pairing(
 ///
 /// # Safety
 ///
-/// Each pointer must address the accompanying number of readable bytes for
-/// the duration of the call, and both inputs must be UTF-8.
+/// `code` must address `code_length` readable UTF-8 bytes for the duration
+/// of the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn refineid_rapp_begin_pairing(
     code: *const u8,
     code_length: usize,
-    name: *const u8,
-    name_length: usize,
 ) -> *mut c_char {
     reply_json(|| {
-        // SAFETY: Each input is pointer- and bound-checked before the slice
+        // SAFETY: The input is pointer- and bound-checked before the slice
         // is formed, then copied into owned Rust before use.
         let code = unsafe { copy_utf8(code, code_length, MAX_CODE_BYTES, "code") }?;
-        // SAFETY: As above.
-        let name = unsafe { copy_utf8(name, name_length, MAX_NAME_BYTES, "name") }?;
         let Some(code) = normalize_pairing_code(&code) else {
             return Err(ApiFailure::new("invalid_code", INVALID_CODE_STATUS));
         };
-        begin_pairing(code, name)
+        begin_pairing(code)
     })
 }
 
@@ -592,12 +573,12 @@ pub extern "C" fn refineid_rapp_end_pairing(handle: u64) -> *mut c_char {
     })
 }
 
-fn begin_pairing(code: String, name: String) -> Result<BeginPairingDto, ApiFailure> {
+fn begin_pairing(code: String) -> Result<BeginPairingDto, ApiFailure> {
     let pairing_store = ProtectedPairingStore::load()
         .map_err(|error| ApiFailure::new("pairing_store_unavailable", format!("{error}")))?;
     let requester = Requester::new(
         RequesterConfig {
-            display_name: name,
+            display_name: local_host_name(),
             platform: "Windows".to_owned(),
         },
         pairing_store,
@@ -625,7 +606,7 @@ fn begin_pairing(code: String, name: String) -> Result<BeginPairingDto, ApiFailu
     Ok(BeginPairingDto { handle: handle_id })
 }
 
-fn open_pairing(name: String) -> Result<BeginPairingDto, ApiFailure> {
+fn open_pairing() -> Result<BeginPairingDto, ApiFailure> {
     let pairing_store = ProtectedPairingStore::load()
         .map_err(|error| ApiFailure::new("pairing_store_unavailable", format!("{error}")))?;
     if pairing_store.forgotten_pairings().next().is_some() {
@@ -637,7 +618,7 @@ fn open_pairing(name: String) -> Result<BeginPairingDto, ApiFailure> {
         .ok_or_else(|| ApiFailure::new("no_pairing", "No phone is paired with this device."))?;
     let requester = Requester::new(
         RequesterConfig {
-            display_name: name,
+            display_name: local_host_name(),
             platform: "Windows".to_owned(),
         },
         pairing_store,

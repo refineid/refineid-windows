@@ -49,15 +49,10 @@ internal static partial class NativeRappService
     private const string Library = "refineid_rapp_ffi";
 
     [LibraryImport(Library, EntryPoint = "refineid_rapp_begin_pairing")]
-    private static partial nint BeginPairingNative(
-        [In] byte[] code,
-        nuint codeLength,
-        [In] byte[] name,
-        nuint nameLength
-    );
+    private static partial nint BeginPairingNative([In] byte[] code, nuint codeLength);
 
     [LibraryImport(Library, EntryPoint = "refineid_rapp_open_pairing")]
-    private static partial nint OpenPairingNative(byte[] name, nuint nameLength);
+    private static partial nint OpenPairingNative();
 
     [LibraryImport(Library, EntryPoint = "refineid_rapp_poll_pairing")]
     private static partial nint PollPairingNative(ulong handle);
@@ -85,18 +80,11 @@ internal static partial class NativeRappService
     private static partial void StringFree(nint value);
 
     /// <summary>Starts pairing with the code the phone shows and returns its handle.</summary>
-    internal static BeginPairingResult BeginPairing(string code, string name)
+    internal static BeginPairingResult BeginPairing(string code)
     {
         byte[] codeBytes = Encoding.UTF8.GetBytes(code);
-        byte[] nameBytes = Encoding.UTF8.GetBytes(name);
         return Invoke(
-            () =>
-                BeginPairingNative(
-                    codeBytes,
-                    (nuint)codeBytes.Length,
-                    nameBytes,
-                    (nuint)nameBytes.Length
-                ),
+            () => BeginPairingNative(codeBytes, (nuint)codeBytes.Length),
             RappJsonContext.Default.NativeEnvelopeBeginPairingResult
         );
     }
@@ -106,14 +94,8 @@ internal static partial class NativeRappService
     /// parked in the paired state. Fails with code <c>no_pairing</c> when
     /// none is stored.
     /// </summary>
-    internal static BeginPairingResult OpenPairing(string name)
-    {
-        byte[] nameBytes = Encoding.UTF8.GetBytes(name);
-        return Invoke(
-            () => OpenPairingNative(nameBytes, (nuint)nameBytes.Length),
-            RappJsonContext.Default.NativeEnvelopeBeginPairingResult
-        );
-    }
+    internal static BeginPairingResult OpenPairing() =>
+        Invoke(OpenPairingNative, RappJsonContext.Default.NativeEnvelopeBeginPairingResult);
 
     /// <summary>Reads the current pairing state for the handle.</summary>
     internal static PairingState PollPairing(ulong handle) =>

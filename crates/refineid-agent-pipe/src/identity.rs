@@ -13,7 +13,6 @@ use windows_sys::Win32::Security::{
     GetLengthSid, GetTokenInformation, IsValidSid, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
-use windows_sys::Win32::System::SystemInformation::{ComputerNameDnsHostname, GetComputerNameExW};
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
@@ -116,27 +115,6 @@ impl ProcessIdentity {
 
 /// The size of a SID with no subauthority: revision, count and authority.
 const MIN_SID_BYTES: usize = 8;
-
-/// The longest computer name read, in UTF-16 units.
-const COMPUTER_NAME_UNITS: usize = 256;
-
-/// This computer's DNS host name, or an empty string when Windows cannot
-/// report it.
-#[must_use]
-pub fn computer_name() -> String {
-    let mut name = vec![0u16; COMPUTER_NAME_UNITS];
-    let Ok(mut length) = u32::try_from(name.len()) else {
-        return String::new();
-    };
-    // SAFETY: `name` holds `length` units; Windows writes at most that.
-    if unsafe { GetComputerNameExW(ComputerNameDnsHostname, name.as_mut_ptr(), &raw mut length) }
-        == 0
-    {
-        return String::new();
-    }
-    name.truncate(length as usize);
-    String::from_utf16_lossy(&name)
-}
 
 /// A handle closed when it goes out of scope.
 struct Handle(HANDLE);
