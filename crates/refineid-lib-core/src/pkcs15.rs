@@ -40,7 +40,7 @@ use crate::apdu::iso7816::{
 };
 use crate::apdu::primitives::{Aid, AidError};
 use crate::apdu::status_word::StatusWord;
-use crate::transport::{CardTransport, TransportDispatchError};
+use crate::transport::{CardTransport, CommandApdu, TransportDispatchError};
 
 /// Convenience alias for [`TransportDispatchError`] specialised to
 /// a [`CardTransport`] implementation's own error type.
@@ -94,6 +94,22 @@ pub const EF_SIGN_CERT_ALT_FID: [u8; 2] = [0x43, 0x35];
 pub const EF_ISSUING_CA_ECC_FID: [u8; 2] = [0x43, 0x36];
 /// PKCS#15 `EF.TokenInfo` -- card label / manufacturer / serial.
 pub const EF_TOKEN_INFO_FID: [u8; 2] = [0x50, 0x32];
+
+/// DF.ESIGN, the signature directory beneath the MF: its file
+/// identifier, which citizen cards answer to.
+pub const DF_ESIGN_FID: [u8; 2] = [0x50, 0x16];
+
+/// DF.ESIGN's application identifier, ASCII `E.SIGN`, which FINEID
+/// S4-2 v4.0 section 4.6.21 publishes for the organizational card's
+/// qualified-signature directory.
+pub const ESIGN_AID: &[u8] = b"E.SIGN";
+
+// Compile-time guard: keep the published directory name inside the
+// ISO 7816-5 AID length range `Aid::from_slice` accepts.
+const _: () = assert!(
+    ESIGN_AID.len() >= 5 && ESIGN_AID.len() <= 16,
+    "ESIGN_AID must satisfy ISO 7816-5 AID length range 5..=16"
+);
 
 /// Where a slot lives in the card's file tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -439,19 +455,9 @@ pub trait Pkcs15Ops: CardTransport {
     where
         Self: Sized,
     {
-        let attempts: &[[u8; 7]] = &[
-            [0x00, 0xA4, 0x00, 0x0C, 0x02, 0x3F, 0x00],
-            [0x00, 0xA4, 0x04, 0x0C, 0x02, 0x3F, 0x00],
-        ];
-        let mut last_sw: u16 = 0;
-        for apdu in attempts {
-            let r = self.transmit(apdu).map_err(Pkcs15Error::Transport)?;
-            if r.is_ok() {
-                return Ok(());
-            }
-            last_sw = r.sw();
-        }
-        Err(Pkcs15Error::Sw(last_sw))
+        accepted_or_refusal(
+            first_accepted(self, mf_select_attempts()).map_err(Pkcs15Error::Transport)?,
+        )
     }
 
     /// SELECT a child DF under the current context. Helper for
@@ -467,19 +473,40 @@ pub trait Pkcs15Ops: CardTransport {
     where
         Self: Sized,
     {
-        let variants: &[[u8; 7]] = &[
-            [0x00, 0xA4, 0x01, 0x0C, 0x02, fid[0], fid[1]],
-            [0x00, 0xA4, 0x00, 0x0C, 0x02, fid[0], fid[1]],
-        ];
-        let mut last_sw: u16 = 0;
-        for apdu in variants {
-            let r = self.transmit(apdu).map_err(Pkcs15Error::Transport)?;
-            if r.is_ok() {
-                return Ok(());
-            }
-            last_sw = r.sw();
+        accepted_or_refusal(
+            first_accepted(self, child_df_select_attempts(fid)).map_err(Pkcs15Error::Transport)?,
+        )
+    }
+
+    /// SELECT DF.ESIGN, the qualified-signature directory beneath
+    /// the MF, and answer the status word the walk ended on:
+    /// [`StatusWord::Success`] once DF.ESIGN is current, otherwise
+    /// the card's last refusal.
+    ///
+    /// Organizational cards publish the directory by the
+    /// [`ESIGN_AID`] name; citizen cards answer to [`DF_ESIGN_FID`].
+    /// The name is tried first because an organizational card can
+    /// acknowledge a file-identifier SELECT without making DF.ESIGN
+    /// current.
+    ///
+    /// # Errors
+    /// Transport failures.
+    #[inline]
+    fn select_esign_directory(&mut self) -> Result<StatusWord, TxError<Self>>
+    where
+        Self: Sized,
+    {
+        let mf = first_accepted(self, mf_select_attempts())?;
+        if !mf.is_success() {
+            return Ok(mf);
         }
-        Err(Pkcs15Error::Sw(last_sw))
+        if let Ok(aid) = Aid::from_slice(ESIGN_AID) {
+            let by_name = self.transmit(SelectByAidNoFci { aid }.into_apdu().as_bytes())?;
+            if by_name.is_ok() {
+                return Ok(StatusWord::Success);
+            }
+        }
+        first_accepted(self, child_df_select_attempts(DF_ESIGN_FID))
     }
 
     /// `READ BINARY` in 128-byte chunks against the currently
@@ -644,7 +671,7 @@ pub trait Pkcs15Ops: CardTransport {
             }
             SlotPath::UnderDf5016 => {
                 self.select_mf()?;
-                self.select_child_df([0x50, 0x16])?;
+                self.select_child_df(DF_ESIGN_FID)?;
                 self.select_ef(slot.fid())?;
                 self.read_binary_der_object(slot.label())?
             }
@@ -679,6 +706,75 @@ pub trait Pkcs15Ops: CardTransport {
 }
 
 impl<T: CardTransport + ?Sized> Pkcs15Ops for T {}
+
+/// SELECT FILE P1: any file by its identifier (ISO 7816-4 SELECT P1
+/// coding).
+const SELECT_P1_ANY_BY_FID: u8 = 0x00;
+/// SELECT FILE P1: a child DF of the current DF by its identifier.
+const SELECT_P1_CHILD_DF: u8 = 0x01;
+/// SELECT FILE P1: by DF name.
+const SELECT_P1_BY_NAME: u8 = 0x04;
+/// Lc of a SELECT carrying one file identifier.
+const SELECT_FID_LC: u8 = 2;
+
+/// A SELECT FILE without response data naming `fid` under `p1`.
+fn select_no_fci(p1: u8, fid: [u8; 2]) -> CommandApdu {
+    let [high, low] = fid;
+    CommandApdu::new(vec![
+        SelectEfNoFci::CLA,
+        SelectEfNoFci::INS,
+        p1,
+        SelectEfNoFci::P2,
+        SELECT_FID_LC,
+        high,
+        low,
+    ])
+}
+
+/// SELECT MF variants, tried in order: FINEID variants disagree on
+/// which they accept after a deep-DF SELECT.
+fn mf_select_attempts() -> [CommandApdu; 2] {
+    [
+        select_no_fci(SELECT_P1_ANY_BY_FID, *FileId::MF.as_bytes()),
+        select_no_fci(SELECT_P1_BY_NAME, *FileId::MF.as_bytes()),
+    ]
+}
+
+/// SELECT child-DF variants for `fid`, tried in order: the
+/// short-form child-DF SELECT, then any file by identifier.
+pub(crate) fn child_df_select_attempts(fid: [u8; 2]) -> [CommandApdu; 2] {
+    [
+        select_no_fci(SELECT_P1_CHILD_DF, fid),
+        select_no_fci(SELECT_P1_ANY_BY_FID, fid),
+    ]
+}
+
+/// Send the preferred SELECT variant, then the fallback when the card
+/// refuses it. Answers [`StatusWord::Success`] for the accepted one, or
+/// the card's refusal of the fallback.
+fn first_accepted<T: CardTransport>(
+    transport: &mut T,
+    [first, second]: [CommandApdu; 2],
+) -> Result<StatusWord, TxError<T>> {
+    if transport.transmit(first.as_bytes())?.is_ok() {
+        return Ok(StatusWord::Success);
+    }
+    let fallback = transport.transmit(second.as_bytes())?;
+    Ok(if fallback.is_ok() {
+        StatusWord::Success
+    } else {
+        fallback.status_word()
+    })
+}
+
+/// A SELECT walk's ending status as the [`Pkcs15Error`] contract.
+const fn accepted_or_refusal<TE>(status: StatusWord) -> Result<(), Pkcs15Error<TE>> {
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(Pkcs15Error::Sw(status.as_u16()))
+    }
+}
 
 /// File Control Information (FCI) bytes returned by a SELECT
 /// EF that requested FCI (P2=0x00).
@@ -1364,6 +1460,45 @@ where
         }
     }
     Ok(out)
+}
+
+/// Expected SELECT wire for the DF.ESIGN walk, assembled from the
+/// typed command builders, for the scripted tests of every flow that
+/// enters the directory.
+#[cfg(test)]
+pub(crate) mod esign_wire {
+    use super::{DF_ESIGN_FID, ESIGN_AID};
+    use crate::apdu::iso7816::{
+        ApduClass, FileId, SelectByAidNoFci, SelectFile, SelectFileResponseMode, SelectFileTarget,
+    };
+    use crate::apdu::primitives::Aid;
+    use crate::transport::CommandApdu;
+
+    fn select_any_by_fid(fid: FileId) -> CommandApdu {
+        SelectFile {
+            class: ApduClass::Plain,
+            target: SelectFileTarget::AnyByFileId(Some(fid)),
+            response_mode: SelectFileResponseMode::None,
+        }
+        .into_apdu()
+    }
+
+    /// SELECT MF, the walk's first command.
+    pub fn select_mf() -> CommandApdu {
+        select_any_by_fid(FileId::MF)
+    }
+
+    /// SELECT DF.ESIGN by its published name.
+    pub fn select_esign_by_name() -> CommandApdu {
+        let aid = Aid::from_slice(ESIGN_AID).expect("published E.SIGN AID length is valid");
+        SelectByAidNoFci { aid }.into_apdu()
+    }
+
+    /// SELECT DF.ESIGN as any file by its identifier, the walk's last
+    /// variant.
+    pub fn select_esign_any_by_fid() -> CommandApdu {
+        select_any_by_fid(FileId::new(DF_ESIGN_FID))
+    }
 }
 
 #[cfg(test)]

@@ -141,8 +141,8 @@ use cardmod::{CardCapabilityModel, CardModel, ContainerDescriptor, Ctx, KeyAlgor
 use ffi::*;
 #[cfg(windows)]
 use refineid_lib_core::auth::{
-    AuthError, CardPinLengths, ChangePinOutcome, PinOps, PinSlot, PinStatus, UnblockOutcome,
-    VerifyOutcome,
+    AuthError, CardPinLengths, ChangePinOutcome, PinOps, PinReferenceScheme, PinSlot, PinStatus,
+    UnblockOutcome, VerifyOutcome,
 };
 #[cfg(windows)]
 use refineid_lib_core::crypto::container::{Ciphertext, RsaPkcs1};
@@ -193,10 +193,34 @@ fn live_token_serial(tx: &mut CardSessionTransport) -> Result<TokenSerial, DWORD
 }
 
 #[cfg(windows)]
-fn live_pin_status(tx: &mut CardSessionTransport, slot: PinSlot) -> Result<PinStatus, DWORD> {
+fn live_pin_status(
+    tx: &mut CardSessionTransport,
+    slot: PinSlot,
+    scheme: PinReferenceScheme,
+) -> Result<PinStatus, DWORD> {
     tx.select_pkcs15_application()
         .map_err(|_error| SCARD_F_INTERNAL_ERROR)?;
-    tx.pin_status(slot).map_err(|_error| SCARD_F_INTERNAL_ERROR)
+    tx.pin_status_with_scheme(scheme, slot)
+        .map_err(|_error| SCARD_F_INTERNAL_ERROR)
+}
+
+/// The credential numbering `slot` is verified under, and its counter
+/// once the retry floor admits it. PIN 2 asks the card with
+/// counter-safe probes: under the organizational numbering its VERIFY
+/// makes DF.ESIGN current, where the qualified key signs. PIN 1 keeps
+/// the citizen numbering.
+#[cfg(windows)]
+fn live_verify_floor(
+    tx: &mut CardSessionTransport,
+    slot: PinSlot,
+) -> Result<(PinReferenceScheme, PinStatus), DWORD> {
+    let scheme = match slot {
+        PinSlot::Pin1 => PinReferenceScheme::Citizen,
+        PinSlot::Pin2 => tx
+            .resolve_pin_reference_scheme()
+            .map_err(|_error| SCARD_F_INTERNAL_ERROR)?,
+    };
+    Ok((scheme, live_retry_floor(tx, slot, scheme)?))
 }
 
 /// Apply the retry floor to `slot` before any command that can spend one
@@ -284,8 +308,12 @@ fn manage_error_answer<TE>(error: &AuthError<TE>) -> DWORD {
 
 /// Read the live status of `slot` and apply [`retry_floor_answer`].
 #[cfg(windows)]
-fn live_retry_floor(tx: &mut CardSessionTransport, slot: PinSlot) -> Result<PinStatus, DWORD> {
-    let status = live_pin_status(tx, slot)?;
+fn live_retry_floor(
+    tx: &mut CardSessionTransport,
+    slot: PinSlot,
+    scheme: PinReferenceScheme,
+) -> Result<PinStatus, DWORD> {
+    let status = live_pin_status(tx, slot, scheme)?;
     retry_floor_answer(slot, status)?;
     Ok(status)
 }
@@ -525,6 +553,7 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
         card,
         pin1_authenticated: false,
         pin2_authenticated: false,
+        pin2_scheme: PinReferenceScheme::Citizen,
     });
     cd.pvVendorSpecific = Box::into_raw(ctx).cast();
 
@@ -844,7 +873,7 @@ fn reverify_cached_pin(
             return Some(error);
         }
     };
-    let status = match live_pin_status(tx, PinSlot::Pin1) {
+    let status = match live_pin_status(tx, PinSlot::Pin1, PinReferenceScheme::Citizen) {
         Ok(status) => status,
         Err(error) => {
             reset_card_state(pin1_authenticated, pin2_authenticated);
@@ -1780,8 +1809,8 @@ unsafe extern "system" fn CardAuthenticatePin(
         Ok(serial) => serial,
         Err(error) => return error,
     };
-    let status = match live_retry_floor(&mut tx, slot) {
-        Ok(status) => status,
+    let (scheme, status) = match live_verify_floor(&mut tx, slot) {
+        Ok(admitted) => admitted,
         Err(error) => return error,
     };
     let is_rejected =
@@ -1792,7 +1821,7 @@ unsafe extern "system" fn CardAuthenticatePin(
     let outcome = if slot == PinSlot::Pin1 {
         tx.verify_pin1(pin.clone())
     } else {
-        tx.verify_pin(slot, pin.clone())
+        tx.verify_pin_with_scheme(scheme, slot, pin.clone())
     };
     drop(tx);
     match outcome {
@@ -1802,6 +1831,7 @@ unsafe extern "system" fn CardAuthenticatePin(
                 hold_verified_pin1(serial, pin, status);
             } else {
                 ctx.pin2_authenticated = true;
+                ctx.pin2_scheme = scheme;
             }
             SCARD_S_SUCCESS
         }
@@ -2014,7 +2044,7 @@ unsafe extern "system" fn CardSignData(
     }
 
     let key_ref = if container.pin_id == PIN_ID_QUALIFIED_SIG {
-        KeyRef::Sign
+        KeyRef::Sign(ctx.pin2_scheme)
     } else {
         KeyRef::Auth
     };
@@ -2673,7 +2703,7 @@ unsafe extern "system" fn CardChangeAuthenticator(
         Ok(serial) => serial,
         Err(error) => return error,
     };
-    if let Err(error) = live_retry_floor(&mut tx, slot) {
+    if let Err(error) = live_retry_floor(&mut tx, slot, PinReferenceScheme::Citizen) {
         return error;
     }
     let is_rejected = with_pin_safety(|cache| {
@@ -2770,8 +2800,8 @@ unsafe extern "system" fn CardAuthenticateEx(
         Ok(serial) => serial,
         Err(error) => return error,
     };
-    let status = match live_retry_floor(&mut tx, slot) {
-        Ok(status) => status,
+    let (scheme, status) = match live_verify_floor(&mut tx, slot) {
+        Ok(admitted) => admitted,
         Err(error) => return error,
     };
     let is_rejected =
@@ -2782,7 +2812,7 @@ unsafe extern "system" fn CardAuthenticateEx(
     let outcome = if slot == PinSlot::Pin1 {
         tx.verify_pin1(pin.clone())
     } else {
-        tx.verify_pin(slot, pin.clone())
+        tx.verify_pin_with_scheme(scheme, slot, pin.clone())
     };
     drop(tx);
     match outcome {
@@ -2792,6 +2822,7 @@ unsafe extern "system" fn CardAuthenticateEx(
                 hold_verified_pin1(serial, pin, status);
             } else {
                 ctx.pin2_authenticated = true;
+                ctx.pin2_scheme = scheme;
             }
             SCARD_S_SUCCESS
         }
@@ -2914,7 +2945,7 @@ unsafe extern "system" fn CardChangeAuthenticatorEx(
         Ok(serial) => serial,
         Err(error) => return error,
     };
-    if let Err(error) = live_retry_floor(&mut tx, target_slot) {
+    if let Err(error) = live_retry_floor(&mut tx, target_slot, PinReferenceScheme::Citizen) {
         return error;
     }
     let is_rejected = with_pin_safety(|cache| {

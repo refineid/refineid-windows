@@ -44,6 +44,7 @@ pub use refineid_pkcs15::PasswordLengthRange;
 use crate::apdu::iso7816::ApduClass;
 use crate::apdu::status_word::{PinRetries, StatusWord};
 use crate::pin::PinBytes;
+use crate::pkcs15::Pkcs15Ops as _;
 use crate::transport::{CardTransport, TransportDispatchError};
 
 /// Shortened alias for the transport-error variant produced by a
@@ -132,7 +133,7 @@ pub enum PinSlot {
 /// §4.2 security-data-object identifiers. The numbering is resolved by
 /// asking the card with a counter-safe probe
 /// ([`PinOps::resolve_pin_reference_scheme`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PinReferenceScheme {
     /// FINEID S1 v4.2 numbering: the citizen cards.
     Citizen,
@@ -150,6 +151,13 @@ impl PinReferenceScheme {
             (Self::Organizational, PinSlot::Pin1) => PIN1_REFERENCE_ORGANIZATIONAL,
             (Self::Organizational, PinSlot::Pin2) => PIN2_REFERENCE_ORGANIZATIONAL,
         }
+    }
+
+    /// `true` when `slot` under this numbering is the PIN 2 local to
+    /// DF.ESIGN: the organizational card's qualified-signature PIN.
+    #[must_use]
+    pub const fn gates_esign_directory(self, slot: PinSlot) -> bool {
+        matches!((self, slot), (Self::Organizational, PinSlot::Pin2))
     }
 
     /// The PUK reference byte under this numbering.
@@ -490,6 +498,13 @@ pub trait PinOps: CardTransport {
     /// `ZeroizeOnDrop` so the caller doesn't leak it by passing
     /// ownership in.
     ///
+    /// The organizational qualified-signature key and the PIN 2 that
+    /// gates it live in DF.ESIGN, which must be current at VERIFY and
+    /// through the MSE:Set and PSO:CDS that follow. PIN 2 under the
+    /// organizational numbering therefore selects DF.ESIGN first; when
+    /// the card refuses that SELECT the PIN is not presented and its
+    /// refusal returns as [`VerifyOutcome::Other`].
+    ///
     /// # Errors
     /// [`AuthError::PinPolicy`] when local policy rejects the typed
     /// PIN; [`AuthError::Transport`] when the underlying transport
@@ -503,6 +518,14 @@ pub trait PinOps: CardTransport {
     where
         Self: Sized,
     {
+        if scheme.gates_esign_directory(slot) {
+            let entered = self
+                .select_esign_directory()
+                .map_err(AuthError::Transport)?;
+            if !entered.is_success() {
+                return Ok(VerifyOutcome::Other(entered.as_u16()));
+            }
+        }
         let pin_ascii = pin.as_bytes();
         let stored = slot.stored_length();
         PinPolicyCheck::validate_ascii(pin_ascii, PIN_MIN_LENGTH, stored)?;
@@ -1135,6 +1158,7 @@ mod tests {
 
     use super::*;
     use crate::atr::{Atr, AtrError, MINIMAL_DIRECT_ATR};
+    use crate::pkcs15::esign_wire;
     use crate::transport::{CommandApdu, ResponseApdu, TransportOutcome};
 
     struct MockTx {
@@ -1737,6 +1761,13 @@ mod tests {
     const FIRST: usize = 0;
     /// Index of the second recorded command.
     const SECOND: usize = 1;
+    /// Index of the fourth recorded command.
+    const FOURTH: usize = 3;
+    /// Index of the fifth recorded command.
+    const FIFTH: usize = 4;
+    /// SELECT MF, SELECT DF.ESIGN and VERIFY: the commands an
+    /// organizational PIN 2 VERIFY sends.
+    const ESIGN_ENTRY_AND_VERIFY: usize = 3;
     /// One command sent.
     const ONE_COMMAND: usize = 1;
     /// Three commands sent.
@@ -1911,12 +1942,12 @@ mod tests {
     fn organization_verify_sends_twelve_bare_digits_for_both_pins() {
         for slot in [PinSlot::Pin1, PinSlot::Pin2] {
             let pin = digits(slot.stored_length());
-            let mut tx = RecordingTx::new(&[StatusWord::Success]);
+            let mut tx = RecordingTx::new(&[StatusWord::Success; ESIGN_ENTRY_AND_VERIFY]);
             let outcome = tx
                 .verify_pin_with_scheme(PinReferenceScheme::Organizational, slot, secret(&pin))
                 .expect("sent");
             assert_eq!(outcome, VerifyOutcome::Ok);
-            let command = &tx.sent[FIRST];
+            let command = tx.sent.last().expect("VERIFY sent");
             assert_eq!(command[INS_INDEX], commands::Verify::INS);
             assert_eq!(
                 command[P2_INDEX],
@@ -1924,6 +1955,106 @@ mod tests {
             );
             assert_eq!(&command[DATA_INDEX..], pin.as_slice());
         }
+    }
+
+    #[test]
+    fn organization_pin2_verify_enters_esign_first() {
+        let pin = digits(PIN2_STORED_LENGTH);
+        let mut tx = RecordingTx::new(&[StatusWord::Success; ESIGN_ENTRY_AND_VERIFY]);
+        let outcome = tx
+            .verify_pin_with_scheme(
+                PinReferenceScheme::Organizational,
+                PinSlot::Pin2,
+                secret(&pin),
+            )
+            .expect("sent");
+        assert_eq!(outcome, VerifyOutcome::Ok);
+        let verify = commands::Verify {
+            class: ApduClass::Plain,
+            mode: commands::VerifyMode::Verify,
+            reference: CredentialReference::Pin(PinReferenceScheme::Organizational, PinSlot::Pin2),
+            data: commands::VerifyData::PinBlock(pin),
+        }
+        .into_apdu()
+        .as_bytes()
+        .to_vec();
+        assert_eq!(
+            tx.sent,
+            vec![
+                esign_wire::select_mf().into_bytes(),
+                esign_wire::select_esign_by_name().into_bytes(),
+                verify,
+            ]
+        );
+    }
+
+    #[test]
+    fn organization_pin2_falls_back_to_the_esign_identifier() {
+        let mut tx = RecordingTx::new(&[
+            StatusWord::Success,
+            StatusWord::FileNotFound,
+            StatusWord::FileNotFound,
+            StatusWord::Success,
+            StatusWord::Success,
+        ]);
+        let outcome = tx
+            .verify_pin_with_scheme(
+                PinReferenceScheme::Organizational,
+                PinSlot::Pin2,
+                secret(&digits(PIN2_STORED_LENGTH)),
+            )
+            .expect("sent");
+        assert_eq!(outcome, VerifyOutcome::Ok);
+        assert_eq!(
+            tx.sent[SECOND],
+            esign_wire::select_esign_by_name().into_bytes()
+        );
+        assert_eq!(
+            tx.sent[FOURTH],
+            esign_wire::select_esign_any_by_fid().into_bytes()
+        );
+        assert_eq!(tx.sent[FIFTH][INS_INDEX], commands::Verify::INS);
+    }
+
+    #[test]
+    fn organization_pin2_is_not_presented_outside_esign() {
+        let mut tx = RecordingTx::new(&[
+            StatusWord::Success,
+            StatusWord::FileNotFound,
+            StatusWord::FileNotFound,
+            StatusWord::FileNotFound,
+        ]);
+        let outcome = tx
+            .verify_pin_with_scheme(
+                PinReferenceScheme::Organizational,
+                PinSlot::Pin2,
+                secret(&digits(PIN2_STORED_LENGTH)),
+            )
+            .expect("a refused SELECT is an outcome");
+        assert_eq!(
+            outcome,
+            VerifyOutcome::Other(StatusWord::FileNotFound.as_u16())
+        );
+        assert!(
+            tx.sent
+                .iter()
+                .all(|command| command[INS_INDEX] != commands::Verify::INS)
+        );
+    }
+
+    #[test]
+    fn citizen_pin2_verify_selects_nothing() {
+        let mut tx = RecordingTx::new(&[StatusWord::Success]);
+        let outcome = tx
+            .verify_pin_with_scheme(
+                PinReferenceScheme::Citizen,
+                PinSlot::Pin2,
+                secret(&digits(PIN2_STORED_LENGTH)),
+            )
+            .expect("sent");
+        assert_eq!(outcome, VerifyOutcome::Ok);
+        assert_eq!(tx.sent.len(), ONE_COMMAND);
+        assert_eq!(tx.sent[FIRST][P2_INDEX], PIN2_REFERENCE_PKCS15);
     }
 
     #[test]
