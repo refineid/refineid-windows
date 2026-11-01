@@ -879,7 +879,7 @@ pub unsafe extern "C" fn refineid_settings_activate(
         let serial = unsafe { copy_utf8(serial, serial_length, MAX_SERIAL_BYTES, "card serial") }?;
         // SAFETY: Secret inputs are copied into zeroizing domain types.
         let activation_code =
-            unsafe { copy_pin(activation_code, activation_code_length, "activation code") }?;
+            unsafe { copy_pin(activation_code, activation_code_length, "activation PIN") }?;
         // SAFETY: As above.
         // SAFETY: As above; an empty pair names a PIN the card does not
         // ask for.

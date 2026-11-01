@@ -250,7 +250,7 @@ internal sealed partial class CardPage : Page
 
     /// <summary>
     /// Marks each entry valid, invalid or differing from its pair, and
-    /// enables the button only when the activation code has the card's
+    /// enables the button only when the activation PIN has the card's
     /// length and each new PIN the card asks for is valid and repeated.
     /// The form asks only for the PINs that wait for their activation.
     /// </summary>

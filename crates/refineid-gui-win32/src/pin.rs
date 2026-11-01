@@ -69,7 +69,7 @@ pub const FIELDS: [[&str; 5]; 5] = [
     ["PUK:", "New basic PIN 1:", "Repeat PIN 1:", "", ""],
     ["PUK:", "New signature PIN 2:", "Repeat PIN 2:", "", ""],
     [
-        "Activation code:",
+        "Activation PIN:",
         "New basic PIN 1:",
         "Repeat PIN 1:",
         "New signature PIN 2:",
@@ -259,7 +259,7 @@ fn prepare_activate(
     let code = take_digit_buffer(
         &mut fields,
         0,
-        "Activation code",
+        "Activation PIN",
         ActivationPinSeven::LENGTH,
         "7 or 8 digits",
     )?;
@@ -476,11 +476,11 @@ fn render_unblock(report: &UnblockPinReport) -> String {
     }
 }
 
-/// The refusal for an activation code of the wrong length for the
+/// The refusal for an activation PIN of the wrong length for the
 /// card's scheme.
 fn activation_length_error(expected: usize) -> String {
     format!(
-        "The activation code must have {expected} digits for this card; nothing was sent to the card."
+        "The activation PIN must have {expected} digits for this card; nothing was sent to the card."
     )
 }
 
@@ -506,7 +506,7 @@ fn activate_line(outcome: Option<&UnblockOutcome>) -> String {
         None => String::from("not attempted"),
         Some(UnblockOutcome::Ok) => String::from("set"),
         Some(UnblockOutcome::WrongPuk { retries_left }) => {
-            format!("wrong activation code; {retries_left} tries left")
+            format!("wrong activation PIN; {retries_left} tries left")
         }
         Some(UnblockOutcome::PukLocked) => String::from("code locked"),
         Some(UnblockOutcome::Invalidated) => {

@@ -2552,7 +2552,7 @@ const IDENTITY_ROW_LABELS: [&str; 8] = [
     "Serial",
     "Holder",
     "Card",
-    "Activation code",
+    "Activation PIN",
     "PIN 1",
     "PIN 2",
     "PUK",

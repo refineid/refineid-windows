@@ -43,7 +43,7 @@ pub enum FlooredCredential {
     /// PIN 2, presented by VERIFY or CHANGE REFERENCE DATA.
     Pin2,
     /// The PUK, presented by RESET RETRY COUNTER; on cards that ship with blocked PINs the
-    /// activation code is presented under the PUK's counter.
+    /// activation PIN is presented under the PUK's counter.
     Puk,
 }
 
@@ -261,7 +261,7 @@ pub const fn check_retry_floor(
 /// The retry floor applied to the PUK's own counter.
 ///
 /// The counter is read by the counter-safe PUK probe. Anything that
-/// presents the PUK -- RESET RETRY COUNTER, or the activation code on a
+/// presents the PUK -- RESET RETRY COUNTER, or the activation PIN on a
 /// card that ships with blocked PINs -- is sent only at five, four or
 /// three PUK tries left. A blocked or invalidated PUK, and a counter the
 /// card did not report, are refused.

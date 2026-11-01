@@ -36,7 +36,7 @@ use crate::activation::ActivationScheme;
 /// A syntactically valid FINEID PIN-family code: 4-12 ASCII digits.
 ///
 /// Role-specific types and operations may impose tighter bounds. For
-/// example, PIN2 requires at least 6 digits and activation codes have
+/// example, PIN2 requires at least 6 digits and activation PINs have
 /// an exact length. Padding to the card's stored length is done
 /// downstream in `auth::verify_pin`.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
@@ -249,9 +249,9 @@ impl PinBytes {
 /// for the `RESET RETRY COUNTER` APDU.
 ///
 /// Distinct from [`ActivationCode`] in the type system: the
-/// activation code is "the code from the activation letter", this
+/// activation PIN is "the code from the activation letter", this
 /// is "the code presented to unblock a PIN", even where FINEID S4-1
-/// v4.2 §4.6.1 makes the activation code the PUK.
+/// v4.2 §4.6.1 makes the activation PIN the PUK.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct Puk(PinBytes);
 
@@ -346,8 +346,8 @@ impl core::fmt::Debug for ActivationPinSeven {
     }
 }
 
-/// Activation code of the FINEID S4-1 v4.2 §4.6.1 scheme ("the
-/// activation code is the PUK"). 8 ASCII digits exactly.
+/// Activation PIN of the FINEID S4-1 v4.2 §4.6.1 scheme ("the
+/// activation PIN is the PUK"). 8 ASCII digits exactly.
 ///
 /// **Reusable**: the same 8-digit code from the activation
 /// letter is the card's PUK -- it can unblock PIN1 /
@@ -371,7 +371,7 @@ impl ActivationPinEight {
     /// 8 ASCII digits exactly.
     pub const LENGTH: usize = 8;
 
-    /// Parse `bytes` as a §4.6.1 activation code.
+    /// Parse `bytes` as a §4.6.1 activation PIN.
     ///
     /// # Errors
     /// Empty, wrong length (not exactly 8), or any non-digit

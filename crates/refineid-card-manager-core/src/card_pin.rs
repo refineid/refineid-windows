@@ -139,7 +139,7 @@ pub struct UnblockPinOptions {
     pub slot: PinManageSlot,
     /// The PUK code. Typed [`Puk`] forces construction
     /// via [`Puk::new`] at the operator-input boundary, so a
-    /// non-PUK `PinBytes` value (e.g. a PIN or activation code)
+    /// non-PUK `PinBytes` value (e.g. a PIN or the activation PIN)
     /// can't reach the `RESET RETRY COUNTER` APDU by accident.
     pub puk: Puk,
     /// New PIN value to set after the unblock succeeds. Consumed
@@ -191,7 +191,7 @@ pub enum CardPinError {
     /// is not the one the stored CAN was proved on, or the CAN was typed
     /// wrong. The card was power-reset so the next attempt starts clean.
     AccessNumberRejected(String),
-    /// `card activate` only: the activation code the operator
+    /// `card activate` only: the activation PIN the operator
     /// entered doesn't have the length the card's activation scheme
     /// takes. Reported *before* any modify APDU, so the card-side
     /// try counter is untouched.
@@ -268,7 +268,7 @@ impl fmt::Display for CardPinError {
                 expected,
             } => write!(
                 f,
-                "activation code length wrong for this card: the card \
+                "activation PIN length wrong for this card: the card \
                  expects {expected} digits. Sending it anyway would \
                  burn a card-side try; refusing"
             ),
@@ -889,12 +889,12 @@ pub(crate) fn re_verify_session<T: refineid_lib_core::transport::CardTransport>(
 }
 
 /// Inputs for `card activate` -- the one-time DVV activation flow
-/// that consumes the activation code (aktivointitunnusluku) from
+/// that consumes the activation PIN (aktivointitunnusluku) from
 /// the activation letter and sets the initial values of PIN1 and
 /// PIN2.
 #[derive(Debug)]
 pub struct ActivateOptions {
-    /// The activation code from the DVV activation letter, as typed.
+    /// The activation PIN from the DVV activation letter, as typed.
     /// [`activate_first`] reads it as the card's scheme takes it
     /// ([`ActivationCode::for_scheme`]); a length the scheme does not
     /// take is reported as [`CardPinError::ActivationLengthMismatch`]
@@ -909,7 +909,7 @@ pub struct ActivateOptions {
     /// Override the pre-flight refusal when no PIN awaits its
     /// activation, and set every PIN given. Defaults to refuse; flip
     /// to `true` only when the operator genuinely intends to overwrite
-    /// an active card's PINs (requires the activation code to still
+    /// an active card's PINs (requires the activation PIN to still
     /// be valid).
     pub allow_reactivate: bool,
 }
@@ -1069,11 +1069,11 @@ fn puk_retry_floor<T: refineid_lib_core::transport::CardTransport>(
 ///   `CHANGE REFERENCE DATA` from the preset activation PIN, behind
 ///   the slot's retry floor.
 /// - §4.6.1 ([`ActivationScheme::ActivationCodeIsPuk`]):
-///   `RESET RETRY COUNTER` presenting the activation code as the
+///   `RESET RETRY COUNTER` presenting the activation PIN as the
 ///   PUK, behind the PUK's retry floor.
 ///
 /// `new_pin` is consumed by value so the PIN material drops +
-/// zeroizes at function return; the activation code's transient copy
+/// zeroizes at function return; the activation PIN's transient copy
 /// zeroizes on drop.
 fn activate_slot_setup<T: refineid_lib_core::transport::CardTransport>(
     transport: &mut T,
@@ -1096,7 +1096,7 @@ fn activate_slot_setup<T: refineid_lib_core::transport::CardTransport>(
                 .map_err(auth_to_card_pin)
         }
         ActivationCode::Eight(_) => {
-            // The activation code is presented as the PUK, under the
+            // The activation PIN is presented as the PUK, under the
             // PUK's counter.
             puk_retry_floor(transport, numbering)?;
             transport
@@ -1115,7 +1115,7 @@ const fn activation_continues_after_pin1(outcome: UnblockOutcome) -> bool {
     matches!(outcome, UnblockOutcome::Ok)
 }
 
-/// Read the typed activation code as the card's scheme takes it.
+/// Read the typed activation PIN as the card's scheme takes it.
 ///
 /// # Errors
 /// [`CardPinError::ActivationLengthMismatch`] for a length the scheme
@@ -1144,7 +1144,7 @@ fn activation_code_for(
 /// card's reference numbering:
 ///
 /// - **§4.6.1, [`ActivationScheme::ActivationCodeIsPuk`]:** PIN1
-///   and PIN2 ship BLOCKED. The 8-digit activation code is the
+///   and PIN2 ship BLOCKED. The 8-digit activation PIN is the
 ///   PUK that unblocks them: `RESET RETRY COUNTER` per PIN. An
 ///   organization card takes this scheme.
 /// - **§4.6.2, [`ActivationScheme::PresetActivationPin`]:** PIN1
@@ -1167,15 +1167,15 @@ fn activation_code_for(
 ///      the flow before PIN2.
 ///
 /// `options` (and the inner [`PinBytes`]) is consumed by value
-/// so on return the activation code + new PIN1/PIN2 are zeroized.
+/// so on return the activation PIN + new PIN1/PIN2 are zeroized.
 ///
 /// # Errors
 /// PC/SC, PKCS#15-SELECT, reader-pick, length or local-policy
-/// failures. Card-side outcomes (wrong activation code, locked, etc.)
+/// failures. Card-side outcomes (wrong activation PIN, locked, etc.)
 /// are surfaced via [`ActivateReport`], not as `Err`.
 #[expect(
     clippy::needless_pass_by_value,
-    reason = "ActivateOptions embeds activation code + new PIN1/PIN2 PinBytes; consumed by value so all drop+zeroize at function return."
+    reason = "ActivateOptions embeds activation PIN + new PIN1/PIN2 PinBytes; consumed by value so all drop+zeroize at function return."
 )]
 pub fn activate_first(
     backend: PcscBackend,
@@ -1231,7 +1231,7 @@ pub fn activate_first(
             new_pin1,
         )?;
         pin1_outcome = Some(outcome);
-        // Single-shot: if PIN1 setup rejected the activation code
+        // Single-shot: if PIN1 setup rejected the activation PIN
         // (wrong code, locked slot, anything other than Ok), don't
         // burn a second card-side try on the PIN2 slot. The operator
         // re-runs after fixing the input.
@@ -1303,7 +1303,7 @@ impl fmt::Display for ActivateReport {
             (Some(o), None) if !activation_continues_after_pin1(o) => writeln!(
                 f,
                 "PIN2 setup: not attempted (PIN1 setup failed; re-run after fixing \
-                 the activation code -- each invocation consumes one card-side try)"
+                 the activation PIN -- each invocation consumes one card-side try)"
             )?,
             _ => writeln!(f, "PIN2 setup: not attempted")?,
         }
@@ -1399,7 +1399,7 @@ mod activate_tests {
     const UNMODELED_SW: u16 = 0x6F00;
     /// Synthetic seven-digit preset activation PIN.
     const PRESET_PIN: &[u8] = b"0000000";
-    /// Synthetic eight-digit activation code.
+    /// Synthetic eight-digit activation PIN.
     const PUK_CODE: &[u8] = b"00000000";
     /// Synthetic new PIN.
     const NEW_PIN: &[u8] = b"0000";
