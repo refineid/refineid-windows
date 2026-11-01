@@ -32,7 +32,7 @@ use std::io::Write as _;
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "pin-change")]
-use refineid_lib_core::auth::ChangePinOutcome;
+use refineid_lib_core::auth::{AuthError, ChangePinOutcome};
 use refineid_lib_core::auth::{PinOps as _, PinSlot, PinStatus, VerifyOutcome};
 use refineid_lib_core::backend::{ReaderAccessCap, ReaderBackend as _, ReaderId};
 use refineid_lib_core::crypto::container::{EcdsaP384, RsaPkcs1Sha256, Signature};
@@ -1606,7 +1606,9 @@ fn clear_positive(pin_cache: &Arc<Mutex<PinSafetyCache>>) {
 ///
 /// Typed inputs cross the boundary owned: [`ReaderId`] names the
 /// reader and both PINs are consumed (their buffers zeroize on
-/// drop), matching [`refineid_lib_core::auth::PinOps::change_pin`].
+/// drop), matching [`refineid_lib_core::auth::PinOps::change_pin`]. The
+/// card's PIN 1 lengths are read first, and an entry of another length
+/// is refused before the command.
 ///
 /// # Errors
 /// [`CKR_PIN_INCORRECT`] when the current PIN is wrong,
@@ -1637,9 +1639,15 @@ pub(super) fn card_change_pin1(
         .pin_status(PinSlot::Pin1)
         .map_err(|_probe_err| CKR_DEVICE_ERROR)?;
     pin1_verify_guard(status)?;
+    let lengths = card
+        .read_card_pin_lengths()
+        .map_err(|_read_err| CKR_DEVICE_ERROR)?;
     let outcome = card
-        .change_pin(PinSlot::Pin1, current_pin1, new_pin1)
-        .map_err(|_change_err| CKR_DEVICE_ERROR)?;
+        .change_pin(&lengths, PinSlot::Pin1, current_pin1, new_pin1)
+        .map_err(|change_err| match change_err {
+            AuthError::PinPolicy(_reason) => CKR_PIN_LEN_RANGE,
+            AuthError::Transport(_transport_err) => CKR_DEVICE_ERROR,
+        })?;
     match outcome {
         ChangePinOutcome::Ok => Ok(()),
         ChangePinOutcome::WrongCurrentPin { .. } => Err(CKR_PIN_INCORRECT),

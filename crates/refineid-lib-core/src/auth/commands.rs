@@ -364,6 +364,44 @@ impl PinInfoResponse {
             })
     }
 
+    /// Extract the length range of the PIN policy (`DF 3F 14`, FINEID S1
+    /// v4.2 §3.15.3 Table 19): its second octet is the minimum length and
+    /// its third the maximum, each within 4 to 64. `None` when the body
+    /// carries no policy, or its lengths fall outside that range or
+    /// admit nothing.
+    #[must_use]
+    pub(crate) fn policy_lengths_from_response_body(
+        body: &[u8],
+    ) -> Option<refineid_pkcs15::PasswordLengthRange> {
+        const POLICY_TAG_HI: u8 = 0xDF;
+        const POLICY_TAG_LO: u8 = 0x3F;
+        const POLICY_LENGTH: u8 = 20;
+        const POLICY_HEADER_LENGTH: usize = 3;
+        const POLICY_TLV_LENGTH: usize = POLICY_HEADER_LENGTH + POLICY_LENGTH as usize;
+        const LENGTH_FLOOR: u8 = 4;
+        const LENGTH_CEILING: u8 = 64;
+
+        let in_range = |length: u8| (LENGTH_FLOOR..=LENGTH_CEILING).contains(&length);
+        body.windows(POLICY_TLV_LENGTH).find_map(|window| {
+            let [
+                POLICY_TAG_HI,
+                POLICY_TAG_LO,
+                POLICY_LENGTH,
+                _tries,
+                min,
+                max,
+                ..,
+            ] = window
+            else {
+                return None;
+            };
+            if !in_range(*min) || !in_range(*max) {
+                return None;
+            }
+            refineid_pkcs15::PasswordLengthRange::new(*min, *max)
+        })
+    }
+
     /// Extract the usage and unblocking allowances from `DF 21 04`.
     #[must_use]
     pub(crate) fn policy_counters_from_response_body(
@@ -515,6 +553,55 @@ mod tests {
                 PUK_REFERENCE,
                 MAX_RESPONSE_LENGTH,
             ]
+        );
+    }
+
+    /// A PIN container carrying a PIN policy of `min` to `max` digits.
+    fn container_with_policy(min: u8, max: u8) -> Vec<u8> {
+        const POLICY_TAG_HI: u8 = 0xDF;
+        const POLICY_TAG_LO: u8 = 0x3F;
+        const POLICY_LENGTH: u8 = 20;
+        const TRY_LIMIT: u8 = 5;
+        const FILLER: u8 = 0;
+        let mut body = vec![
+            POLICY_TAG_HI,
+            POLICY_TAG_LO,
+            POLICY_LENGTH,
+            TRY_LIMIT,
+            min,
+            max,
+        ];
+        body.resize(body.len() + usize::from(POLICY_LENGTH) - 3, FILLER);
+        body
+    }
+
+    #[test]
+    fn pin_info_extracts_policy_lengths() {
+        const FOUR: u8 = 4;
+        const EIGHT: u8 = 8;
+        let range =
+            PinInfoResponse::policy_lengths_from_response_body(&container_with_policy(FOUR, EIGHT))
+                .expect("a policy range");
+        assert_eq!(range.min(), usize::from(FOUR));
+        assert_eq!(range.max(), usize::from(EIGHT));
+    }
+
+    #[test]
+    fn pin_info_refuses_policy_lengths_outside_the_specified_range() {
+        const THREE: u8 = 3;
+        const EIGHT: u8 = 8;
+        const SIXTY_FIVE: u8 = 65;
+        assert_eq!(
+            PinInfoResponse::policy_lengths_from_response_body(&container_with_policy(
+                THREE, EIGHT
+            )),
+            None
+        );
+        assert_eq!(
+            PinInfoResponse::policy_lengths_from_response_body(&container_with_policy(
+                EIGHT, SIXTY_FIVE
+            )),
+            None
         );
     }
 

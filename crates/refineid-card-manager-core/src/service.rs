@@ -15,7 +15,9 @@
 //! UI-toolkit-independent card-management facade.
 
 use refineid_lib_core::activation::{ActivationScheme, PinActivation};
-use refineid_lib_core::auth::{PinOps as _, PinReferenceScheme, PinSlot, PinStatus, PukStatus};
+use refineid_lib_core::auth::{
+    CardPinLengths, PinOps as _, PinReferenceScheme, PinSlot, PinStatus, PukStatus,
+};
 use refineid_lib_core::backend::{ReaderAccessCap, ReaderBackend as _, ReaderFilter};
 use refineid_lib_core::can::Can;
 use refineid_lib_core::fineid_card::FineidCardModel;
@@ -50,6 +52,9 @@ pub struct CardSnapshot {
     pub scheme: ActivationScheme,
     /// Exact activation-code length for the scheme.
     pub activation_code_length: usize,
+    /// The PIN 1, PIN 2 and PUK lengths the card accepts, which the PIN
+    /// forms take their digit limits from.
+    pub lengths: CardPinLengths,
     /// What the counter-safe probes say about the card's activation, so
     /// the app opens the activation flow only on evidence that the card
     /// still waits for it.
@@ -189,6 +194,9 @@ fn inspected(reader_filter: Option<&ReaderFilter>) -> Result<CardSnapshot, CardP
         .select_pkcs15_application()
         .map_err(|error| CardPinError::Pkcs15Select(format!("{error}")))?;
     crate::card_pin::re_verify_session(&mut transport, &context.bound_serial)?;
+    let lengths = transport
+        .read_card_pin_lengths()
+        .map_err(|error| CardPinError::Transport(format!("PIN lengths read: {error}")))?;
 
     let numbering = context.numbering;
     let scheme = context.scheme;
@@ -220,6 +228,7 @@ fn inspected(reader_filter: Option<&ReaderFilter>) -> Result<CardSnapshot, CardP
         numbering,
         scheme,
         activation_code_length,
+        lengths,
         activation,
         pin1_activation,
         pin2_activation,

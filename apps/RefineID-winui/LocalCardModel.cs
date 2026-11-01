@@ -89,6 +89,19 @@ internal sealed class CredentialStatus
     public ushort? StatusWord { get; init; }
 }
 
+/// <summary>The digit counts the card accepts for one credential.</summary>
+internal sealed class LengthRange
+{
+    [JsonPropertyName("min")]
+    public int Min { get; init; }
+
+    [JsonPropertyName("max")]
+    public int Max { get; init; }
+
+    /// <summary>Whether an entry of this many digits is accepted.</summary>
+    public bool Accepts(int digits) => digits >= this.Min && digits <= this.Max;
+}
+
 /// <summary>Snapshot of a local card returned by card-manager inspection.</summary>
 internal sealed class LocalCardSnapshot
 {
@@ -113,6 +126,18 @@ internal sealed class LocalCardSnapshot
 
     [JsonPropertyName("activation_code_length")]
     public int? ActivationCodeLength { get; init; }
+
+    /// <summary>The digit counts the card accepts for PIN 1; absent when it accepts none.</summary>
+    [JsonPropertyName("pin1_lengths")]
+    public LengthRange? Pin1Lengths { get; init; }
+
+    /// <summary>The digit counts the card accepts for PIN 2; absent when it accepts none.</summary>
+    [JsonPropertyName("pin2_lengths")]
+    public LengthRange? Pin2Lengths { get; init; }
+
+    /// <summary>The digit counts the card accepts for the PUK; absent when it accepts none.</summary>
+    [JsonPropertyName("puk_lengths")]
+    public LengthRange? PukLengths { get; init; }
 
     /// <summary>
     /// What the card service's counter-safe probes say about activation:

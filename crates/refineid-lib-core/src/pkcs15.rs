@@ -407,6 +407,27 @@ pub trait Pkcs15Ops: CardTransport {
         Err(Pkcs15Error::Sw(last_sw))
     }
 
+    /// Read and parse EF.AOD, the card's authentication objects, under
+    /// the PKCS#15 application (FINEID S4-1 v4.2 §8.1.5; FINEID S4-2 v4.0
+    /// §4.6.10, §4.7.10). Leaves the PKCS#15 application selected.
+    ///
+    /// # Errors
+    /// Transport failures, a non-success status word, an empty or
+    /// oversized file, or [`Pkcs15Error::InvalidData`] when the file does
+    /// not decode.
+    fn read_authentication_objects(
+        &mut self,
+    ) -> Result<refineid_pkcs15::AuthenticationObjects, Pkcs15Error<TxError<Self>>>
+    where
+        Self: Sized,
+    {
+        self.select_pkcs15_application()?;
+        self.select_ef(*refineid_pkcs15::EF_AOD_FID.as_bytes())?;
+        let bytes = self.read_binary_to_end(None)?;
+        refineid_pkcs15::AuthenticationObjects::parse(&bytes)
+            .map_err(|_parse_error| Pkcs15Error::InvalidData("EF.AOD"))
+    }
+
     /// SELECT MF (`3F00`). Tries `P1=0x00` then `P1=0x04` because
     /// FINEID variants disagree on which they accept after a
     /// deep-DF SELECT.
