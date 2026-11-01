@@ -48,7 +48,6 @@ use refineid_lib_core::backend::{
 };
 use refineid_lib_core::can::Can;
 use refineid_lib_core::cert_state::CertDer;
-use refineid_lib_core::crypto::container::{RsaPkcs1Sha256, Signature};
 use refineid_lib_core::crypto::digest::{Sha256 as CoreSha256, Sha384 as CoreSha384};
 use refineid_lib_core::identity::{CommonName, TokenSerial, render_token_serial};
 use refineid_lib_core::pace;
@@ -57,9 +56,8 @@ use refineid_lib_core::pin_retry_risk::{RetryFloorRefusal, check_retry_floor};
 use refineid_lib_core::pkcs15::Pkcs15Ops as _;
 use refineid_lib_core::pkcs15::{CertSlot, Pkcs15Error};
 use refineid_lib_core::secure_messaging::SmTransport;
-use refineid_lib_core::sign::commands::SignatureAlgRef;
-use refineid_lib_core::sign::{KeyRef, RSA_3072_SIG_BYTES, SignError, SignOps as _};
-use refineid_lib_core::transport::{CardTransport, TransportDispatchError};
+use refineid_lib_core::sign::{KeyRef, SignError, SignOps as _};
+use refineid_lib_core::transport::CardTransport;
 use refineid_lib_core::x509::{
     Certificate, DateTime, EcCurve, OwnedCert, PublicKeyAlgorithm, UnvalidatedCertificate,
     extract_rsa_public_key,
@@ -164,14 +162,18 @@ impl fmt::Debug for TimestampCredentials {
     }
 }
 
-/// The key that signs documents: the qualified-signature key, gated by
-/// PIN 2, whose certificate is EF.4332 (FINEID S1 v4.2 §3.5).
-const SIGNING_KEY: KeyRef = KeyRef::Sign;
+/// The key that signs documents under the card's numbering: the
+/// qualified-signature key, gated by PIN 2, whose certificate is
+/// EF.4332 (FINEID S1 v4.2 §3.5); on an organization card it lives in
+/// DF.ESIGN, which the PIN 2 VERIFY makes current.
+const fn signing_key(scheme: PinReferenceScheme) -> KeyRef {
+    KeyRef::Sign(scheme)
+}
 
-/// The PIN that gates [`SIGNING_KEY`].
+/// The PIN that gates [`signing_key`].
 const SIGNING_PIN: PinSlot = PinSlot::Pin2;
 
-/// The certificate whose public key pairs with [`SIGNING_KEY`], read
+/// The certificate whose public key pairs with [`signing_key`], read
 /// once at session start and reused by the local verify.
 const SIGNING_CERT: CertSlot = CertSlot::Signature;
 
@@ -328,6 +330,8 @@ pub struct SignReport {
     /// PC/SC reader name the sign APDU chain landed against.
     /// Tier 0 `String` from `ReaderId::as_str().to_owned()`.
     pub reader: String,
+    /// The key reference the card signed under.
+    pub key_ref: KeyRef,
     /// Length of the input file in bytes.
     pub input_len: u64,
     /// SHA-256 of the input.
@@ -665,22 +669,6 @@ fn signing_pin_retry_floor<T: CardTransport>(
     check_retry_floor(SIGNING_PIN.into(), status).map_err(SignErrorKind::RetryFloor)
 }
 
-/// Organizational form of the SHA-256 + RSA-PKCS1v15 chain: no
-/// PSO:HASH, the off-card digest rides in the PSO:CDS data field
-/// (organizational cards specification §6.6.2.3).
-fn sign_pre_hashed_sha256_rsa_hash_in_command<T: CardTransport>(
-    transport: &mut T,
-    key_ref: KeyRef,
-    hash: CoreSha256,
-) -> Result<Signature<RsaPkcs1Sha256>, SignError<TransportDispatchError<T::Error>>> {
-    transport.mse_set_dst(SignatureAlgRef::SHA256_RSA_PKCS1_V1_5, key_ref)?;
-    let sig = transport.pso_cds_with_data(hash.as_bytes())?;
-    if sig.len() != RSA_3072_SIG_BYTES {
-        return Err(SignError::UnexpectedSignatureLength(sig.len()));
-    }
-    Ok(sig)
-}
-
 /// Dispatch the per-cert sign chain: RSA (PKCS#1 v1.5 SHA-256) or
 /// ECDSA P-384 SHA-384, returning the raw signature bytes plus the
 /// local-verify outcome. Unsupported curves / non-RSA SPKIs raise
@@ -697,20 +685,12 @@ fn sign_dispatch_by_alg<T: CardTransport>(
         PublicKeyAlgorithm::Rsa { .. } => {
             let pubkey = extract_rsa_public_key(cert.spki.as_der())
                 .ok_or(SignErrorKind::UnsupportedKeyType)?;
-            // The organizational platform has no external-hash
-            // PSO:HASH: the off-card digest rides in PSO:CDS's data
-            // field there (organizational cards specification
-            // §6.6.2.3).
+            // The key's numbering picks the chain: the organizational
+            // qualified key takes the digest inside PSO:CDS.
             let core_digest = CoreSha256::from_bytes(*input_sha256.as_bytes());
-            let signature = match scheme {
-                PinReferenceScheme::Citizen => transport
-                    .sign_pre_hashed_sha256_rsa(SIGNING_KEY, core_digest)
-                    .map_err(sign_err_to_kind)?,
-                PinReferenceScheme::Organizational => {
-                    sign_pre_hashed_sha256_rsa_hash_in_command(transport, SIGNING_KEY, core_digest)
-                        .map_err(sign_err_to_kind)?
-                }
-            };
+            let signature = transport
+                .sign_pre_hashed_sha256_rsa(signing_key(scheme), core_digest)
+                .map_err(sign_err_to_kind)?;
             let verify = match pubkey.verify_pkcs1v15_sha256(input_bytes, &signature) {
                 Ok(()) => LocalVerifyOutcome::Ok,
                 Err(e) => {
@@ -722,7 +702,7 @@ fn sign_dispatch_by_alg<T: CardTransport>(
         PublicKeyAlgorithm::Ec(EcCurve::Secp384r1) => {
             let hash_sha384 = CoreSha384::of(input_bytes);
             let signature = transport
-                .sign_pre_hashed_sha384_ecdsa_p384(SIGNING_KEY, hash_sha384)
+                .sign_pre_hashed_sha384_ecdsa_p384(signing_key(scheme), hash_sha384)
                 .map_err(sign_err_to_kind)?;
             let pubkey =
                 cert.spki
@@ -894,6 +874,7 @@ fn signed_qualified(
 
     Ok(SignReport {
         reader: reader_id.as_str().to_owned(),
+        key_ref: chain.key_ref,
         input_len,
         input_sha256,
         signature_path: options.output,
@@ -914,6 +895,8 @@ struct SignChainOutput {
     cert_der: CertDer,
     /// Subject CN for the report.
     cert_subject_cn: Option<CommonName>,
+    /// The key reference the card signed under.
+    key_ref: KeyRef,
     /// Retry count surfaced by a non-Ok VERIFY status word; see
     /// [`SignReport::pin_retries_after`].
     pin_retries_after: Option<u8>,
@@ -1048,6 +1031,7 @@ fn sign_chain<T: CardTransport>(
     Ok(SignChainOutput {
         cert_der,
         cert_subject_cn,
+        key_ref: signing_key(scheme),
         pin_retries_after,
         signature_bytes,
         timestamps,
@@ -1845,7 +1829,7 @@ impl fmt::Display for SignReport {
         writeln!(
             f,
             "key: {SIGNING_KEY_LABEL} (key ref {:#04X})",
-            SIGNING_KEY.as_u8()
+            self.key_ref.as_u8()
         )?;
         if let Some(cn) = &self.cert_subject_cn {
             writeln!(f, "cert subject CN: {cn}")?;
@@ -2545,6 +2529,7 @@ mod tests {
     fn sample_report(cn: Option<CommonName>) -> SignReport {
         SignReport {
             reader: "OMNIKEY 5422".to_owned(),
+            key_ref: signing_key(PinReferenceScheme::Citizen),
             input_len: 11,
             input_sha256: Sha256::of(b"hello world"),
             signature_path: PathBuf::from("/tmp/out.sig"),

@@ -35,6 +35,7 @@ use crate::ffi::{
     SCARD_E_UNSUPPORTED_FEATURE, SCARD_S_SUCCESS,
 };
 use crate::transport::CardSessionTransport;
+use refineid_lib_core::auth::PinReferenceScheme;
 use refineid_lib_core::sign::{KEY_REF_AUTH, KEY_REF_SIGN};
 use refineid_lib_core::x509::{
     EcCurve, OwnedCert, PublicKeyAlgorithm, UnvalidatedCertificate, parse_subject_public_key_info,
@@ -49,6 +50,9 @@ pub(crate) struct Ctx {
     pub(crate) pin1_authenticated: bool,
     /// Whether PIN2 has been verified for the current operation.
     pub(crate) pin2_authenticated: bool,
+    /// The credential numbering PIN2 was verified under, which names
+    /// the qualified key the next signature uses.
+    pub(crate) pin2_scheme: PinReferenceScheme,
 }
 
 /// PIN role IDs as the Base CSP addresses them. `ROLE_USER` /
