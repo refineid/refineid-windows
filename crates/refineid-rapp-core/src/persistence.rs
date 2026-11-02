@@ -24,10 +24,11 @@
 //! for good and its peer pairs again.
 
 use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
-use refineid_rapp::{EncodedPairRecord, EndpointRole, PAIR_ID_SIZE, PairRecordCodecError};
+use refineid_rapp::{
+    DisplayName, EncodedPairRecord, EndpointRole, PAIR_ID_SIZE, PairRecordCodecError,
+};
 use zeroize::Zeroizing;
 
-use crate::engine::PeerIntroduction;
 use crate::ids::PairId;
 use crate::store::{PairingRecord, PairingState};
 
@@ -35,11 +36,11 @@ use crate::store::{PairingRecord, PairingState};
 const PAIRING_BLOB_MAGIC: &[u8] = b"RAPP-pair-record";
 
 /// The pairing-record encoding revision.
-const PAIRING_BLOB_VERSION: u8 = 8;
+const PAIRING_BLOB_VERSION: u8 = 9;
 
 /// The highest revision written for an earlier RAPP protocol version. Those
-/// pairings cannot open RAPP v26.10.29 sessions, so they are not loaded.
-const LAST_EARLIER_PROTOCOL_BLOB_VERSION: u8 = 7;
+/// pairings cannot open RAPP v26.11.2 sessions, so they are not loaded.
+const LAST_EARLIER_PROTOCOL_BLOB_VERSION: u8 = 8;
 
 /// The lowest revision ever written.
 const FIRST_BLOB_VERSION: u8 = 1;
@@ -52,8 +53,8 @@ const PAIRING_SET_VERSION: u8 = 1;
 
 /// Keys tag: the engine's record, keys held, follows.
 const KEYS_HELD: u8 = 0;
-/// Keys tag: the keys are destroyed; the pair identifier and who revoked
-/// follow.
+/// Keys tag: the keys are destroyed; the pair identifier, who revoked and
+/// the peer's last display name follow.
 const KEYS_REVOKED: u8 = 1;
 
 /// Boolean false on the wire.
@@ -90,6 +91,8 @@ pub enum PairingCodecError {
     InvalidBoolean,
     /// A text field was not valid UTF-8.
     InvalidText,
+    /// The peer's display name is blank or longer than 256 bytes.
+    InvalidDisplayName,
     /// A field is longer than a length prefix can state.
     Oversized,
     /// The engine refused its record's encoding.
@@ -118,6 +121,9 @@ impl core::fmt::Display for PairingCodecError {
             Self::InvalidKeys => formatter.write_str("pairing record had an unknown keys tag"),
             Self::InvalidBoolean => formatter.write_str("pairing record had a malformed flag"),
             Self::InvalidText => formatter.write_str("pairing record held invalid text"),
+            Self::InvalidDisplayName => {
+                formatter.write_str("pairing record held an invalid display name")
+            }
             Self::Oversized => formatter.write_str("pairing record field too long"),
             Self::PairRecord(error) => write!(formatter, "pairing keys refused: {error}"),
             Self::NotRequester => formatter.write_str("pairing record is not a requester's"),
@@ -160,10 +166,10 @@ pub fn encode_pairing_record(
                 state,
                 PairingState::Revoked { by_peer: true }
             )));
+            put_bytes(&mut out, record.peer_display_name().as_str().as_bytes())?;
         }
     }
-    put_bytes(&mut out, record.peer().display_name.as_bytes())?;
-    put_bytes(&mut out, record.peer().platform.as_bytes())?;
+    put_bytes(&mut out, record.peer_platform().as_bytes())?;
     put_optional_certificate(&mut out, record.authentication_certificate())?;
     put_optional_certificate(&mut out, record.signature_certificate())?;
     put_optional_certificate(&mut out, record.root_certificate())?;
@@ -204,17 +210,16 @@ pub fn decode_pairing_record(blob: &[u8]) -> Result<PairingRecord, PairingCodecE
         KEYS_REVOKED => {
             let pair_id = PairId::from_array(reader.take_array::<PAIR_ID_SIZE>()?);
             let by_peer = boolean_from_tag(reader.take_u8()?)?;
-            Err((pair_id, by_peer))
+            let name = DisplayName::parse(reader.take_text()?)
+                .map_err(|_| PairingCodecError::InvalidDisplayName)?;
+            Err((pair_id, by_peer, name))
         }
         _ => return Err(PairingCodecError::InvalidKeys),
     };
-    let peer = PeerIntroduction {
-        display_name: reader.take_text()?,
-        platform: reader.take_text()?,
-    };
+    let platform = reader.take_text()?;
     let mut record = match keys {
-        Ok(keys) => PairingRecord::new(keys, peer),
-        Err((pair_id, by_peer)) => PairingRecord::revoked(pair_id, by_peer, peer),
+        Ok(keys) => PairingRecord::new(keys, platform),
+        Err((pair_id, by_peer, name)) => PairingRecord::revoked(pair_id, by_peer, name, platform),
     };
     if let Some(certificate) = reader.take_optional_certificate()? {
         record.remember_authentication_certificate(certificate);
@@ -463,13 +468,11 @@ mod tests {
     const FORGOTTEN_AT_MS: u64 = 1_800_000_000_000;
     /// A revision newer than any this build writes.
     const FUTURE_BLOB_VERSION: u8 = u8::MAX;
-    /// The engine's record format before the current one.
-    const EARLIER_KEYS_FORMAT: u64 = PAIR_RECORD_FORMAT_VERSION - 1;
     /// The field of the engine's record encoding that holds its format.
     const KEYS_FORMAT_FIELD: &str = "format_version";
-    /// The field the engine's current record format added: the latest time
-    /// a session to the pairing was established.
-    const LAST_SESSION_FIELD: &str = "last_session_at_ms";
+    /// The field the engine's current record format added: the peer's
+    /// display name.
+    const PEER_DISPLAY_NAME_FIELD: &str = "peer_display_name";
 
     /// The full record, certificates included.
     fn sample() -> PairingRecord {
@@ -497,7 +500,8 @@ mod tests {
         assert_eq!(left.pair_id(), right.pair_id());
         assert_eq!(left.state(), right.state());
         assert_eq!(left.granted_profiles(), right.granted_profiles());
-        assert_eq!(left.peer(), right.peer());
+        assert_eq!(left.peer_display_name(), right.peer_display_name());
+        assert_eq!(left.peer_platform(), right.peer_platform());
         assert_eq!(
             left.pair_record().map(encoded_keys),
             right.pair_record().map(encoded_keys)
@@ -681,11 +685,17 @@ mod tests {
         let WireValue::Map(mut fields) = decode_deterministic_cbor(keys.as_bytes()).unwrap() else {
             panic!("an encoded pair record is a map");
         };
+        // A format the engine does not read: the current version without its
+        // day, as a version of another stamp is.
+        let (year, month, _) = PAIR_RECORD_FORMAT_VERSION;
         fields.insert(
             KEYS_FORMAT_FIELD.to_owned(),
-            WireValue::Unsigned(EARLIER_KEYS_FORMAT),
+            WireValue::Array(vec![
+                WireValue::Unsigned(u64::from(year)),
+                WireValue::Unsigned(u64::from(month)),
+            ]),
         );
-        fields.remove(LAST_SESSION_FIELD);
+        fields.remove(PEER_DISPLAY_NAME_FIELD);
         let earlier = encode_deterministic_cbor(&WireValue::Map(fields)).unwrap();
 
         let blob = encode_pairing_record(record).unwrap();

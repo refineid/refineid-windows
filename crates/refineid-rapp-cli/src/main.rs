@@ -43,8 +43,8 @@ use refineid_rapp_core::store::{
     MemoryPairingStore, PairingRecord, PairingState, PairingStore, forget_pairing,
 };
 use refineid_rapp_core::stream::{
-    DialPurpose, PairingAddress, PairingServices, STREAM_CANDIDATE_ID, StreamError, dial,
-    dial_session,
+    DialCause, DialPurpose, PairingAddress, PairingServices, STREAM_CANDIDATE_ID, StreamError,
+    dial, dial_session,
 };
 use refineid_rapp_core::transport::TcpFrameTransport;
 use refineid_windows_credential_store::ProtectedPairingStore;
@@ -100,7 +100,7 @@ fn main() {
         _ => {
             eprintln!("usage:");
             eprintln!("  refineid-rapp pair-demo --code <code> [--connect <host:port>] \\");
-            eprintln!("      [--name <label>] [--auto-confirm] [--count <n>] \\");
+            eprintln!("      [--auto-confirm] [--count <n>] \\");
             eprintln!("      [--sign-profile rsa3072|ecdsa384] [--durable]");
             eprintln!("  refineid-rapp reconnect [--connect <host:port>] \\");
             eprintln!("      [--sign-profile rsa3072|ecdsa384] [--count <n>]");
@@ -122,9 +122,7 @@ fn main() {
             #[cfg(windows)]
             {
                 eprintln!("  refineid-rapp ble-scan [--seconds <n>]");
-                eprintln!(
-                    "  refineid-rapp ble-pair --code <code> [--name <label>] [--auto-confirm]"
-                );
+                eprintln!("  refineid-rapp ble-pair --code <code> [--auto-confirm]");
                 eprintln!("  refineid-rapp ble-session");
             }
             std::process::exit(2);
@@ -138,7 +136,6 @@ fn main() {
 
 struct DemoOptions {
     connect: Option<String>,
-    name: String,
     code: Option<String>,
     auto_confirm: bool,
     count: Option<usize>,
@@ -148,7 +145,6 @@ struct DemoOptions {
 
 fn parse_options(arguments: &[String]) -> Result<DemoOptions, String> {
     let mut connect = None;
-    let mut name = "RefineID Windows".to_owned();
     let mut code = None;
     let mut auto_confirm = false;
     let mut count = None;
@@ -164,7 +160,6 @@ fn parse_options(arguments: &[String]) -> Result<DemoOptions, String> {
         };
         match flag.as_str() {
             "--connect" => connect = Some(value()?),
-            "--name" => name = value()?,
             "--code" => {
                 code = Some(
                     normalize_pairing_code(&value()?)
@@ -192,7 +187,6 @@ fn parse_options(arguments: &[String]) -> Result<DemoOptions, String> {
     }
     Ok(DemoOptions {
         connect,
-        name,
         code,
         auto_confirm,
         count,
@@ -214,20 +208,15 @@ fn pair_demo(arguments: &[String]) -> Result<(), String> {
 
 fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(), String> {
     let code = options.code.as_deref().ok_or("--code is required")?;
-    let mut requester = Requester::new(
-        RequesterConfig {
-            display_name: options.name.clone(),
-            platform: "Windows".into(),
-        },
-        store,
-    );
+    let mut requester = Requester::new(RequesterConfig::this_computer(), store);
     let auto_confirm = options.auto_confirm;
     let confirm = move |peer: &PeerIntroduction, requested: &[ProfileName]| {
         if auto_confirm {
             println!();
             println!(
                 "auto-confirming pairing request from {} ({})",
-                peer.display_name, peer.platform
+                peer.display_name.as_str(),
+                peer.platform
             );
             println!("granted: {}", profile_list(requested));
             Some(requested.to_vec())
@@ -270,8 +259,8 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
             .map_err(|error| format!("stored pairing unreadable: {error:?}"))?;
         println!(
             "paired with {} ({}); granted: {}",
-            record.peer().display_name,
-            record.peer().platform,
+            record.peer_display_name().as_str(),
+            record.peer_platform(),
             profile_list(record.granted_profiles())
         );
     }
@@ -332,13 +321,7 @@ fn reconnect(arguments: &[String]) -> Result<(), String> {
         return Err("no pairing is stored; pair first in the settings app".into());
     }
 
-    let mut requester = Requester::new(
-        RequesterConfig {
-            display_name: options.name.clone(),
-            platform: "Windows".into(),
-        },
-        store,
-    );
+    let mut requester = Requester::new(RequesterConfig::this_computer(), store);
 
     let pair_id = {
         let record = requester
@@ -347,8 +330,8 @@ fn reconnect(arguments: &[String]) -> Result<(), String> {
             .ok_or("the stored pairing serves nothing; pair again in the settings app")?;
         println!(
             "reconnecting to {} ({}); granted: {}",
-            record.peer().display_name,
-            record.peer().platform,
+            record.peer_display_name().as_str(),
+            record.peer_platform(),
             profile_list(record.granted_profiles())
         );
         record.pair_id()
@@ -426,7 +409,8 @@ fn serve_sessions<S: PairingStore>(
             .ok()
             .and_then(PairingRecord::serving_record)
             .ok_or("the pairing serves nothing; pair again")?;
-        let Ok(transport) = dial_session(keys, &preferred, &[], BROWSE_WINDOW) else {
+        let Ok(transport) = dial_session(keys, &preferred, BROWSE_WINDOW, DialCause::Holding)
+        else {
             std::thread::sleep(SESSION_RETRY);
             continue;
         };
@@ -547,12 +531,13 @@ fn flush_now() {
     let _ = std::io::Write::flush(&mut std::io::stdout());
 }
 
-/// The grant confirmation of RAPP v26.10.29 section 4.3 item 3.
+/// The grant confirmation of RAPP v26.11.2 section 4.3 item 3.
 fn confirm_grants(peer: &PeerIntroduction, requested: &[ProfileName]) -> Option<Vec<ProfileName>> {
     println!();
     println!(
         "pairing request from {} ({})",
-        peer.display_name, peer.platform
+        peer.display_name.as_str(),
+        peer.platform
     );
     println!("grants to confirm: {}", profile_list(requested));
     print!("confirm this exact pairing? [y/N] ");
@@ -677,13 +662,7 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
     let store = ProtectedPairingStore::load()
         .map_err(|e| format!("cannot load ProtectedPairingStore: {e}"))?;
 
-    let mut requester = Requester::new(
-        RequesterConfig {
-            display_name: "RefineID Windows".into(),
-            platform: "Windows".into(),
-        },
-        store,
-    );
+    let mut requester = Requester::new(RequesterConfig::this_computer(), store);
 
     let transport = dial_for_pairing(
         &[DEFAULT_LISTEN.to_owned()],
@@ -737,7 +716,7 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
 /// Deletes this user's whole pairing set, keys included, and tells no
 /// phone: a local wipe for a development machine, for instance of a set
 /// that no longer decodes. `forget-pairing` is the user's forget action of
-/// RAPP v26.10.29 section 4.6.
+/// RAPP v26.11.2 section 4.6.
 fn clear_pairing() -> Result<(), String> {
     refineid_windows_credential_store::delete_pairing_set()
         .map_err(|e| format!("failed to clear pairing: {e:?}"))?;
@@ -745,7 +724,7 @@ fn clear_pairing() -> Result<(), String> {
     Ok(())
 }
 
-/// The user's forget action on one pairing (RAPP v26.10.29 section 4.6): a
+/// The user's forget action on one pairing (RAPP v26.11.2 section 4.6): a
 /// confirmed pairing keeps its keys only for the `pairing_revoked` close
 /// its phone is given on the next session, and serves nothing from now on;
 /// an unconfirmed or revoked one is removed.
@@ -800,8 +779,8 @@ fn list_pairing() -> Result<(), String> {
         );
         println!(
             "      Peer: {} ({})",
-            record.peer().display_name,
-            record.peer().platform
+            record.peer_display_name().as_str(),
+            record.peer_platform()
         );
         println!("      State: {:?}", record.state());
         println!(

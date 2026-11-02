@@ -64,7 +64,7 @@ use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::limits::OFFER_TTL_MS;
 use refineid_rapp_core::offer::normalize_pairing_code;
 use refineid_rapp_core::store::{PairingRecord, PairingState, PairingStore as _, forget_pairing};
-use refineid_rapp_core::stream::PairingServices;
+use refineid_rapp_core::stream::{PairingServices, attempt_revocations};
 use refineid_windows_credential_store::ProtectedPairingStore;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -76,6 +76,8 @@ const REFRESH_MS: u32 = 2000;
 const ATR_POLL_MS: u128 = 30_000;
 /// One DNS-SD browse round of the pairing search.
 const PAIRING_BROWSE_WINDOW: Duration = Duration::from_millis(600);
+/// How long one browse of a revocation attempt listens for the phone.
+const FORGET_BROWSE_WINDOW: Duration = Duration::from_millis(1_500);
 /// How long a pairing connection waits for each message from the phone.
 const PAIRING_RECEIVE_DEADLINE: Duration = Duration::from_secs(10);
 
@@ -2279,7 +2281,7 @@ fn start_doc_verify() {
 /// Pair with the code the phone shows, on a worker thread; the
 /// refresh timer picks progress and the outcome up from `INBOX`. The
 /// phone advertises a pairing-mode record over DNS-SD and serves its
-/// offer on the connection (RAPP v26.10.29 section 4.2); this side
+/// offer on the connection (RAPP v26.11.2 section 4.2); this side
 /// browses, dials, and types the code into `CPace` with each phone in
 /// pairing mode in turn.
 fn start_pairing() {
@@ -2345,10 +2347,7 @@ fn stop_pairing() {
 fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<String, String> {
     post_pair_status("Looking for the phone…");
     let mut requester = Requester::new(
-        RequesterConfig {
-            display_name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows PC".to_owned()),
-            platform: "Windows".into(),
-        },
+        RequesterConfig::this_computer(),
         ProtectedPairingStore::load()
             .map_err(|error| format!("Cannot open pairing store: {error}"))?,
     );
@@ -2359,10 +2358,48 @@ fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<S
         || cancel.load(Ordering::SeqCst),
     );
     match requester.pair_with_code(code, &mut services, |peer, requested| {
-        confirm_pairing_dialog(main_raw, &peer.display_name, &peer.platform, requested)
+        confirm_pairing_dialog(
+            main_raw,
+            peer.display_name.as_str(),
+            &peer.platform,
+            requested,
+        )
     }) {
-        Ok((pair_id, _)) => paired_summary(&requester, pair_id),
+        Ok((pair_id, _)) => {
+            let summary = paired_summary(&requester, pair_id);
+            // This computer holds one pairing: the new one replaces any held
+            // before, which is forgotten with one bounded attempt (RAPP
+            // v26.11.2 section 4.6 item 6).
+            let replaced: Vec<PairId> = requester
+                .store()
+                .pair_ids()
+                .into_iter()
+                .filter(|stored| *stored != pair_id)
+                .collect();
+            for stored in &replaced {
+                let _ = requester.forget_pairing(*stored);
+            }
+            if !replaced.is_empty() {
+                std::thread::spawn(move || tell_and_clear(requester, &replaced));
+            }
+            summary
+        }
         Err(error) => Err(pairing_failure_text(error).to_owned()),
+    }
+}
+
+/// Makes the bounded attempt of every pairing forgotten on `requester`,
+/// then removes what is left of `forgotten`.
+fn tell_and_clear(mut requester: Requester<ProtectedPairingStore>, forgotten: &[PairId]) {
+    attempt_revocations(&mut requester, FORGET_BROWSE_WINDOW);
+    for pair_id in forgotten {
+        let revoked = requester
+            .store()
+            .get(*pair_id)
+            .is_ok_and(|record| matches!(record.state(), PairingState::Revoked { .. }));
+        if revoked {
+            let _ = requester.forget_pairing(*pair_id);
+        }
     }
 }
 
@@ -2416,8 +2453,8 @@ fn paired_summary(
         .map_err(|error| format!("Stored pairing unreadable: {error:?}"))?;
     Ok(format!(
         "Paired with {} ({}).",
-        record.peer().display_name,
-        record.peer().platform
+        record.peer_display_name().as_str(),
+        record.peer_platform()
     ))
 }
 
@@ -2463,8 +2500,8 @@ fn refresh_remote_devices() {
                     list,
                     &format!(
                         "{marker}[{index}] {} ({}){state}",
-                        record.peer().display_name,
-                        record.peer().platform
+                        record.peer_display_name().as_str(),
+                        record.peer_platform()
                     ),
                 );
             }
@@ -2473,10 +2510,10 @@ fn refresh_remote_devices() {
     }
 }
 
-/// Forget the selected pairing, then refresh (RAPP v26.10.29 section 4.6):
-/// it serves nothing from now on and keeps its keys only until its phone is
-/// told, on the next session with it, or for 30 days. One already revoked
-/// is removed.
+/// Forget the selected pairing, then refresh (RAPP v26.11.2 section 4.6
+/// item 6): it serves nothing from now on and keeps its keys only for one
+/// attempt of at most 10 seconds to tell its phone. One already revoked is
+/// removed.
 fn remove_remote_device() {
     let target = STATE.with(|cell| cell.borrow().as_ref().map(|state| state.remote_devices));
     let Some(list) = target else {
@@ -2503,11 +2540,9 @@ fn remove_remote_device() {
     };
     let pair_id = record.pair_id();
     // An unconfirmed or revoked pairing is removed and nobody is told (RAPP
-    // v26.10.29 section 4.6 item 3).
+    // v26.11.2 section 4.6 item 3).
     let status = match record.state() {
-        PairingState::Serving | PairingState::Forgotten => {
-            "Pairing forgotten. The phone is told when it is next reached."
-        }
+        PairingState::Serving | PairingState::Forgotten => "Pairing forgotten.",
         PairingState::Unconfirmed | PairingState::Revoked { .. } => "Pairing removed.",
     };
     match forget_pairing(
@@ -2518,6 +2553,14 @@ fn remove_remote_device() {
         Ok(()) => {
             refresh_remote_devices();
             set_remote_status(status);
+            // One bounded attempt tells the phone (RAPP v26.11.2 section 4.6
+            // item 6).
+            std::thread::spawn(move || {
+                tell_and_clear(
+                    Requester::new(RequesterConfig::this_computer(), store),
+                    &[pair_id],
+                );
+            });
         }
         Err(error) => set_remote_status(&format!("Forget failed: {error:?}")),
     }
