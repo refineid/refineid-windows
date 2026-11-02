@@ -28,65 +28,78 @@
     <StackPanel MinWidth="320" Spacing="16">
         <!--  The six digits printed on the card, in two groups of three,
               each empty until typed, and the group being typed carries
-              the accent line. One text box, kept invisible over the
+              the accent line. A typed digit shows as a dot until the
+              eye reveals it. One text box, kept invisible over the
               groups, takes the typing, so paste and Backspace work as in
               any field, and the sixth digit proves the number on the
               card at once.  -->
-        <Grid HorizontalAlignment="Center">
-            <StackPanel
-                AutomationProperties.AccessibilityView="Raw"
-                Orientation="Horizontal"
-                Spacing="12"
+        <StackPanel HorizontalAlignment="Center" Orientation="Horizontal" Spacing="12">
+            <Grid>
+                <StackPanel
+                    AutomationProperties.AccessibilityView="Raw"
+                    Orientation="Horizontal"
+                    Spacing="12"
+                >
+                    <Border
+                        x:Name="Group0Line"
+                        MinWidth="72"
+                        Padding="8,4"
+                        BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                        BorderThickness="0,0,0,2"
+                    >
+                        <TextBlock
+                            x:Name="Group0"
+                            HorizontalAlignment="Center"
+                            FontFamily="Consolas"
+                            FontSize="28"
+                            FontWeight="SemiBold"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            Text="&#160;&#160;&#160;"
+                        />
+                    </Border>
+                    <Border
+                        x:Name="Group1Line"
+                        MinWidth="72"
+                        Padding="8,4"
+                        BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                        BorderThickness="0,0,0,2"
+                    >
+                        <TextBlock
+                            x:Name="Group1"
+                            HorizontalAlignment="Center"
+                            FontFamily="Consolas"
+                            FontSize="28"
+                            FontWeight="SemiBold"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            Text="&#160;&#160;&#160;"
+                        />
+                    </Border>
+                </StackPanel>
+                <TextBox
+                    x:Name="NumberBox"
+                    x:Uid="AccessNumberBox"
+                    VerticalAlignment="Stretch"
+                    AutomationProperties.AutomationId="AccessNumberBox"
+                    AutomationProperties.Name="Card access number (CAN)"
+                    InputScope="Number"
+                    IsSpellCheckEnabled="False"
+                    IsTextPredictionEnabled="False"
+                    MaxLength="7"
+                    Opacity="0"
+                    TextChanged="NumberBox_TextChanged"
+                />
+            </Grid>
+            <ToggleButton
+                x:Name="RevealToggle"
+                x:Uid="AccessNumberReveal"
+                VerticalAlignment="Center"
+                AutomationProperties.AutomationId="AccessNumberReveal"
+                AutomationProperties.Name="Show CAN"
+                Click="RevealToggle_Click"
             >
-                <Border
-                    x:Name="Group0Line"
-                    MinWidth="72"
-                    Padding="8,4"
-                    BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
-                    BorderThickness="0,0,0,2"
-                >
-                    <TextBlock
-                        x:Name="Group0"
-                        HorizontalAlignment="Center"
-                        FontFamily="Consolas"
-                        FontSize="28"
-                        FontWeight="SemiBold"
-                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                        Text="&#160;&#160;&#160;"
-                    />
-                </Border>
-                <Border
-                    x:Name="Group1Line"
-                    MinWidth="72"
-                    Padding="8,4"
-                    BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
-                    BorderThickness="0,0,0,2"
-                >
-                    <TextBlock
-                        x:Name="Group1"
-                        HorizontalAlignment="Center"
-                        FontFamily="Consolas"
-                        FontSize="28"
-                        FontWeight="SemiBold"
-                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                        Text="&#160;&#160;&#160;"
-                    />
-                </Border>
-            </StackPanel>
-            <TextBox
-                x:Name="NumberBox"
-                x:Uid="AccessNumberBox"
-                VerticalAlignment="Stretch"
-                AutomationProperties.AutomationId="AccessNumberBox"
-                AutomationProperties.Name="Card access number (CAN)"
-                InputScope="Number"
-                IsSpellCheckEnabled="False"
-                IsTextPredictionEnabled="False"
-                MaxLength="7"
-                Opacity="0"
-                TextChanged="NumberBox_TextChanged"
-            />
-        </Grid>
+                <FontIcon Glyph="&#xE7B3;" />
+            </ToggleButton>
+        </StackPanel>
 
         <TextBlock
             x:Name="StatusText"

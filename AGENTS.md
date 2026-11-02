@@ -10,6 +10,11 @@
   display, or format PIN bytes, candidate PIN lengths (e.g. `got {len}`), or
   development PIN identifiers in log sinks, audit records, or error strings.
   Never commit test PINs or card secrets.
+- The CAN is a secret like the PINs: never displayed back, logged (digits or
+  length), sent over RAPP or diagnostics, or read from argv or the
+  environment. Entry hides it by default with a reveal control. A personal
+  card's CAN is stored only in the DPAPI-protected credential store
+  (refineid-core `doc/security/credential-custody.md`).
 - Development builds make every error visible; release builds never log. A
   debug build (`debug_assertions` in Rust, `DEBUG` in C#) reports each
   failure at its typed boundary with `refineid_dev_errors::report!` or

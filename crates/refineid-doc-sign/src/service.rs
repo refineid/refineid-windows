@@ -631,8 +631,7 @@ impl fmt::Display for SignErrorKind {
             Self::NeedCan => write!(
                 f,
                 "contactless card: the PKCS#15 application is sealed behind \
-                 PACE; provide the CAN (six digits printed on the card front) \
-                 via --can or the prompt"
+                 PACE; enter the CAN printed on the front of a personal card"
             ),
             Self::BadCan => write!(f, "PACE failed: the CAN did not match the card"),
             Self::Pace(s) => write!(f, "PACE: {s}"),
