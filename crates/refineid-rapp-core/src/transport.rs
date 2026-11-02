@@ -1,4 +1,4 @@
-//! The transport-profile contract of RAPP v26.10.29 section 2.2.
+//! The transport-profile contract of RAPP v26.11.2 section 2.2.
 //!
 //! A transport delivers bounded binary frames in order, reports EOF, the
 //! receive deadline and failure distinctly, and names the registered
@@ -43,7 +43,7 @@ pub enum TransportError {
     TimedOut,
     /// The peer refused a sent frame with the RAPP application error: on
     /// BLE, the ATT error `0x80 Application Error` a Custodian answers to a
-    /// `CPace` step 1 it cannot admit (RAPP v26.10.29 section 4.2, "Busy
+    /// `CPace` step 1 it cannot admit (RAPP v26.11.2 section 4.2, "Busy
     /// Refusal" item 2). The connection stays up.
     Refused,
 }

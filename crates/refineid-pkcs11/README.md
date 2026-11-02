@@ -26,7 +26,7 @@ Implemented:
   PIN1 is validated as 4..=12 ASCII digits and held in memory only, with no
   time window, until the card is removed or replaced, the card rejects it or
   reports a retry counter below pristine, or the login ends (logout, the last
-  session's close, finalize); a transport failure keeps it (RAPP v26.10.29
+  session's close, finalize); a transport failure keeps it (RAPP v26.11.2
   section 11 item 2).
   It is verified on the card inside each sign, never logged, and zeroized when it ends.
 - Objects: `C_FindObjectsInit` / `C_FindObjects` / `C_FindObjectsFinal` and `C_GetAttributeValue` over three objects

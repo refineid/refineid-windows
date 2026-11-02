@@ -1141,7 +1141,7 @@ fn card_sign_with_origin_source(
     card.select_pkcs15_application()
         .map_err(|_select_err| CKR_DEVICE_ERROR)?;
     // A failed read is a transport failure: the held PIN 1 stays, and the
-    // retry counter read before its next use decides (RAPP v26.10.29
+    // retry counter read before its next use decides (RAPP v26.11.2
     // section 11 item 2).
     let serial = live_token_serial(&mut card)?;
     let pin1_status = card
@@ -1213,7 +1213,7 @@ fn parse_der_len(der: &[u8], idx: &mut usize) -> Option<usize> {
 
 /// Normalizes a remote ECDSA signature to IEEE P1363 (`r || s`).
 ///
-/// RAPP v26.10.29 section 9.2 sends the fixed-width raw form, which may itself
+/// RAPP v26.11.2 section 9.2 sends the fixed-width raw form, which may itself
 /// begin with the DER sequence tag, so the raw length is checked before any
 /// DER decoding; other lengths are accepted only as DER.
 #[cfg_attr(
@@ -1291,10 +1291,14 @@ pub fn ecdsa_der_to_p1363(der: &[u8], field_bytes: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// The lifetime a remote operation is sent with (RAPP v26.10.29 section
+/// The lifetime a remote operation is sent with (RAPP v26.11.2 section
 /// 8.1 item 2).
 #[cfg(windows)]
 const REMOTE_OPERATION_LIFETIME_MS: u64 = 30_000;
+
+/// How long one DNS-SD browse listens for the paired phone's session record.
+#[cfg(windows)]
+const REMOTE_BROWSE_WINDOW: core::time::Duration = core::time::Duration::from_secs(2);
 
 #[cfg(windows)]
 pub struct RemoteCardTransport {
@@ -1308,13 +1312,13 @@ impl RemoteCardTransport {
     }
 
     /// Establishes a session transport to the paired custodian found by its
-    /// session-mode discovery record, falling back to the local mock
-    /// custodian. This computer only dials; it never listens.
+    /// session-mode discovery record, for this operation, a local consumer's
+    /// request (RAPP v26.11.2 section 8.3). This computer only dials; it never
+    /// listens.
     fn connect_session_transport(
         &self,
         store: &refineid_windows_credential_store::ProtectedPairingStore,
     ) -> Result<refineid_rapp_core::transport::TcpFrameTransport, String> {
-        use core::time::Duration;
         use refineid_rapp_core::store::PairingStore as _;
 
         let pairing = store
@@ -1325,8 +1329,8 @@ impl RemoteCardTransport {
         refineid_rapp_core::stream::dial_session(
             pairing,
             &[],
-            &["127.0.0.1:47110".to_owned()],
-            Duration::from_secs(2),
+            REMOTE_BROWSE_WINDOW,
+            refineid_rapp_core::stream::DialCause::ConsumerRequest,
         )
         // The stream reports the failed dial.
         .map_err(|_| "unable to reach the paired phone".to_owned())
@@ -1347,16 +1351,10 @@ impl RemoteCardTransport {
                 format!("the pairing store cannot be loaded: {error}")
             })?;
         let transport = self.connect_session_transport(&store)?;
-        let mut requester = Requester::new(
-            RequesterConfig {
-                display_name: "RefineID PKCS#11".into(),
-                platform: "Windows".into(),
-            },
-            store,
-        );
+        let mut requester = Requester::new(RequesterConfig::this_computer(), store);
 
         // The phone's `pairing_revoked` close revokes the pairing in the
-        // protected store the requester runs over (RAPP v26.10.29 section
+        // protected store the requester runs over (RAPP v26.11.2 section
         // 4.6 item 4), and the user is told to pair again.
         let mut session = match requester.connect(self.pair_id, transport) {
             Ok(session) => session,

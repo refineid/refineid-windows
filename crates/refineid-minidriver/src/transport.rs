@@ -40,7 +40,7 @@ use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::message::{CloseReason, ResultError};
 use refineid_rapp_core::operations::{CardOperation, CardOperationResult};
 use refineid_rapp_core::store::{PairingRecord, PairingStore};
-use refineid_rapp_core::stream::StreamError;
+use refineid_rapp_core::stream::{DialCause, StreamError};
 use refineid_rapp_core::transport::TcpFrameTransport;
 use refineid_windows_credential_store::ProtectedPairingStore;
 
@@ -249,9 +249,6 @@ pub(crate) fn is_remote_card(atr: &[u8]) -> bool {
         || atr == DEV_TEST_CARD_ATR
 }
 
-/// The endpoint the development mock custodian listens on.
-const LOCAL_MOCK_CUSTODIAN: &str = "127.0.0.1:47110";
-
 /// How long one DNS-SD browse listens for the phone's session record.
 const BROWSE_ROUND: Duration = Duration::from_secs(3);
 
@@ -268,7 +265,7 @@ pub(crate) enum RemoteFailure {
     /// The holder declined on the phone (`user_cancelled`).
     UserCancelled,
     /// The pairing serves nothing: the user forgot it here, or the phone
-    /// closed with `pairing_revoked` (RAPP v26.10.29 section 4.6).
+    /// closed with `pairing_revoked` (RAPP v26.11.2 section 4.6).
     Unpaired,
     /// The phone was not reached, or has turned remote access off.
     Unreachable,
@@ -276,7 +273,7 @@ pub(crate) enum RemoteFailure {
     Lost,
     /// The phone's card did not answer this operation (`card_error`): a
     /// failed operation, never the card's absence, which only `card.status`
-    /// reports (RAPP v26.10.29 section 8.4 item 1).
+    /// reports (RAPP v26.11.2 section 8.4 item 1).
     CardError,
     /// Any other refusal or fault, named for debug logs.
     Failed(String),
@@ -321,10 +318,12 @@ impl RemoteCardTransport {
         Self { atr, pair_id }
     }
 
-    /// Establishes a session transport to the paired custodian: an explicit
-    /// `REFINEID_RAPP_ENDPOINT` for test harnesses first, then the phone found
-    /// by its session-mode discovery record, then the local mock custodian.
-    /// This computer only dials; it never listens.
+    /// Establishes a session transport to the paired custodian for this
+    /// operation, a local consumer's request (RAPP v26.11.2 section 8.3): an
+    /// explicit `REFINEID_RAPP_ENDPOINT` for test harnesses first, then the
+    /// phone found by its session-mode discovery record. A withdrawn phone
+    /// is not dialed (section 4.5 item 6). This computer only dials; it never
+    /// listens.
     fn connect_session_transport(
         &self,
         store: &ProtectedPairingStore,
@@ -345,10 +344,13 @@ impl RemoteCardTransport {
             outcome = refineid_rapp_core::stream::dial_session(
                 pairing,
                 &preferred,
-                &[LOCAL_MOCK_CUSTODIAN.to_owned()],
                 BROWSE_ROUND,
+                DialCause::ConsumerRequest,
             );
-            if matches!(outcome, Ok(_) | Err(StreamError::Withdrawn)) {
+            if matches!(
+                outcome,
+                Ok(_) | Err(StreamError::Withdrawn | StreamError::NotDue)
+            ) {
                 break;
             }
         }
@@ -364,16 +366,10 @@ impl RemoteCardTransport {
             RemoteFailure::Failed(format!("the pairing store cannot be loaded: {error}"))
         })?;
         let transport = self.connect_session_transport(&store)?;
-        let mut requester = Requester::new(
-            RequesterConfig {
-                display_name: "RefineID Windows Remote Arm".into(),
-                platform: "Windows".into(),
-            },
-            store,
-        );
+        let mut requester = Requester::new(RequesterConfig::this_computer(), store);
 
         // The phone's `pairing_revoked` close revokes the pairing in the
-        // protected store the requester runs over (RAPP v26.10.29 section
+        // protected store the requester runs over (RAPP v26.11.2 section
         // 4.6 item 4), and the user is told to pair again.
         let mut session = match requester.connect(self.pair_id, transport) {
             Ok(session) => session,
