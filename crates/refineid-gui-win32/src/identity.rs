@@ -151,8 +151,8 @@ pub const fn puk_kind(status: Option<&PukStatus>) -> StateKind {
 }
 
 /// Parse a UI digit buffer into a typed CAN, wiping the buffer.
-/// Error texts are static: `CanError`'s `Display` renders the
-/// offending byte, which must never reach the display.
+/// Error texts are static and never echo the entered digits or
+/// their count.
 pub fn parse_can(mut buffer: Vec<u8>) -> Result<Can, String> {
     let result = std::str::from_utf8(&buffer)
         .map_err(|_| String::from("CAN must contain digits only."))
@@ -166,7 +166,7 @@ fn can_error(error: CanError) -> String {
         CanError::Empty => String::from("CAN is empty (6 digits)."),
         CanError::WrongLength => String::from("CAN must be exactly 6 digits."),
         CanError::NonDigit => String::from("CAN must contain digits only."),
-        CanError::AllZeros => String::from("CAN was all zeros; check the input."),
+        CanError::AllZeros => String::from("CAN is not an issued card access number."),
     }
 }
 

@@ -352,6 +352,9 @@
   <data name="AccessNumberBox.AutomationProperties.Name" xml:space="preserve">
     <value>Card access number (CAN)</value>
   </data>
+  <data name="AccessNumberReveal.AutomationProperties.Name" xml:space="preserve">
+    <value>Show CAN</value>
+  </data>
   <data name="AccessNumberWaitRing.AutomationProperties.Name" xml:space="preserve">
     <value>Proving the access number</value>
   </data>
