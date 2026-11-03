@@ -268,6 +268,11 @@ internal sealed partial class MainPage : Page
             this.RefreshSignEntry();
             this.StatusInfoBar.IsOpen = false;
         }
+        catch (NativeRappException error) when (error.Code == "no_pairing")
+        {
+            // The phone is absent: the row already shows the card or the
+            // way to connect one, and absence itself is not shown.
+        }
         catch (NativeRappException error)
         {
             if (!quiet)

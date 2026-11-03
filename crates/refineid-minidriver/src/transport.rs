@@ -45,8 +45,8 @@ use refineid_rapp_core::transport::TcpFrameTransport;
 use refineid_windows_credential_store::ProtectedPairingStore;
 
 use crate::ffi::{
-    DWORD, SCARD_E_COMM_DATA_LOST, SCARD_E_NO_KEY_CONTAINER, SCARD_E_READER_UNAVAILABLE,
-    SCARD_F_INTERNAL_ERROR, SCARD_W_CANCELLED_BY_USER, SCARDHANDLE,
+    DWORD, SCARD_E_COMM_DATA_LOST, SCARD_E_NO_KEY_CONTAINER, SCARD_F_INTERNAL_ERROR,
+    SCARD_W_CANCELLED_BY_USER, SCARD_W_REMOVED_CARD, SCARDHANDLE,
 };
 
 /// PC/SC `SCARD_S_SUCCESS`: the winscard call returned no error.
@@ -252,8 +252,8 @@ pub(crate) fn is_remote_card(atr: &[u8]) -> bool {
 /// How long one DNS-SD browse listens for the phone's session record.
 const BROWSE_ROUND: Duration = Duration::from_secs(3);
 
-/// Browse rounds before the phone counts as unreachable; a single query
-/// goes unanswered often enough that one round is not a verdict.
+/// Browse rounds before a dial that stays unanswered gives up; a single
+/// query goes unanswered often enough that one round is not a verdict.
 const BROWSE_ROUNDS: u32 = 3;
 
 /// Operation expiry sent on the wire; the holder approves within this.
@@ -267,8 +267,9 @@ pub(crate) enum RemoteFailure {
     /// The pairing serves nothing: the user forgot it here, or the phone
     /// closed with `pairing_revoked` (RAPP v26.11.2 section 4.6).
     Unpaired,
-    /// The phone was not reached, or has turned remote access off.
-    Unreachable,
+    /// No dial reached the phone: it reads as no card in the reader
+    /// (RAPP v26.11.2 section 4.7), exactly as if no phone were there.
+    NoCard,
     /// The session ended before the operation's result arrived.
     Lost,
     /// The phone's card did not answer this operation (`card_error`): a
@@ -287,7 +288,7 @@ impl RemoteFailure {
         match self {
             Self::UserCancelled => SCARD_W_CANCELLED_BY_USER,
             Self::Unpaired => SCARD_E_NO_KEY_CONTAINER,
-            Self::Unreachable => SCARD_E_READER_UNAVAILABLE,
+            Self::NoCard => SCARD_W_REMOVED_CARD,
             Self::Lost | Self::CardError => SCARD_E_COMM_DATA_LOST,
             Self::Failed(_) => SCARD_F_INTERNAL_ERROR,
         }
@@ -299,7 +300,7 @@ impl core::fmt::Display for RemoteFailure {
         match self {
             Self::UserCancelled => formatter.write_str("the holder declined on the phone"),
             Self::Unpaired => formatter.write_str("the pairing serves nothing; pair again"),
-            Self::Unreachable => formatter.write_str("the paired phone was not reached"),
+            Self::NoCard => formatter.write_str("no card present"),
             Self::Lost => formatter.write_str("the session ended before the result"),
             Self::CardError => formatter.write_str("the phone's card did not answer"),
             Self::Failed(reason) => formatter.write_str(reason),
@@ -354,7 +355,7 @@ impl RemoteCardTransport {
                 break;
             }
         }
-        outcome.map_err(|_| RemoteFailure::Unreachable)
+        outcome.map_err(|_| RemoteFailure::NoCard)
     }
 
     /// Executes a typed card operation via RAPP.
@@ -747,5 +748,26 @@ impl CardTransport for CardSessionTransport {
 
     fn atr(&self) -> Result<Atr, AtrError> {
         Atr::new(self.atr_bytes())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RemoteFailure;
+    use crate::ffi::{SCARD_E_NO_KEY_CONTAINER, SCARD_W_REMOVED_CARD};
+
+    #[test]
+    fn an_absent_phone_reads_as_no_card_in_the_reader() {
+        assert_eq!(RemoteFailure::NoCard.status(), SCARD_W_REMOVED_CARD);
+        assert_eq!(RemoteFailure::NoCard.to_string(), "no card present");
+    }
+
+    #[test]
+    fn a_pairing_that_serves_nothing_still_asks_to_pair_again() {
+        assert_eq!(RemoteFailure::Unpaired.status(), SCARD_E_NO_KEY_CONTAINER);
+        assert_eq!(
+            RemoteFailure::Unpaired.to_string(),
+            "the pairing serves nothing; pair again"
+        );
     }
 }

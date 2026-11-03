@@ -87,8 +87,8 @@ const BROWSE_WINDOW_MS: u64 = 3_000;
 /// the phone's offer (section 3.3 item 7).
 const PAIRING_SEARCH_MS: u64 = refineid_rapp::OFFER_TTL_MS;
 
-/// Browse rounds a card read makes before reporting that the paired phone
-/// is not on the network.
+/// Browse rounds a card read makes before it answers that no remote card
+/// is there.
 const MAX_SESSION_BROWSE_ROUNDS: u32 = 3;
 
 /// Operation expiry sent on the wire; the holder approves within this.
@@ -704,25 +704,28 @@ fn finish_pairing(handle_id: u64, mut requester: StreamRequester, pair_id: PairI
     });
 }
 
+/// The failure a card read answers when no remote card is there,
+/// whatever the phone's state: the pairing reads as absent.
+fn no_remote_card() -> ApiFailure {
+    ApiFailure::new("no_pairing", NO_PAIRING_STATUS)
+}
+
 fn read_paired_card(handle_id: u64, paired: &mut Paired) -> Result<CardReadDto, ApiFailure> {
     let mut outcome = Err(StreamError::Unreachable);
     for _ in 0..MAX_SESSION_BROWSE_ROUNDS {
         let Some(keys) = serving_keys(&paired.requester, paired.pair_id) else {
-            return Err(ApiFailure::new("no_pairing", NO_PAIRING_STATUS));
+            return Err(no_remote_card());
         };
         outcome = dial_session(keys, &[], browse_window(), DialCause::ConsumerRequest);
         if matches!(outcome, Ok(_) | Err(StreamError::Withdrawn)) {
             break;
         }
     }
-    // A withdrawn phone is answered at once that no remote card is there
-    // (RAPP v26.11.2 section 4.5 item 6), as any phone not found is.
-    let session_transport = outcome.map_err(|_| {
-        ApiFailure::new(
-            "no_session",
-            "The paired phone was not found on this network.",
-        )
-    })?;
+    // A dial that opened no session reads as no pairing: the phone is
+    // shown only through its card (RAPP v26.11.2 section 4.7), exactly as
+    // if no phone were there. A withdrawn phone answers at once, dialing
+    // nothing more (section 4.5 item 6).
+    let session_transport = outcome.map_err(|_| no_remote_card())?;
 
     let mut session = match paired.requester.connect(paired.pair_id, session_transport) {
         Ok(session) => session,
@@ -1560,7 +1563,7 @@ mod tests {
         CODE_NOT_ACCEPTED_STATUS, CONSENT_SHOWN_STATUS, NO_PAIRING_STATUS,
         NONE_IN_PAIRING_MODE_STATUS, PAIRING_INCOMPLETE_STATUS, Phase, REVOKED_STATUS_TAIL,
         authentication_certificate, card_request_status, granted_profiles, is_watch_status,
-        search_failure_phase, state_dto,
+        no_remote_card, search_failure_phase, state_dto,
     };
     use refineid_lib_core::x509::OwnedCert;
     use refineid_rapp::ProfileName;
@@ -1593,6 +1596,13 @@ mod tests {
             card_request_status(CardReader::Absent),
             CARD_TO_PHONE_STATUS
         );
+    }
+
+    #[test]
+    fn no_remote_card_reads_as_no_pairing() {
+        let failure = no_remote_card();
+        assert_eq!(failure.code, "no_pairing");
+        assert_eq!(failure.message, NO_PAIRING_STATUS);
     }
 
     #[test]
