@@ -8,7 +8,8 @@
 - No AI attribution in commits.
 - New source files carry `Copyright 2026 Petri Koistinen` with no
   email address and HTTPS license URLs; shell scripts carry the
-  one-line form under the shebang.
+  one-line form under the shebang, PowerShell keeps its multi-line
+  form.
 - Zero PIN and PIN-length logging across all environments: Never log, trace,
   display, or format PIN bytes, candidate PIN lengths (e.g. `got {len}`), or
   development PIN identifiers in log sinks, audit records, or error strings.
