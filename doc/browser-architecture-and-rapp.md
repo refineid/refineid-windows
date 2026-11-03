@@ -239,3 +239,14 @@ Windows App SDK:
 - Fluent Design with Mica backdrop and system styling.
 - Local smart card verification (PC/SC) by default, pairing management, and outbound phone reader discovery (deprecating inbound firewall rules and UAC elevation per [remote-transport-and-discovery-architecture.md](remote-transport-and-discovery-architecture.md)).
 - Native builds for `win-arm64` and `win-x64` targeting .NET 10.
+
+## 9. Remote use is off by default
+
+RAPP ships present but disabled until pairing completes. An unconfigured
+machine runs no agent process, no named pipe, no listener and no startup
+entry: nothing to attack. While the app is open it dials out to the
+phone itself and is the sole writer of the phone's certificates; the
+phone is usable only while the app is open. After a first successful
+RAPP setup the app offers a startup task once, in settings rather than
+as a prompt. Local drivers (minidriver, KSP) ride in a separate admin
+installer, not the Store app.

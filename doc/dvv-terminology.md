@@ -3,6 +3,18 @@
 Code identifiers use universal PKI terms; user-facing strings (WinUI
 resources, Win32 labels, CLI and error messages) use DVV's vocabulary.
 
+## Pairing
+
+Pairing is *yhdistäminen*, and its code is the *yhdistämiskoodi*.
+*Paritus*, *pariliitos* and *laitepari* are not used. A pairing the
+holder breaks is a broken pairing (*rikottu yhdistäminen*), never a
+*paritus*.
+
+## Revocation
+
+Revocation-list evidence is labelled *sulkulista*; a revoked state is
+*mitätöity* and its time the *mitätöintiaika*.
+
 ## Activation PIN
 
 The credential in DVV's activation letter takes DVV's official name
