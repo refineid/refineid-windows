@@ -38,6 +38,13 @@ without any local card driver:
 - Signed with no WHQL attestation path required for the minidriver itself —
   because it is not a kernel driver.
 
+### Driver installer channels
+
+The driver installer (minidriver + KSP MSI) is published via GitHub
+Releases with a winget manifest; the app itself comes from the
+Microsoft Store, which signs it. The installer signing route (SignPath
+Foundation or Trusted Signing) is not yet chosen.
+
 ## Driver/card-mode details
 
 - **The minidriver is user-mode.** It is loaded by WinSCard in user space

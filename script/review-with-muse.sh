@@ -18,7 +18,7 @@ set -euo pipefail
 # review-with-muse.sh - Run automated code review using Muse Code agent (muse exec --yolo)
 
 PROGNAME="review-with-muse"
-MUSE_BIN="${MUSE_BIN:-/Users/pk/.local/bin/muse}"
+MUSE_BIN="${MUSE_BIN:-${HOME}/.local/bin/muse}"
 MUSE_MODEL="${MUSE_MODEL:-muse-spark-1.3-contributor}"
 MUSE_REASONING_EFFORT="${MUSE_REASONING_EFFORT:-max}"
 

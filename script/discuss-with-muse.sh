@@ -18,7 +18,7 @@ set -euo pipefail
 # discuss-with-muse.sh - Stateful multi-turn code review discussion with Muse Code agent
 
 PROGNAME="discuss-with-muse"
-MUSE_BIN="${MUSE_BIN:-/Users/pk/.local/bin/muse}"
+MUSE_BIN="${MUSE_BIN:-${HOME}/.local/bin/muse}"
 MUSE_MODEL="${MUSE_MODEL:-muse-spark-1.3-contributor}"
 MUSE_REASONING_EFFORT="${MUSE_REASONING_EFFORT:-max}"
 CONTRIBUTOR_NAME="${CONTRIBUTOR_NAME:-Contributor}"
@@ -42,8 +42,8 @@ print_usage() {
   echo "      Submit the discussion transcript to the GitHub PR."
   echo ""
   echo "Examples:"
-  echo "  $PROGNAME start --pr 65 --repo refineid/refineid-mono-internal"
-  echo "  $PROGNAME reply --pr 65 \"Fixed the clone/cd mismatch in site/beta/index.html.\""
+  echo "  $PROGNAME start --pr 65 --repo refineid/refineid-windows"
+  echo "  $PROGNAME reply --pr 65 \"Fixed the lint finding in certstore.rs.\""
   echo "  $PROGNAME transcript --pr 65"
   exit 1
 }

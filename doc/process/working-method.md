@@ -20,7 +20,8 @@ developer or an agent. The loops are:
 - **Development builds show every error** on screen and in the system log
   (this repository's AGENTS.md). Release builds log nothing.
 - **Gates** run at commit and push: format, lint, build, tests. Never skip
-  them.
+  them. Continuous integration reports problems after the merge; it never
+  gates one.
 - **An independent review** reads every diff before it merges: a model
   from a different family than the one that wrote the change, run as this
   repository's AGENTS.md describes.
@@ -31,12 +32,18 @@ developer or an agent. The loops are:
 
 A finding from any loop is either fixed in the current change or filed as
 an issue, with the evidence, in the repository whose code it concerns.
+A known defect is not parked as a future issue: the issue records it
+and the fix is queued behind the current change, each in its own branch.
 
 Disagreement is feedback too. When a request conflicts with a
 specification, the front agent says so to the owner and gives an honest
 view of which is better before any brief is written. Good design leads:
 if the design wins, the brief includes the specification change, and the
-specification change merges first.
+specification change merges first. Usable beats strict: when strict
+wording would break real use, the brief proposes the practical behavior
+with a bounded rule. Never add privacy theatre: no extra padding or
+fixed sizes against observers of encrypted traffic beyond what the
+protocol requires.
 
 ## Roles
 
@@ -72,8 +79,12 @@ specification change merges first.
   `../wt/` is the `wt` directory beside the main checkout; worktrees live
   nowhere else.
 - Runs the gate and test commands from AGENTS.md by hand in the worktree.
+- An AI implementation agent runs sandboxed.
 - Does not commit, push, open pull requests, merge or install. It leaves
-  the change uncommitted and reports.
+  the change uncommitted and reports. An explicit owner order may grant
+  commit and push rights for one run only, with the commit and scan
+  rules in the brief; independent review and the merge stay with the
+  front agent.
 - Reports decisions and ambiguities instead of guessing; the front agent
   takes the ones that are the owner's to the owner.
 - Reports what it ran and what the result was, word for word. "Not run" is
@@ -82,15 +93,41 @@ specification change merges first.
 ### The front agent
 
 - Checks the result against the code, not against the report.
+- Verifies commits and pushes with git log and status itself, never
+  from an agent's report. If the owner drives an agent directly, it
+  stands down rather than fight for the machine.
 - Scans the diff, and every text it publishes, for personal data (see
   below) and secrets.
 - Runs the independent review, fixes or rejects each finding, and lists
   the rejected ones with the reason in the pull request.
-- Commits, pushes through the gates, opens the pull request, merges it, and
-  installs the merged main on the owner's devices.
+- Commits, pushes through the gates, opens the pull request, merges it
+  by squash without rebasing onto main first, and installs the merged
+  main on the owner's devices. The squash carries a body composed from
+  the branch's commits, passed explicitly, so no footer reaches history.
+- A hardware acceptance item (a real card must complete something)
+  blocks the merge: the front agent asks the owner to run it and merges
+  only after it passes. Merging first and filing a follow-up issue
+  instead is not allowed.
+- Removes the worktree and deletes the branch only after the merge is
+  confirmed, each in its own step. Destructive commands are never
+  chained after other commands. Signing secrets are never copied or
+  removed by agents.
 - Gives two changes that edit the same files to agents one after the
   other: the second starts from main after the first has merged.
-- Tells the owner what changed and what to test, briefly.
+- Asks the owner one question at a time, the most impactful first, and
+  carries on with unblocked work between answers.
+- Says in chat, before merging, what the change does beyond the brief:
+  a new flag, a changed default or exit code, a step on a machine. The
+  pull request description does not count as telling, and a step beyond
+  the brief waits for the owner's word.
+- Presents the comparative review and the design before a dramatic
+  change (a big port, a merge of implementations, a deletion of a
+  stack) and starts only on approval.
+- Adds no user-visible state, message, outcome or option without asking
+  first; a new case reuses an existing outcome or error instead of
+  inventing one.
+- Tells the owner what changed and what to test, briefly, naming
+  specification identifiers (MF, EF.CardAccess), not bare hex.
 
 ## Personal data
 
@@ -100,6 +137,8 @@ or reader serial number, PIN or card access number, host or device name,
 network address, or the date of a person's test. That covers code, tests,
 commits, issues, pull requests, news entries and any log pasted into them.
 Tests use synthetic identities. Redact a log before it is quoted.
+Public text never names another vendor's middleware or a private
+repository; findings are stated in neutral terms.
 
 ## What is kept and what is not
 
