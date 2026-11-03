@@ -93,21 +93,21 @@ protocol requires.
 ### The front agent
 
 - Checks the result against the code, not against the report.
-- Verifies commits and pushes with git log and status itself, never
-  from an agent's report. If the owner drives an agent directly, it
-  stands down rather than fight for the machine.
+- Verifies commits and pushes directly in its own session using git
+  log and status, never from an agent's report. If the owner drives an
+  agent directly, it stands down rather than fight for the machine.
 - Scans the diff, and every text it publishes, for personal data (see
   below) and secrets.
 - Runs the independent review, fixes or rejects each finding, and lists
   the rejected ones with the reason in the pull request.
+- A hardware acceptance item (a real card must complete something)
+  blocks the merge: the front agent asks the owner to run it and
+  proceeds to merge only after it passes. Merging first and filing a
+  follow-up issue instead is not allowed.
 - Commits, pushes through the gates, opens the pull request, merges it
   by squash without rebasing onto main first, and installs the merged
   main on the owner's devices. The squash carries a body composed from
   the branch's commits, passed explicitly, so no footer reaches history.
-- A hardware acceptance item (a real card must complete something)
-  blocks the merge: the front agent asks the owner to run it and merges
-  only after it passes. Merging first and filing a follow-up issue
-  instead is not allowed.
 - Removes the worktree and deletes the branch only after the merge is
   confirmed, each in its own step. Destructive commands are never
   chained after other commands. Signing secrets are never copied or
