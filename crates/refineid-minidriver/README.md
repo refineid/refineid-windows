@@ -133,8 +133,9 @@ describing and signing.
 
 Over the card module's remote arm, an operation that gives no result answers
 `SCARD_W_CANCELLED_BY_USER` when the holder declines, `SCARD_E_NO_KEY_CONTAINER`
-when the pairing serves nothing, `SCARD_E_READER_UNAVAILABLE` when the phone is
-not reached, `SCARD_E_COMM_DATA_LOST` when the session ends before the result
+when the pairing serves nothing, `SCARD_W_REMOVED_CARD` when no dial reached
+its phone (an absent phone reads as no card in the reader),
+`SCARD_E_COMM_DATA_LOST` when the session ends before the result
 or the phone's card does not answer the operation (`card_error`, a failed
 operation and not the card's absence), and `SCARD_F_INTERNAL_ERROR` otherwise,
 the retry floor included.

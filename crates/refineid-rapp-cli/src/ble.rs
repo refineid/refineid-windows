@@ -1,7 +1,7 @@
 //! The BLE commands over `"fi.refineid.rapp.ble"`: `ble-scan` lists RAPP
-//! advertisers, `ble-pair` pairs with the phone showing a code and stores
-//! the pairing, and `ble-session` opens a session with the stored pairing's
-//! phone and reads its card.
+//! advertisers, `ble-pair` pairs with the phone showing a code, stores
+//! the pairing, and forgets the pairing held before, and `ble-session`
+//! opens a session with the stored pairing's phone and reads its card.
 //!
 //! Nothing personal is printed: a read identity is reported as read, not
 //! shown, and certificates by their size.
@@ -174,7 +174,8 @@ pub fn ble_scan(arguments: &[String]) -> Result<(), String> {
 
 /// `ble-pair`: pairs with the phone showing `--code`, trying each
 /// advertiser in pairing mode once, strongest first, a busy one again
-/// after its wait, and stores the pairing.
+/// after its wait, stores the pairing, and forgets the pairing held
+/// before, as `pair-demo` does.
 pub fn ble_pair(arguments: &[String]) -> Result<(), String> {
     let options = parse(arguments)?;
     let code = options.code.as_deref().ok_or("--code is required")?;
@@ -218,6 +219,7 @@ pub fn ble_pair(arguments: &[String]) -> Result<(), String> {
         crate::profile_list(record.granted_profiles())
     );
     println!("the pairing is stored, protected to this Windows user");
+    crate::forget_replaced_pairings_and_tell(&mut requester, pair_id);
     Ok(())
 }
 
