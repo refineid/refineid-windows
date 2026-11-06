@@ -579,8 +579,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Reads the name at `offset` (RFC 1035 section 4.1.4) and where the bytes
 /// after it start. A name with no terminator inside the datagram, longer than
-/// the limit, with a reserved label length or too many pointers is malformed:
-/// the read always ends, and the next offset is always past `offset`.
+/// the limit, with a reserved label length or too many pointers is malformed
+/// and reads as `None`. The read always ends, and a name that is read ends past
+/// `offset`.
 fn parse_dns_name(buf: &[u8], mut offset: usize) -> Option<(String, usize)> {
     let mut labels = Vec::new();
     let mut name_bytes = DNS_TERMINATOR_BYTES;
