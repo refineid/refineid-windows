@@ -46,6 +46,9 @@ last needs a person. Prefer the lowest tier that can show the failure.
   removes it afterwards. An installed RefineID is left alone.
 - PC/SC is not isolated: a card in a reader is really read, without a PIN. A UI
   test asserts only what holds with or without a card.
+- `CurrentUser\My` is not isolated either, and the app installs and withdraws
+  a paired phone's certificate there. A UI test therefore never pairs, and one
+  checks that a run leaves the store as it found it.
 - The pointer test moves the real pointer, and refuses to click unless the app
   is the foreground window. Leave the desktop alone while the UI tier runs.
 
@@ -69,7 +72,9 @@ These need a person, or are not built yet:
   over a phone: the Hardware tier.
 - The MSI and MSIX install and upgrade paths.
 - UI flows that need a card present or a paired phone. The mock phone publishes
-  no DNS-SD record, so the app cannot find it yet.
+  no DNS-SD record, so the app cannot find it yet, and pairing changes the
+  user's certificate store: this needs a disposable Windows user or machine,
+  never a developer's own account.
 - Coverage is reported and not enforced: a threshold rewards easy tests over
   the ones that matter.
 - Coverage-guided fuzzing: `cargo-fuzz` needs a nightly toolchain, and this

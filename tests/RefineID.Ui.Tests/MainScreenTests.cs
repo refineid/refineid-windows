@@ -16,6 +16,7 @@ namespace RefineID.Ui.Tests;
 
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography.X509Certificates;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Definitions;
 using Xunit;
@@ -65,6 +66,24 @@ public sealed partial class MainScreenTests
 
         Assert.True(app.IsRunning, "The app exited on its own.");
         Assert.Empty(ReportedFailures(app.StartedAt));
+    }
+
+    /// <summary>
+    /// The certificate store is the user's own: the empty profile does not
+    /// isolate it, so a run that changed it would disturb a real login.
+    /// </summary>
+    [Fact]
+    public void Running_the_app_without_a_pairing_leaves_the_users_certificates_alone()
+    {
+        HashSet<string> before = PersonalCertificates();
+
+        using (RunningApp app = new())
+        {
+            Assert.NotNull(app.Find(VerifyCard));
+            Thread.Sleep(SettleTime);
+        }
+
+        Assert.Equal(before, PersonalCertificates());
     }
 
     [Fact]
@@ -124,6 +143,14 @@ public sealed partial class MainScreenTests
             .ToList();
 
         Assert.Empty(unnamed);
+    }
+
+    /// <summary>The thumbprints in the user's personal certificate store.</summary>
+    private static HashSet<string> PersonalCertificates()
+    {
+        using X509Store store = new(StoreName.My, StoreLocation.CurrentUser);
+        store.Open(OpenFlags.ReadOnly);
+        return store.Certificates.Select(certificate => certificate.Thumbprint).ToHashSet();
     }
 
     [LibraryImport("user32.dll")]
