@@ -38,6 +38,15 @@ fi
 
 # A relative link escapes the repository when it climbs more directories
 # than its file is deep. Cross-repository references use the GitHub URL.
+# RefineID's own crates are never pinned: every commit builds the head of
+# refineid-core main. Without the network the lock file keeps its core
+# revision, and the daily track-core-main job moves it later.
+if cargo update --quiet --package refineid-rapp 2>/dev/null; then
+    git add "$root/Cargo.lock"
+else
+    echo "pre-commit: core main not reachable; the lock file keeps its core revision" >&2
+fi
+
 echo "pre-commit: markdown links stay inside the repository"
 link_open='](' # markdown inline link opener preceding the target
 parent_dir='../'

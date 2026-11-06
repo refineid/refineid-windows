@@ -1,0 +1,61 @@
+name: track-core-main
+
+# RefineID's own crates are never pinned: every app builds the head of
+# refineid-core main. A commit moves the lock file there through the
+# pre-commit hook; this moves it on a day nobody commits, in the
+# background, and merges the move at once. Nothing here runs on a pull
+# request.
+on:
+  schedule:
+    - cron: '15 4 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  # One "directory:package" per lock file; the package names the core
+  # git source, which cargo moves as a whole.
+  LOCK_DIRS: '.:refineid-rapp'
+
+jobs:
+  track:
+    name: Build the head of refineid-core main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The move is pushed back with the workflow's own token.
+          persist-credentials: true
+
+      - name: Move every lock file to the head of core main
+        run: |
+          for pair in $LOCK_DIRS; do
+            dir=${pair%%:*}
+            package=${pair##*:}
+            (cd "$dir" && cargo update --package "$package")
+          done
+
+      - name: Merge the move
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git diff --quiet; then
+            echo "every lock file already names the head of core main"
+            exit 0
+          fi
+          branch="track-core-main/$(date -u +%Y%m%d-%H%M)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -b "$branch"
+          git commit -am 'Build the head of refineid-core main'
+          git push -u origin "$branch"
+          gh pr create --base main --head "$branch" --title 'Build the head of refineid-core main' \
+            --body "RefineID's own crates are never pinned: the lock file moves to the head of refineid-core main."
+          gh pr merge "$branch" --squash --delete-branch
