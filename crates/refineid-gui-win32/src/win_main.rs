@@ -241,8 +241,7 @@ static INBOX: Mutex<Option<InboxItem>> = Mutex::new(None);
 fn probe_ui() {
     match create_main_window() {
         Ok(window) => {
-            // Exercise the photo pipeline too when a saved JPEG is
-            // around (a `--smoke` with the test CAN leaves one).
+            // Exercise the photo pipeline too when a saved JPEG is around.
             let photo = std::env::temp_dir().join("refineid-photo.jpg");
             let bitmap = photo.is_file() && load_photo_bitmap(&photo);
             let _ = unsafe { DestroyWindow(window) };
@@ -329,14 +328,7 @@ fn smoke() {
         println!("SMOKE-NO-CARD");
         return;
     };
-    let can = std::env::var("REFINEID_TEST_CAN")
-        .ok()
-        .and_then(|value| identity::parse_can(value.into_bytes()).ok());
-    let outcome = can.map_or_else(
-        || identity::read_identity(&reader),
-        |can| identity::read_identity_and_photo(&reader, can),
-    );
-    match outcome {
+    match identity::read_identity(&reader) {
         Ok(panel) => println!("SMOKE-OK reader={reader}\n{panel}"),
         Err(error) => println!("SMOKE-READ-FAIL reader={reader}\n{error}"),
     }
@@ -747,13 +739,6 @@ fn on_create(main: HWND) -> windows::core::Result<()> {
         instance,
     )?;
     set_font(identity_can, font);
-    // Test hook: prefill the CAN from the environment when it
-    // parses. The value is never logged.
-    if let Ok(prefill) = std::env::var("REFINEID_TEST_CAN")
-        && refineid_lib_core::can::Can::new(&prefill).is_ok()
-    {
-        set_text(identity_can, &prefill);
-    }
     let identity_photo = child(
         w!("BUTTON"),
         "Read photo",

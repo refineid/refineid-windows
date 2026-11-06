@@ -1613,4 +1613,17 @@ mod tests {
             Err(StreamError::Unreachable)
         ));
     }
+
+    /// The longest arbitrary datagram tried: past any Ethernet frame.
+    const ARBITRARY_DATAGRAM_BYTES: usize = 2048;
+
+    proptest::proptest! {
+        /// Anyone on the network can send the browser a datagram.
+        #[test]
+        fn any_datagram_is_read_without_a_panic(
+            data in proptest::collection::vec(proptest::num::u8::ANY, 0..ARBITRARY_DATAGRAM_BYTES),
+        ) {
+            parse_mdns_response(&data, None, &mut MdnsRecords::default());
+        }
+    }
 }

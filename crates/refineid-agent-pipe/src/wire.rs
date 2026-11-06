@@ -532,4 +532,35 @@ mod tests {
             Err(WireError::Oversized)
         );
     }
+
+    /// The longest arbitrary message tried: past any valid one.
+    const ARBITRARY_MESSAGE_BYTES: usize = 1024;
+
+    proptest::proptest! {
+        /// Any process of this user can write to the pipe.
+        #[test]
+        fn any_bytes_decode_without_a_panic(
+            bytes in proptest::collection::vec(proptest::num::u8::ANY, 0..ARBITRARY_MESSAGE_BYTES),
+        ) {
+            let _request = SignRequest::decode(&bytes);
+            let _answer = SignAnswer::decode(&bytes);
+        }
+
+        /// A valid request with one byte changed is refused or still valid:
+        /// what decodes encodes back to the same bytes.
+        #[test]
+        fn a_changed_request_decodes_only_to_what_it_says(
+            position in proptest::num::usize::ANY,
+            value in proptest::num::u8::ANY,
+        ) {
+            let mut bytes = request().encode();
+            let index = position % bytes.len();
+            if let Some(byte) = bytes.get_mut(index) {
+                *byte = value;
+            }
+            if let Ok(decoded) = SignRequest::decode(&bytes) {
+                proptest::prop_assert_eq!(decoded.encode(), bytes);
+            }
+        }
+    }
 }

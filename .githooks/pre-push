@@ -11,6 +11,9 @@
 # once per target: for the native host and, when the host is another
 # target and the Windows target is installed, x86_64-pc-windows-msvc.
 #
+# Then runs every Rust test this host can run and the app's contract tests.
+# A non-Windows host skips the Windows-only tests (doc/testing.md).
+#
 # Enable local hooks once per clone with:
 #
 #     git config core.hooksPath .githooks
@@ -38,4 +41,10 @@ if [ "$HOST_TARGET" != "$WINDOWS_TARGET" ] \
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --quiet --target "$WINDOWS_TARGET"
 fi
 
-echo "pre-push: ok (Cargo.lock matches the manifests, documentation builds)"
+echo "pre-push: every Rust test of this host"
+cargo test --workspace --locked --quiet
+
+echo "pre-push: the app's contract tests"
+dotnet test tests/RefineID.Contract.Tests --verbosity quiet
+
+echo "pre-push: ok (Cargo.lock matches the manifests, documentation builds, tests pass)"

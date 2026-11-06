@@ -39,6 +39,7 @@
   every SDK at the latest release. Rust follows the latest stable release
   (`rust-toolchain.toml` selects the stable channel); never pin a release.
 - Always run formatting (`cargo fmt`, `csharpier`), clippy (`-D warnings` on both host and Windows targets), and unit tests before committing (`.githooks/pre-commit` enforces this). `Cargo.lock` must match the manifests and the workspace documentation must build with rustdoc warnings denied (`.githooks/pre-push` enforces both); the refineid-core crates track core main, so refresh them with `cargo update -p refineid-rapp` when core moves. Never bypass verification with `--no-verify`. Hardware claims additionally require a real reader and card.
+- Tests: [doc/testing.md](doc/testing.md) names the tiers and what each proves. A bug fix starts with a test that fails without the fix. Run `scripts/test.ps1 -Tier all` on Windows before a pull request that touches the app or a bridge; a change made on another host cannot run the Windows-only tests.
 - Reading does not require a worktree; writing does. The main checkout is
   never edited directly. Before writing code or modifying files for any task,
   create a dedicated git worktree strictly under `../wt/`

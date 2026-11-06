@@ -192,4 +192,16 @@ mod tests {
         let cut = encoded.get(..encoded.len() - 1).unwrap_or_default();
         assert!(decode_sighting(cut).is_err());
     }
+
+    /// The longest arbitrary file tried: past a valid sighting.
+    const ARBITRARY_FILE_BYTES: usize = 256;
+
+    proptest::proptest! {
+        #[test]
+        fn any_bytes_decode_without_a_panic(
+            bytes in proptest::collection::vec(proptest::num::u8::ANY, 0..ARBITRARY_FILE_BYTES),
+        ) {
+            let _sighting = decode_sighting(&bytes);
+        }
+    }
 }

@@ -63,7 +63,7 @@ repository.
 3. Open one pull request for the branch.
 4. Squash-merge after the mandatory local gates pass and the pull request is
    reviewed, so the `main` history stays linear. The scheduled/manual Windows
-   portability workflow does not gate pull requests. The pull request preserves
+   workflow does not gate pull requests. The pull request preserves
    the branch history.
 5. Remove the worktree (`git worktree remove`), delete the branch, and
    fast-forward local main.

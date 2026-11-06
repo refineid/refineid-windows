@@ -27,6 +27,8 @@ Visual Studio Installer for:
   installing a second one;
 - `rustup`, updated to its latest release, and the latest stable Rust with
   the components and targets `rust-toolchain.toml` names;
+- `cargo-nextest` and `cargo-llvm-cov`, which run the tests and measure
+  coverage ([testing.md](testing.md));
 - the latest .NET SDK of the major the WinUI apps target
   (`TargetFramework` in `apps/RefineID-winui/RefineID.csproj`) and the
   repository's .NET local tools (`csharpier`);

@@ -1,0 +1,18 @@
+# Test runner settings: every test in its own process, so one that hangs or
+# leaks global state is named instead of stalling or disturbing the rest.
+
+[profile.default]
+fail-fast = false
+retries = 0
+# A test taking more than a minute is reported, and ended at four: a hang is
+# a defect to see, not a build to wait for.
+slow-timeout = { period = "60s", terminate-after = 4 }
+leak-timeout = "1s"
+status-level = "fail"
+final-status-level = "slow"
+
+[profile.ci]
+failure-output = "immediate-final"
+
+[profile.ci.junit]
+path = "junit.xml"

@@ -16,6 +16,8 @@
 # .NET build output (scoped to the app tree so a Rust src/bin/ is never caught)
 /apps/*/bin/
 /apps/*/obj/
+/tests/*/bin/
+/tests/*/obj/
 
 # Private signing material
 *.p12
