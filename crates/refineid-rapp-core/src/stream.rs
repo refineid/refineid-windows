@@ -583,7 +583,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// the read always ends, and the next offset is always past `offset`.
 fn parse_dns_name(buf: &[u8], mut offset: usize) -> Option<(String, usize)> {
     let mut labels = Vec::new();
-    let mut name_bytes = 0;
+    let mut name_bytes = DNS_TERMINATOR_BYTES;
     let mut after_name = None;
     let mut pointers = 0;
 
@@ -630,6 +630,8 @@ const DNS_LABEL_TAG_MASK: u8 = 0xC0;
 const DNS_POINTER_TAG: u8 = 0xC0;
 /// Bytes of a compression pointer.
 const DNS_POINTER_BYTES: usize = 2;
+/// Bytes of the zero label that ends a name, which its limit counts.
+const DNS_TERMINATOR_BYTES: usize = 1;
 
 /// DNS resource-record types the browser reads (RFC 1035, RFC 2782).
 const RR_TYPE_A: u16 = 1;
@@ -1646,12 +1648,27 @@ mod tests {
         assert_eq!(parse_dns_name(&unended_name(1), 0), None);
     }
 
-    #[test]
-    fn a_name_longer_than_the_dns_limit_is_malformed() {
-        let labels = super::DNS_NAME_BYTES / LABEL.len();
-        let mut name = unended_name(labels);
+    /// A name of exactly `total` bytes on the wire, terminator included.
+    fn name_of_bytes(total: usize) -> Vec<u8> {
+        let longest_label = 63;
+        let mut name = Vec::new();
+        let mut left = total - super::DNS_TERMINATOR_BYTES;
+        while left > 0 {
+            let length = (left - 1).min(longest_label).max(1);
+            name.push(u8::try_from(length).expect("a label length"));
+            name.resize(name.len() + length, LABEL[0]);
+            left -= length + 1;
+        }
         name.push(0);
-        assert_eq!(parse_dns_name(&name, 0), None);
+        assert_eq!(name.len(), total);
+        name
+    }
+
+    #[test]
+    fn a_name_at_the_dns_limit_is_read_and_one_byte_more_is_malformed() {
+        let limit = super::DNS_NAME_BYTES;
+        assert!(parse_dns_name(&name_of_bytes(limit), 0).is_some());
+        assert_eq!(parse_dns_name(&name_of_bytes(limit + 1), 0), None);
     }
 
     #[test]
