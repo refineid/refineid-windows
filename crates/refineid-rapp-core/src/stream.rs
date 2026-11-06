@@ -13,6 +13,9 @@
 //! `refineid_rapp` unparsed. An anomaly closes the connection without
 //! touching stored state (specification section 10.1, class 1).
 
+#[cfg(test)]
+mod browse_receive_tests;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
@@ -637,8 +640,11 @@ const MDNS_PORT: u16 = 5353;
 /// Where every browse question is sent.
 const MDNS_GROUP: std::net::SocketAddrV4 =
     std::net::SocketAddrV4::new(MDNS_GROUP_ADDRESS, MDNS_PORT);
-/// Poll interval while waiting for answers on each socket.
+/// How long one round waits for an answer across a browse's sockets.
 const MDNS_POLL: Duration = Duration::from_millis(125);
+/// The part of [`MDNS_POLL`] each of a browse's two sockets waits, so a round
+/// with nothing to read takes one poll.
+const MDNS_SOCKET_POLL: Duration = MDNS_POLL.checked_div(2).expect("the divisor is not zero");
 /// Interval at which the browse question is asked again within one window
 /// (RFC 6762 section 5.2); a custodian does not answer every question.
 const MDNS_REQUERY: Duration = Duration::from_secs(1);
@@ -816,18 +822,29 @@ struct BrowseSockets {
     group: Option<std::net::UdpSocket>,
     legacy: std::net::UdpSocket,
     interfaces: Vec<Ipv4Addr>,
+    /// Whether the next read starts with the legacy socket: they take turns,
+    /// so busy multicast traffic does not hold back a unicast answer.
+    legacy_next: core::cell::Cell<bool>,
 }
 
 impl BrowseSockets {
     fn open() -> Option<Self> {
         let interfaces = browse_interfaces();
         let legacy = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
-        legacy.set_read_timeout(Some(MDNS_POLL)).ok()?;
-        Some(Self {
-            group: Self::group_socket(&interfaces),
+        legacy.set_read_timeout(Some(MDNS_SOCKET_POLL)).ok()?;
+        let mut sockets = Self::over(Self::group_socket(&interfaces), legacy);
+        sockets.interfaces = interfaces;
+        Some(sockets)
+    }
+
+    /// The two sockets, asking through no interface yet.
+    const fn over(group: Option<std::net::UdpSocket>, legacy: std::net::UdpSocket) -> Self {
+        Self {
+            group,
             legacy,
-            interfaces,
-        })
+            interfaces: Vec::new(),
+            legacy_next: core::cell::Cell::new(false),
+        }
     }
 
     /// Binds the shared mDNS port and joins the group on every interface
@@ -851,7 +868,7 @@ impl BrowseSockets {
         if joined == 0 {
             return None;
         }
-        socket.set_read_timeout(Some(MDNS_POLL)).ok()?;
+        socket.set_read_timeout(Some(MDNS_SOCKET_POLL)).ok()?;
         Some(socket.into())
     }
 
@@ -877,14 +894,19 @@ impl BrowseSockets {
             && socket.send_to(question, MDNS_GROUP).is_ok()
     }
 
-    /// Reads one datagram from whichever socket has one within its poll.
+    /// Reads one datagram from whichever socket has one within its poll,
+    /// starting with the socket the last read did not start with.
     fn receive(&self, buffer: &mut [u8]) -> Option<(usize, std::net::SocketAddr)> {
-        if let Some(group) = &self.group
-            && let Ok(received) = group.recv_from(buffer)
-        {
-            return Some(received);
-        }
-        self.legacy.recv_from(buffer).ok()
+        let legacy_first = self.legacy_next.replace(!self.legacy_next.get());
+        let group = self.group.as_ref();
+        let (first, second) = if legacy_first {
+            (Some(&self.legacy), group)
+        } else {
+            (group, Some(&self.legacy))
+        };
+        first
+            .and_then(|socket| socket.recv_from(buffer).ok())
+            .or_else(|| second.and_then(|socket| socket.recv_from(buffer).ok()))
     }
 }
 
