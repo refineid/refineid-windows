@@ -58,6 +58,11 @@
     reason = "the PKCS#11 dispatch surface is 60-plus `extern \"C\"` entry points, which cannot be `const fn` in edition 2024; const-promotion of the handful of pure helpers is a per-site judgment, not a workspace gate (see the note by this lint in the root Cargo.toml)"
 )]
 
+// The PIN test hook reads a PIN from the environment; a release build
+// cannot carry it.
+#[cfg(all(feature = "test-pin-env", not(debug_assertions)))]
+compile_error!("the `test-pin-env` feature is for debug builds only");
+
 extern crate alloc;
 
 mod api;
