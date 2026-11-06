@@ -77,7 +77,7 @@ function Invoke-StaleArtifactPrune {
 
     if (-not (Get-Command cargo-sweep -ErrorAction SilentlyContinue)) {
         Write-Host 'Installing cargo-sweep to prune stale Rust artifacts...'
-        & $CargoExecutable install cargo-sweep --locked
+        & $CargoExecutable install cargo-sweep --version 0.8.0 --locked
         if ($LASTEXITCODE -ne 0) {
             Write-Warning 'cargo-sweep is unavailable; skipping the stale-artifact prune.'
             return
