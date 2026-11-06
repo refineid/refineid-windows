@@ -722,14 +722,26 @@ fn read_cstr(p: LPSTR) -> String {
     }
 }
 
+/// The terminator of a C string.
+#[cfg(windows)]
+const NUL: u8 = 0;
+
+/// Whether the NUL-terminated string at `p` equals `s`.
+///
+/// Reads `p` one byte at a time and stops at its first NUL or at the first
+/// byte that differs, so no byte past the caller's terminator is read.
 #[cfg(windows)]
 fn cstr_eq(p: LPSTR, s: &str) -> bool {
     if p.is_null() {
         return false;
     }
-    let len = s.len();
-    let bytes = unsafe { core::slice::from_raw_parts(p.cast::<u8>(), len + 1) };
-    bytes[len] == 0 && &bytes[..len] == s.as_bytes()
+    for (offset, &expected) in s.as_bytes().iter().enumerate() {
+        let actual = unsafe { *p.add(offset) };
+        if actual == NUL || actual != expected {
+            return false;
+        }
+    }
+    unsafe { *p.add(s.len()) == NUL }
 }
 
 #[cfg(windows)]
@@ -3345,4 +3357,63 @@ unsafe extern "system" fn unsupported_create_container_ex(
     _pinId: DWORD,
 ) -> DWORD {
     SCARD_E_UNSUPPORTED_FEATURE
+}
+
+#[cfg(all(windows, test))]
+mod tests {
+    use super::{NUL, cstr_eq};
+
+    /// `text` as an owned C string: its bytes followed by one NUL and
+    /// nothing after it.
+    fn c_string(text: &str) -> Vec<u8> {
+        let mut bytes = text.as_bytes().to_vec();
+        bytes.push(NUL);
+        bytes.shrink_to_fit();
+        bytes
+    }
+
+    #[test]
+    fn an_equal_string_matches() {
+        let mut name = c_string("cmapfile");
+        assert!(cstr_eq(name.as_mut_ptr(), "cmapfile"));
+    }
+
+    #[test]
+    fn a_shorter_string_does_not_match_a_longer_name() {
+        let mut name = c_string("ksc00");
+        assert!(!cstr_eq(name.as_mut_ptr(), "cmapfile"));
+    }
+
+    #[test]
+    fn a_prefix_does_not_match() {
+        let mut name = c_string("card");
+        assert!(!cstr_eq(name.as_mut_ptr(), "cardcf"));
+    }
+
+    #[test]
+    fn a_longer_string_does_not_match_its_prefix() {
+        let mut name = c_string("cardcf");
+        assert!(!cstr_eq(name.as_mut_ptr(), "card"));
+    }
+
+    #[test]
+    fn a_different_string_of_equal_length_does_not_match() {
+        let mut name = c_string("cardid");
+        assert!(!cstr_eq(name.as_mut_ptr(), "cardcf"));
+    }
+
+    #[test]
+    fn an_empty_string_matches_only_the_empty_name() {
+        let mut empty = c_string("");
+        let mut name = c_string("mscp");
+        assert!(cstr_eq(empty.as_mut_ptr(), ""));
+        assert!(!cstr_eq(name.as_mut_ptr(), ""));
+        assert!(!cstr_eq(empty.as_mut_ptr(), "mscp"));
+    }
+
+    #[test]
+    fn a_null_pointer_never_matches() {
+        assert!(!cstr_eq(core::ptr::null_mut(), ""));
+        assert!(!cstr_eq(core::ptr::null_mut(), "mscp"));
+    }
 }
