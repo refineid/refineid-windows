@@ -940,9 +940,9 @@ mod tests {
     }
 
     #[test]
-    fn an_expiry_is_stored_with_the_whole_record() {
-        // The pairing expires now, so the reload finds it inside the notice
-        // window of section 4.6 item 3.
+    fn an_expiry_destroys_the_keys_and_certificates_on_disk() {
+        // Section 4.6 item 5: an idle expiry sends nothing, so nothing is
+        // kept for a notice.
         let expired_at_ms = refineid_rapp_core::clock::unix_time_ms();
         let directory = TestDirectory::new("expiry");
         let mut store = ProtectedPairingStore::load_from(directory.0.clone()).expect("load");
@@ -956,15 +956,14 @@ mod tests {
             store.sweep(FIRST_PAIR, expired_at_ms, false),
             Ok(SweepOutcome::Expired)
         );
-        assert_eq!(
-            store.get(FIRST_PAIR).expect("held").state(),
-            PairingState::Forgotten
-        );
+        let revoked = PairingState::Revoked { by_peer: false };
+        assert_eq!(store.get(FIRST_PAIR).expect("held").state(), revoked);
         let reloaded = ProtectedPairingStore::load_from(directory.0.clone()).expect("reload");
         let stored = reloaded.get(FIRST_PAIR).expect("stored");
-        assert_eq!(stored.state(), PairingState::Forgotten);
-        assert!(stored.authentication_certificate().is_some());
-        assert!(stored.signature_certificate().is_some());
+        assert_eq!(stored.state(), revoked);
+        assert!(stored.pair_record().is_none());
+        assert!(stored.authentication_certificate().is_none());
+        assert!(stored.signature_certificate().is_none());
     }
 
     #[test]

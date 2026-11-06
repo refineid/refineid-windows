@@ -770,4 +770,38 @@ mod tests {
             Err(PairingCodecError::Truncated)
         ));
     }
+
+    /// The longest arbitrary file tried.
+    const ARBITRARY_FILE_BYTES: usize = 4096;
+
+    proptest::proptest! {
+        /// A stored file can be damaged, or replaced by this user's programs.
+        #[test]
+        fn any_bytes_decode_without_a_panic(
+            bytes in proptest::collection::vec(proptest::num::u8::ANY, 0..ARBITRARY_FILE_BYTES),
+        ) {
+            let _record = decode_pairing_record(&bytes);
+            let _set = decode_pairing_records(&bytes);
+        }
+
+        /// A stored set cut short or with one byte changed is refused or
+        /// decodes; it never panics.
+        #[test]
+        fn a_damaged_set_decodes_without_a_panic(
+            position in proptest::num::usize::ANY,
+            value in proptest::num::u8::ANY,
+            keep in proptest::num::usize::ANY,
+        ) {
+            let sample = sample();
+            let mut bytes = encode_pairing_records([&sample].into_iter()).unwrap();
+            let index = position % bytes.len();
+            if let Some(byte) = bytes.get_mut(index) {
+                *byte = value;
+            }
+            let _changed = decode_pairing_records(&bytes);
+            let kept = keep % bytes.len();
+            bytes.truncate(kept);
+            let _cut = decode_pairing_records(&bytes);
+        }
+    }
 }

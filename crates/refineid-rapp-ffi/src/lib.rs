@@ -593,7 +593,7 @@ fn open_pairing() -> Result<BeginPairingDto, ApiFailure> {
     let pair_id = pairing_store
         .usable_pairing()
         .map(PairingRecord::pair_id)
-        .ok_or_else(|| ApiFailure::new("no_pairing", "No phone is paired with this device."))?;
+        .ok_or_else(|| ApiFailure::new(NO_PAIRING_CODE, "No phone is paired with this device."))?;
     let requester = Requester::new(RequesterConfig::this_computer(), pairing_store);
     let handle_id = register_handle(Shared {
         phase: Phase::Paired { pair_id },
@@ -704,10 +704,14 @@ fn finish_pairing(handle_id: u64, mut requester: StreamRequester, pair_id: PairI
     });
 }
 
+/// The error code of a device with no usable pairing: a state the app asks
+/// about on every start, not a failure.
+const NO_PAIRING_CODE: &str = "no_pairing";
+
 /// The failure a card read answers when no remote card is there,
 /// whatever the phone's state: the pairing reads as absent.
 fn no_remote_card() -> ApiFailure {
-    ApiFailure::new("no_pairing", NO_PAIRING_STATUS)
+    ApiFailure::new(NO_PAIRING_CODE, NO_PAIRING_STATUS)
 }
 
 fn read_paired_card(handle_id: u64, paired: &mut Paired) -> Result<CardReadDto, ApiFailure> {
@@ -1525,7 +1529,9 @@ where
             error: None,
         }),
         Ok(Err(error)) => {
-            refineid_dev_errors::report!(RappBridge, "requester call failed", name error.code);
+            if error.code != NO_PAIRING_CODE {
+                refineid_dev_errors::report!(RappBridge, "requester call failed", name error.code);
+            }
             serialize_envelope::<T>(&ApiEnvelope {
                 ok: false,
                 data: None,

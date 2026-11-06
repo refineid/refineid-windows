@@ -19,6 +19,7 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:controls="using:CommunityToolkit.WinUI.Controls"
+    xmlns:local="using:RefineID"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     NavigationCacheMode="Required"
@@ -56,27 +57,27 @@
                         Style="{StaticResource BodyStrongTextBlockStyle}"
                         Text="Document"
                     />
-                    <controls:SettingsCard
+                    <local:ActionCard
                         x:Name="VerifyCard"
                         x:Uid="VerifyCard"
                         AutomationProperties.AutomationId="VerifyCard"
                         AutomationProperties.HelpText="Verify a signed document using the card"
                         AutomationProperties.Name="Verify document"
-                        Click="Verify_Click"
+                        Activated="Verify_Click"
                         Header="Verify"
                         IsClickEnabled="True"
                     >
                         <controls:SettingsCard.HeaderIcon>
                             <FontIcon Glyph="&#xE73E;" />
                         </controls:SettingsCard.HeaderIcon>
-                    </controls:SettingsCard>
-                    <controls:SettingsCard
+                    </local:ActionCard>
+                    <local:ActionCard
                         x:Name="SignCard"
                         x:Uid="SignCard"
                         AutomationProperties.AutomationId="SignCard"
                         AutomationProperties.HelpText="Sign a document with the card"
                         AutomationProperties.Name="Sign document"
-                        Click="Sign_Click"
+                        Activated="Sign_Click"
                         Header="Sign"
                         IsClickEnabled="True"
                         Visibility="Collapsed"
@@ -84,7 +85,7 @@
                         <controls:SettingsCard.HeaderIcon>
                             <FontIcon Glyph="&#xE70F;" />
                         </controls:SettingsCard.HeaderIcon>
-                    </controls:SettingsCard>
+                    </local:ActionCard>
                 </StackPanel>
                 <!--  Identity  -->
                 <StackPanel Spacing="4">
@@ -100,11 +101,12 @@
                           other platforms. Without a holder its header is
                           the way to get one, and the row connects the
                           remote reader when clicked.  -->
-                    <controls:SettingsCard
+                    <local:ActionCard
                         x:Name="PersonCard"
                         x:Uid="PersonCard"
                         AutomationProperties.AutomationId="PersonCard"
                         AutomationProperties.Name="Card holder identity"
+                        Activated="ConnectRemoteReader_Click"
                         IsClickEnabled="False"
                     >
                         <controls:SettingsCard.HeaderIcon>
@@ -132,20 +134,20 @@
                                 <FontIcon Glyph="&#xF69B;" />
                             </Button>
                         </StackPanel>
-                    </controls:SettingsCard>
+                    </local:ActionCard>
                 </StackPanel>
 
                 <!--  PINs of the card in a local reader: change, reset,
                       activation and NFC access. The phone manages its own
                       card, so the entry exists only while a reader is
                       connected.  -->
-                <controls:SettingsCard
+                <local:ActionCard
                     x:Name="PinsCard"
                     x:Uid="PinsCard"
                     AutomationProperties.AutomationId="PinsCard"
                     AutomationProperties.HelpText="Change or reset the PINs of the card in the reader"
                     AutomationProperties.Name="PINs"
-                    Click="Pins_Click"
+                    Activated="Pins_Click"
                     Header="PINs"
                     IsClickEnabled="True"
                     Visibility="Collapsed"
@@ -153,7 +155,7 @@
                     <controls:SettingsCard.HeaderIcon>
                         <FontIcon Glyph="&#xE8D7;" />
                     </controls:SettingsCard.HeaderIcon>
-                </controls:SettingsCard>
+                </local:ActionCard>
 
                 <TextBlock
                     x:Name="DiagnosticsText"

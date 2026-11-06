@@ -10,7 +10,7 @@ cargo fmt --all -- --check
 dotnet tool restore
 dotnet csharpier check .
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test -p refineid-lib-core
+pwsh scripts/test.ps1 -Tier all
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Architecture x64,arm64
 ```
 

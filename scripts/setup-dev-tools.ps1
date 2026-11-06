@@ -219,6 +219,9 @@ try {
     Invoke-Checked 'rustup toolchain install' { rustup toolchain install }
     Invoke-Checked 'rustc --version' { rustc --version }
 
+    Write-Host 'Installing or updating the test runner and the coverage tool...'
+    Invoke-Checked 'cargo install' { cargo install --locked cargo-nextest cargo-llvm-cov }
+
     Write-Host 'Restoring .NET local tools...'
     Invoke-Checked 'dotnet tool restore' { dotnet tool restore }
 
