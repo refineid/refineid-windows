@@ -29,6 +29,8 @@ pub mod client;
 #[cfg(windows)]
 pub mod identity;
 #[cfg(windows)]
+mod overlapped;
+#[cfg(windows)]
 pub mod server;
 
 /// The pipe name prefix; the user's SID and Windows session complete it,
