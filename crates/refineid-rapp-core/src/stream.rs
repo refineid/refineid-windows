@@ -13,6 +13,9 @@
 //! `refineid_rapp` unparsed. An anomaly closes the connection without
 //! touching stored state (specification section 10.1, class 1).
 
+#[cfg(test)]
+mod browse_receive_tests;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
@@ -637,7 +640,7 @@ const MDNS_PORT: u16 = 5353;
 /// Where every browse question is sent.
 const MDNS_GROUP: std::net::SocketAddrV4 =
     std::net::SocketAddrV4::new(MDNS_GROUP_ADDRESS, MDNS_PORT);
-/// Poll interval while waiting for answers on each socket.
+/// How long one round waits for an answer across a browse's sockets.
 const MDNS_POLL: Duration = Duration::from_millis(125);
 /// The part of [`MDNS_POLL`] each of a browse's two sockets waits, so a round
 /// with nothing to read takes one poll.
@@ -1207,80 +1210,6 @@ impl core::error::Error for StreamError {
             Self::Preamble(e) => Some(e),
             _ => None,
         }
-    }
-}
-
-#[cfg(test)]
-mod browse_receive_tests {
-    use std::net::{Ipv4Addr, UdpSocket};
-    use std::time::{Duration, Instant};
-
-    use super::{BrowseSockets, MDNS_POLL, MDNS_SOCKET_POLL};
-
-    /// How long a test waits for a datagram it sent to itself.
-    const ARRIVAL: Duration = Duration::from_secs(5);
-    /// Quiet rounds measured together, so one late timer does not decide.
-    const QUIET_ROUNDS: u32 = 4;
-    /// A datagram on the busy socket.
-    const NOISE: &[u8] = b"noise";
-    /// The datagram on the quiet socket.
-    const ANSWER: &[u8] = b"answer";
-    /// Largest test datagram.
-    const BUFFER_BYTES: usize = 16;
-
-    fn bound() -> UdpSocket {
-        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
-        socket
-            .set_read_timeout(Some(MDNS_SOCKET_POLL))
-            .expect("timeout");
-        socket
-    }
-
-    fn sockets() -> BrowseSockets {
-        BrowseSockets::over(Some(bound()), bound())
-    }
-
-    fn send(to: &UdpSocket, payload: &[u8]) {
-        let from = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
-        from.send_to(payload, to.local_addr().expect("address"))
-            .expect("send");
-    }
-
-    #[test]
-    fn a_quiet_round_takes_one_poll_and_not_one_per_socket() {
-        let sockets = sockets();
-        let mut buffer = [0u8; BUFFER_BYTES];
-        let started = Instant::now();
-        for _ in 0..QUIET_ROUNDS {
-            assert!(sockets.receive(&mut buffer).is_none());
-        }
-        // One poll per socket would take twice this.
-        let limit = (MDNS_POLL * QUIET_ROUNDS) * 3 / 2;
-        assert!(started.elapsed() < limit, "took {:?}", started.elapsed());
-    }
-
-    #[test]
-    fn multicast_traffic_does_not_hold_back_a_unicast_answer() {
-        let sockets = sockets();
-        let group = sockets.group.as_ref().expect("a group socket");
-        send(group, NOISE);
-        send(group, NOISE);
-        send(group, NOISE);
-        send(&sockets.legacy, ANSWER);
-        // Both sockets hold a datagram once this returns.
-        std::thread::sleep(MDNS_POLL);
-        let started = Instant::now();
-        let mut buffer = [0u8; BUFFER_BYTES];
-        let mut heard = Vec::new();
-        while heard.len() < 2 && started.elapsed() < ARRIVAL {
-            if let Some((read, _peer)) = sockets.receive(&mut buffer) {
-                heard.push(buffer[..read].to_vec());
-            }
-        }
-        assert!(
-            heard.iter().any(|payload| payload == ANSWER),
-            "the answer waited behind the noise: {heard:?}"
-        );
     }
 }
 
