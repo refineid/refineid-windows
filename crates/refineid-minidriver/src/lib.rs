@@ -141,8 +141,8 @@ use cardmod::{CardCapabilityModel, CardModel, ContainerDescriptor, Ctx, KeyAlgor
 use ffi::*;
 #[cfg(windows)]
 use refineid_lib_core::auth::{
-    AuthError, CardPinLengths, ChangePinOutcome, PinOps, PinReferenceScheme, PinSlot, PinStatus,
-    UnblockOutcome, VerifyOutcome,
+    AuthError, CardPinLengths, ChangePinOutcome, PIN_MAX_LENGTH, PIN_MIN_LENGTH, PUK_MAX_LENGTH,
+    PUK_MIN_LENGTH, PinOps, PinReferenceScheme, PinSlot, PinStatus, UnblockOutcome, VerifyOutcome,
 };
 #[cfg(windows)]
 use refineid_lib_core::crypto::container::{Ciphertext, RsaPkcs1};
@@ -1150,12 +1150,15 @@ fn authenticated_pin_set(ctx: &Ctx) -> DWORD {
     pin_set
 }
 
+/// The lengths an entry for `pin_id` may have before it reaches the card
+/// service: what the PIN and PUK commands carry. The card service narrows
+/// a PIN change or reset to the card's own lengths, and the card decides
+/// any narrower range at VERIFY.
 #[cfg(windows)]
 fn pin_len_bounds(pin_id: DWORD) -> Option<(usize, usize)> {
     match pin_id {
-        PIN_ID_AUTH => Some((4, 12)),
-        PIN_ID_QUALIFIED_SIG => Some((6, 12)),
-        PIN_ID_PUK => Some((7, 8)),
+        PIN_ID_AUTH | PIN_ID_QUALIFIED_SIG => Some((PIN_MIN_LENGTH, PIN_MAX_LENGTH)),
+        PIN_ID_PUK => Some((PUK_MIN_LENGTH, PUK_MAX_LENGTH)),
         _ => None,
     }
 }
