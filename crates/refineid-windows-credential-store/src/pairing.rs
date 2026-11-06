@@ -954,17 +954,22 @@ mod tests {
         // rewriting the set, as the agent does. No pairing may be lost.
         const ADDED: u8 = 30;
         const REWRITES: usize = 60;
+        const WRITERS: usize = 2;
         let directory = TestDirectory::new("concurrent");
+        let start = std::sync::Arc::new(std::sync::Barrier::new(WRITERS));
         let rewriter = {
             let path = directory.0.clone();
+            let start = start.clone();
             std::thread::spawn(move || {
                 let mut store = ProtectedPairingStore::load_from(path).expect("load");
+                start.wait();
                 for _ in 0..REWRITES {
                     store.insert(record(SECOND_PAIR)).expect("rewrite");
                 }
             })
         };
         let mut adder = ProtectedPairingStore::load_from(directory.0.clone()).expect("load");
+        start.wait();
         for index in 0..ADDED {
             let mut id = *b"added pairing   ";
             let last = id.last_mut().expect("an identifier has bytes");
