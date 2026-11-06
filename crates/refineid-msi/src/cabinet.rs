@@ -28,6 +28,10 @@ use std::process::Command;
 pub enum CabinetError {
     /// The directive file or its directory could not be written.
     Io(std::io::Error),
+    /// `SystemRoot` is not set, so the system directory is unknown.
+    NoSystemRoot,
+    /// `makecab.exe` is not in the system directory.
+    NoMakeCab(PathBuf),
     /// `makecab.exe` could not be run.
     Spawn(std::io::Error),
     /// `makecab.exe` ran but reported failure.
@@ -45,6 +49,8 @@ impl fmt::Display for CabinetError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(error) => write!(f, "could not stage the cabinet directives: {error}"),
+            Self::NoSystemRoot => write!(f, "SystemRoot is not set; makecab.exe cannot be found"),
+            Self::NoMakeCab(path) => write!(f, "makecab.exe is missing at {}", path.display()),
             Self::Spawn(error) => write!(f, "could not run makecab.exe: {error}"),
             Self::MakeCab { status, output } => match status {
                 Some(status) => write!(f, "makecab.exe exited with {status}: {output}"),
@@ -58,6 +64,27 @@ impl fmt::Display for CabinetError {
 }
 
 impl std::error::Error for CabinetError {}
+
+/// The environment variable that names the Windows directory.
+const SYSTEM_ROOT_VARIABLE: &str = "SystemRoot";
+/// The system directory below `SystemRoot`, where Windows keeps `makecab.exe`.
+const SYSTEM_DIRECTORY: &str = "System32";
+/// The cabinet maker's file name.
+const MAKECAB: &str = "makecab.exe";
+
+/// The absolute path of `makecab.exe` in the Windows system directory, so
+/// neither `PATH` nor the current directory chooses the program that runs.
+fn makecab_path() -> Result<PathBuf, CabinetError> {
+    let root = std::env::var_os(SYSTEM_ROOT_VARIABLE)
+        .filter(|root| !root.is_empty())
+        .ok_or(CabinetError::NoSystemRoot)?;
+    let path = PathBuf::from(root).join(SYSTEM_DIRECTORY).join(MAKECAB);
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err(CabinetError::NoMakeCab(path))
+    }
+}
 
 /// One payload file and the `File` table key it is stored under.
 #[derive(Debug, Clone, Copy)]
@@ -114,7 +141,7 @@ pub fn build(
     let directive_path = directory.join("payload.ddf");
     std::fs::write(&directive_path, directives).map_err(CabinetError::Io)?;
 
-    let output = Command::new("makecab.exe")
+    let output = Command::new(makecab_path()?)
         .arg("/F")
         .arg(&directive_path)
         .output()
