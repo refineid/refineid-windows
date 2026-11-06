@@ -141,8 +141,8 @@ use cardmod::{CardCapabilityModel, CardModel, ContainerDescriptor, Ctx, KeyAlgor
 use ffi::*;
 #[cfg(windows)]
 use refineid_lib_core::auth::{
-    AuthError, CardPinLengths, ChangePinOutcome, PinOps, PinReferenceScheme, PinSlot, PinStatus,
-    UnblockOutcome, VerifyOutcome,
+    AuthError, CardPinLengths, ChangePinOutcome, PIN_MAX_LENGTH, PIN_MIN_LENGTH, PUK_MAX_LENGTH,
+    PUK_MIN_LENGTH, PinOps, PinReferenceScheme, PinSlot, PinStatus, UnblockOutcome, VerifyOutcome,
 };
 #[cfg(windows)]
 use refineid_lib_core::crypto::container::{Ciphertext, RsaPkcs1};
@@ -722,14 +722,119 @@ fn read_cstr(p: LPSTR) -> String {
     }
 }
 
-#[cfg(windows)]
-fn cstr_eq(p: LPSTR, s: &str) -> bool {
-    if p.is_null() {
-        return false;
+/// The root directory of the minidriver's file system, as the
+/// caller names it: no directory.
+#[cfg(any(windows, test))]
+const ROOT_DIRECTORY: Option<&str> = None;
+/// The one directory under the root (Microsoft card minidriver
+/// specification, "Card File System").
+#[cfg(any(windows, test))]
+const MSCP_DIRECTORY: &str = "mscp";
+/// Root file: the cache freshness record.
+#[cfg(any(windows, test))]
+const CARDCF_FILE: &str = "cardcf";
+/// Root file: the card identifier.
+#[cfg(any(windows, test))]
+const CARDID_FILE: &str = "cardid";
+/// Root file: the application directory list.
+#[cfg(any(windows, test))]
+const CARDAPPS_FILE: &str = "cardapps";
+/// `mscp` file: the container map.
+#[cfg(any(windows, test))]
+const CMAPFILE_FILE: &str = "cmapfile";
+/// `mscp` file: the trusted roots bundle.
+#[cfg(any(windows, test))]
+const MSROOTS_FILE: &str = "msroots";
+
+/// One file of the minidriver's file system, resolved once from the
+/// directory and file name a caller passed. A value names a file this
+/// minidriver serves; the name comparisons live in [`Self::resolve`]
+/// and nowhere else.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CardFile {
+    /// `cardcf`, the cache freshness record.
+    CardCf,
+    /// `cardid`, the card identifier.
+    CardId,
+    /// `cardapps`, the application directory list.
+    CardApps,
+    /// `mscp/cmapfile`, the container map.
+    CmapFile,
+    /// `mscp/msroots`, the trusted roots bundle.
+    MsRoots,
+    /// A certificate file under `mscp`, named by its container.
+    Container(String),
+}
+
+/// Why a directory and file name resolve to no [`CardFile`].
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoSuchFile {
+    /// The directory is not one this file system has.
+    Directory,
+    /// The directory exists; the file is not in it.
+    File,
+}
+
+#[cfg(any(windows, test))]
+impl CardFile {
+    /// The file `directory` and `file` name. The root holds the three
+    /// card files; `mscp` holds the container map, the roots bundle
+    /// and one certificate file per container, and answers `cardcf`
+    /// too, as some callers ask for it there. Whether a container
+    /// file exists is the card model's to say, so a `Container` is any
+    /// other `mscp` name.
+    fn resolve(directory: Option<&str>, file: &str) -> Result<Self, NoSuchFile> {
+        match directory {
+            ROOT_DIRECTORY => match file {
+                CARDCF_FILE => Ok(Self::CardCf),
+                CARDID_FILE => Ok(Self::CardId),
+                CARDAPPS_FILE => Ok(Self::CardApps),
+                _ => Err(NoSuchFile::File),
+            },
+            Some(MSCP_DIRECTORY) => match file {
+                CMAPFILE_FILE => Ok(Self::CmapFile),
+                MSROOTS_FILE => Ok(Self::MsRoots),
+                CARDCF_FILE => Ok(Self::CardCf),
+                other => Ok(Self::Container(other.to_owned())),
+            },
+            Some(_) => Err(NoSuchFile::Directory),
+        }
     }
-    let len = s.len();
-    let bytes = unsafe { core::slice::from_raw_parts(p.cast::<u8>(), len + 1) };
-    bytes[len] == 0 && &bytes[..len] == s.as_bytes()
+}
+
+/// The directory a caller passed: `None` for the root.
+#[cfg(windows)]
+fn read_directory(p: LPSTR) -> Option<String> {
+    if p.is_null() {
+        None
+    } else {
+        Some(read_cstr(p))
+    }
+}
+
+/// The bytes of `file` on this card, or `None` for a container file
+/// the card does not have.
+#[cfg(windows)]
+fn card_file_bytes(card: &CardCapabilityModel, file: &CardFile) -> Option<Vec<u8>> {
+    match file {
+        CardFile::CardCf => Some(synth_cardcf()),
+        CardFile::CardId => Some(synth_cardid(card.auth_cert_der().unwrap_or(&[]))),
+        CardFile::CardApps => Some(synth_cardapps()),
+        CardFile::CmapFile => Some(synth_cmapfile(card)),
+        CardFile::MsRoots => Some(msroots::active_msroots_pkcs7_der().to_vec()),
+        CardFile::Container(name) => container_file_bytes(card, name),
+    }
+}
+
+/// The status a failed lookup answers.
+#[cfg(windows)]
+const fn no_such_file_status(reason: NoSuchFile) -> DWORD {
+    match reason {
+        NoSuchFile::Directory => SCARD_E_DIR_NOT_FOUND,
+        NoSuchFile::File => SCARD_E_FILE_NOT_FOUND,
+    }
 }
 
 #[cfg(windows)]
@@ -1138,12 +1243,15 @@ fn authenticated_pin_set(ctx: &Ctx) -> DWORD {
     pin_set
 }
 
+/// The lengths an entry for `pin_id` may have before it reaches the card
+/// service: what the PIN and PUK commands carry. The card service narrows
+/// a PIN change or reset to the card's own lengths, and the card decides
+/// any narrower range at VERIFY.
 #[cfg(windows)]
 fn pin_len_bounds(pin_id: DWORD) -> Option<(usize, usize)> {
     match pin_id {
-        PIN_ID_AUTH => Some((4, 12)),
-        PIN_ID_QUALIFIED_SIG => Some((6, 12)),
-        PIN_ID_PUK => Some((7, 8)),
+        PIN_ID_AUTH | PIN_ID_QUALIFIED_SIG => Some((PIN_MIN_LENGTH, PIN_MAX_LENGTH)),
+        PIN_ID_PUK => Some((PUK_MIN_LENGTH, PUK_MAX_LENGTH)),
         _ => None,
     }
 }
@@ -1468,31 +1576,15 @@ unsafe extern "system" fn CardReadFile(
         Err(rc) => return rc,
     };
 
-    let file = read_cstr(pszFileName);
-    let data = if pszDirectoryName.is_null() {
-        if cstr_eq(pszFileName, "cardcf") {
-            synth_cardcf()
-        } else if cstr_eq(pszFileName, "cardid") {
-            synth_cardid(ctx.card.auth_cert_der().unwrap_or(&[]))
-        } else if cstr_eq(pszFileName, "cardapps") {
-            synth_cardapps()
-        } else {
-            return SCARD_E_FILE_NOT_FOUND;
-        }
-    } else if cstr_eq(pszDirectoryName, "mscp") {
-        if cstr_eq(pszFileName, "cmapfile") {
-            synth_cmapfile(&ctx.card)
-        } else if cstr_eq(pszFileName, "msroots") {
-            msroots::active_msroots_pkcs7_der().to_vec()
-        } else if let Some(bytes) = container_file_bytes(&ctx.card, &file) {
-            bytes
-        } else if cstr_eq(pszFileName, "cardcf") {
-            synth_cardcf()
-        } else {
-            return SCARD_E_FILE_NOT_FOUND;
-        }
-    } else {
-        return SCARD_E_DIR_NOT_FOUND;
+    let file = match CardFile::resolve(
+        read_directory(pszDirectoryName).as_deref(),
+        &read_cstr(pszFileName),
+    ) {
+        Ok(file) => file,
+        Err(reason) => return no_such_file_status(reason),
+    };
+    let Some(data) = card_file_bytes(&ctx.card, &file) else {
+        return SCARD_E_FILE_NOT_FOUND;
     };
 
     let Some(p) = (unsafe { alloc_copy(cd, &data) }) else {
@@ -1524,34 +1616,39 @@ unsafe extern "system" fn CardEnumFiles(
         Err(rc) => return rc,
     };
 
-    let names = if pszDirectoryName.is_null() {
-        let mut v = Vec::new();
-        v.extend_from_slice(b"cardcf\0");
-        v.extend_from_slice(b"cardid\0");
-        v.extend_from_slice(b"cardapps\0");
-        v.push(0);
-        v
-    } else if cstr_eq(pszDirectoryName, "mscp") {
-        let mut v = Vec::new();
-        v.extend_from_slice(b"cmapfile\0");
-        for container in &ctx.card.containers {
-            if !container.is_visible() {
-                continue;
-            }
-            if let Some(keyex_file) = container.keyex_file.as_deref() {
-                v.extend_from_slice(keyex_file.as_bytes());
+    let names = match read_directory(pszDirectoryName).as_deref() {
+        ROOT_DIRECTORY => {
+            let mut v = Vec::new();
+            for name in [CARDCF_FILE, CARDID_FILE, CARDAPPS_FILE] {
+                v.extend_from_slice(name.as_bytes());
                 v.push(0);
             }
-            if container.reported_sig_bits > 0 {
-                v.extend_from_slice(container.sig_file.as_bytes());
-                v.push(0);
-            }
+            v.push(0);
+            v
         }
-        v.extend_from_slice(b"msroots\0");
-        v.push(0);
-        v
-    } else {
-        return SCARD_E_DIR_NOT_FOUND;
+        Some(MSCP_DIRECTORY) => {
+            let mut v = Vec::new();
+            v.extend_from_slice(CMAPFILE_FILE.as_bytes());
+            v.push(0);
+            for container in &ctx.card.containers {
+                if !container.is_visible() {
+                    continue;
+                }
+                if let Some(keyex_file) = container.keyex_file.as_deref() {
+                    v.extend_from_slice(keyex_file.as_bytes());
+                    v.push(0);
+                }
+                if container.reported_sig_bits > 0 {
+                    v.extend_from_slice(container.sig_file.as_bytes());
+                    v.push(0);
+                }
+            }
+            v.extend_from_slice(MSROOTS_FILE.as_bytes());
+            v.push(0);
+            v.push(0);
+            v
+        }
+        Some(_) => return SCARD_E_DIR_NOT_FOUND,
     };
 
     let Some(p) = (unsafe { alloc_copy(cd, &names) }) else {
@@ -1581,30 +1678,17 @@ unsafe extern "system" fn CardGetFileInfo(
         Ok(values) => values,
         Err(rc) => return rc,
     };
-    let file = read_cstr(pszFileName);
-
-    let size = if pszDirectoryName.is_null() {
-        if cstr_eq(pszFileName, "cardcf") {
-            6
-        } else if cstr_eq(pszFileName, "cardid") {
-            16
-        } else if cstr_eq(pszFileName, "cardapps") {
-            8
-        } else {
-            return SCARD_E_FILE_NOT_FOUND;
-        }
-    } else if cstr_eq(pszDirectoryName, "mscp") {
-        if cstr_eq(pszFileName, "cmapfile") {
-            synth_cmapfile(&ctx.card).len()
-        } else if cstr_eq(pszFileName, "msroots") {
-            msroots::active_msroots_pkcs7_der().len()
-        } else if let Some(bytes) = container_file_bytes(&ctx.card, &file) {
-            bytes.len()
-        } else {
-            return SCARD_E_FILE_NOT_FOUND;
-        }
-    } else {
-        return SCARD_E_DIR_NOT_FOUND;
+    let file = match CardFile::resolve(
+        read_directory(pszDirectoryName).as_deref(),
+        &read_cstr(pszFileName),
+    ) {
+        Ok(file) => file,
+        Err(reason) => return no_such_file_status(reason),
+    };
+    // The size is the size of what CardReadFile would return, from the
+    // same bytes, so the two can never disagree.
+    let Some(size) = card_file_bytes(&ctx.card, &file).map(|bytes| bytes.len()) else {
+        return SCARD_E_FILE_NOT_FOUND;
     };
 
     let info = unsafe { &mut *pInfo };
@@ -3345,4 +3429,60 @@ unsafe extern "system" fn unsupported_create_container_ex(
     _pinId: DWORD,
 ) -> DWORD {
     SCARD_E_UNSUPPORTED_FEATURE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CardFile, NoSuchFile};
+
+    #[test]
+    fn the_root_holds_the_three_card_files() {
+        assert_eq!(CardFile::resolve(None, "cardcf"), Ok(CardFile::CardCf));
+        assert_eq!(CardFile::resolve(None, "cardid"), Ok(CardFile::CardId));
+        assert_eq!(CardFile::resolve(None, "cardapps"), Ok(CardFile::CardApps));
+    }
+
+    #[test]
+    fn the_root_has_no_other_file() {
+        assert_eq!(CardFile::resolve(None, "cmapfile"), Err(NoSuchFile::File));
+        assert_eq!(CardFile::resolve(None, "cardc"), Err(NoSuchFile::File));
+        assert_eq!(CardFile::resolve(None, "cardcfx"), Err(NoSuchFile::File));
+        assert_eq!(CardFile::resolve(None, ""), Err(NoSuchFile::File));
+    }
+
+    #[test]
+    fn mscp_holds_the_map_the_roots_and_container_files() {
+        assert_eq!(
+            CardFile::resolve(Some("mscp"), "cmapfile"),
+            Ok(CardFile::CmapFile)
+        );
+        assert_eq!(
+            CardFile::resolve(Some("mscp"), "msroots"),
+            Ok(CardFile::MsRoots)
+        );
+        assert_eq!(
+            CardFile::resolve(Some("mscp"), "cardcf"),
+            Ok(CardFile::CardCf)
+        );
+        assert_eq!(
+            CardFile::resolve(Some("mscp"), "kxc00"),
+            Ok(CardFile::Container("kxc00".to_owned()))
+        );
+    }
+
+    #[test]
+    fn any_other_directory_is_no_directory() {
+        assert_eq!(
+            CardFile::resolve(Some("msc"), "cmapfile"),
+            Err(NoSuchFile::Directory)
+        );
+        assert_eq!(
+            CardFile::resolve(Some("mscpx"), "cmapfile"),
+            Err(NoSuchFile::Directory)
+        );
+        assert_eq!(
+            CardFile::resolve(Some(""), "cardcf"),
+            Err(NoSuchFile::Directory)
+        );
+    }
 }
