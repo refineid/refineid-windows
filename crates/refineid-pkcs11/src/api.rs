@@ -826,15 +826,6 @@ unsafe extern "C" fn c_login(
     // never logged (PIN secrecy rule).
     let caller_bytes = unsafe { core::slice::from_raw_parts(pin_ptr, length) }.to_vec();
 
-    // When the `test-pin-env` feature is active and the environment
-    // variable `REFINEID_TEST_PIN1` is set, override the caller-supplied
-    // PIN with the env value.  This lets Firefox skip its GUI PIN dialog
-    // in fully automated test runs (Marionette / CI headless).  The feature
-    // is never compiled into production (non-test) builds.
-    #[cfg(feature = "test-pin-env")]
-    let caller_bytes =
-        std::env::var("REFINEID_TEST_PIN1").map_or(caller_bytes, std::string::String::into_bytes);
-
     let pin1 = match PinBytes::new(caller_bytes) {
         Ok(pin) => pin,
         Err(error) => return classify_pin_error(error),

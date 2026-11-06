@@ -170,17 +170,6 @@ fn can_error(error: CanError) -> String {
     }
 }
 
-/// Read the identity panel plus the eMRTD photo. A photo failure
-/// still returns the identity panel with the photo error appended.
-pub fn read_identity_and_photo(reader: &str, can: Can) -> Result<String, String> {
-    let identity = read_identity(reader)?;
-    let photo = match read_photo(reader, can) {
-        Ok(report) => report,
-        Err(error) => format!("FAILED: {error}"),
-    };
-    Ok(format!("{identity}\r\nPhoto: {photo}"))
-}
-
 /// Photo outcome: a report line plus, for JPEG faces, the saved
 /// file the GUI displays.
 pub struct PhotoOutcome {
@@ -189,10 +178,6 @@ pub struct PhotoOutcome {
     /// Saved JPEG path for in-window display. `None` for
     /// JPEG2000 (no OS decoder) and when no face was found.
     pub display_jpeg: Option<PathBuf>,
-}
-
-fn read_photo(reader: &str, can: Can) -> Result<String, String> {
-    Ok(read_photo_saved(reader, can)?.report)
 }
 
 /// Run PACE with the CAN, read DG2, and save the facial image to
