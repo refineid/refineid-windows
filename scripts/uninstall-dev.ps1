@@ -18,6 +18,17 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Remove-KeyStorageProviderRegistration([string]$Module) {
+    # Mirrors install-dev.ps1: the DLL removes its own CNG key storage
+    # provider registration through the BCrypt registration API. The entry
+    # ignores the status, so a provider that is not registered is no error.
+    $process = Start-Process -FilePath "$env:SystemRoot\System32\rundll32.exe" `
+        -ArgumentList "`"$Module`",RefineIdUnregisterProvider" -Wait -PassThru
+    if ($process.ExitCode -ne 0) {
+        throw "Unregistering the key storage provider failed with exit code $($process.ExitCode)."
+    }
+}
+
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -30,6 +41,8 @@ $backup = Join-Path $backupDirectory 'refineid_minidriver.dll'
 $registryKeys = @(
     'HKLM:\SOFTWARE\Microsoft\Cryptography\Calais\SmartCards\FINEID-S4-1-v3.1',
     'HKLM:\SOFTWARE\Microsoft\Cryptography\Calais\SmartCards\FINEID-S4-1-v4.0',
+    'HKLM:\SOFTWARE\Microsoft\Cryptography\Calais\SmartCards\FINEID-RAPP-Remote',
+    'HKLM:\SOFTWARE\Microsoft\Cryptography\Calais\SmartCards\FINEID-Dev-CCID',
     'HKLM:\SOFTWARE\Microsoft\Cryptography\Calais\SmartCards\FINEID-S4-1-v4.0-contactless',
     # The event source development builds report their errors as.
     'HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\RefineID'
@@ -44,6 +57,12 @@ foreach ($service in @('CertPropSvc', 'SCardSvr')) {
 }
 
 try {
+    # The provider is unregistered by the DLL itself, so before the DLL is
+    # restored or removed.
+    if (Test-Path -LiteralPath $destination) {
+        Remove-KeyStorageProviderRegistration -Module $destination
+    }
+
     foreach ($key in $registryKeys) {
         if (Test-Path -LiteralPath $key) {
             Remove-Item -LiteralPath $key -Recurse -Force
