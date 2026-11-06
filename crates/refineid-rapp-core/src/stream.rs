@@ -639,6 +639,9 @@ const MDNS_GROUP: std::net::SocketAddrV4 =
     std::net::SocketAddrV4::new(MDNS_GROUP_ADDRESS, MDNS_PORT);
 /// Poll interval while waiting for answers on each socket.
 const MDNS_POLL: Duration = Duration::from_millis(125);
+/// The part of [`MDNS_POLL`] each of a browse's two sockets waits, so a round
+/// with nothing to read takes one poll.
+const MDNS_SOCKET_POLL: Duration = MDNS_POLL.checked_div(2).expect("the divisor is not zero");
 /// Interval at which the browse question is asked again within one window
 /// (RFC 6762 section 5.2); a custodian does not answer every question.
 const MDNS_REQUERY: Duration = Duration::from_secs(1);
@@ -816,18 +819,29 @@ struct BrowseSockets {
     group: Option<std::net::UdpSocket>,
     legacy: std::net::UdpSocket,
     interfaces: Vec<Ipv4Addr>,
+    /// Whether the next read starts with the legacy socket: they take turns,
+    /// so busy multicast traffic does not hold back a unicast answer.
+    legacy_next: core::cell::Cell<bool>,
 }
 
 impl BrowseSockets {
     fn open() -> Option<Self> {
         let interfaces = browse_interfaces();
         let legacy = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
-        legacy.set_read_timeout(Some(MDNS_POLL)).ok()?;
-        Some(Self {
-            group: Self::group_socket(&interfaces),
+        legacy.set_read_timeout(Some(MDNS_SOCKET_POLL)).ok()?;
+        let mut sockets = Self::over(Self::group_socket(&interfaces), legacy);
+        sockets.interfaces = interfaces;
+        Some(sockets)
+    }
+
+    /// The two sockets, asking through no interface yet.
+    const fn over(group: Option<std::net::UdpSocket>, legacy: std::net::UdpSocket) -> Self {
+        Self {
+            group,
             legacy,
-            interfaces,
-        })
+            interfaces: Vec::new(),
+            legacy_next: core::cell::Cell::new(false),
+        }
     }
 
     /// Binds the shared mDNS port and joins the group on every interface
@@ -851,7 +865,7 @@ impl BrowseSockets {
         if joined == 0 {
             return None;
         }
-        socket.set_read_timeout(Some(MDNS_POLL)).ok()?;
+        socket.set_read_timeout(Some(MDNS_SOCKET_POLL)).ok()?;
         Some(socket.into())
     }
 
@@ -877,14 +891,19 @@ impl BrowseSockets {
             && socket.send_to(question, MDNS_GROUP).is_ok()
     }
 
-    /// Reads one datagram from whichever socket has one within its poll.
+    /// Reads one datagram from whichever socket has one within its poll,
+    /// starting with the socket the last read did not start with.
     fn receive(&self, buffer: &mut [u8]) -> Option<(usize, std::net::SocketAddr)> {
-        if let Some(group) = &self.group
-            && let Ok(received) = group.recv_from(buffer)
-        {
-            return Some(received);
-        }
-        self.legacy.recv_from(buffer).ok()
+        let legacy_first = self.legacy_next.replace(!self.legacy_next.get());
+        let group = self.group.as_ref();
+        let (first, second) = if legacy_first {
+            (Some(&self.legacy), group)
+        } else {
+            (group, Some(&self.legacy))
+        };
+        first
+            .and_then(|socket| socket.recv_from(buffer).ok())
+            .or_else(|| second.and_then(|socket| socket.recv_from(buffer).ok()))
     }
 }
 
@@ -1188,6 +1207,80 @@ impl core::error::Error for StreamError {
             Self::Preamble(e) => Some(e),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod browse_receive_tests {
+    use std::net::{Ipv4Addr, UdpSocket};
+    use std::time::{Duration, Instant};
+
+    use super::{BrowseSockets, MDNS_POLL, MDNS_SOCKET_POLL};
+
+    /// How long a test waits for a datagram it sent to itself.
+    const ARRIVAL: Duration = Duration::from_secs(5);
+    /// Quiet rounds measured together, so one late timer does not decide.
+    const QUIET_ROUNDS: u32 = 4;
+    /// A datagram on the busy socket.
+    const NOISE: &[u8] = b"noise";
+    /// The datagram on the quiet socket.
+    const ANSWER: &[u8] = b"answer";
+    /// Largest test datagram.
+    const BUFFER_BYTES: usize = 16;
+
+    fn bound() -> UdpSocket {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+        socket
+            .set_read_timeout(Some(MDNS_SOCKET_POLL))
+            .expect("timeout");
+        socket
+    }
+
+    fn sockets() -> BrowseSockets {
+        BrowseSockets::over(Some(bound()), bound())
+    }
+
+    fn send(to: &UdpSocket, payload: &[u8]) {
+        let from = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+        from.send_to(payload, to.local_addr().expect("address"))
+            .expect("send");
+    }
+
+    #[test]
+    fn a_quiet_round_takes_one_poll_and_not_one_per_socket() {
+        let sockets = sockets();
+        let mut buffer = [0u8; BUFFER_BYTES];
+        let started = Instant::now();
+        for _ in 0..QUIET_ROUNDS {
+            assert!(sockets.receive(&mut buffer).is_none());
+        }
+        // One poll per socket would take twice this.
+        let limit = (MDNS_POLL * QUIET_ROUNDS) * 3 / 2;
+        assert!(started.elapsed() < limit, "took {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn multicast_traffic_does_not_hold_back_a_unicast_answer() {
+        let sockets = sockets();
+        let group = sockets.group.as_ref().expect("a group socket");
+        send(group, NOISE);
+        send(group, NOISE);
+        send(group, NOISE);
+        send(&sockets.legacy, ANSWER);
+        // Both sockets hold a datagram once this returns.
+        std::thread::sleep(MDNS_POLL);
+        let started = Instant::now();
+        let mut buffer = [0u8; BUFFER_BYTES];
+        let mut heard = Vec::new();
+        while heard.len() < 2 && started.elapsed() < ARRIVAL {
+            if let Some((read, _peer)) = sockets.receive(&mut buffer) {
+                heard.push(buffer[..read].to_vec());
+            }
+        }
+        assert!(
+            heard.iter().any(|payload| payload == ANSWER),
+            "the answer waited behind the noise: {heard:?}"
+        );
     }
 }
 
