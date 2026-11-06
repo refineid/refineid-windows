@@ -56,16 +56,42 @@ pub const SIGNATURE_DEADLINE: Duration = Duration::from_secs(
     REACH_WINDOW.as_secs() + OPERATION_LIFETIME.as_secs() + TRANSFER_MARGIN.as_secs(),
 );
 
+/// The environment variables that name the Program Files directories,
+/// which only administrators can write to on a default Windows install.
+pub const PROGRAM_DIRECTORY_VARIABLES: [&str; 3] =
+    ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"];
+
 /// The label the phone shows for a program.
 ///
-/// A product name for the browsers people use, otherwise the image's file
-/// name. The phone shows what asks, not where the request goes, because
-/// CNG does not tell a key storage provider the site.
+/// A product name for the browsers people use when their image lies under
+/// a Program Files directory this process's environment names
+/// ([`PROGRAM_DIRECTORY_VARIABLES`]), otherwise the image's file name.
+/// The phone shows what asks, not where the request goes, because CNG
+/// does not tell a key storage provider the site.
 #[must_use]
 pub fn program_label(image: &Path) -> String {
+    let roots: Vec<String> = PROGRAM_DIRECTORY_VARIABLES
+        .iter()
+        .filter_map(|variable| std::env::var(variable).ok())
+        .collect();
+    program_label_within(image, &roots)
+}
+
+/// The label the phone shows for a program whose image is `image`, where
+/// `trusted_roots` are the directories only administrators can write to.
+///
+/// A product name for the browsers people use, only when the image lies
+/// strictly below one of `trusted_roots`; otherwise the image's file name.
+/// Both paths are compared component by component, ignoring case and
+/// accepting `\` and `/` as separators; a path with a `..` component is
+/// below no root, and an empty root is ignored.
+#[must_use]
+pub fn program_label_within(image: &Path, trusted_roots: &[String]) -> String {
+    let image = image.to_string_lossy();
     let file = image
-        .file_name()
-        .map(|name| name.to_string_lossy().trim().to_owned())
+        .rsplit(PATH_SEPARATORS)
+        .next()
+        .map(|name| name.trim().to_owned())
         .unwrap_or_default();
     let known = match file.to_ascii_lowercase().as_str() {
         "msedge.exe" => Some("Microsoft Edge"),
@@ -75,11 +101,31 @@ pub fn program_label(image: &Path) -> String {
         "vivaldi.exe" => Some("Vivaldi"),
         _ => None,
     };
+    let trusted = trusted_roots.iter().any(|root| lies_below(&image, root));
     match known {
-        Some(name) => name.to_owned(),
-        None if file.is_empty() => "A Windows program".to_owned(),
-        None => file,
+        Some(name) if trusted => name.to_owned(),
+        _ if file.is_empty() => "A Windows program".to_owned(),
+        _ => file,
     }
+}
+
+/// The separators a Windows path accepts.
+const PATH_SEPARATORS: [char; 2] = ['\\', '/'];
+
+/// The case-folded components of `path`, or `None` when one climbs (`..`).
+fn path_components(path: &str) -> Option<Vec<String>> {
+    path.split(PATH_SEPARATORS)
+        .filter(|component| !component.is_empty() && *component != ".")
+        .map(|component| (component != "..").then(|| component.to_lowercase()))
+        .collect()
+}
+
+/// Whether `path` lies strictly below the directory `root`.
+fn lies_below(path: &str, root: &str) -> bool {
+    let (Some(path), Some(root)) = (path_components(path), path_components(root)) else {
+        return false;
+    };
+    !root.is_empty() && path.len() > root.len() && path.starts_with(&root)
 }
 
 /// What the phone shows as the asking party (W-R-10): the program, and the
@@ -157,5 +203,103 @@ pub(crate) fn wide(text: &str) -> Vec<u16> {
 impl From<wire::WireError> for PipeError {
     fn from(error: wire::WireError) -> Self {
         Self::Wire(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn roots() -> Vec<String> {
+        vec![
+            r"C:\Program Files".to_owned(),
+            r"C:\Program Files (x86)".to_owned(),
+        ]
+    }
+
+    fn label(image: &str) -> String {
+        program_label_within(Path::new(image), &roots())
+    }
+
+    #[test]
+    fn a_browser_under_program_files_is_named() {
+        assert_eq!(
+            label(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+            "Microsoft Edge"
+        );
+        assert_eq!(
+            label(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+            "Google Chrome"
+        );
+    }
+
+    #[test]
+    fn a_browser_name_in_a_user_directory_is_its_file_name() {
+        assert_eq!(
+            label(r"C:\Users\holder\AppData\Local\Temp\msedge.exe"),
+            "msedge.exe"
+        );
+    }
+
+    #[test]
+    fn a_look_alike_directory_is_not_program_files() {
+        assert_eq!(label(r"C:\Program Files Evil\msedge.exe"), "msedge.exe");
+        assert_eq!(label(r"C:\Program Filesx\msedge.exe"), "msedge.exe");
+    }
+
+    #[test]
+    fn a_climbing_path_is_below_no_root() {
+        assert_eq!(
+            label(r"C:\Program Files\..\Users\holder\msedge.exe"),
+            "msedge.exe"
+        );
+    }
+
+    #[test]
+    fn the_root_itself_is_not_below_it() {
+        let roots = vec![r"C:\Program Files\msedge.exe".to_owned()];
+        assert_eq!(
+            program_label_within(Path::new(r"C:\Program Files\msedge.exe"), &roots),
+            "msedge.exe"
+        );
+    }
+
+    #[test]
+    fn case_and_separators_do_not_matter() {
+        assert_eq!(
+            label(r"c:\PROGRAM FILES\Google\Chrome\Application\CHROME.EXE"),
+            "Google Chrome"
+        );
+        assert_eq!(
+            label("C:/Program Files/Google/Chrome/Application/chrome.exe"),
+            "Google Chrome"
+        );
+        assert_eq!(
+            label(r"C:/Program Files\BraveSoftware/Brave-Browser\Application/brave.exe"),
+            "Brave"
+        );
+        let slashed = vec!["C:/Program Files/".to_owned()];
+        assert_eq!(
+            program_label_within(
+                Path::new(r"C:\Program Files\Vivaldi\Application\vivaldi.exe"),
+                &slashed
+            ),
+            "Vivaldi"
+        );
+    }
+
+    #[test]
+    fn an_empty_root_trusts_nothing() {
+        let roots = vec![String::new()];
+        assert_eq!(
+            program_label_within(Path::new(r"C:\Opera\opera.exe"), &roots),
+            "opera.exe"
+        );
+    }
+
+    #[test]
+    fn an_unknown_program_is_its_file_name() {
+        assert_eq!(label(r"C:\Program Files\Tool\tool.exe"), "tool.exe");
+        assert_eq!(label(""), "A Windows program");
     }
 }
