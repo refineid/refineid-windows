@@ -5,7 +5,8 @@
   xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap rescap">
+  xmlns:desktop2="http://schemas.microsoft.com/appx/manifest/desktop/windows10/2"
+  IgnorableNamespaces="uap rescap desktop2">
 
   <!-- Version is stamped at build by RefineID.csproj. -->
   <Identity
@@ -49,4 +50,18 @@
   <Capabilities>
     <rescap:Capability Name="runFullTrust" />
   </Capabilities>
+
+  <!-- The one inbound path the app needs: the phone's mDNS answers to the
+       browse, on the shared mDNS port. Declared here, Windows creates the
+       rule at install for the package, not for one version's path, so no
+       update asks again, and the uninstall removes it. The app listens on
+       no TCP port; it only dials out. All profiles, as a home network is
+       often classed public. -->
+  <Extensions>
+    <desktop2:Extension Category="windows.firewallRules">
+      <desktop2:FirewallRules Executable="RefineID.exe">
+        <desktop2:Rule Direction="in" IPProtocol="UDP" Profile="all" LocalPortMin="5353" LocalPortMax="5353" />
+      </desktop2:FirewallRules>
+    </desktop2:Extension>
+  </Extensions>
 </Package>
