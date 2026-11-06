@@ -24,7 +24,8 @@ using Xunit;
 public sealed partial class SecretTests
 {
     [GeneratedRegex(
-        @"(?:env::var(?:_os)?|GetEnvironmentVariable)\(\s*""([^""]*(?:PIN|PUK|CAN)[^""]*)"""
+        @"(?:env::var(?:_os)?|GetEnvironmentVariable)\(\s*""([^""]*(?:PIN|PUK|CAN)[^""]*)""",
+        RegexOptions.IgnoreCase
     )]
     private static partial Regex SecretVariable();
 
