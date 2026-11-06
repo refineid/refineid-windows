@@ -15,7 +15,7 @@
 //! Durable pairing storage, protected to the Windows user by DPAPI.
 //!
 //! RAPP requires the pair keys to live in device-only, non-migrating secret
-//! storage (RAPP v26.10.29 section 4.3 item 4). The whole pairing set is
+//! storage (RAPP v26.11.2 section 4.3 item 4). The whole pairing set is
 //! serialized by [`refineid_rapp_core::persistence`], protected with
 //! `CryptProtectData` to the current user under a purpose entropy, and
 //! written as one file in the user's local application data, through a
@@ -33,7 +33,7 @@
 //! [`ProtectedPairingStore`] keeps the decoded records in memory so it can
 //! satisfy the borrowing [`PairingStore`] contract, and writes the set through
 //! on every change, after re-reading it: a change is never written over a set
-//! that could not be read. An idle-expiry check (RAPP v26.10.29 section 4.6
+//! that could not be read. An idle-expiry check (RAPP v26.11.2 section 4.6
 //! item 5) writes the set first and changes the record held here only once
 //! the write succeeded.
 //!
@@ -43,7 +43,7 @@
 //! without it, so it is refused once.
 //!
 //! Beside the set, in a directory of plain files, one per pairing, the
-//! store keeps the last card a session heard present (RAPP v26.10.29
+//! store keeps the last card a session heard present (RAPP v26.11.2
 //! section 8.4): a pair identifier, the fingerprint of a public certificate
 //! and a time, nothing secret. Every requester process of this user offers
 //! the phone's identity by it, and a session refreshes it every few
@@ -56,8 +56,8 @@ use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::persistence::{PairingSet, decode_pairing_records, encode_pairing_records};
 use refineid_rapp_core::presence::{CardSighting, decode_sighting, encode_sighting};
 use refineid_rapp_core::store::{
-    PairingRecord, PairingStore, StoreError, SweepError, SweepOutcome, expire_revocation_notices,
-    remove_unconfirmed, revoke_pairing,
+    PairingRecord, PairingStore, RecordStoreError, StoreError, SweepOutcome,
+    expire_revocation_notices, remove_unconfirmed, revoke_pairing,
 };
 use zeroize::Zeroizing;
 
@@ -81,7 +81,7 @@ impl ProtectedPairingStore {
     ///
     /// A record whose peer never confirmed its storage was written inside a
     /// pairing this computer did not complete; it is removed with its keys
-    /// here, at the first load after that pairing (RAPP v26.10.29 section
+    /// here, at the first load after that pairing (RAPP v26.11.2 section
     /// 4.3 item 4). A forgotten pairing whose `pairing_revoked` close was
     /// not delivered within 30 days loses its keys untold (section 4.6
     /// item 3). A record the codec refuses is left out, and the set is
@@ -146,7 +146,7 @@ impl ProtectedPairingStore {
     }
 
     /// The pairings forgotten here whose `pairing_revoked` close is still
-    /// owed to the phone (RAPP v26.10.29 section 4.6 item 2).
+    /// owed to the phone (RAPP v26.11.2 section 4.6 item 2).
     pub fn forgotten_pairings(&self) -> impl Iterator<Item = &PairingRecord> {
         self.records
             .iter()
@@ -160,7 +160,7 @@ impl ProtectedPairingStore {
     }
 
     /// Records that the phone revoked `pair_id` with its `pairing_revoked`
-    /// close (RAPP v26.10.29 section 4.6 item 4): the keys are destroyed and
+    /// close (RAPP v26.11.2 section 4.6 item 4): the keys are destroyed and
     /// the record stays so the user is told.
     ///
     /// # Errors
@@ -296,6 +296,14 @@ impl PairingStore for ProtectedPairingStore {
         Ok(())
     }
 
+    /// Removes the pairing's own sighting file; one that cannot be removed
+    /// is read back by the next refresh, and the identity it names ages out
+    /// over the grace.
+    fn drop_card_sighting(&mut self, pair_id: PairId) {
+        remove_sighting(&self.directory, pair_id);
+        self.sightings.retain(|(sighted, _)| *sighted != pair_id);
+    }
+
     /// Re-reads the stored set and checks the pairing as it is stored now;
     /// a change is written as the whole set, with the checked record in its
     /// place, before the record held here changes.
@@ -304,17 +312,17 @@ impl PairingStore for ProtectedPairingStore {
         pair_id: PairId,
         now_ms: u64,
         session_established: bool,
-    ) -> Result<SweepOutcome, SweepError<StoreError>> {
-        let _lock = lock_set(&self.directory).map_err(SweepError::Store)?;
-        self.refresh().map_err(SweepError::Store)?;
+    ) -> Result<SweepOutcome, RecordStoreError<StoreError>> {
+        let _lock = lock_set(&self.directory).map_err(RecordStoreError::Store)?;
+        self.refresh().map_err(RecordStoreError::Store)?;
         let index = self
             .records
             .iter()
             .position(|entry| entry.pair_id() == pair_id)
-            .ok_or(SweepError::Store(StoreError::Unknown))?;
+            .ok_or(RecordStoreError::Store(StoreError::Unknown))?;
         let (before, from) = self.records.split_at_mut(index);
         let Some((record, after)) = from.split_first_mut() else {
-            return Err(SweepError::Store(StoreError::Unknown));
+            return Err(RecordStoreError::Store(StoreError::Unknown));
         };
         let directory = &self.directory;
         record.sweep(now_ms, session_established, |checked| {
@@ -336,10 +344,8 @@ const PAIRING_SET_FILE: &str = "pairing-set.dpapi";
 /// The file whose exclusive lock every change to the set holds.
 ///
 /// The app, the agent and the card module each re-read the set, change it
-/// and write it back. Without the lock one process could write back a set
-/// it read before another stored a record, and the record would be gone: a
-/// pairing stored unconfirmed by the app vanished that way before its
-/// confirmation, so the phone kept a pairing the computer did not.
+/// and write it back. The lock keeps one from writing back a set it read
+/// before another stored a record, which would lose that record.
 const PAIRING_SET_LOCK_FILE: &str = "pairing-set.lock";
 
 /// Takes the set's exclusive lock, waiting for another process to release
@@ -797,13 +803,12 @@ mod tests {
     use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
     use refineid_rapp::noise::x25519_public_key;
     use refineid_rapp::{
-        EndpointRole, PAIRING_IDLE_EXPIRY_MS, PairRecord, ProfileName, X25519_KEY_SIZE,
-        compute_grants_hash,
+        DisplayName, EndpointRole, PAIRING_IDLE_EXPIRY_MS, PairRecord, ProfileName,
+        X25519_KEY_SIZE, compute_grants_hash,
     };
-    use refineid_rapp_core::engine::PeerIntroduction;
     use refineid_rapp_core::ids::PairId;
     use refineid_rapp_core::store::{
-        PairingRecord, PairingState, PairingStore, StoreError, SweepError, SweepOutcome,
+        PairingRecord, PairingState, PairingStore, RecordStoreError, StoreError, SweepOutcome,
     };
 
     use super::{
@@ -870,16 +875,11 @@ mod tests {
             x25519_public_key(&CUSTODIAN_PRIVATE),
             compute_grants_hash(&profiles).expect("grants hash"),
             profiles,
+            DisplayName::parse("Phone".to_owned()).expect("a display name"),
             created_at_ms,
         )
         .expect("record");
-        let mut record = PairingRecord::new(
-            keys,
-            PeerIntroduction {
-                display_name: "Phone".into(),
-                platform: "iOS".into(),
-            },
-        );
+        let mut record = PairingRecord::new(keys, "iOS".to_owned());
         record.remember_authentication_certificate(
             OwnedCert::from_der(UnvalidatedCertificate::new(LARGE_CERTIFICATE.to_vec()))
                 .expect("certificate"),
@@ -967,7 +967,8 @@ mod tests {
         let mut adder = ProtectedPairingStore::load_from(directory.0.clone()).expect("load");
         for index in 0..ADDED {
             let mut id = *b"added pairing   ";
-            id[15] = index;
+            let last = id.last_mut().expect("an identifier has bytes");
+            *last = index;
             adder.insert(record(PairId::from_array(id))).expect("add");
         }
         rewriter.join().expect("rewriter");
@@ -1054,7 +1055,7 @@ mod tests {
 
         assert_eq!(
             store.sweep(FIRST_PAIR, IDLE_EXPIRED_AT_MS, false),
-            Err(SweepError::Store(StoreError::Unreadable))
+            Err(RecordStoreError::Store(StoreError::Unreadable))
         );
         assert!(store.get(FIRST_PAIR).expect("held").serves());
         assert_eq!(std::fs::read(&stored).expect("still there"), NOT_PROTECTED);

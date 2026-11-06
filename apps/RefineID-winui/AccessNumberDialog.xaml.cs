@@ -33,6 +33,9 @@ internal sealed partial class AccessNumberDialog : ContentDialog
     /// <summary>Three blanks the width of a group's digits.</summary>
     private const string EmptyGroup = "   ";
 
+    /// <summary>What a typed digit shows until the eye reveals it.</summary>
+    private const char HiddenDigit = '\u2022';
+
     private readonly string reader;
     private bool proving;
 
@@ -112,7 +115,10 @@ internal sealed partial class AccessNumberDialog : ContentDialog
             int start = Math.Min(index * GroupSize, digits.Length);
             string part = digits.Substring(start, Math.Min(GroupSize, digits.Length - start));
             bool typedGroup = part.Length > 0;
-            groups[index].Text = typedGroup ? part : EmptyGroup;
+            bool revealed = this.RevealToggle.IsChecked == true;
+            groups[index].Text = typedGroup
+                ? (revealed ? part : new string(HiddenDigit, part.Length))
+                : EmptyGroup;
             groups[index].Foreground = Brush(
                 typedGroup ? "TextFillColorPrimaryBrush" : "TextFillColorSecondaryBrush"
             );
@@ -131,6 +137,13 @@ internal sealed partial class AccessNumberDialog : ContentDialog
             : null;
 
     private void FocusNumber() => _ = this.NumberBox.Focus(FocusState.Programmatic);
+
+    /// <summary>The eye shows or hides the typed digits and hands the typing back.</summary>
+    private void RevealToggle_Click(object sender, RoutedEventArgs args)
+    {
+        this.Render(this.NumberBox.Text);
+        this.FocusNumber();
+    }
 
     /// <summary>
     /// Proves `digits` on the card over PACE and stores them; the dialog

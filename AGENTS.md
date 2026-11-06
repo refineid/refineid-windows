@@ -6,10 +6,19 @@
   (Rust `.rs` files must be valid UTF-8). Preserve a protocol fixture's exact
   specified byte encoding.
 - No AI attribution in commits.
+- New source files carry `Copyright 2026 Petri Koistinen` with no
+  email address and HTTPS license URLs; shell scripts carry the
+  one-line form under the shebang, PowerShell keeps its multi-line
+  form.
 - Zero PIN and PIN-length logging across all environments: Never log, trace,
   display, or format PIN bytes, candidate PIN lengths (e.g. `got {len}`), or
   development PIN identifiers in log sinks, audit records, or error strings.
   Never commit test PINs or card secrets.
+- The CAN is a secret like the PINs: never displayed back, logged (digits or
+  length), sent over RAPP or diagnostics, or read from argv or the
+  environment. Entry hides it by default with a reveal control. A personal
+  card's CAN is stored only in the DPAPI-protected credential store
+  (refineid-core `doc/security/credential-custody.md`).
 - Development builds make every error visible; release builds never log. A
   debug build (`debug_assertions` in Rust, `DEBUG` in C#) reports each
   failure at its typed boundary with `refineid_dev_errors::report!` or
@@ -45,13 +54,43 @@
   remove the worktree and branch and fast-forward `main`. The scheduled/manual
   Windows portability workflow does not gate pull requests. Full workflow:
   `doc/process/agent-worktrees.md`.
+- Clean worktrees at the start and end of every task: run
+  `scripts/agent-housekeeping.sh --clean` before creating your worktree
+  and again before finishing. It removes only worktrees whose branch is
+  merged into main, whose tree is clean, that hold no unpushed commits,
+  and that have been idle for over a day; everything else is left alone.
+  If your own branch just merged and is too fresh for `--clean` to take,
+  remove it yourself once its tree is clean and pushed, then delete the
+  branch and fast-forward local main. If your pull request is still open
+  when you finish, leave the worktree in place — a later start-clean reaps
+  it after merge. Verify with `git worktree list`.
 - Do not publish unsigned or test-signed binaries as production releases.
+
+## Rules live here, not in an agent's memory
+
+Every rule, decision and finding an agent should remember lives in this
+repository, never only in an agent's memory: a design rule in `doc/`, a
+defect in an issue, a working rule in this file. This file states each
+rule in a line and points to the reading behind it; the readings live
+in `doc/`, not here.
+
+## Product
+
+- RefineID-Apple is the product-behavior and UX reference.
+- User-facing UI is terse. Explanations, status, and diagnostics belong
+  in documentation and developer tooling, not product copy.
+- No confirmation dialogs: a chosen action happens.
+- Only an error takes red or orange; normal states never do.
+- No recovery buttons: back-offs stay silent and clear themselves.
+- Details live with the reference: RefineID-Apple
+  `Documentation/design/ui.md`.
 
 ## Source comments
 
 - Comments explain what the code does now and the constraints it honors.
   Past bugs, previous implementations, and explanations of what a fix changed
-  belong in commit messages, not source comments.
+  belong in commit messages, not source comments. No measurement dates
+  in comments.
 
 ## Code reviews and AI reviewers
 
@@ -167,6 +206,15 @@ record for RAPP and its applications.
   readers or migration paths behind.
 - Update every caller, hook, CI job and document to the replacement in that
   same change instead of keeping the old entry point alive for them.
+
+## Certificates and trust
+
+- Certificates come from the card, which carries its own, or, for external
+  ones (EU eIDAS), from trusted lists at runtime. No certificates or
+  fingerprints are shipped in the software.
+- No pinning or other trust policy is added without the owner's decision.
+- Describe what the code does and cite the source; ask the owner before
+  changing trust behavior.
 
 ## Independent review
 

@@ -33,13 +33,6 @@ using Microsoft.UI.Xaml.Controls;
 )]
 internal sealed partial class MainPage : Page
 {
-    /// <summary>
-    /// The name the phone shows for this requester: the computer's name,
-    /// as a Mac and an iPhone send theirs. The phone names the platform
-    /// itself, so the name does not repeat it.
-    /// </summary>
-    private static readonly string RequesterName = Environment.MachineName;
-
     /// <summary>Pairing-state poll cadence.</summary>
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(700);
 
@@ -206,10 +199,7 @@ internal sealed partial class MainPage : Page
         ulong handle;
         try
         {
-            handle = (
-                await Task.Run(() => NativeRappService.OpenPairing(RequesterName))
-                    .ConfigureAwait(true)
-            ).Handle;
+            handle = (await Task.Run(NativeRappService.OpenPairing).ConfigureAwait(true)).Handle;
         }
         catch (NativeRappException error) when (error.Code == "no_pairing")
         {
@@ -239,10 +229,7 @@ internal sealed partial class MainPage : Page
 
     private async Task PairAndReadAsync()
     {
-        var dialog = new PairingDialog(RequesterName, this.dispatcher, PollInterval)
-        {
-            XamlRoot = this.XamlRoot,
-        };
+        var dialog = new PairingDialog(this.dispatcher, PollInterval) { XamlRoot = this.XamlRoot };
         this.pairing = true;
         try
         {
@@ -281,6 +268,11 @@ internal sealed partial class MainPage : Page
             this.RefreshSignEntry();
             this.StatusInfoBar.IsOpen = false;
         }
+        catch (NativeRappException error) when (error.Code == "no_pairing")
+        {
+            // The phone is absent: the row already shows the card or the
+            // way to connect one, and absence itself is not shown.
+        }
         catch (NativeRappException error)
         {
             if (!quiet)
@@ -314,9 +306,10 @@ internal sealed partial class MainPage : Page
     }
 
     /// <summary>
-    /// Drops the stored pair keys from the device-only credential. The
-    /// native call first tells the phone over a short network session, so it
-    /// runs off the UI thread behind the busy overlay.
+    /// Forgets the stored pairing. The native call forgets it at once and
+    /// tells the phone in one bounded attempt on a thread of its own; it
+    /// reads the protected store, so it runs off the UI thread behind the
+    /// busy overlay.
     /// </summary>
     private async Task ForgetIdentityAsync()
     {
@@ -548,7 +541,7 @@ internal sealed partial class MainPage : Page
             this.unactivatedSerial = snapshot.Serial;
             if (firstSight && !this.pairing && ReferenceEquals(this.Frame.Content, this))
             {
-                this.Frame.Navigate(typeof(CardPage), snapshot.Reader);
+                this.Frame.Navigate(typeof(CardPage), snapshot);
             }
         }
 

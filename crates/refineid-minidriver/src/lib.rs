@@ -141,7 +141,8 @@ use cardmod::{CardCapabilityModel, CardModel, ContainerDescriptor, Ctx, KeyAlgor
 use ffi::*;
 #[cfg(windows)]
 use refineid_lib_core::auth::{
-    ChangePinOutcome, PinOps, PinSlot, PinStatus, UnblockOutcome, VerifyOutcome,
+    AuthError, CardPinLengths, ChangePinOutcome, PinOps, PinReferenceScheme, PinSlot, PinStatus,
+    UnblockOutcome, VerifyOutcome,
 };
 #[cfg(windows)]
 use refineid_lib_core::crypto::container::{Ciphertext, RsaPkcs1};
@@ -192,10 +193,34 @@ fn live_token_serial(tx: &mut CardSessionTransport) -> Result<TokenSerial, DWORD
 }
 
 #[cfg(windows)]
-fn live_pin_status(tx: &mut CardSessionTransport, slot: PinSlot) -> Result<PinStatus, DWORD> {
+fn live_pin_status(
+    tx: &mut CardSessionTransport,
+    slot: PinSlot,
+    scheme: PinReferenceScheme,
+) -> Result<PinStatus, DWORD> {
     tx.select_pkcs15_application()
         .map_err(|_error| SCARD_F_INTERNAL_ERROR)?;
-    tx.pin_status(slot).map_err(|_error| SCARD_F_INTERNAL_ERROR)
+    tx.pin_status_with_scheme(scheme, slot)
+        .map_err(|_error| SCARD_F_INTERNAL_ERROR)
+}
+
+/// The credential numbering `slot` is verified under, and its counter
+/// once the retry floor admits it. PIN 2 asks the card with
+/// counter-safe probes: under the organizational numbering its VERIFY
+/// makes DF.ESIGN current, where the qualified key signs. PIN 1 keeps
+/// the citizen numbering.
+#[cfg(windows)]
+fn live_verify_floor(
+    tx: &mut CardSessionTransport,
+    slot: PinSlot,
+) -> Result<(PinReferenceScheme, PinStatus), DWORD> {
+    let scheme = match slot {
+        PinSlot::Pin1 => PinReferenceScheme::Citizen,
+        PinSlot::Pin2 => tx
+            .resolve_pin_reference_scheme()
+            .map_err(|_error| SCARD_F_INTERNAL_ERROR)?,
+    };
+    Ok((scheme, live_retry_floor(tx, slot, scheme)?))
 }
 
 /// Apply the retry floor to `slot` before any command that can spend one
@@ -255,10 +280,40 @@ fn puk_floor_answer(tx: &mut CardSessionTransport) -> Result<(), DWORD> {
     })
 }
 
+/// Read the lengths the card accepts for its PINs and the PUK, once per
+/// PIN change or reset; the card is addressed under the numbering they
+/// were read by.
+#[cfg(windows)]
+fn card_pin_lengths(tx: &mut CardSessionTransport) -> Result<CardPinLengths, DWORD> {
+    tx.read_card_pin_lengths().map_err(|_error| {
+        refineid_dev_errors::report!(
+            CardModule,
+            "PIN lengths not read",
+            "the card session failed"
+        );
+        SCARD_F_INTERNAL_ERROR
+    })
+}
+
+/// The answer for a PIN change or reset the card service refused: an
+/// entry of a length the card does not accept is an invalid parameter,
+/// as a malformed entry is; a transport failure is internal.
+#[cfg(windows)]
+fn manage_error_answer<TE>(error: &AuthError<TE>) -> DWORD {
+    match error {
+        AuthError::PinPolicy(_reason) => SCARD_E_INVALID_PARAMETER,
+        AuthError::Transport(_error) => SCARD_F_INTERNAL_ERROR,
+    }
+}
+
 /// Read the live status of `slot` and apply [`retry_floor_answer`].
 #[cfg(windows)]
-fn live_retry_floor(tx: &mut CardSessionTransport, slot: PinSlot) -> Result<PinStatus, DWORD> {
-    let status = live_pin_status(tx, slot)?;
+fn live_retry_floor(
+    tx: &mut CardSessionTransport,
+    slot: PinSlot,
+    scheme: PinReferenceScheme,
+) -> Result<PinStatus, DWORD> {
+    let status = live_pin_status(tx, slot, scheme)?;
     retry_floor_answer(slot, status)?;
     Ok(status)
 }
@@ -379,7 +434,7 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
         };
         let pair_id = pairing.pair_id();
         // The card is offered on the certificate whose card a session heard
-        // present within the grace, and on nothing else (RAPP v26.10.29
+        // present within the grace, and on nothing else (RAPP v26.11.2
         // section 8.4 items 2 and 3).
         let Some(auth) = refineid_rapp_core::store::offered_certificate(
             &store,
@@ -498,6 +553,7 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
         card,
         pin1_authenticated: false,
         pin2_authenticated: false,
+        pin2_scheme: PinReferenceScheme::Citizen,
     });
     cd.pvVendorSpecific = Box::into_raw(ctx).cast();
 
@@ -808,7 +864,7 @@ fn reverify_cached_pin(
         };
     }
     // A failed read is a transport failure: the held PIN 1 stays, and the
-    // retry counter read before its next use decides (RAPP v26.10.29
+    // retry counter read before its next use decides (RAPP v26.11.2
     // section 11 item 2).
     let serial = match live_token_serial(tx) {
         Ok(serial) => serial,
@@ -817,7 +873,7 @@ fn reverify_cached_pin(
             return Some(error);
         }
     };
-    let status = match live_pin_status(tx, PinSlot::Pin1) {
+    let status = match live_pin_status(tx, PinSlot::Pin1, PinReferenceScheme::Citizen) {
         Ok(status) => status,
         Err(error) => {
             reset_card_state(pin1_authenticated, pin2_authenticated);
@@ -1055,7 +1111,7 @@ fn pin_unblock_permission(pin_id: DWORD) -> DWORD {
 #[cfg(windows)]
 const NO_PIN_CACHE_POLICY_INFO: DWORD = 0;
 
-/// The Base CSP's PIN caching for each PIN (RAPP v26.10.29 section 11 item
+/// The Base CSP's PIN caching for each PIN (RAPP v26.11.2 section 11 item
 /// 2): PIN 1 in its process memory, as this module holds it; PIN 2 asked for
 /// every signature.
 #[cfg(windows)]
@@ -1133,14 +1189,14 @@ fn clear_pin_state(pin1_authenticated: &mut bool, pin2_authenticated: &mut bool)
 
 /// Forgets the card's verified state after a transport failure or a failed
 /// command: the held PIN 1 stays, and the retry counter read before its next
-/// use decides (RAPP v26.10.29 section 11 item 2).
+/// use decides (RAPP v26.11.2 section 11 item 2).
 #[cfg(windows)]
 const fn reset_card_state(pin1_authenticated: &mut bool, pin2_authenticated: &mut bool) {
     *pin1_authenticated = false;
     *pin2_authenticated = false;
 }
 
-/// PIN 2 is entered for every signature and never held (RAPP v26.10.29
+/// PIN 2 is entered for every signature and never held (RAPP v26.11.2
 /// section 11 item 2): the card spends it on one signature, and the next
 /// one asks again.
 #[cfg(windows)]
@@ -1753,8 +1809,8 @@ unsafe extern "system" fn CardAuthenticatePin(
         Ok(serial) => serial,
         Err(error) => return error,
     };
-    let status = match live_retry_floor(&mut tx, slot) {
-        Ok(status) => status,
+    let (scheme, status) = match live_verify_floor(&mut tx, slot) {
+        Ok(admitted) => admitted,
         Err(error) => return error,
     };
     let is_rejected =
@@ -1765,7 +1821,7 @@ unsafe extern "system" fn CardAuthenticatePin(
     let outcome = if slot == PinSlot::Pin1 {
         tx.verify_pin1(pin.clone())
     } else {
-        tx.verify_pin(slot, pin.clone())
+        tx.verify_pin_with_scheme(scheme, slot, pin.clone())
     };
     drop(tx);
     match outcome {
@@ -1775,6 +1831,7 @@ unsafe extern "system" fn CardAuthenticatePin(
                 hold_verified_pin1(serial, pin, status);
             } else {
                 ctx.pin2_authenticated = true;
+                ctx.pin2_scheme = scheme;
             }
             SCARD_S_SUCCESS
         }
@@ -1924,6 +1981,7 @@ unsafe extern "system" fn CardSignData(
         let operation = if container.pin_id == PIN_ID_QUALIFIED_SIG {
             CardOperation::SignDocument {
                 document_name: "Document".to_owned(),
+                contained_files: None,
                 key_profile,
                 algorithm,
                 digest,
@@ -1987,7 +2045,7 @@ unsafe extern "system" fn CardSignData(
     }
 
     let key_ref = if container.pin_id == PIN_ID_QUALIFIED_SIG {
-        KeyRef::Sign
+        KeyRef::Sign(ctx.pin2_scheme)
     } else {
         KeyRef::Auth
     };
@@ -2597,14 +2655,15 @@ unsafe extern "system" fn CardUnblockPin(
     if let Err(error) = puk_floor_answer(&mut tx) {
         return error;
     }
-    let outcome = match target_slot {
-        PinSlot::Pin1 => tx.unblock_pin1(puk, new_pin),
-        PinSlot::Pin2 => tx.reset_retry_counter(PinSlot::Pin2, puk, new_pin),
+    let lengths = match card_pin_lengths(&mut tx) {
+        Ok(lengths) => lengths,
+        Err(error) => return error,
     };
+    let outcome = tx.reset_retry_counter(&lengths, target_slot, puk, new_pin);
     drop(tx);
     match outcome {
         Ok(o) => map_unblock_outcome(ctx, target_pin_id, o),
-        Err(_e) => SCARD_F_INTERNAL_ERROR,
+        Err(error) => manage_error_answer(&error),
     }
 }
 
@@ -2645,7 +2704,7 @@ unsafe extern "system" fn CardChangeAuthenticator(
         Ok(serial) => serial,
         Err(error) => return error,
     };
-    if let Err(error) = live_retry_floor(&mut tx, slot) {
+    if let Err(error) = live_retry_floor(&mut tx, slot, PinReferenceScheme::Citizen) {
         return error;
     }
     let is_rejected = with_pin_safety(|cache| {
@@ -2656,10 +2715,11 @@ unsafe extern "system" fn CardChangeAuthenticator(
         return SCARD_W_WRONG_CHV;
     }
 
-    let outcome = match slot {
-        PinSlot::Pin1 => tx.change_pin1(current_pin.clone(), new_pin),
-        PinSlot::Pin2 => tx.change_pin(PinSlot::Pin2, current_pin.clone(), new_pin),
+    let lengths = match card_pin_lengths(&mut tx) {
+        Ok(lengths) => lengths,
+        Err(error) => return error,
     };
+    let outcome = tx.change_pin(&lengths, slot, current_pin.clone(), new_pin);
     drop(tx);
     match outcome {
         Ok(o) => {
@@ -2670,7 +2730,7 @@ unsafe extern "system" fn CardChangeAuthenticator(
             }
             map_change_pin_outcome(ctx, pin_id, o, pcAttemptsRemaining)
         }
-        Err(_e) => SCARD_F_INTERNAL_ERROR,
+        Err(error) => manage_error_answer(&error),
     }
 }
 
@@ -2741,8 +2801,8 @@ unsafe extern "system" fn CardAuthenticateEx(
         Ok(serial) => serial,
         Err(error) => return error,
     };
-    let status = match live_retry_floor(&mut tx, slot) {
-        Ok(status) => status,
+    let (scheme, status) = match live_verify_floor(&mut tx, slot) {
+        Ok(admitted) => admitted,
         Err(error) => return error,
     };
     let is_rejected =
@@ -2753,7 +2813,7 @@ unsafe extern "system" fn CardAuthenticateEx(
     let outcome = if slot == PinSlot::Pin1 {
         tx.verify_pin1(pin.clone())
     } else {
-        tx.verify_pin(slot, pin.clone())
+        tx.verify_pin_with_scheme(scheme, slot, pin.clone())
     };
     drop(tx);
     match outcome {
@@ -2763,6 +2823,7 @@ unsafe extern "system" fn CardAuthenticateEx(
                 hold_verified_pin1(serial, pin, status);
             } else {
                 ctx.pin2_authenticated = true;
+                ctx.pin2_scheme = scheme;
             }
             SCARD_S_SUCCESS
         }
@@ -2848,14 +2909,15 @@ unsafe extern "system" fn CardChangeAuthenticatorEx(
         if let Err(error) = puk_floor_answer(&mut tx) {
             return error;
         }
-        let outcome = match target_slot {
-            PinSlot::Pin1 => tx.unblock_pin1(puk, new_pin),
-            PinSlot::Pin2 => tx.reset_retry_counter(PinSlot::Pin2, puk, new_pin),
+        let lengths = match card_pin_lengths(&mut tx) {
+            Ok(lengths) => lengths,
+            Err(error) => return error,
         };
+        let outcome = tx.reset_retry_counter(&lengths, target_slot, puk, new_pin);
         drop(tx);
         return match outcome {
             Ok(o) => map_unblock_outcome(ctx, dwTargetPinId, o),
-            Err(_) => SCARD_F_INTERNAL_ERROR,
+            Err(error) => manage_error_answer(&error),
         };
     }
 
@@ -2884,7 +2946,7 @@ unsafe extern "system" fn CardChangeAuthenticatorEx(
         Ok(serial) => serial,
         Err(error) => return error,
     };
-    if let Err(error) = live_retry_floor(&mut tx, target_slot) {
+    if let Err(error) = live_retry_floor(&mut tx, target_slot, PinReferenceScheme::Citizen) {
         return error;
     }
     let is_rejected = with_pin_safety(|cache| {
@@ -2895,10 +2957,11 @@ unsafe extern "system" fn CardChangeAuthenticatorEx(
     if is_rejected {
         return SCARD_W_WRONG_CHV;
     }
-    let outcome = match target_slot {
-        PinSlot::Pin1 => tx.change_pin1(current_pin.clone(), new_pin),
-        PinSlot::Pin2 => tx.change_pin(PinSlot::Pin2, current_pin.clone(), new_pin),
+    let lengths = match card_pin_lengths(&mut tx) {
+        Ok(lengths) => lengths,
+        Err(error) => return error,
     };
+    let outcome = tx.change_pin(&lengths, target_slot, current_pin.clone(), new_pin);
     drop(tx);
     match outcome {
         Ok(o) => {
@@ -2909,7 +2972,7 @@ unsafe extern "system" fn CardChangeAuthenticatorEx(
             }
             map_change_pin_outcome(ctx, dwTargetPinId, o, pcAttemptsRemaining)
         }
-        Err(_) => SCARD_F_INTERNAL_ERROR,
+        Err(error) => manage_error_answer(&error),
     }
 }
 

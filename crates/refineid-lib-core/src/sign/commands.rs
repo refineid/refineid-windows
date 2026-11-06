@@ -995,12 +995,33 @@ impl PsoComputeDigitalSignature {
         ])
         .allow_wrong_le_retry()
     }
+
+    /// Serialise with the off-card digest in the data field.
+    ///
+    /// The organizational cards take the externally computed hash
+    /// directly in PSO:CDS (organizational cards specification
+    /// §6.6.2.3: Lc = hash length, Data = computed hash). Wire:
+    /// `<CLA> 2A 9E 9A <Lc> <hash> <Le>`.
+    #[must_use]
+    pub fn into_apdu_with_hash(self, hash: &ExternalHashValue, le: u8) -> CommandApdu {
+        let mut out = vec![
+            self.class.as_byte(),
+            Self::INS,
+            Self::P1,
+            Self::P2,
+            hash.len_byte(),
+        ];
+        out.extend_from_slice(hash.as_bytes());
+        out.push(le);
+        CommandApdu::new(out)
+    }
 }
 
 #[cfg(test)]
 mod tests {
 
     use super::*;
+    use crate::auth::PinReferenceScheme;
 
     #[test]
     fn signature_alg_ref_sha256_rsa_pkcs1_is_42h() {
@@ -1131,7 +1152,7 @@ mod tests {
             class: ApduClass::ChainedFirst,
             template: MseSetTemplate::DigitalSignature {
                 alg_ref: SignatureAlgRef::SHA256_RSA_PKCS1_V1_5,
-                key_ref: KeyRef::Sign,
+                key_ref: KeyRef::Sign(PinReferenceScheme::Citizen),
             },
         }
         .into_apdu();

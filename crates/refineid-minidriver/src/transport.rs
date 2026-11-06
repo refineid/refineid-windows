@@ -40,13 +40,13 @@ use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::message::{CloseReason, ResultError};
 use refineid_rapp_core::operations::{CardOperation, CardOperationResult};
 use refineid_rapp_core::store::{PairingRecord, PairingStore};
-use refineid_rapp_core::stream::StreamError;
+use refineid_rapp_core::stream::{DialCause, StreamError};
 use refineid_rapp_core::transport::TcpFrameTransport;
 use refineid_windows_credential_store::ProtectedPairingStore;
 
 use crate::ffi::{
-    DWORD, SCARD_E_COMM_DATA_LOST, SCARD_E_NO_KEY_CONTAINER, SCARD_E_READER_UNAVAILABLE,
-    SCARD_F_INTERNAL_ERROR, SCARD_W_CANCELLED_BY_USER, SCARDHANDLE,
+    DWORD, SCARD_E_COMM_DATA_LOST, SCARD_E_NO_KEY_CONTAINER, SCARD_F_INTERNAL_ERROR,
+    SCARD_W_CANCELLED_BY_USER, SCARD_W_REMOVED_CARD, SCARDHANDLE,
 };
 
 /// PC/SC `SCARD_S_SUCCESS`: the winscard call returned no error.
@@ -249,14 +249,11 @@ pub(crate) fn is_remote_card(atr: &[u8]) -> bool {
         || atr == DEV_TEST_CARD_ATR
 }
 
-/// The endpoint the development mock custodian listens on.
-const LOCAL_MOCK_CUSTODIAN: &str = "127.0.0.1:47110";
-
 /// How long one DNS-SD browse listens for the phone's session record.
 const BROWSE_ROUND: Duration = Duration::from_secs(3);
 
-/// Browse rounds before the phone counts as unreachable; a single query
-/// goes unanswered often enough that one round is not a verdict.
+/// Browse rounds before a dial that stays unanswered gives up; a single
+/// query goes unanswered often enough that one round is not a verdict.
 const BROWSE_ROUNDS: u32 = 3;
 
 /// Operation expiry sent on the wire; the holder approves within this.
@@ -268,15 +265,16 @@ pub(crate) enum RemoteFailure {
     /// The holder declined on the phone (`user_cancelled`).
     UserCancelled,
     /// The pairing serves nothing: the user forgot it here, or the phone
-    /// closed with `pairing_revoked` (RAPP v26.10.29 section 4.6).
+    /// closed with `pairing_revoked` (RAPP v26.11.2 section 4.6).
     Unpaired,
-    /// The phone was not reached, or has turned remote access off.
-    Unreachable,
+    /// No dial reached the phone: it reads as no card in the reader
+    /// (RAPP v26.11.2 section 4.7), exactly as if no phone were there.
+    NoCard,
     /// The session ended before the operation's result arrived.
     Lost,
     /// The phone's card did not answer this operation (`card_error`): a
     /// failed operation, never the card's absence, which only `card.status`
-    /// reports (RAPP v26.10.29 section 8.4 item 1).
+    /// reports (RAPP v26.11.2 section 8.4 item 1).
     CardError,
     /// Any other refusal or fault, named for debug logs.
     Failed(String),
@@ -290,7 +288,7 @@ impl RemoteFailure {
         match self {
             Self::UserCancelled => SCARD_W_CANCELLED_BY_USER,
             Self::Unpaired => SCARD_E_NO_KEY_CONTAINER,
-            Self::Unreachable => SCARD_E_READER_UNAVAILABLE,
+            Self::NoCard => SCARD_W_REMOVED_CARD,
             Self::Lost | Self::CardError => SCARD_E_COMM_DATA_LOST,
             Self::Failed(_) => SCARD_F_INTERNAL_ERROR,
         }
@@ -302,7 +300,7 @@ impl core::fmt::Display for RemoteFailure {
         match self {
             Self::UserCancelled => formatter.write_str("the holder declined on the phone"),
             Self::Unpaired => formatter.write_str("the pairing serves nothing; pair again"),
-            Self::Unreachable => formatter.write_str("the paired phone was not reached"),
+            Self::NoCard => formatter.write_str("no card present"),
             Self::Lost => formatter.write_str("the session ended before the result"),
             Self::CardError => formatter.write_str("the phone's card did not answer"),
             Self::Failed(reason) => formatter.write_str(reason),
@@ -321,10 +319,12 @@ impl RemoteCardTransport {
         Self { atr, pair_id }
     }
 
-    /// Establishes a session transport to the paired custodian: an explicit
-    /// `REFINEID_RAPP_ENDPOINT` for test harnesses first, then the phone found
-    /// by its session-mode discovery record, then the local mock custodian.
-    /// This computer only dials; it never listens.
+    /// Establishes a session transport to the paired custodian for this
+    /// operation, a local consumer's request (RAPP v26.11.2 section 8.3): an
+    /// explicit `REFINEID_RAPP_ENDPOINT` for test harnesses first, then the
+    /// phone found by its session-mode discovery record. A withdrawn phone
+    /// is not dialed (section 4.5 item 6). This computer only dials; it never
+    /// listens.
     fn connect_session_transport(
         &self,
         store: &ProtectedPairingStore,
@@ -345,14 +345,17 @@ impl RemoteCardTransport {
             outcome = refineid_rapp_core::stream::dial_session(
                 pairing,
                 &preferred,
-                &[LOCAL_MOCK_CUSTODIAN.to_owned()],
                 BROWSE_ROUND,
+                DialCause::ConsumerRequest,
             );
-            if matches!(outcome, Ok(_) | Err(StreamError::Withdrawn)) {
+            if matches!(
+                outcome,
+                Ok(_) | Err(StreamError::Withdrawn | StreamError::NotDue)
+            ) {
                 break;
             }
         }
-        outcome.map_err(|_| RemoteFailure::Unreachable)
+        outcome.map_err(|_| RemoteFailure::NoCard)
     }
 
     /// Executes a typed card operation via RAPP.
@@ -364,16 +367,10 @@ impl RemoteCardTransport {
             RemoteFailure::Failed(format!("the pairing store cannot be loaded: {error}"))
         })?;
         let transport = self.connect_session_transport(&store)?;
-        let mut requester = Requester::new(
-            RequesterConfig {
-                display_name: "RefineID Windows Remote Arm".into(),
-                platform: "Windows".into(),
-            },
-            store,
-        );
+        let mut requester = Requester::new(RequesterConfig::this_computer(), store);
 
         // The phone's `pairing_revoked` close revokes the pairing in the
-        // protected store the requester runs over (RAPP v26.10.29 section
+        // protected store the requester runs over (RAPP v26.11.2 section
         // 4.6 item 4), and the user is told to pair again.
         let mut session = match requester.connect(self.pair_id, transport) {
             Ok(session) => session,
@@ -751,5 +748,26 @@ impl CardTransport for CardSessionTransport {
 
     fn atr(&self) -> Result<Atr, AtrError> {
         Atr::new(self.atr_bytes())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RemoteFailure;
+    use crate::ffi::{SCARD_E_NO_KEY_CONTAINER, SCARD_W_REMOVED_CARD};
+
+    #[test]
+    fn an_absent_phone_reads_as_no_card_in_the_reader() {
+        assert_eq!(RemoteFailure::NoCard.status(), SCARD_W_REMOVED_CARD);
+        assert_eq!(RemoteFailure::NoCard.to_string(), "no card present");
+    }
+
+    #[test]
+    fn a_pairing_that_serves_nothing_still_asks_to_pair_again() {
+        assert_eq!(RemoteFailure::Unpaired.status(), SCARD_E_NO_KEY_CONTAINER);
+        assert_eq!(
+            RemoteFailure::Unpaired.to_string(),
+            "the pairing serves nothing; pair again"
+        );
     }
 }

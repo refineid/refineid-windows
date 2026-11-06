@@ -62,7 +62,8 @@ fn options() -> MockProxyOptions {
 fn requester() -> Requester<MemoryPairingStore> {
     Requester::new(
         RequesterConfig {
-            display_name: "Test Requester".into(),
+            display_name: refineid_rapp::DisplayName::parse("Windows - TEST-HOST".to_owned())
+                .expect("a display name"),
             platform: "Windows".into(),
         },
         MemoryPairingStore::new(),
@@ -89,7 +90,7 @@ fn paired_session(
             TEST_CODE,
             &mut PairingAddress::new(transport, vec![endpoint.to_owned()], DEADLINE),
             |peer, requested| {
-                assert_eq!(peer.display_name, "RefineID Mock Phone");
+                assert_eq!(peer.display_name.as_str(), "RefineID Mock Phone");
                 assert_eq!(peer.platform, "iOS");
                 assert_eq!(requested, ProfileName::ALL);
                 Some(requested.to_vec())
@@ -102,8 +103,13 @@ fn paired_session(
         .ok()
         .and_then(PairingRecord::pair_record)
         .expect("stored record");
-    let transport = dial_session(keys, &[endpoint.to_owned()], &[], std::time::Duration::ZERO)
-        .expect("dial session");
+    let transport = dial_session(
+        keys,
+        &[endpoint.to_owned()],
+        std::time::Duration::ZERO,
+        refineid_rapp_core::stream::DialCause::ConsumerRequest,
+    )
+    .expect("dial session");
     let session = requester
         .connect(pair_id, transport)
         .expect("session connect");

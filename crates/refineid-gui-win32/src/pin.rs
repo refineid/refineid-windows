@@ -2,9 +2,8 @@
 //! PIN screen backend: status reads plus change, unblock, and
 //! activate operations.
 //!
-//! Secrets cross this module only as validated [`PinBytes`],
-//! [`Puk`], or [`ActivationCode`] values built from raw digit
-//! buffers at the UI boundary. They are never held in `String`,
+//! Secrets cross this module only as validated [`PinBytes`] or
+//! [`Puk`] values built from raw digit buffers at the UI boundary. They are never held in `String`,
 //! never formatted (not even their lengths), and never logged;
 //! retry counts are the only numbers that reach the display.
 use refineid_card_manager_core::card_pin::ActivatePreflightOutcome;
@@ -13,10 +12,10 @@ use refineid_card_manager_core::card_pin::{
     PinManageSlot, UnblockPinOptions, UnblockPinReport,
 };
 use refineid_card_manager_core::service;
-use refineid_lib_core::auth::{ChangePinOutcome, UnblockOutcome};
-use refineid_lib_core::pin::{
-    ActivationCode, ActivationPinEight, ActivationPinSeven, PinBytes, PinRoleError, Puk,
+use refineid_lib_core::auth::{
+    CardPinLengths, ChangePinOutcome, PasswordLengthRange, UnblockOutcome,
 };
+use refineid_lib_core::pin::{ActivationPinSeven, PinBytes, PinRoleError, Puk};
 use zeroize::Zeroize;
 
 use crate::identity::{StateText, credential_label, pin_kind, puk_kind, puk_label, short_error};
@@ -24,26 +23,59 @@ use crate::identity::{StateText, credential_label, pin_kind, puk_kind, puk_label
 /// Combobox entries, in dispatch order. The UI and [`prepare`]
 /// share these indices.
 pub const MODES: [&str; 5] = [
-    "Change PIN1",
-    "Change PIN2",
-    "Unblock PIN1 (PUK)",
-    "Unblock PIN2 (PUK)",
+    "Change PIN 1",
+    "Change PIN 2",
+    "Unblock PIN 1 (PUK)",
+    "Unblock PIN 2 (PUK)",
     "Activate new card",
 ];
+
+/// The labels of one PIN's fields, as the form shows them and as the
+/// validation messages name them.
+#[derive(Clone, Copy)]
+struct PinFields {
+    current: &'static str,
+    new: &'static str,
+    repeat: &'static str,
+}
+
+const PIN1_FIELDS: PinFields = PinFields {
+    current: "Current PIN 1",
+    new: "New basic PIN 1",
+    repeat: "Repeat PIN 1",
+};
+
+const PIN2_FIELDS: PinFields = PinFields {
+    current: "Current PIN 2",
+    new: "New signature PIN 2",
+    repeat: "Repeat PIN 2",
+};
 
 /// Field labels per mode, top to bottom. An empty label hides
 /// that row.
 pub const FIELDS: [[&str; 5]; 5] = [
-    ["Current PIN1:", "New PIN:", "Confirm new PIN:", "", ""],
-    ["Current PIN2:", "New PIN:", "Confirm new PIN:", "", ""],
-    ["PUK:", "New PIN1:", "Confirm new PIN1:", "", ""],
-    ["PUK:", "New PIN2:", "Confirm new PIN2:", "", ""],
     [
-        "Activation code:",
-        "New PIN1:",
-        "Confirm PIN1:",
-        "New PIN2:",
-        "Confirm PIN2:",
+        "Current PIN 1:",
+        "New basic PIN 1:",
+        "Repeat PIN 1:",
+        "",
+        "",
+    ],
+    [
+        "Current PIN 2:",
+        "New signature PIN 2:",
+        "Repeat PIN 2:",
+        "",
+        "",
+    ],
+    ["PUK:", "New basic PIN 1:", "Repeat PIN 1:", "", ""],
+    ["PUK:", "New signature PIN 2:", "Repeat PIN 2:", "", ""],
+    [
+        "Activation PIN:",
+        "New basic PIN 1:",
+        "Repeat PIN 1:",
+        "New signature PIN 2:",
+        "Repeat PIN 2:",
     ],
 ];
 
@@ -61,9 +93,9 @@ pub enum PinJob {
         new: PinBytes,
     },
     Activate {
-        code: ActivationCode,
-        pin1: PinBytes,
-        pin2: PinBytes,
+        code: PinBytes,
+        pin1: Option<PinBytes>,
+        pin2: Option<PinBytes>,
     },
 }
 
@@ -81,6 +113,9 @@ pub struct PinStatusView {
     pub pin2: StateText,
     /// PUK state.
     pub puk: StateText,
+    /// The PIN 1, PIN 2 and PUK lengths the card accepts, which the PIN
+    /// form validates its entries against.
+    pub lengths: CardPinLengths,
 }
 
 /// Read the structured PIN status panel for one reader.
@@ -102,6 +137,7 @@ pub fn read_status_view(reader: &str) -> Result<PinStatusView, String> {
             text: puk_label(snapshot.puk.as_ref()),
             kind: puk_kind(snapshot.puk.as_ref()),
         },
+        lengths: snapshot.lengths,
     })
 }
 
@@ -109,11 +145,16 @@ pub fn read_status_view(reader: &str) -> Result<PinStatusView, String> {
 /// thread so typos surface without touching the card: no APDU
 /// goes out, and no retry counter moves, before this returns
 /// `Ok`. Every buffer is either moved into a zeroizing type or
-/// wiped on the error path.
-pub fn prepare(mode: usize, fields: Vec<Vec<u8>>) -> Result<PinJob, String> {
+/// wiped on the error path. Each entry is checked against the lengths
+/// the card accepts for its credential.
+pub fn prepare(
+    mode: usize,
+    fields: Vec<Vec<u8>>,
+    lengths: &CardPinLengths,
+) -> Result<PinJob, String> {
     match mode {
         0 => {
-            let (current, new) = prepare_change(fields, "Current PIN1", 4, "4-12 digits")?;
+            let (current, new) = prepare_change(fields, PIN1_FIELDS, lengths.pin1())?;
             Ok(PinJob::Change {
                 slot: PinManageSlot::Pin1,
                 current,
@@ -121,7 +162,7 @@ pub fn prepare(mode: usize, fields: Vec<Vec<u8>>) -> Result<PinJob, String> {
             })
         }
         1 => {
-            let (current, new) = prepare_change(fields, "Current PIN2", 6, "6-12 digits")?;
+            let (current, new) = prepare_change(fields, PIN2_FIELDS, lengths.pin2())?;
             Ok(PinJob::Change {
                 slot: PinManageSlot::Pin2,
                 current,
@@ -129,7 +170,7 @@ pub fn prepare(mode: usize, fields: Vec<Vec<u8>>) -> Result<PinJob, String> {
             })
         }
         2 => {
-            let (puk, new) = prepare_unblock(fields, "New PIN1", 4, "4-12 digits")?;
+            let (puk, new) = prepare_unblock(fields, PIN1_FIELDS, lengths.puk(), lengths.pin1())?;
             Ok(PinJob::Unblock {
                 slot: PinManageSlot::Pin1,
                 puk,
@@ -137,16 +178,18 @@ pub fn prepare(mode: usize, fields: Vec<Vec<u8>>) -> Result<PinJob, String> {
             })
         }
         3 => {
-            let (puk, new) = prepare_unblock(fields, "New PIN2", 6, "6-12 digits")?;
+            let (puk, new) = prepare_unblock(fields, PIN2_FIELDS, lengths.puk(), lengths.pin2())?;
             Ok(PinJob::Unblock {
                 slot: PinManageSlot::Pin2,
                 puk,
                 new,
             })
         }
-        4 => {
-            prepare_activate(fields).map(|(code, pin1, pin2)| PinJob::Activate { code, pin1, pin2 })
-        }
+        4 => prepare_activate(fields, lengths).map(|(code, pin1, pin2)| PinJob::Activate {
+            code,
+            pin1,
+            pin2,
+        }),
         _ => {
             let mut fields = fields;
             zeroize_all(&mut fields);
@@ -167,22 +210,34 @@ pub fn run_job(job: PinJob, reader: &str) -> Result<String, String> {
     }
 }
 
+/// The accepted range of a credential, or the refusal when the card
+/// accepts no length for it.
+fn accepted(
+    fields: &mut [Vec<u8>],
+    range: Option<PasswordLengthRange>,
+) -> Result<PasswordLengthRange, String> {
+    range.ok_or_else(|| {
+        zeroize_all(fields);
+        String::from("This card lists no PIN length that can be set; nothing was sent to the card.")
+    })
+}
+
 fn prepare_change(
     mut fields: Vec<Vec<u8>>,
-    current_label: &str,
-    role_min: usize,
-    hint: &str,
+    labels: PinFields,
+    pin: Option<PasswordLengthRange>,
 ) -> Result<(PinBytes, PinBytes), String> {
     if fields.len() != 3 {
         zeroize_all(&mut fields);
         return Err(String::from("Internal error: wrong field count."));
     }
-    let current = take_digit_buffer(&mut fields, 0, current_label, role_min, hint)?;
-    let new = take_digit_buffer(&mut fields, 1, "New PIN", role_min, hint)?;
-    let confirm = take_digit_buffer(&mut fields, 2, "Confirm new PIN", role_min, hint)?;
+    let pin = accepted(&mut fields, pin)?;
+    let current = take_digit_buffer(&mut fields, 0, labels.current, pin)?;
+    let new = take_digit_buffer(&mut fields, 1, labels.new, pin)?;
+    let confirm = take_digit_buffer(&mut fields, 2, labels.repeat, pin)?;
     if new.as_bytes() != confirm.as_bytes() {
         return Err(String::from(
-            "New PIN entries do not match; nothing was sent to the card.",
+            "The new PIN entries do not match; nothing was sent to the card.",
         ));
     }
     Ok((current, new))
@@ -190,72 +245,134 @@ fn prepare_change(
 
 fn prepare_unblock(
     mut fields: Vec<Vec<u8>>,
-    new_label: &str,
-    role_min: usize,
-    hint: &str,
+    labels: PinFields,
+    puk: Option<PasswordLengthRange>,
+    pin: Option<PasswordLengthRange>,
 ) -> Result<(Puk, PinBytes), String> {
     if fields.len() != 3 {
         zeroize_all(&mut fields);
         return Err(String::from("Internal error: wrong field count."));
     }
-    let raw = take_digit_buffer(&mut fields, 0, "PUK", 7, "7-8 digits")?;
-    let puk = Puk::new(raw).map_err(|error| role_error("The PUK", "7-8 digits", error))?;
-    let new = take_digit_buffer(&mut fields, 1, new_label, role_min, hint)?;
-    let confirm = take_digit_buffer(&mut fields, 2, "Confirm new PIN", role_min, hint)?;
+    let puk_range = accepted(&mut fields, puk)?;
+    let pin = accepted(&mut fields, pin)?;
+    let raw = take_digit_buffer(&mut fields, 0, "PUK", puk_range)?;
+    let puk = Puk::new(raw).map_err(|error| {
+        zeroize_all(&mut fields);
+        role_error("The PUK", &digits_hint(puk_range), error)
+    })?;
+    let new = take_digit_buffer(&mut fields, 1, labels.new, pin)?;
+    let confirm = take_digit_buffer(&mut fields, 2, labels.repeat, pin)?;
     if new.as_bytes() != confirm.as_bytes() {
         return Err(String::from(
-            "New PIN entries do not match; nothing was sent to the card.",
+            "The new PIN entries do not match; nothing was sent to the card.",
         ));
     }
     Ok((puk, new))
 }
 
+/// Validate the activation fields. The code's exact length is the
+/// card's to decide ([`run_activate`] checks it against the card's
+/// scheme before any command); here it only has to be digits no
+/// shorter than any scheme takes. A PIN whose two fields are both
+/// empty is not entered; the card service refuses unless the entries
+/// name exactly the PINs that await activation.
 fn prepare_activate(
     mut fields: Vec<Vec<u8>>,
-) -> Result<(ActivationCode, PinBytes, PinBytes), String> {
+    lengths: &CardPinLengths,
+) -> Result<(PinBytes, Option<PinBytes>, Option<PinBytes>), String> {
     if fields.len() != 5 {
         zeroize_all(&mut fields);
         return Err(String::from("Internal error: wrong field count."));
     }
-    let raw = take_digit_buffer(&mut fields, 0, "Activation code", 7, "7 or 8 digits")?;
-    let code = match raw.digit_count() {
-        7 => ActivationPinSeven::new(raw)
-            .map(ActivationCode::Seven)
-            .map_err(|error| role_error("The activation code", "7 or 8 digits", error))?,
-        8 => ActivationPinEight::new(raw)
-            .map(ActivationCode::Eight)
-            .map_err(|error| role_error("The activation code", "7 or 8 digits", error))?,
-        _ => {
-            return Err(String::from(
-                "The activation code has the wrong length (7 or 8 digits).",
-            ));
-        }
-    };
-    let pin1 = take_digit_buffer(&mut fields, 1, "New PIN1", 4, "4-12 digits")?;
-    let confirm1 = take_digit_buffer(&mut fields, 2, "Confirm PIN1", 4, "4-12 digits")?;
-    if pin1.as_bytes() != confirm1.as_bytes() {
-        return Err(String::from(
-            "New PIN1 entries do not match; nothing was sent to the card.",
-        ));
-    }
-    let pin2 = take_digit_buffer(&mut fields, 3, "New PIN2", 6, "6-12 digits")?;
-    let confirm2 = take_digit_buffer(&mut fields, 4, "Confirm PIN2", 6, "6-12 digits")?;
-    if pin2.as_bytes() != confirm2.as_bytes() {
-        return Err(String::from(
-            "New PIN2 entries do not match; nothing was sent to the card.",
-        ));
-    }
+    let code = take_code_buffer(&mut fields, 0)?;
+    let pin1 = take_optional_pair(
+        &mut fields,
+        1,
+        PIN1_FIELDS,
+        lengths.pin1(),
+        "The PIN 1 entries do not match; nothing was sent to the card.",
+    )?;
+    let pin2 = take_optional_pair(
+        &mut fields,
+        3,
+        PIN2_FIELDS,
+        lengths.pin2(),
+        "The PIN 2 entries do not match; nothing was sent to the card.",
+    )?;
     Ok((code, pin1, pin2))
 }
 
-/// Move one buffer into a validated [`PinBytes`]. The role minimum
-/// (4 for PIN1-family, 6 for PIN2) is enforced locally so a short
-/// typo is rejected before it can burn a card-side retry.
+/// Move a new PIN and its repeat, at `index` and the next field, into
+/// a validated [`PinBytes`]; `None` when both fields are empty. Two
+/// entries that differ give `mismatch`.
+fn take_optional_pair(
+    fields: &mut [Vec<u8>],
+    index: usize,
+    labels: PinFields,
+    range: Option<PasswordLengthRange>,
+    mismatch: &str,
+) -> Result<Option<PinBytes>, String> {
+    let repeat_index = index.saturating_add(1);
+    let both_empty = fields.get(index).is_some_and(Vec::is_empty)
+        && fields.get(repeat_index).is_some_and(Vec::is_empty);
+    if both_empty {
+        return Ok(None);
+    }
+    let range = accepted(fields, range)?;
+    let pin = take_digit_buffer(fields, index, labels.new, range)?;
+    let repeat = take_digit_buffer(fields, repeat_index, labels.repeat, range)?;
+    if pin.as_bytes() != repeat.as_bytes() {
+        zeroize_all(fields);
+        return Err(String::from(mismatch));
+    }
+    Ok(Some(pin))
+}
+
+/// The accepted length of a credential, as the form states it.
+fn digits_hint(range: PasswordLengthRange) -> String {
+    format!("{}-{} digits", range.min(), range.max())
+}
+
+/// Move one buffer into a validated [`PinBytes`] whose length the card
+/// accepts, so a typo is rejected before it can burn a card-side retry.
 fn take_digit_buffer(
     fields: &mut [Vec<u8>],
     index: usize,
     label: &str,
-    role_min: usize,
+    range: PasswordLengthRange,
+) -> Result<PinBytes, String> {
+    let hint = digits_hint(range);
+    let pin = take_buffer(fields, index, label, &hint)?;
+    if pin.digit_count() < range.min() {
+        zeroize_all(fields);
+        return Err(format!("{label} is too short ({hint})."));
+    }
+    if !range.contains(pin.digit_count()) {
+        zeroize_all(fields);
+        return Err(format!("{label} has the wrong length ({hint})."));
+    }
+    Ok(pin)
+}
+
+/// Move the activation PIN into a validated [`PinBytes`]. Its exact
+/// length is the card's scheme to decide; here it only has to be digits
+/// no shorter than any scheme takes.
+fn take_code_buffer(fields: &mut [Vec<u8>], index: usize) -> Result<PinBytes, String> {
+    const HINT: &str = "7 or 8 digits";
+    const LABEL: &str = "Activation PIN";
+    let code = take_buffer(fields, index, LABEL, HINT)?;
+    if code.digit_count() < ActivationPinSeven::LENGTH {
+        zeroize_all(fields);
+        return Err(format!("{LABEL} is too short ({HINT})."));
+    }
+    Ok(code)
+}
+
+/// Move one buffer into a [`PinBytes`] of digits.
+fn take_buffer(
+    fields: &mut [Vec<u8>],
+    index: usize,
+    label: &str,
     hint: &str,
 ) -> Result<PinBytes, String> {
     let Some(slot) = fields.get_mut(index) else {
@@ -263,15 +380,10 @@ fn take_digit_buffer(
         return Err(String::from("Internal error: missing PIN field."));
     };
     let bytes = std::mem::take(slot);
-    let pin = PinBytes::new(bytes).map_err(|error| {
+    PinBytes::new(bytes).map_err(|error| {
         zeroize_all(fields);
         role_error(label, hint, error)
-    })?;
-    if pin.digit_count() < role_min {
-        zeroize_all(fields);
-        return Err(format!("{label} is too short ({hint})."));
-    }
-    Ok(pin)
+    })
 }
 
 /// Render a credential-policy rejection using only static policy
@@ -334,16 +446,18 @@ fn run_unblock(
 
 fn run_activate(
     reader: &str,
-    code: ActivationCode,
-    pin1: PinBytes,
-    pin2: PinBytes,
+    code: PinBytes,
+    pin1: Option<PinBytes>,
+    pin2: Option<PinBytes>,
 ) -> Result<String, String> {
     let filter = service::reader_filter(reader.to_owned());
-    let serial = service::inspect(Some(&filter))
-        .map_err(|error| op_error(&error))?
-        .serial;
+    let snapshot = service::inspect(Some(&filter)).map_err(|error| op_error(&error))?;
+    if code.digit_count() != snapshot.activation_code_length {
+        return Err(activation_length_error(snapshot.activation_code_length));
+    }
+    let serial = snapshot.serial;
     let options = ActivateOptions {
-        activation_pin: code,
+        activation_code: code,
         new_pin1: pin1,
         new_pin2: pin2,
         allow_reactivate: false,
@@ -414,17 +528,25 @@ fn render_unblock(report: &UnblockPinReport) -> String {
     }
 }
 
+/// The refusal for an activation PIN of the wrong length for the
+/// card's scheme.
+fn activation_length_error(expected: usize) -> String {
+    format!(
+        "The activation PIN must have {expected} digits for this card; nothing was sent to the card."
+    )
+}
+
 fn render_activate(report: &ActivateReport) -> String {
     let mut out = String::new();
     match report.preflight {
-        ActivatePreflightOutcome::LooksUnactivated { .. } => {
+        ActivatePreflightOutcome::AwaitsActivation { .. } => {
             out.push_str("Card looks unactivated; activation proceeded.\r\n");
         }
-        ActivatePreflightOutcome::LooksActivated { .. } => {
+        ActivatePreflightOutcome::NothingAwaits { .. } => {
             out.push_str("Card already looks activated.\r\n");
         }
     }
-    out.push_str("PIN1: ");
+    out.push_str("PIN 1: ");
     out.push_str(&activate_line(report.pin1_outcome.as_ref()));
     out.push_str("\r\nPIN2: ");
     out.push_str(&activate_line(report.pin2_outcome.as_ref()));
@@ -436,7 +558,7 @@ fn activate_line(outcome: Option<&UnblockOutcome>) -> String {
         None => String::from("not attempted"),
         Some(UnblockOutcome::Ok) => String::from("set"),
         Some(UnblockOutcome::WrongPuk { retries_left }) => {
-            format!("wrong activation code; {retries_left} tries left")
+            format!("wrong activation PIN; {retries_left} tries left")
         }
         Some(UnblockOutcome::PukLocked) => String::from("code locked"),
         Some(UnblockOutcome::Invalidated) => {
@@ -460,6 +582,9 @@ fn op_error(error: &CardPinError) -> String {
         CardPinError::CardSessionRevoked { .. } => String::from(
             "The card or reader changed during the operation. Check the card and retry.",
         ),
+        CardPinError::ActivationLengthMismatch { expected, .. } => {
+            activation_length_error(*expected)
+        }
         other => flatten(&other.to_string(), 400),
     }
 }

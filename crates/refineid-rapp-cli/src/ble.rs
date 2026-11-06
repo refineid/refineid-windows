@@ -1,7 +1,7 @@
 //! The BLE commands over `"fi.refineid.rapp.ble"`: `ble-scan` lists RAPP
-//! advertisers, `ble-pair` pairs with the phone showing a code and stores
-//! the pairing, and `ble-session` opens a session with the stored pairing's
-//! phone and reads its card.
+//! advertisers, `ble-pair` pairs with the phone showing a code, stores
+//! the pairing, and forgets the pairing held before, and `ble-session`
+//! opens a session with the stored pairing's phone and reads its card.
 //!
 //! Nothing personal is printed: a read identity is reported as read, not
 //! shown, and certificates by their size.
@@ -44,7 +44,6 @@ const OPERATION_EXPIRY_MS: u64 = 60_000;
 
 struct BleOptions {
     code: Option<String>,
-    name: String,
     auto_confirm: bool,
     seconds: u64,
 }
@@ -52,7 +51,6 @@ struct BleOptions {
 fn parse(arguments: &[String]) -> Result<BleOptions, String> {
     let mut options = BleOptions {
         code: None,
-        name: "RefineID Windows".to_owned(),
         auto_confirm: false,
         seconds: DEFAULT_SCAN_SECONDS,
     };
@@ -71,7 +69,6 @@ fn parse(arguments: &[String]) -> Result<BleOptions, String> {
                         .ok_or("the pairing code is six characters from the phone")?,
                 );
             }
-            "--name" => options.name = value()?,
             "--seconds" => {
                 let raw = value()?;
                 options.seconds = raw
@@ -89,16 +86,10 @@ fn describe(advertiser: &ScannedAdvertiser) -> String {
     format!("{}  {} dBm", advertiser.address, advertiser.rssi.dbm())
 }
 
-fn requester(name: &str) -> Result<Requester<ProtectedPairingStore>, String> {
+fn requester() -> Result<Requester<ProtectedPairingStore>, String> {
     let store = ProtectedPairingStore::load()
         .map_err(|error| format!("the pairing store cannot be loaded: {error}"))?;
-    Ok(Requester::new(
-        RequesterConfig {
-            display_name: name.to_owned(),
-            platform: "Windows".into(),
-        },
-        store,
-    ))
+    Ok(Requester::new(RequesterConfig::this_computer(), store))
 }
 
 /// The RAPP advertisers in range, scanned round by round until the pairing
@@ -183,16 +174,18 @@ pub fn ble_scan(arguments: &[String]) -> Result<(), String> {
 
 /// `ble-pair`: pairs with the phone showing `--code`, trying each
 /// advertiser in pairing mode once, strongest first, a busy one again
-/// after its wait, and stores the pairing.
+/// after its wait, stores the pairing, and forgets the pairing held
+/// before, as `pair-demo` does.
 pub fn ble_pair(arguments: &[String]) -> Result<(), String> {
     let options = parse(arguments)?;
     let code = options.code.as_deref().ok_or("--code is required")?;
-    let mut requester = requester(&options.name)?;
+    let mut requester = requester()?;
     let auto_confirm = options.auto_confirm;
     let confirm = move |peer: &PeerIntroduction, requested: &[ProfileName]| {
         println!(
             "the phone introduced itself as {} ({})",
-            peer.display_name, peer.platform
+            peer.display_name.as_str(),
+            peer.platform
         );
         if auto_confirm {
             println!("granting: {}", crate::profile_list(requested));
@@ -221,11 +214,12 @@ pub fn ble_pair(arguments: &[String]) -> Result<(), String> {
         .map_err(|error| format!("stored pairing unreadable: {error:?}"))?;
     println!(
         "paired over Bluetooth with {} ({}); granted: {}",
-        record.peer().display_name,
-        record.peer().platform,
+        record.peer_display_name().as_str(),
+        record.peer_platform(),
         crate::profile_list(record.granted_profiles())
     );
     println!("the pairing is stored, protected to this Windows user");
+    crate::forget_replaced_pairings_and_tell(&mut requester, pair_id);
     Ok(())
 }
 
@@ -233,8 +227,8 @@ pub fn ble_pair(arguments: &[String]) -> Result<(), String> {
 /// and reads its card: status, identity, and the authentication
 /// certificate.
 pub fn ble_session(arguments: &[String]) -> Result<(), String> {
-    let options = parse(arguments)?;
-    let mut requester = requester(&options.name)?;
+    parse(arguments)?;
+    let mut requester = requester()?;
     let (pair_id, key) = {
         let record = requester
             .store()
@@ -248,21 +242,21 @@ pub fn ble_session(arguments: &[String]) -> Result<(), String> {
         (PairingRecord::pair_id(record), key)
     };
 
-    let mut session =
-        reach_session(
-            &mut requester,
-            pair_id,
-            &key,
-            SESSION_WINDOW,
-            |attempt| match attempt {
-                Attempt::Routing(advertiser) => {
-                    println!("routing a session to {}", describe(advertiser));
-                }
-                Attempt::LinkFailed(error) => println!("  {error}"),
-                Attempt::Refused(error) => println!("  no session: {error:?}"),
-            },
-        )
-        .map_err(|error| error.to_string())?;
+    let mut session = reach_session(
+        &mut requester,
+        pair_id,
+        &key,
+        SESSION_WINDOW,
+        refineid_rapp_core::stream::DialCause::ConsumerRequest,
+        |attempt| match attempt {
+            Attempt::Routing(advertiser) => {
+                println!("routing a session to {}", describe(advertiser));
+            }
+            Attempt::LinkFailed(error) => println!("  {error}"),
+            Attempt::Refused(error) => println!("  no session: {error:?}"),
+        },
+    )
+    .map_err(|error| error.to_string())?;
     println!("session open over Bluetooth");
 
     let operations = [

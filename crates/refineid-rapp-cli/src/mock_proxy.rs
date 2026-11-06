@@ -1,6 +1,6 @@
 //! Mock RAPP custodian for automated verification and testing.
 //!
-//! Listens like a phone does (RAPP v26.10.29 section 2.2.2), shows a pairing
+//! Listens like a phone does (RAPP v26.11.2 section 2.2.2), shows a pairing
 //! code, serves a random offer after the pairing preamble, or `pairing-busy`
 //! while it cannot admit an attempt (section 4.2, "Busy Refusal"), answers
 //! `CPace` KC2 as responder and `Noise_XXpsk3` with the hello, confirmation, and
@@ -24,14 +24,14 @@ use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
 use refineid_rapp::{
     BinaryFrame, CardIdentity, CardInspection, CardOperation, CardOperationResult, CardPresence,
     CardReader, CardStatusMessage, CertificateFingerprint, CpaceAttemptSlot, CpaceKc2Responder,
-    DEFAULT_OPERATION_LIFETIME_MS, EncodedPairRecord, EndpointRole, EstablishedSessionRuntime,
-    OfferId, OperationRequest, OperationResultMessage, OperationViolation, PairRecord, PairingBusy,
-    PairingCode, PairingHandshake, PairingOffer, PingChallenge, PreAuthenticationRateLimit,
-    ProfileName, ProgressEvent, ProxyDispatch, ProxyEngineError, ProxyFailure,
-    ProxyOperationEngine, RoutingKey, RuntimePoll, RuntimeReceive, SESSION_READY_NONCE_SIZE,
-    SessionHandshake, SignatureAlgorithm, TransportProfile, TypedMessage, UserApproval,
-    decode_pair_record, encode_pair_record, generate_pair_key_material, route_session,
-    standard_pairing_context_v2,
+    DEFAULT_OPERATION_LIFETIME_MS, DisplayName, EncodedPairRecord, EndpointRole,
+    EstablishedSessionRuntime, OfferId, OperationRequest, OperationResultMessage,
+    OperationViolation, PairRecord, PairingBusy, PairingCode, PairingHandshake, PairingOffer,
+    PingChallenge, PreAuthenticationRateLimit, ProfileName, ProgressEvent, ProxyDispatch,
+    ProxyEngineError, ProxyFailure, ProxyOperationEngine, RoutingKey, RuntimePoll, RuntimeReceive,
+    SESSION_READY_NONCE_SIZE, SessionHandshake, SignatureAlgorithm, TransportProfile, TypedMessage,
+    UserApproval, decode_pair_record, encode_pair_record, generate_pair_key_material,
+    route_session, standard_pairing_context_v2,
 };
 use refineid_rapp_core::clock::{continuous_ms, unix_time_ms};
 use refineid_rapp_core::engine::SESSION_RECEIVE_TICK;
@@ -124,6 +124,14 @@ pub struct MockProxyOptions {
 }
 
 impl MockProxyOptions {
+    /// The mock phone's display name (RAPP v26.11.2 section 4.3 item 3).
+    ///
+    /// # Errors
+    /// When the configured name is blank or longer than 256 bytes.
+    pub fn display_name(&self) -> Result<DisplayName, String> {
+        DisplayName::parse(self.name.clone()).map_err(|error| format!("--name: {error}"))
+    }
+
     /// The default options with the checked-in mock certificate.
     ///
     /// # Errors
@@ -306,7 +314,7 @@ enum AttemptEnd {
     /// the offer stays as it was.
     Failed(String),
     /// `T_A` verified and consumed the offer; the pairing that followed.
-    Consumed(Result<PairRecord, String>),
+    Consumed(Result<Box<PairRecord>, String>),
 }
 
 impl Admission {
@@ -439,7 +447,7 @@ fn run_pairing(
                 match end {
                     AttemptEnd::Failed(error) => println!("pairing attempt failed: {error}"),
                     AttemptEnd::Consumed(record) => {
-                        return record.map(|record| (ProxyPairing { record }, None));
+                        return record.map(|record| (ProxyPairing { record: *record }, None));
                     }
                 }
             }
@@ -487,7 +495,7 @@ fn run_pairing(
 fn consumed_pairing(endings: &std::sync::mpsc::Receiver<AttemptEnd>) -> Result<PairRecord, String> {
     loop {
         match endings.recv() {
-            Ok(AttemptEnd::Consumed(record)) => return record,
+            Ok(AttemptEnd::Consumed(record)) => return record.map(|record| *record),
             Ok(AttemptEnd::Failed(error)) => println!("pairing attempt failed: {error}"),
             Err(_) => return Err("the consuming attempt ended without a pairing".into()),
         }
@@ -563,7 +571,9 @@ fn pair_once(
     let verified = run_cpace(&mut transport, offer, code, &step_one);
     let end = match verified {
         Ok(pairing_secret) if admission(admission_state).consume(attempt, continuous_ms()) => {
-            AttemptEnd::Consumed(finish_pairing(transport, offer, &pairing_secret, options))
+            AttemptEnd::Consumed(
+                finish_pairing(transport, offer, &pairing_secret, options).map(Box::new),
+            )
         }
         Ok(_) => {
             admission(admission_state).fail(attempt);
@@ -659,10 +669,11 @@ fn finish_pairing(
         .map_err(|e| format!("verify hello failed: {e:?}"))?;
     println!(
         "requester hello from: {} ({})",
-        requester_hello.display_name, requester_hello.platform
+        requester_hello.display_name.as_str(),
+        requester_hello.platform
     );
     let proxy_hello = confirmation
-        .send_hello(options.name.clone(), options.platform.clone())
+        .send_hello(options.display_name()?, options.platform.clone())
         .map_err(|e| format!("send hello failed: {e:?}"))?;
     send_pairing_frame(&mut transport, &proxy_hello, "hello")?;
 
@@ -789,7 +800,7 @@ fn serve_one_session(
     let mut nonce = [0_u8; SESSION_READY_NONCE_SIZE];
     getrandom::fill(&mut nonce).map_err(|e| format!("nonce failed: {e:?}"))?;
     let ready = authentication
-        .send_ready(nonce)
+        .send_ready(nonce, &options.display_name()?)
         .map_err(|e| format!("send ready failed: {e:?}"))?;
     send_pairing_frame(&mut transport, &ready, "ready")?;
     let endpoint = authentication
@@ -867,9 +878,21 @@ fn serve_messages(
                 }
             }
             Ok(RuntimeReceive::Send(pong)) => session.deliver(&pong)?,
-            Ok(RuntimeReceive::LivenessConfirmed | RuntimeReceive::IgnoredStalePong) => {}
-            Ok(RuntimeReceive::PeerClosed(reason)) => {
+            Ok(
+                RuntimeReceive::LivenessConfirmed
+                | RuntimeReceive::IgnoredStalePong
+                | RuntimeReceive::IgnoredWhileClosing,
+            ) => {}
+            Ok(RuntimeReceive::PeerClosed { reason, echo }) => {
+                // Every close is answered with its echo (section 7.1 item 7).
+                if let Some(echo) = echo {
+                    session.deliver(&echo)?;
+                }
                 println!("requester closed the session: {reason:?}");
+                return Ok(());
+            }
+            Ok(RuntimeReceive::CloseAcknowledged { reason, .. }) => {
+                println!("requester acknowledged the close: {reason:?}");
                 return Ok(());
             }
             Ok(RuntimeReceive::ViolationClosed { notice, .. }) => {

@@ -39,19 +39,15 @@ use crate::document::{self, DocumentError, DocumentPlan, Format};
 use crate::pades::SignatureMetadata;
 use crate::timestamp::{self, TimestampError, VerifiedTimestampToken};
 use crate::validation::ValidationMaterial;
-use refineid_lib_core::apdu::iso7816::ApduClass;
 use refineid_lib_core::apdu::status_word::StatusWord;
-use refineid_lib_core::auth::commands::VerifyMode;
 use refineid_lib_core::auth::{
-    AuthError, PIN_PAD_BYTE, PinOps as _, PinPolicyReason, PinSlot, PinStatus, VerifyOutcome,
-    classify_pin_status_sw, classify_verify_sw,
+    AuthError, PinOps as _, PinPolicyReason, PinReferenceScheme, PinSlot, VerifyOutcome,
 };
 use refineid_lib_core::backend::{
     ReaderAccessCap, ReaderBackend as _, ReaderBackendOps as _, ReaderPickError,
 };
 use refineid_lib_core::can::Can;
 use refineid_lib_core::cert_state::CertDer;
-use refineid_lib_core::crypto::container::{RsaPkcs1Sha256, Signature};
 use refineid_lib_core::crypto::digest::{Sha256 as CoreSha256, Sha384 as CoreSha384};
 use refineid_lib_core::identity::{CommonName, TokenSerial, render_token_serial};
 use refineid_lib_core::pace;
@@ -60,9 +56,8 @@ use refineid_lib_core::pin_retry_risk::{RetryFloorRefusal, check_retry_floor};
 use refineid_lib_core::pkcs15::Pkcs15Ops as _;
 use refineid_lib_core::pkcs15::{CertSlot, Pkcs15Error};
 use refineid_lib_core::secure_messaging::SmTransport;
-use refineid_lib_core::sign::commands::SignatureAlgRef;
-use refineid_lib_core::sign::{KeyRef, RSA_3072_SIG_BYTES, SignError, SignOps as _};
-use refineid_lib_core::transport::{CardTransport, TransportDispatchError};
+use refineid_lib_core::sign::{KeyRef, SignError, SignOps as _};
+use refineid_lib_core::transport::CardTransport;
 use refineid_lib_core::x509::{
     Certificate, DateTime, EcCurve, OwnedCert, PublicKeyAlgorithm, UnvalidatedCertificate,
     extract_rsa_public_key,
@@ -167,14 +162,18 @@ impl fmt::Debug for TimestampCredentials {
     }
 }
 
-/// The key that signs documents: the qualified-signature key, gated by
-/// PIN 2, whose certificate is EF.4332 (FINEID S1 v4.2 §3.5).
-const SIGNING_KEY: KeyRef = KeyRef::Sign;
+/// The key that signs documents under the card's numbering: the
+/// qualified-signature key, gated by PIN 2, whose certificate is
+/// EF.4332 (FINEID S1 v4.2 §3.5); on an organization card it lives in
+/// DF.ESIGN, which the PIN 2 VERIFY makes current.
+const fn signing_key(scheme: PinReferenceScheme) -> KeyRef {
+    KeyRef::Sign(scheme)
+}
 
-/// The PIN that gates [`SIGNING_KEY`].
+/// The PIN that gates [`signing_key`].
 const SIGNING_PIN: PinSlot = PinSlot::Pin2;
 
-/// The certificate whose public key pairs with [`SIGNING_KEY`], read
+/// The certificate whose public key pairs with [`signing_key`], read
 /// once at session start and reused by the local verify.
 const SIGNING_CERT: CertSlot = CertSlot::Signature;
 
@@ -331,6 +330,8 @@ pub struct SignReport {
     /// PC/SC reader name the sign APDU chain landed against.
     /// Tier 0 `String` from `ReaderId::as_str().to_owned()`.
     pub reader: String,
+    /// The key reference the card signed under.
+    pub key_ref: KeyRef,
     /// Length of the input file in bytes.
     pub input_len: u64,
     /// SHA-256 of the input.
@@ -630,8 +631,7 @@ impl fmt::Display for SignErrorKind {
             Self::NeedCan => write!(
                 f,
                 "contactless card: the PKCS#15 application is sealed behind \
-                 PACE; provide the CAN (six digits printed on the card front) \
-                 via --can or the prompt"
+                 PACE; enter the CAN printed on the front of a personal card"
             ),
             Self::BadCan => write!(f, "PACE failed: the CAN did not match the card"),
             Self::Pace(s) => write!(f, "PACE: {s}"),
@@ -653,188 +653,19 @@ impl From<ReaderPickError> for SignErrorKind {
     }
 }
 
-/// Drive the sign chain for `slot` on the first reader with a
-/// card. `options` is taken by value so the embedded
-/// [`PinBytes`] drops (and zeroes) when this function returns,
-/// regardless of branch.
-///
-/// # Errors
-/// PC/SC enumeration / connect failure, PIN policy / verify
-/// failure, sign-chain SW failure, signature-length mismatch,
-/// cert read or parse failure, local-verify failure, or
-/// input / output I/O failure.
-// sign_with_slot is a flat sequence of open -> read input -> hash
-// -> read cert -> VERIFY PIN -> sign chain -> local verify ->
-// write. Splitting into helpers would just shuttle locals across
-// boundaries; the body reads top-to-bottom as one operation.
-/// PIN reference numbering: whose P2 bytes VERIFY speaks.
-///
-/// Ported from the sibling `refineid-unix` `auth` module
-/// (Apache-2.0, same copyright holder); the Windows port of
-/// `refineid-lib-core` only numbers the citizen slots, so the
-/// organizational numbering and the scheme-aware VERIFY path
-/// live here until the core port catches up.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PinReferenceScheme {
-    /// FINEID S1 v4.2 §3.5.2 numbering -- the citizen cards.
-    Citizen,
-    /// FINEID S4-2 v4.0 §4.2 numbering -- the organization cards.
-    Organizational,
-}
-
-/// Citizen PIN1 VERIFY P2 (FINEID S1 v4.2 §3.5.2).
-const PIN1_REFERENCE_CITIZEN: u8 = 0x11;
-/// Citizen PIN2 VERIFY P2.
-const PIN2_REFERENCE_CITIZEN: u8 = 0x82;
-/// Organizational PIN1 VERIFY P2 (FINEID S4-2 v4.0 §4.2).
-const PIN1_REFERENCE_ORGANIZATIONAL: u8 = 0x03;
-/// Organizational PIN2 VERIFY P2.
-const PIN2_REFERENCE_ORGANIZATIONAL: u8 = 0x04;
-/// Organizational PIN minimum length (S4-2 v4.0 §4.2).
-const ORGANIZATIONAL_PIN_MIN_LENGTH: usize = 4;
-/// Organizational PIN stored (padded) length.
-const ORGANIZATIONAL_PIN_STORED_LENGTH: usize = 8;
-
-impl PinReferenceScheme {
-    /// VERIFY P2 byte for `slot` under this numbering.
-    const fn p2_reference(self, slot: PinSlot) -> u8 {
-        match (self, slot) {
-            (Self::Citizen, PinSlot::Pin1) => PIN1_REFERENCE_CITIZEN,
-            (Self::Citizen, PinSlot::Pin2) => PIN2_REFERENCE_CITIZEN,
-            (Self::Organizational, PinSlot::Pin1) => PIN1_REFERENCE_ORGANIZATIONAL,
-            (Self::Organizational, PinSlot::Pin2) => PIN2_REFERENCE_ORGANIZATIONAL,
-        }
-    }
-}
-
-/// Ask the card which reference numbering it speaks.
-///
-/// A VERIFY status probe against an absent reference answers
-/// `SW=6A88` without touching any retry counter, so the probe
-/// costs one command and no risk.
-fn resolve_pin_reference_scheme<T: CardTransport>(
-    transport: &mut T,
-) -> Result<PinReferenceScheme, AuthError<TransportDispatchError<T::Error>>> {
-    let citizen = reference_probe_sw(transport, PinReferenceScheme::Citizen, PinSlot::Pin1)?;
-    if !matches!(citizen, StatusWord::ReferenceDataNotFound) {
-        return Ok(PinReferenceScheme::Citizen);
-    }
-    let organizational =
-        reference_probe_sw(transport, PinReferenceScheme::Organizational, PinSlot::Pin1)?;
-    Ok(match classify_pin_status_sw(organizational) {
-        PinStatus::Verified | PinStatus::Remaining(_) | PinStatus::Locked | PinStatus::NoInfo => {
-            PinReferenceScheme::Organizational
-        }
-        PinStatus::Other(_) => PinReferenceScheme::Citizen,
-    })
-}
-
-/// Counter-safe VERIFY status probe (`Lc=0`) against `slot` under
-/// `scheme`. Wire-identical to the core `pin_status` probe
-/// except for the P2 source.
-fn reference_probe_sw<T: CardTransport>(
-    transport: &mut T,
-    scheme: PinReferenceScheme,
-    slot: PinSlot,
-) -> Result<StatusWord, AuthError<TransportDispatchError<T::Error>>> {
-    let apdu = [
-        ApduClass::Plain.as_byte(),
-        0x20, // INS VERIFY
-        VerifyMode::Verify.as_p1(),
-        scheme.p2_reference(slot),
-        0x00, // Lc=0 probe form
-    ];
-    let r = transport.transmit(&apdu).map_err(AuthError::Transport)?;
-    Ok(r.status_word())
-}
-
 /// Apply the retry floor to the signing PIN under `scheme`, from its
 /// counter-safe status probe, before any VERIFY can spend an attempt.
 fn signing_pin_retry_floor<T: CardTransport>(
     transport: &mut T,
     scheme: PinReferenceScheme,
 ) -> Result<(), SignErrorKind> {
-    let status = reference_probe_sw(transport, scheme, SIGNING_PIN)
-        .map(classify_pin_status_sw)
+    let status = transport
+        .pin_status_with_scheme(scheme, SIGNING_PIN)
         .map_err(|e| match e {
             AuthError::Transport(t) => SignErrorKind::Transport(format!("{t}")),
             AuthError::PinPolicy(reason) => SignErrorKind::PinPolicy { reason },
         })?;
     check_retry_floor(SIGNING_PIN.into(), status).map_err(SignErrorKind::RetryFloor)
-}
-
-/// VERIFY `pin` for `slot` under the resolved `scheme`.
-///
-/// The citizen path delegates to the core [`PinOps::verify_pin`]
-/// (same P2 bytes, same padding); the organizational path
-/// speaks its own P2 with its own length window.
-fn verify_pin_with_scheme<T: CardTransport>(
-    transport: &mut T,
-    slot: PinSlot,
-    scheme: PinReferenceScheme,
-    pin: PinBytes,
-) -> Result<VerifyOutcome, AuthError<TransportDispatchError<T::Error>>> {
-    if scheme == PinReferenceScheme::Citizen {
-        return transport.verify_pin(slot, pin);
-    }
-    let pin_ascii = pin.as_bytes();
-    validate_org_pin_policy(pin_ascii)?;
-    let mut padded = vec![PIN_PAD_BYTE; ORGANIZATIONAL_PIN_STORED_LENGTH];
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "validate_org_pin_policy above proves pin_ascii.len() in [min, stored]; padded was allocated at length stored, so padded[..pin_ascii.len()] is in-bounds."
-    )]
-    padded[..pin_ascii.len()].copy_from_slice(pin_ascii);
-    let mut out = Vec::with_capacity(padded.len().saturating_add(5));
-    out.push(ApduClass::Plain.as_byte());
-    out.push(0x20); // INS VERIFY
-    out.push(VerifyMode::Verify.as_p1());
-    out.push(scheme.p2_reference(slot));
-    let Ok(lc) = u8::try_from(padded.len()) else {
-        unreachable!("VERIFY PIN block exceeds short-form Lc")
-    };
-    out.push(lc);
-    out.extend_from_slice(&padded);
-    let r = transport.transmit(&out).map_err(AuthError::Transport)?;
-    // Wipe the padded buffer; it still carries the typed PIN
-    // bytes in the leading slice.
-    zeroize::Zeroize::zeroize(&mut padded);
-    Ok(classify_verify_sw(r.status_word()))
-}
-
-/// Organizational length window plus ASCII-digit shape. A
-/// rejection here doesn't burn a card-side retry counter slot.
-fn validate_org_pin_policy<TE>(ascii: &[u8]) -> Result<(), AuthError<TE>> {
-    if ascii.len() < ORGANIZATIONAL_PIN_MIN_LENGTH || ascii.len() > ORGANIZATIONAL_PIN_STORED_LENGTH
-    {
-        return Err(AuthError::PinPolicy(PinPolicyReason::WrongLength {
-            got: ascii.len(),
-            min: ORGANIZATIONAL_PIN_MIN_LENGTH,
-            max: ORGANIZATIONAL_PIN_STORED_LENGTH,
-        }));
-    }
-    if let Some(off) = ascii.iter().position(|b| !b.is_ascii_digit()) {
-        return Err(AuthError::PinPolicy(PinPolicyReason::NonDigit {
-            byte_offset: off,
-        }));
-    }
-    Ok(())
-}
-
-/// Organizational form of the SHA-256 + RSA-PKCS1v15 chain: no
-/// PSO:HASH, the off-card digest rides in the PSO:CDS data field
-/// (organizational cards specification §6.6.2.3).
-fn sign_pre_hashed_sha256_rsa_hash_in_command<T: CardTransport>(
-    transport: &mut T,
-    key_ref: KeyRef,
-    hash: CoreSha256,
-) -> Result<Signature<RsaPkcs1Sha256>, SignError<TransportDispatchError<T::Error>>> {
-    transport.mse_set_dst(SignatureAlgRef::SHA256_RSA_PKCS1_V1_5, key_ref)?;
-    let sig = transport.pso_cds_with_data(hash.as_bytes())?;
-    if sig.len() != RSA_3072_SIG_BYTES {
-        return Err(SignError::UnexpectedSignatureLength(sig.len()));
-    }
-    Ok(sig)
 }
 
 /// Dispatch the per-cert sign chain: RSA (PKCS#1 v1.5 SHA-256) or
@@ -853,20 +684,12 @@ fn sign_dispatch_by_alg<T: CardTransport>(
         PublicKeyAlgorithm::Rsa { .. } => {
             let pubkey = extract_rsa_public_key(cert.spki.as_der())
                 .ok_or(SignErrorKind::UnsupportedKeyType)?;
-            // The organizational platform has no external-hash
-            // PSO:HASH: the off-card digest rides in PSO:CDS's data
-            // field there (organizational cards specification
-            // §6.6.2.3).
+            // The key's numbering picks the chain: the organizational
+            // qualified key takes the digest inside PSO:CDS.
             let core_digest = CoreSha256::from_bytes(*input_sha256.as_bytes());
-            let signature = match scheme {
-                PinReferenceScheme::Citizen => transport
-                    .sign_pre_hashed_sha256_rsa(SIGNING_KEY, core_digest)
-                    .map_err(sign_err_to_kind)?,
-                PinReferenceScheme::Organizational => {
-                    sign_pre_hashed_sha256_rsa_hash_in_command(transport, SIGNING_KEY, core_digest)
-                        .map_err(sign_err_to_kind)?
-                }
-            };
+            let signature = transport
+                .sign_pre_hashed_sha256_rsa(signing_key(scheme), core_digest)
+                .map_err(sign_err_to_kind)?;
             let verify = match pubkey.verify_pkcs1v15_sha256(input_bytes, &signature) {
                 Ok(()) => LocalVerifyOutcome::Ok,
                 Err(e) => {
@@ -878,7 +701,7 @@ fn sign_dispatch_by_alg<T: CardTransport>(
         PublicKeyAlgorithm::Ec(EcCurve::Secp384r1) => {
             let hash_sha384 = CoreSha384::of(input_bytes);
             let signature = transport
-                .sign_pre_hashed_sha384_ecdsa_p384(SIGNING_KEY, hash_sha384)
+                .sign_pre_hashed_sha384_ecdsa_p384(signing_key(scheme), hash_sha384)
                 .map_err(sign_err_to_kind)?;
             let pubkey =
                 cert.spki
@@ -1050,6 +873,7 @@ fn signed_qualified(
 
     Ok(SignReport {
         reader: reader_id.as_str().to_owned(),
+        key_ref: chain.key_ref,
         input_len,
         input_sha256,
         signature_path: options.output,
@@ -1070,6 +894,8 @@ struct SignChainOutput {
     cert_der: CertDer,
     /// Subject CN for the report.
     cert_subject_cn: Option<CommonName>,
+    /// The key reference the card signed under.
+    key_ref: KeyRef,
     /// Retry count surfaced by a non-Ok VERIFY status word; see
     /// [`SignReport::pin_retries_after`].
     pin_retries_after: Option<u8>,
@@ -1147,12 +973,15 @@ fn sign_chain<T: CardTransport>(
     // The reference numbering is the card's to declare (citizen
     // S1 v4.2 vs organizational S4-2 v4.0), resolved by
     // counter-safe probes before the typed PIN is spent.
-    let scheme = resolve_pin_reference_scheme(transport).map_err(|e| match e {
-        AuthError::Transport(t) => SignErrorKind::Transport(format!("{t}")),
-        AuthError::PinPolicy(reason) => SignErrorKind::PinPolicy { reason },
-    })?;
+    let scheme = transport
+        .resolve_pin_reference_scheme()
+        .map_err(|e| match e {
+            AuthError::Transport(t) => SignErrorKind::Transport(format!("{t}")),
+            AuthError::PinPolicy(reason) => SignErrorKind::PinPolicy { reason },
+        })?;
     signing_pin_retry_floor(transport, scheme)?;
-    let outcome = verify_pin_with_scheme(transport, SIGNING_PIN, scheme, options.pin.clone())
+    let outcome = transport
+        .verify_pin_with_scheme(scheme, SIGNING_PIN, options.pin.clone())
         .map_err(|e| match e {
             AuthError::Transport(t) => SignErrorKind::Transport(format!("{t}")),
             AuthError::PinPolicy(reason) => SignErrorKind::PinPolicy { reason },
@@ -1201,6 +1030,7 @@ fn sign_chain<T: CardTransport>(
     Ok(SignChainOutput {
         cert_der,
         cert_subject_cn,
+        key_ref: signing_key(scheme),
         pin_retries_after,
         signature_bytes,
         timestamps,
@@ -1998,7 +1828,7 @@ impl fmt::Display for SignReport {
         writeln!(
             f,
             "key: {SIGNING_KEY_LABEL} (key ref {:#04X})",
-            SIGNING_KEY.as_u8()
+            self.key_ref.as_u8()
         )?;
         if let Some(cn) = &self.cert_subject_cn {
             writeln!(f, "cert subject CN: {cn}")?;
@@ -2698,6 +2528,7 @@ mod tests {
     fn sample_report(cn: Option<CommonName>) -> SignReport {
         SignReport {
             reader: "OMNIKEY 5422".to_owned(),
+            key_ref: signing_key(PinReferenceScheme::Citizen),
             input_len: 11,
             input_sha256: Sha256::of(b"hello world"),
             signature_path: PathBuf::from("/tmp/out.sig"),
@@ -2851,7 +2682,7 @@ mod tests {
                 check_true(sent.len() == 1, "one counter-safe probe")?;
                 check_true(
                     sent.first().and_then(|apdu| apdu.get(P2_OFFSET)).copied()
-                        == Some(scheme.p2_reference(SIGNING_PIN)),
+                        == Some(scheme.reference(SIGNING_PIN)),
                     "the probe targets the signing PIN",
                 )?;
             }

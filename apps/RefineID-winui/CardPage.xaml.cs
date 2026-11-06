@@ -55,17 +55,17 @@ internal sealed partial class CardPage : Page
     /// <summary>The reader the main screen opened this page for, used once.</summary>
     private string? requestedReader;
 
+    /// <summary>The main screen's inspection of that reader's card, shown once on loading.</summary>
+    private LocalCardSnapshot? handedOver;
+
     /// <summary>Whether the activation section was shown at the last inspection.</summary>
     private bool activationShown;
 
     /// <summary>
-    /// The digit counts a new PIN may have, as the card service's PIN
-    /// types bound them: PIN 1 takes four to twelve digits, PIN 2 six to
-    /// twelve.
+    /// The most digits a PIN or PUK entry takes when the card accepts no
+    /// length for it: the stored length the card service's commands carry.
     /// </summary>
-    private const int Pin1MinimumDigits = 4;
-    private const int Pin2MinimumDigits = 6;
-    private const int PinMaximumDigits = 12;
+    private const int CommandDigitCapacity = 12;
 
     /// <summary>Segoe Fluent Icons: CheckMark, Cancel and Warning.</summary>
     private const string ValidGlyph = "\uE73E";
@@ -75,6 +75,18 @@ internal sealed partial class CardPage : Page
     public CardPage()
     {
         this.InitializeComponent();
+        this.ChangeSlotBox.SelectionChanged += (s, e) =>
+        {
+            LabelPinFields(this.ChangeSlotBox, this.NewPinBox, this.NewPinConfirmationBox);
+            this.ApplyPinLimits();
+        };
+        this.UnblockSlotBox.SelectionChanged += (s, e) =>
+        {
+            LabelPinFields(this.UnblockSlotBox, this.UnblockNewPinBox, this.UnblockConfirmationBox);
+            this.ApplyPinLimits();
+        };
+        LabelPinFields(this.ChangeSlotBox, this.NewPinBox, this.NewPinConfirmationBox);
+        LabelPinFields(this.UnblockSlotBox, this.UnblockNewPinBox, this.UnblockConfirmationBox);
         this.readerPollTimer = new DispatcherTimer { Interval = ReaderPollInterval };
         this.readerPollTimer.Tick += (s, e) => this.PollReaders();
         this.Loaded += this.OnLoaded;
@@ -83,17 +95,34 @@ internal sealed partial class CardPage : Page
 
     private async void OnLoaded(object sender, RoutedEventArgs args)
     {
+        if (this.handedOver is LocalCardSnapshot inspected)
+        {
+            this.handedOver = null;
+            this.ShowInspected(inspected);
+        }
+
         await this.RefreshReadersAsync().ConfigureAwait(true);
         this.readerPollTimer.Start();
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs args) => this.readerPollTimer.Stop();
 
-    /// <summary>The main screen names the reader whose card it inspected.</summary>
+    /// <summary>
+    /// The main screen names the reader whose card it inspected, or hands
+    /// over that inspection, which decides the page before its first draw.
+    /// </summary>
     protected override void OnNavigatedTo(NavigationEventArgs args)
     {
         base.OnNavigatedTo(args);
-        this.requestedReader = args.Parameter as string;
+        if (args.Parameter is LocalCardSnapshot inspected)
+        {
+            this.requestedReader = inspected.Reader;
+            this.handedOver = inspected;
+        }
+        else
+        {
+            this.requestedReader = args.Parameter as string;
+        }
     }
 
     /// <summary>
@@ -224,11 +253,17 @@ internal sealed partial class CardPage : Page
 
     /// <summary>
     /// Marks each entry valid, invalid or differing from its pair, and
-    /// enables the button only when the activation code has the card's
-    /// length and both new PINs are valid and repeated.
+    /// enables the button only when the activation PIN has the card's
+    /// length and each new PIN the card asks for is valid and repeated.
+    /// The form asks only for the PINs that wait for their activation.
     /// </summary>
     private void UpdateActivationForm()
     {
+        bool askPin1 = this.snapshot?.Pin1AwaitsActivation ?? true;
+        bool askPin2 = this.snapshot?.Pin2AwaitsActivation ?? true;
+        this.ActivationPin1Group.Visibility = askPin1 ? Visibility.Visible : Visibility.Collapsed;
+        this.ActivationPin2Group.Visibility = askPin2 ? Visibility.Visible : Visibility.Collapsed;
+
         string code = this.ActivationCodeBox.Password;
         string pin1 = this.ActivationPin1Box.Password;
         string pin1Again = this.ActivationPin1ConfirmationBox.Password;
@@ -236,12 +271,14 @@ internal sealed partial class CardPage : Page
         string pin2Again = this.ActivationPin2ConfirmationBox.Password;
 
         bool codeValid = this.snapshot?.ActivationCodeLength is int length && code.Length == length;
-        bool pin1Valid = IsPinLength(pin1, Pin1MinimumDigits);
+        LengthRange? pin1Lengths = this.snapshot?.Pin1Lengths;
+        LengthRange? pin2Lengths = this.snapshot?.Pin2Lengths;
+        bool pin1Valid = IsPinLength(pin1, pin1Lengths);
         bool pin1Repeated = pin1Valid && string.Equals(pin1Again, pin1, StringComparison.Ordinal);
-        bool pin1Differs = pin1Valid && IsPinLength(pin1Again, Pin1MinimumDigits) && !pin1Repeated;
-        bool pin2Valid = IsPinLength(pin2, Pin2MinimumDigits);
+        bool pin1Differs = pin1Valid && IsPinLength(pin1Again, pin1Lengths) && !pin1Repeated;
+        bool pin2Valid = IsPinLength(pin2, pin2Lengths);
         bool pin2Repeated = pin2Valid && string.Equals(pin2Again, pin2, StringComparison.Ordinal);
-        bool pin2Differs = pin2Valid && IsPinLength(pin2Again, Pin2MinimumDigits) && !pin2Repeated;
+        bool pin2Differs = pin2Valid && IsPinLength(pin2Again, pin2Lengths) && !pin2Repeated;
 
         Mark(this.ActivationCodeBoxMark, codeValid, differs: false, isEmpty: code.Length == 0);
         Mark(this.ActivationPin1BoxMark, pin1Valid, differs: false, isEmpty: pin1.Length == 0);
@@ -258,11 +295,38 @@ internal sealed partial class CardPage : Page
             pin2Differs,
             pin2Again.Length == 0
         );
-        this.ActivateButton.IsEnabled = codeValid && pin1Repeated && pin2Repeated;
+        this.ActivateButton.IsEnabled =
+            codeValid && (!askPin1 || pin1Repeated) && (!askPin2 || pin2Repeated);
     }
 
-    private static bool IsPinLength(string entry, int minimumDigits) =>
-        entry.Length >= minimumDigits && entry.Length <= PinMaximumDigits;
+    /// <summary>Whether the entry has a length the card accepts for its credential.</summary>
+    private static bool IsPinLength(string entry, LengthRange? lengths) =>
+        lengths?.Accepts(entry.Length) ?? false;
+
+    /// <summary>The most digits the card accepts for a credential.</summary>
+    private static int MaximumDigits(LengthRange? lengths) => lengths?.Max ?? CommandDigitCapacity;
+
+    /// <summary>
+    /// Each PIN and PUK box takes no more digits than the inspected card
+    /// accepts for its credential, for the PIN the slot box names.
+    /// </summary>
+    private void ApplyPinLimits()
+    {
+        LengthRange? pin1 = this.snapshot?.Pin1Lengths;
+        LengthRange? pin2 = this.snapshot?.Pin2Lengths;
+        int changing = MaximumDigits(SlotFrom(this.ChangeSlotBox) == PinSlot.Pin2 ? pin2 : pin1);
+        this.CurrentPinBox.MaxLength = changing;
+        this.NewPinBox.MaxLength = changing;
+        this.NewPinConfirmationBox.MaxLength = changing;
+        int resetting = MaximumDigits(SlotFrom(this.UnblockSlotBox) == PinSlot.Pin2 ? pin2 : pin1);
+        this.PukBox.MaxLength = MaximumDigits(this.snapshot?.PukLengths);
+        this.UnblockNewPinBox.MaxLength = resetting;
+        this.UnblockConfirmationBox.MaxLength = resetting;
+        this.ActivationPin1Box.MaxLength = MaximumDigits(pin1);
+        this.ActivationPin1ConfirmationBox.MaxLength = MaximumDigits(pin1);
+        this.ActivationPin2Box.MaxLength = MaximumDigits(pin2);
+        this.ActivationPin2ConfirmationBox.MaxLength = MaximumDigits(pin2);
+    }
 
     /// <summary>
     /// A green check, a red cross, or an amber warning for a pair that
@@ -310,11 +374,19 @@ internal sealed partial class CardPage : Page
             return;
         }
 
+        // A PIN the card does not ask for goes out empty, so nothing the
+        // holder cannot see is sent.
+        bool askPin1 = this.snapshot?.Pin1AwaitsActivation ?? true;
+        bool askPin2 = this.snapshot?.Pin2AwaitsActivation ?? true;
         string activationCode = this.ActivationCodeBox.Password;
-        string pin1 = this.ActivationPin1Box.Password;
-        string pin1Confirmation = this.ActivationPin1ConfirmationBox.Password;
-        string pin2 = this.ActivationPin2Box.Password;
-        string pin2Confirmation = this.ActivationPin2ConfirmationBox.Password;
+        string pin1 = askPin1 ? this.ActivationPin1Box.Password : string.Empty;
+        string pin1Confirmation = askPin1
+            ? this.ActivationPin1ConfirmationBox.Password
+            : string.Empty;
+        string pin2 = askPin2 ? this.ActivationPin2Box.Password : string.Empty;
+        string pin2Confirmation = askPin2
+            ? this.ActivationPin2ConfirmationBox.Password
+            : string.Empty;
         Clear(
             this.ActivationCodeBox,
             this.ActivationPin1Box,
@@ -410,6 +482,13 @@ internal sealed partial class CardPage : Page
             );
         }
 
+        this.ShowInspected(inspected);
+        this.StatusInfoBar.IsOpen = false;
+    }
+
+    /// <summary>The page for an inspected card: its sections, heading and form.</summary>
+    private void ShowInspected(LocalCardSnapshot inspected)
+    {
         this.snapshot = inspected;
         // The code box takes no more digits than the card's code has.
         if (inspected.ActivationCodeLength is int codeLength)
@@ -417,23 +496,13 @@ internal sealed partial class CardPage : Page
             this.ActivationCodeBox.MaxLength = codeLength;
         }
 
+        this.ApplyPinLimits();
         this.UpdateActivationForm();
         this.ManagementPanel.IsHitTestVisible = true;
         this.ManagementPanel.Opacity = 1;
-        this.StatusInfoBar.IsOpen = false;
         this.ShowActivationState(inspected);
     }
 
-    /// <summary>
-    /// A card that waits for its activation gets the activation section
-    /// alone, opened: activation sets both PINs, so a PIN change, reset or
-    /// contactless setup has no place before it. An activated card gets
-    /// those, and the activation section goes, since the card service
-    /// refuses activation on it. Undecided evidence, or no card, shows
-    /// every section. The activation section takes the focus only when
-    /// it appears, so a re-inspection while the holder types, or after a
-    /// refused attempt, leaves the focus alone.
-    /// </summary>
     /// <summary>
     /// A contactless card without a stored access number: only the entry
     /// that primes it; nothing else on the page applies before that.
@@ -446,10 +515,39 @@ internal sealed partial class CardPage : Page
         this.ActivationPanel.Visibility = Visibility.Collapsed;
     }
 
+    /// <summary>
+    /// A card that waits for its activation gets the activation section
+    /// alone, opened: activation sets both PINs, so a PIN change, reset or
+    /// contactless setup has no place before it. An activated card gets
+    /// those, and the activation section goes, since the card service
+    /// refuses activation on it. An inspected card in an unknown state
+    /// shows every section. Without an inspected card nothing that depends
+    /// on the card is shown; the heading is named from the same inspection
+    /// that shows the section. The activation section takes the focus only
+    /// when it appears, so a re-inspection while the holder types, or after
+    /// a refused attempt, leaves the focus alone.
+    /// </summary>
     private void ShowActivationState(LocalCardSnapshot? inspected)
     {
-        bool unactivated = inspected?.LooksUnactivated ?? false;
-        bool activated = inspected?.LooksActivated ?? false;
+        if (inspected is null)
+        {
+            this.NfcExpander.Visibility = Visibility.Collapsed;
+            this.ChangePinExpander.Visibility = Visibility.Collapsed;
+            this.UnblockPinExpander.Visibility = Visibility.Collapsed;
+            this.ActivationPanel.Visibility = Visibility.Collapsed;
+            this.activationShown = false;
+            return;
+        }
+
+        bool unactivated = inspected.LooksUnactivated;
+        bool activated = inspected.LooksActivated;
+        string title = Strings.Get(
+            inspected.OrganizationCard
+                ? "OrganisationCardActivationHeading"
+                : "IdentityCardActivationHeading"
+        );
+        this.ActivationHeading.Text = title;
+        AutomationProperties.SetName(this.ActivationPanel, title);
         Visibility managing = unactivated ? Visibility.Collapsed : Visibility.Visible;
         this.NfcExpander.Visibility = managing;
         this.ChangePinExpander.Visibility = managing;
@@ -531,6 +629,21 @@ internal sealed partial class CardPage : Page
 
     private static PinSlot SlotFrom(ComboBox box) =>
         box.SelectedIndex == 1 ? PinSlot.Pin2 : PinSlot.Pin1;
+
+    /// <summary>
+    /// Names the new-PIN field and its repeat after the PIN the slot box
+    /// holds: "New basic PIN 1" and "Repeat PIN 1", or the PIN 2 pair.
+    /// </summary>
+    private static void LabelPinFields(ComboBox slotBox, PasswordBox newBox, PasswordBox repeatBox)
+    {
+        bool pin2 = SlotFrom(slotBox) == PinSlot.Pin2;
+        string newLabel = Strings.Get(pin2 ? "NewPin2Field" : "NewPin1Field");
+        string repeatLabel = Strings.Get(pin2 ? "RepeatPin2Field" : "RepeatPin1Field");
+        newBox.Header = newLabel;
+        AutomationProperties.SetName(newBox, newLabel);
+        repeatBox.Header = repeatLabel;
+        AutomationProperties.SetName(repeatBox, repeatLabel);
+    }
 
     private static void Clear(params PasswordBox[] boxes)
     {

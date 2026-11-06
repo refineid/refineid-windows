@@ -45,7 +45,7 @@
 //!   [`Ats`], [`CardType`], [`CardVendor`], [`FineidCardModel`])
 //!   that project DVV's ATR/ATS technote and the wider FINEID
 //!   card-model taxonomy onto the type system. The classifier
-//!   refuses out-of-scope cards before any modify APDU.
+//!   refuses an unrecognised card before any modify APDU.
 //! - [`cert_state`] -- cert state lattice typestate
 //!   ([`RawDer`] -> [`ParsedCert`] -> [`PathValidatedCert`] ->
 //!   [`RevocationCheckedCert`] -> [`PurposeBoundCert<P>`]).
@@ -82,6 +82,7 @@
 extern crate alloc;
 
 pub mod aa;
+pub mod activation;
 pub mod apdu;
 pub mod atr;
 pub mod auth;

@@ -46,7 +46,7 @@
 //! Subsequent phases:
 //!
 //! - Phase 2: `Card<Trusted>` + `trust_gate()`. Wraps the
-//!   current `establish_trusted_session` logic.
+//!   current `establish_card_session` logic.
 //! - Phase 3: AODF read + `Card<Trusted>::read_pin_state()`
 //!   yields `Card<Activated>` or `Card<Unactivated>`.
 //! - Phase 4: migrate activate / change-pin / unblock-pin to

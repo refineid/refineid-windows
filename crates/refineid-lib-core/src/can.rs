@@ -13,7 +13,7 @@
 // permissions and limitations under the License.
 
 //! Card Access Number -- typed wrapper around the 6-digit code
-//! printed on the FINEID card's front face.
+//! printed on the front of a FINEID personal card.
 //!
 //! See refineid-core's [refinement types] for why we newtype
 //! values that cross trust boundaries. The CAN crosses a real
@@ -22,9 +22,15 @@
 //! key-derivation path. A wrong CAN does not consume a retry
 //! counter, but the card can suspend it until a power reset.
 //!
-//! The CAN is **not secret** -- it's optically public on the
-//! card front. We type it for *shape*, not for confidentiality
-//! (compare `PinBytes`). Constructor-only construction means
+//! The CAN is a secret, handled like PIN 1, PIN 2, the PUK and the
+//! Activation PIN: never displayed back, never logged (neither its
+//! digits nor its length), never sent over any network, RAPP,
+//! diagnostics or export path. `Debug` redacts it and there is no
+//! `Display`; the bytes leave the type only through
+//! [`Can::as_bytes`] for the PACE key derivation and the
+//! DPAPI-protected credential store. An organisation card's access
+//! number is its PIN 1 or PIN 2 (4-12 digits) and is a PIN type,
+//! never a `Can`. Constructor-only construction means
 //! downstream code taking `&Can` can assume well-formed bytes
 //! without re-validating; CLI parse-don't-validate replaces
 //! the previous `validate_can(&str) -> Result<(), _>` shape
@@ -34,18 +40,24 @@
 
 use core::fmt;
 
-/// Number of ASCII digits in a CAN. FINEID and ICAO 9303 §6.2
-/// both fix this at 6.
+/// Number of ASCII digits in a personal card's CAN. FINEID and
+/// ICAO 9303 §6.2 both fix this at 6.
 pub const CAN_DIGITS: usize = 6;
 
 /// A FINEID Card Access Number, validated at construction.
 ///
 /// Always 6 ASCII digits. The internal byte array is the only
-/// representation; conversions to `&str` and `Display` are
-/// guaranteed-valid because the constructor rejects everything
-/// else.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// representation. `Debug` prints a fixed placeholder; the type has
+/// no `Display`.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Can([u8; CAN_DIGITS]);
+
+impl fmt::Debug for Can {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Can(<redacted>)")
+    }
+}
 
 /// Error returned by [`Can::new`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,10 +87,7 @@ impl fmt::Display for CanError {
                 write!(f, "CAN must be exactly {CAN_DIGITS} digits")
             }
             Self::NonDigit => write!(f, "CAN must be ASCII digits only"),
-            Self::AllZeros => write!(
-                f,
-                "CAN was all zeros (000000); never a valid production CAN -- input was likely lost or zeroed upstream"
-            ),
+            Self::AllZeros => write!(f, "CAN is not an issued card access number"),
         }
     }
 }
@@ -119,31 +128,6 @@ impl Can {
     pub const fn as_bytes(&self) -> &[u8; CAN_DIGITS] {
         &self.0
     }
-
-    /// String view of the CAN. Always valid UTF-8 because the
-    /// constructor only accepts ASCII digits.
-    ///
-    /// # Panics
-    /// Never under correct construction; the constructor
-    /// rejects every byte that would break UTF-8. A panic here
-    /// would indicate the type's invariant was violated by
-    /// unsafe code or a serde bypass.
-    #[must_use]
-    #[expect(
-        clippy::expect_used,
-        reason = "Invariant proof: Can::new only accepts ASCII-digit bytes, which is a strict subset of UTF-8. The expect message documents the invariant; reaching the Err arm would require an unsafe / serde bypass that violates the type."
-    )]
-    #[inline]
-    pub fn as_str(&self) -> &str {
-        core::str::from_utf8(&self.0).expect("Can bytes are ASCII digits by construction")
-    }
-}
-
-impl fmt::Display for Can {
-    #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
 }
 
 #[cfg(test)]
@@ -154,7 +138,6 @@ mod tests {
     #[test]
     fn happy_path() {
         let c = Can::new("123456").expect("six digits is a valid CAN");
-        assert_eq!(c.as_str(), "123456");
         assert_eq!(c.as_bytes(), b"123456");
     }
 
@@ -197,9 +180,24 @@ mod tests {
     }
 
     #[test]
-    fn display_round_trips() {
+    fn debug_redacts_digits() {
         let c = Can::new("987654").expect("six digits is a valid CAN");
-        assert_eq!(format!("{c}"), "987654");
+        let rendered = format!("{c:?}");
+        assert_eq!(rendered, "Can(<redacted>)");
+        assert!(!rendered.contains("987654"));
+        assert!(!rendered.chars().any(|ch| ch.is_ascii_digit()));
+    }
+
+    #[test]
+    fn error_texts_carry_no_input() {
+        for (input, error) in [
+            ("12a456", CanError::NonDigit),
+            ("000000", CanError::AllZeros),
+        ] {
+            let text = Can::new(input).expect_err("rejected").to_string();
+            assert_eq!(Can::new(input), Err(error));
+            assert!(!text.contains(input));
+        }
     }
 
     /// `000000` is shape-valid (six ASCII digits) but never a real

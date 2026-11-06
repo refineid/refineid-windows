@@ -5,7 +5,7 @@
 //! `_refineid-stream._tcp.local.` under a fresh random instance name, with a
 //! TXT record naming its mode: `mode=pairing` during a pairing ceremony,
 //! `mode=session` while it serves stored pairings, and `mode=withdrawn`
-//! briefly when it stops serving (RAPP v26.10.29 section 4.5). The requester
+//! briefly when it stops serving (RAPP v26.11.2 section 4.5). The requester
 //! browses by those attributes, dials, and opens every connection with one
 //! plaintext routing preamble. A session preamble
 //! carries a fresh nonce and a tag keyed by the pairing's static agreement,
@@ -15,14 +15,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream, ToSocketAddrs};
-use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::engine::{
-    PairingCandidateSource, PairingConnection, SESSION_RECEIVE_TICK, read_bootstrap_answer,
+    PairingCandidateSource, PairingConnection, Requester, SESSION_RECEIVE_TICK,
+    read_bootstrap_answer,
 };
 use crate::ids::PairId;
+use crate::store::{PairingRecord, PairingStore, expire_revocation_notices};
 use crate::transport::{FrameTransport, TcpFrameTransport, TransportError};
+use crate::view;
+use refineid_rapp::REVOCATION_ATTEMPT_BOUND_MS;
 use refineid_rapp::{
     DiscoveryKey, DiscoveryRecord, InstanceName, PairRecord, RoutingKey, SessionRouting,
     TransportProfile, WithdrawalKey, WithdrawnRecord, discovery_epoch, withdrawal_counter,
@@ -32,7 +35,7 @@ pub use refineid_rapp::{MAX_ROUTING_PREAMBLE_FRAME, RoutingPreamble, STREAM_PROF
 /// The DNS-SD service type of the stream tier.
 pub const STREAM_SERVICE_TYPE: &str = "_refineid-stream._tcp.local";
 
-/// The registered candidate identifier of the stream profile (RAPP v26.10.29
+/// The registered candidate identifier of the stream profile (RAPP v26.11.2
 /// section 2.2).
 pub const STREAM_CANDIDATE_ID: &str = refineid_rapp::STREAM_CANDIDATE_ID;
 
@@ -141,37 +144,6 @@ impl StreamService {
         };
         key.matches(&record, &instance, withdrawal_counter(unix_seconds))
     }
-}
-
-/// Pairings whose custodian announced it stopped serving. A requester does
-/// not dial them again until a session record names them (specification
-/// section 4.5).
-static WITHDRAWN: Mutex<BTreeSet<[u8; 16]>> = Mutex::new(BTreeSet::new());
-
-/// Records that the custodian of `pair_id` stopped serving, as announced by a
-/// withdrawn record or a `service_withdrawn` session close.
-pub fn mark_withdrawn(pair_id: PairId) {
-    WITHDRAWN
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(*pair_id.as_bytes());
-}
-
-/// Whether the custodian of `pair_id` announced it stopped serving and has
-/// not been seen serving since.
-#[must_use]
-pub fn is_withdrawn(pair_id: PairId) -> bool {
-    WITHDRAWN
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .contains(pair_id.as_bytes())
-}
-
-fn clear_withdrawn(pair_id: PairId) {
-    WITHDRAWN
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .remove(pair_id.as_bytes());
 }
 
 /// What a browse found for one stored pairing.
@@ -428,44 +400,63 @@ pub fn dial(
     Err(StreamError::Unreachable)
 }
 
-/// Dials the custodian serving the stored `pairing` with a session preamble.
+/// Why a requester dials its custodian (RAPP v26.11.2 section 8.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DialCause {
+    /// A local consumer asks for the card with no session open.
+    ConsumerRequest,
+    /// The requester keeps its session to the custodian: it dials when the
+    /// custodian appears and within the redial window.
+    Holding,
+    /// A revoking pairing's one bounded attempt (section 4.6 item 6), which
+    /// runs whatever the view says.
+    RevocationAttempt,
+}
+
+/// Dials the custodian serving the stored `pairing` with a session preamble,
+/// as the requester's view of it admits (RAPP v26.11.2 section 8.3).
 ///
-/// Endpoints in `preferred` are tried first, then the session-mode services a
-/// `browse_window` browse finds, those whose hints name this pairing ahead of
-/// those publishing none (hierarchy section 4.3), then `fallback`.
-/// `preferred` and `fallback` are configured endpoints and are always tried.
-///
-/// Discovered phones follow the withdrawal rule (specification section 4.5):
-/// once the custodian announced it stopped serving this pairing, discovered
-/// endpoints are dialed again only after a session record that names the
-/// pairing, or one publishing no hints, shows it serving. A forgotten
-/// pairing is dialed like any other: its next session carries the
-/// `pairing_revoked` close (section 4.6 item 2).
+/// Endpoints in `preferred`, configured endpoints, are tried first and
+/// always. Then a `browse_window` browse looks at the session-mode
+/// services that may be the custodian's, those whose hints name this
+/// pairing ahead of those publishing none (hierarchy section 4.3): a
+/// service in sight that was not at the previous look is an appearance,
+/// and a withdrawn record that verifies for the pairing withdraws it
+/// (section 4.5 item 6). A withdrawn custodian is not dialed until it
+/// appears again; otherwise the view admits the dial when the custodian
+/// appeared, for a local consumer's request, or within the redial window.
+/// A dial that reaches no service counts as failed in the view. A revoking
+/// pairing's attempt dials any service that may be the custodian's, past
+/// the view (section 4.6 item 6).
 ///
 /// The connection receives with [`SESSION_RECEIVE_TICK`] as its deadline,
 /// the liveness tick of the requester engine.
 ///
 /// # Errors
-/// [`StreamError::Withdrawn`] when the custodian announced it stopped
-/// serving and nothing shows it serving again;
-/// [`StreamError::Unreachable`] when no endpoint accepts the connection;
-/// [`StreamError::Malformed`] when the pairing's keys are unusable.
+/// [`StreamError::Withdrawn`] when the custodian is withdrawn and has not
+/// appeared since; [`StreamError::NotDue`] when the view admits no dial
+/// now; [`StreamError::Unreachable`] when no endpoint accepts the
+/// connection; [`StreamError::Malformed`] when the pairing's keys are
+/// unusable.
 pub fn dial_session(
     pairing: &PairRecord,
     preferred: &[String],
-    fallback: &[String],
     browse_window: Duration,
+    cause: DialCause,
 ) -> Result<TcpFrameTransport, StreamError> {
-    dialled_session(pairing, preferred, fallback, browse_window)
-        .inspect_err(|error| refineid_dev_errors::report!(Rapp, "phone not dialled", error))
+    dialled_session(pairing, preferred, browse_window, cause).inspect_err(|error| {
+        if !matches!(error, StreamError::NotDue) {
+            refineid_dev_errors::report!(Rapp, "phone not dialled", error);
+        }
+    })
 }
 
 /// [`dial_session`], unreported.
 fn dialled_session(
     pairing: &PairRecord,
     preferred: &[String],
-    fallback: &[String],
     browse_window: Duration,
+    cause: DialCause,
 ) -> Result<TcpFrameTransport, StreamError> {
     let key = RoutingKey::derive(pairing).map_err(|_| StreamError::Malformed)?;
     let attempt = |endpoints: &[String]| {
@@ -483,53 +474,104 @@ fn dialled_session(
     if let Some(transport) = attempt(preferred) {
         return Ok(transport);
     }
+    let pair_id = pairing.pair_id();
     let unix_seconds = crate::clock::unix_time_seconds();
     let found = session_candidates(browse_stream_services(browse_window), pairing, unix_seconds);
-    match withdrawal_step(&found) {
-        WithdrawalStep::Serving => clear_withdrawn(pairing.pair_id()),
-        WithdrawalStep::Announced => mark_withdrawn(pairing.pair_id()),
-        WithdrawalStep::Unchanged => {}
+    if cause == DialCause::RevocationAttempt {
+        return found
+            .services
+            .iter()
+            .find_map(|service| attempt(&service.endpoints))
+            .ok_or(StreamError::Unreachable);
     }
-    if !is_withdrawn(pairing.pair_id()) {
-        for service in &found.services {
-            if let Some(transport) = attempt(&service.endpoints) {
-                return Ok(transport);
+    let appeared = view::look(
+        pair_id,
+        found
+            .services
+            .iter()
+            .map(|service| service.instance.clone()),
+    );
+    if found.withdrawn && !appeared {
+        view::withdrawn_record_matched(pair_id);
+    }
+    if view::is_withdrawn(pair_id) {
+        return Err(StreamError::Withdrawn);
+    }
+    let now_ms = crate::clock::continuous_ms();
+    if !view::dial_admitted(pair_id, now_ms, cause == DialCause::ConsumerRequest) {
+        return Err(StreamError::NotDue);
+    }
+    for service in &found.services {
+        if let Some(transport) = attempt(&service.endpoints) {
+            return Ok(transport);
+        }
+    }
+    view::dial_failed(pair_id, crate::clock::continuous_ms());
+    Err(StreamError::Unreachable)
+}
+
+/// Makes the one bounded attempt of every pairing forgotten on `requester`
+/// (RAPP v26.11.2 section 4.6 item 6).
+///
+/// Within 10 seconds of the forget the phone is looked for, a `browse_window` browse at a time, until one
+/// connection to it opens; the `pairing_revoked` close goes as the
+/// session's first and only message, and the keys go once the phone echoes
+/// it or the bound passes. Returns once every bound has passed, with every
+/// key left destroyed untold, so no revoking pairing outlives its bound.
+pub fn attempt_revocations<Store: PairingStore>(
+    requester: &mut Requester<Store>,
+    browse_window: Duration,
+) {
+    let now_ms = crate::clock::unix_time_ms();
+    // The bound runs on the monotonic clock from here; the wall clock only
+    // says how much of it the forget left.
+    let started = Instant::now();
+    let owed: Vec<(PairId, Instant)> = requester
+        .store()
+        .pair_ids()
+        .into_iter()
+        .filter_map(|pair_id| {
+            let record = requester.store().get(pair_id).ok()?;
+            let forgotten_at_ms = record
+                .pair_record()
+                .filter(|_| record.owes_revocation_notice())?
+                .forgotten_at_ms()?;
+            let spent_ms = now_ms.checked_sub(forgotten_at_ms)?;
+            let left_ms = REVOCATION_ATTEMPT_BOUND_MS.checked_sub(spent_ms)?;
+            Some((pair_id, started + Duration::from_millis(left_ms)))
+        })
+        .collect();
+    let mut last_end = started;
+    for (pair_id, ends_at) in owed {
+        last_end = last_end.max(ends_at);
+        while Instant::now() < ends_at {
+            let transport = requester
+                .store()
+                .get(pair_id)
+                .ok()
+                .and_then(PairingRecord::pair_record)
+                .and_then(|keys| {
+                    dial_session(keys, &[], browse_window, DialCause::RevocationAttempt).ok()
+                });
+            if let Some(transport) = transport {
+                // The engine reports a notice it could not deliver.
+                let _ = requester.deliver_revocation_notice(pair_id, transport);
+                break;
             }
         }
     }
-    if let Some(transport) = attempt(fallback) {
-        return Ok(transport);
+    // A pairing whose phone echoed has lost its keys already; only one whose
+    // attempt failed is waited out to its bound.
+    let unanswered = requester.store().pair_ids().into_iter().any(|pair_id| {
+        requester
+            .store()
+            .get(pair_id)
+            .is_ok_and(PairingRecord::owes_revocation_notice)
+    });
+    if unanswered {
+        std::thread::sleep(last_end.saturating_duration_since(Instant::now()));
     }
-    if is_withdrawn(pairing.pair_id()) {
-        Err(StreamError::Withdrawn)
-    } else {
-        Err(StreamError::Unreachable)
-    }
-}
-
-/// How one browse changes a pairing's withdrawal mark.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WithdrawalStep {
-    /// A session record shows the custodian serving: clear the mark.
-    Serving,
-    /// A withdrawn record names the pairing and nothing shows it serving:
-    /// set the mark.
-    Announced,
-    /// Neither: keep the mark as it is.
-    Unchanged,
-}
-
-/// Any session record still offered for this pairing — one naming it, or one
-/// publishing no hints — shows its custodian serving, and outweighs a
-/// withdrawal seen in the same browse.
-const fn withdrawal_step(found: &SessionCandidates) -> WithdrawalStep {
-    if !found.services.is_empty() {
-        WithdrawalStep::Serving
-    } else if found.withdrawn {
-        WithdrawalStep::Announced
-    } else {
-        WithdrawalStep::Unchanged
-    }
+    expire_revocation_notices(requester.store_mut(), crate::clock::unix_time_ms());
 }
 
 /// How long one TCP connect may take before the next endpoint is tried.
@@ -922,7 +964,7 @@ pub fn browse(mode: DiscoveryMode, timeout: Duration) -> Vec<StreamService> {
 ///
 /// They are browsed round by round until the search time is spent or
 /// `stopped` holds, and are the endpoints a typed code is tried with (RAPP
-/// v26.10.29 section 4.2, "Trying Each Custodian in Pairing Mode"). Each is
+/// v26.11.2 section 4.2, "Trying Each Custodian in Pairing Mode"). Each is
 /// known by its service instance and dialed at the addresses it last
 /// answered from.
 pub struct PairingServices<Stopped: Fn() -> bool> {
@@ -1103,8 +1145,12 @@ pub enum StreamError {
     Preamble(TransportError),
     /// No advertised endpoint accepted the connection.
     Unreachable,
-    /// The custodian announced it stopped serving this pairing.
+    /// The custodian announced it stopped serving this pairing, or closed
+    /// with `card_unavailable`, and has not announced itself since.
     Withdrawn,
+    /// The requester's view admits no dial now: no appearance, no consumer
+    /// asking, and no redial window running (section 8.3).
+    NotDue,
     /// The platform random source failed.
     Random,
 }
@@ -1130,6 +1176,7 @@ impl core::fmt::Display for StreamError {
             Self::Preamble(e) => write!(f, "failed to move preamble frame: {e}"),
             Self::Unreachable => write!(f, "stream endpoint unreachable"),
             Self::Withdrawn => write!(f, "the phone stopped serving this pairing"),
+            Self::NotDue => write!(f, "no dial is due"),
             Self::Random => write!(f, "random source unavailable"),
         }
     }
@@ -1170,7 +1217,7 @@ mod tests {
     const CANDIDATE: &str = "stream-test";
     const STREAM_CANDIDATE: &str = super::STREAM_CANDIDATE_ID;
 
-    /// Synthetic keys of `rapp-routing-v26.10.29.json` (`pair_keys`).
+    /// Synthetic keys of `rapp-routing-v26.11.2.json` (`pair_keys`).
     const PAIR_ID: [u8; 16] = [0x33; 16];
     const CUSTODIAN_PRIVATE: [u8; 32] = [0x11; 32];
     const REQUESTER_PRIVATE: [u8; 32] = [0x22; 32];
@@ -1190,6 +1237,7 @@ mod tests {
             x25519_public_key(&remote),
             GrantsHash::from_array([0x55; 32]),
             vec![ProfileName::parse(crate::profiles::PROFILE_AUTHENTICATION).unwrap()],
+            refineid_rapp::DisplayName::parse("Phone".to_owned()).unwrap(),
             0,
         )
         .unwrap()
@@ -1325,52 +1373,22 @@ mod tests {
     }
 
     #[test]
-    fn a_withdrawn_pairing_is_remembered_until_cleared() {
-        let pair = PairId::from_array([0x77; 16]);
-        assert!(!super::is_withdrawn(pair));
-        super::mark_withdrawn(pair);
-        assert!(super::is_withdrawn(pair));
-        super::clear_withdrawn(pair);
-        assert!(!super::is_withdrawn(pair));
-    }
-
-    #[test]
-    fn a_session_record_outweighs_a_withdrawal_in_the_same_browse() {
-        let now = 1_791_504_899;
-        let withdrawal = withdrawn("refineid-7f2a1c84", &custodian(), now);
-        let both = super::session_candidates(
-            vec![withdrawal.clone(), session("refineid-0b9e44d1", None)],
-            &requester(),
-            now,
-        );
-        assert_eq!(
-            super::withdrawal_step(&both),
-            super::WithdrawalStep::Serving
-        );
-        let only = super::session_candidates(vec![withdrawal], &requester(), now);
-        assert_eq!(
-            super::withdrawal_step(&only),
-            super::WithdrawalStep::Announced
-        );
-        let neither = super::session_candidates(Vec::new(), &requester(), now);
-        assert_eq!(
-            super::withdrawal_step(&neither),
-            super::WithdrawalStep::Unchanged
-        );
-    }
-
-    #[test]
     fn a_withdrawn_pairing_still_dials_its_configured_endpoint() {
         let pairing = pair_record(EndpointRole::Requester, [0x88; 32], CUSTODIAN_PRIVATE);
-        super::mark_withdrawn(pairing.pair_id());
+        crate::view::withdrawn_record_matched(pairing.pair_id());
         let listener = StreamListener::bind("127.0.0.1:0", STREAM_CANDIDATE, DEADLINE).unwrap();
         let endpoint = format!("127.0.0.1:{}", listener.local_port().unwrap());
         let accepter = std::thread::spawn(move || listener.accept().map(|_| ()));
-        let dialed = super::dial_session(&pairing, &[endpoint], &[], Duration::ZERO);
+        let dialed = super::dial_session(
+            &pairing,
+            &[endpoint],
+            Duration::ZERO,
+            super::DialCause::Holding,
+        );
         assert!(dialed.is_ok());
         accepter.join().unwrap().unwrap();
-        assert!(super::is_withdrawn(pairing.pair_id()));
-        super::clear_withdrawn(pairing.pair_id());
+        assert!(crate::view::is_withdrawn(pairing.pair_id()));
+        crate::view::pairing_left(pairing.pair_id());
     }
 
     #[test]

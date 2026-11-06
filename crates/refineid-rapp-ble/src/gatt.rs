@@ -1,5 +1,5 @@
 //! The GATT central link of `"fi.refineid.rapp.ble"` over the Windows Runtime
-//! (RAPP v26.10.29 sections 4.2, 5.1 to 5.3).
+//! (RAPP v26.11.2 sections 4.2, 5.1 to 5.3).
 //!
 //! [`BleLink::open`] runs the connection the custodian's peripheral expects,
 //! in order: connect without bonding, discover the RAPP service uncached,
@@ -56,7 +56,7 @@ const DEFAULT_LE_ATT_MTU: u16 = 23;
 const ATTRIBUTE_VALUE_LIMIT: usize = 512;
 
 /// The ATT error a custodian answers to a `CPace` step 1 write it cannot
-/// admit (RAPP v26.10.29 §4.2, "Busy Refusal"): `0x11 Insufficient
+/// admit (RAPP v26.11.2 §4.2, "Busy Refusal"): `0x11 Insufficient
 /// Resources`, Bluetooth Core Specification Vol. 3, Part F, §3.4.1.1. The
 /// requester then reads the Bootstrap Characteristic again.
 const ATT_INSUFFICIENT_RESOURCES: u8 = 0x11;

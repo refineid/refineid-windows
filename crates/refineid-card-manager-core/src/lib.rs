@@ -14,7 +14,7 @@
 
 //! Safe Rust service behind the native Windows card-management UI.
 //!
-//! The service owns PC/SC, card classification, trust gating, retry
+//! The service owns PC/SC, card classification, session binding, retry
 //! floors, activation, PIN changes, and PUK recovery. The C ABI lives
 //! in a separate crate so raw pointers cannot spread into this layer.
 
@@ -24,7 +24,6 @@ extern crate alloc;
 
 pub mod card_pin;
 pub mod service;
-mod trust_roots;
 
 #[cfg(test)]
 pub mod test_util {

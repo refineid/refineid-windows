@@ -55,6 +55,7 @@ use refineid_doc_sign::pades::{SignatureMetadata, StampLanguage, VisibleSignatur
 use refineid_doc_sign::service::{
     DEFAULT_TIMESTAMP_AUTHORITY, DocumentRequest, SignOptions, SignReport, sign_qualified,
 };
+use refineid_lib_core::auth::{CardPinLengths, PinReferenceScheme};
 use refineid_lib_core::identity::CommonName;
 use refineid_lib_core::pin::PinBytes;
 use refineid_lib_pcsc::PcscBackend;
@@ -63,7 +64,7 @@ use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::limits::OFFER_TTL_MS;
 use refineid_rapp_core::offer::normalize_pairing_code;
 use refineid_rapp_core::store::{PairingRecord, PairingState, PairingStore as _, forget_pairing};
-use refineid_rapp_core::stream::PairingServices;
+use refineid_rapp_core::stream::{PairingServices, attempt_revocations};
 use refineid_windows_credential_store::ProtectedPairingStore;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -75,6 +76,8 @@ const REFRESH_MS: u32 = 2000;
 const ATR_POLL_MS: u128 = 30_000;
 /// One DNS-SD browse round of the pairing search.
 const PAIRING_BROWSE_WINDOW: Duration = Duration::from_millis(600);
+/// How long one browse of a revocation attempt listens for the phone.
+const FORGET_BROWSE_WINDOW: Duration = Duration::from_millis(1_500);
 /// How long a pairing connection waits for each message from the phone.
 const PAIRING_RECEIVE_DEADLINE: Duration = Duration::from_secs(10);
 
@@ -157,7 +160,7 @@ struct AppState {
     readers: HWND,
     detail_reader: HWND,
     detail_atr: HWND,
-    identity_rows: [HWND; 9],
+    identity_rows: [HWND; IDENTITY_ROW_LABELS.len()],
     identity_status: HWND,
     photo: HWND,
     photo_caption: HWND,
@@ -171,6 +174,9 @@ struct AppState {
     pin_fields: [HWND; 5],
     pin_result: HWND,
     pin_result_ok: Option<bool>,
+    /// The lengths the card on the PIN page accepts, from its last status
+    /// read.
+    pin_lengths: Option<CardPinLengths>,
     doc_file: HWND,
     doc_format: HWND,
     doc_pin: HWND,
@@ -367,10 +373,11 @@ fn smoke_selftest() {
         ),
         (9, &[b"1234"], false),
     ];
+    let lengths = CardPinLengths::not_listed(PinReferenceScheme::Citizen);
     let mut failures = 0;
     for (index, (mode, fields, want_ok)) in cases.iter().enumerate() {
         let buffers: Vec<Vec<u8>> = fields.iter().map(|field| field.to_vec()).collect();
-        let got_ok = pin::prepare(*mode, buffers).is_ok();
+        let got_ok = pin::prepare(*mode, buffers, &lengths).is_ok();
         let pass = got_ok == *want_ok;
         if !pass {
             failures += 1;
@@ -773,7 +780,7 @@ fn on_create(main: HWND) -> windows::core::Result<()> {
         instance,
     )?;
     set_font(identity_status, font);
-    let mut identity_rows = [HWND(std::ptr::null_mut()); 9];
+    let mut identity_rows = [HWND(std::ptr::null_mut()); IDENTITY_ROW_LABELS.len()];
     for (index, label) in IDENTITY_ROW_LABELS.iter().enumerate() {
         identity_rows[index] = add_row(
             pages[1],
@@ -1356,6 +1363,7 @@ fn on_create(main: HWND) -> windows::core::Result<()> {
             pin_fields,
             pin_result,
             pin_result_ok: None,
+            pin_lengths: None,
             doc_file,
             doc_format,
             doc_pin,
@@ -1670,9 +1678,13 @@ fn poll_inbox() {
             match outcome {
                 Ok(view) => {
                     fill_pin_rows(&view);
+                    set_pin_lengths(Some(view.lengths));
                     set_pin_status_msg("", INK);
                 }
-                Err(error) => set_pin_status_msg(&error, ERROR),
+                Err(error) => {
+                    set_pin_lengths(None);
+                    set_pin_status_msg(&error, ERROR);
+                }
             }
             set_card_busy(false);
         }
@@ -1723,10 +1735,8 @@ fn fill_identity_rows(view: &identity::IdentityView) {
     set_tint(rows[3], INK);
     set_text(rows[3], &view.card);
     set_tint(rows[4], INK);
-    set_text(rows[4], view.generation);
-    set_tint(rows[5], INK);
-    set_text(rows[5], view.activation.as_deref().unwrap_or("—"));
-    for (slot, state) in [(6, &view.pin1), (7, &view.pin2), (8, &view.puk)] {
+    set_text(rows[4], &view.activation);
+    for (slot, state) in [(5, &view.pin1), (6, &view.pin2), (7, &view.puk)] {
         set_tint(rows[slot], state_color(state.kind));
         set_text(rows[slot], &state.text);
     }
@@ -1753,6 +1763,14 @@ fn set_identity_status(text: &str, color: u32) {
         set_tint(status, color);
         set_text(status, text);
     }
+}
+
+fn set_pin_lengths(lengths: Option<CardPinLengths>) {
+    STATE.with(|cell| {
+        if let Some(state) = cell.borrow_mut().as_mut() {
+            state.pin_lengths = lengths;
+        }
+    });
 }
 
 fn set_pin_status_msg(text: &str, color: u32) {
@@ -1975,10 +1993,11 @@ fn start_pin_execute() {
                 state.pin_fields,
                 state.card_busy,
                 state.last_detail_for.clone(),
+                state.pin_lengths,
             )
         })
     });
-    let Some((mode, fields, busy, selected)) = snapshot else {
+    let Some((mode, fields, busy, selected, lengths)) = snapshot else {
         return;
     };
     if busy {
@@ -2004,7 +2023,11 @@ fn start_pin_execute() {
     for field in &fields {
         set_text(*field, "");
     }
-    let job = match pin::prepare(usize::try_from(index).unwrap_or(0), buffers) {
+    // Before the card's status is read, the FINEID bounds stand; the card
+    // session checks every entry against the card's own lengths again.
+    let lengths =
+        lengths.unwrap_or_else(|| CardPinLengths::not_listed(PinReferenceScheme::Citizen));
+    let job = match pin::prepare(usize::try_from(index).unwrap_or(0), buffers, &lengths) {
         Ok(job) => job,
         Err(error) => {
             set_pin_result(&error, Some(false));
@@ -2258,7 +2281,7 @@ fn start_doc_verify() {
 /// Pair with the code the phone shows, on a worker thread; the
 /// refresh timer picks progress and the outcome up from `INBOX`. The
 /// phone advertises a pairing-mode record over DNS-SD and serves its
-/// offer on the connection (RAPP v26.10.29 section 4.2); this side
+/// offer on the connection (RAPP v26.11.2 section 4.2); this side
 /// browses, dials, and types the code into `CPace` with each phone in
 /// pairing mode in turn.
 fn start_pairing() {
@@ -2324,10 +2347,7 @@ fn stop_pairing() {
 fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<String, String> {
     post_pair_status("Looking for the phone…");
     let mut requester = Requester::new(
-        RequesterConfig {
-            display_name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows PC".to_owned()),
-            platform: "Windows".into(),
-        },
+        RequesterConfig::this_computer(),
         ProtectedPairingStore::load()
             .map_err(|error| format!("Cannot open pairing store: {error}"))?,
     );
@@ -2338,10 +2358,48 @@ fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<S
         || cancel.load(Ordering::SeqCst),
     );
     match requester.pair_with_code(code, &mut services, |peer, requested| {
-        confirm_pairing_dialog(main_raw, &peer.display_name, &peer.platform, requested)
+        confirm_pairing_dialog(
+            main_raw,
+            peer.display_name.as_str(),
+            &peer.platform,
+            requested,
+        )
     }) {
-        Ok((pair_id, _)) => paired_summary(&requester, pair_id),
+        Ok((pair_id, _)) => {
+            let summary = paired_summary(&requester, pair_id);
+            // This computer holds one pairing: the new one replaces any held
+            // before, which is forgotten with one bounded attempt (RAPP
+            // v26.11.2 section 4.6 item 6).
+            let replaced: Vec<PairId> = requester
+                .store()
+                .pair_ids()
+                .into_iter()
+                .filter(|stored| *stored != pair_id)
+                .collect();
+            for stored in &replaced {
+                let _ = requester.forget_pairing(*stored);
+            }
+            if !replaced.is_empty() {
+                std::thread::spawn(move || tell_and_clear(requester, &replaced));
+            }
+            summary
+        }
         Err(error) => Err(pairing_failure_text(error).to_owned()),
+    }
+}
+
+/// Makes the bounded attempt of every pairing forgotten on `requester`,
+/// then removes what is left of `forgotten`.
+fn tell_and_clear(mut requester: Requester<ProtectedPairingStore>, forgotten: &[PairId]) {
+    attempt_revocations(&mut requester, FORGET_BROWSE_WINDOW);
+    for pair_id in forgotten {
+        let revoked = requester
+            .store()
+            .get(*pair_id)
+            .is_ok_and(|record| matches!(record.state(), PairingState::Revoked { .. }));
+        if revoked {
+            let _ = requester.forget_pairing(*pair_id);
+        }
     }
 }
 
@@ -2395,8 +2453,8 @@ fn paired_summary(
         .map_err(|error| format!("Stored pairing unreadable: {error:?}"))?;
     Ok(format!(
         "Paired with {} ({}).",
-        record.peer().display_name,
-        record.peer().platform
+        record.peer_display_name().as_str(),
+        record.peer_platform()
     ))
 }
 
@@ -2442,8 +2500,8 @@ fn refresh_remote_devices() {
                     list,
                     &format!(
                         "{marker}[{index}] {} ({}){state}",
-                        record.peer().display_name,
-                        record.peer().platform
+                        record.peer_display_name().as_str(),
+                        record.peer_platform()
                     ),
                 );
             }
@@ -2452,10 +2510,10 @@ fn refresh_remote_devices() {
     }
 }
 
-/// Forget the selected pairing, then refresh (RAPP v26.10.29 section 4.6):
-/// it serves nothing from now on and keeps its keys only until its phone is
-/// told, on the next session with it, or for 30 days. One already revoked
-/// is removed.
+/// Forget the selected pairing, then refresh (RAPP v26.11.2 section 4.6
+/// item 6): it serves nothing from now on and keeps its keys only for one
+/// attempt of at most 10 seconds to tell its phone. One already revoked is
+/// removed.
 fn remove_remote_device() {
     let target = STATE.with(|cell| cell.borrow().as_ref().map(|state| state.remote_devices));
     let Some(list) = target else {
@@ -2482,11 +2540,9 @@ fn remove_remote_device() {
     };
     let pair_id = record.pair_id();
     // An unconfirmed or revoked pairing is removed and nobody is told (RAPP
-    // v26.10.29 section 4.6 item 3).
+    // v26.11.2 section 4.6 item 3).
     let status = match record.state() {
-        PairingState::Serving | PairingState::Forgotten => {
-            "Pairing forgotten. The phone is told when it is next reached."
-        }
+        PairingState::Serving | PairingState::Forgotten => "Pairing forgotten.",
         PairingState::Unconfirmed | PairingState::Revoked { .. } => "Pairing removed.",
     };
     match forget_pairing(
@@ -2497,6 +2553,14 @@ fn remove_remote_device() {
         Ok(()) => {
             refresh_remote_devices();
             set_remote_status(status);
+            // One bounded attempt tells the phone (RAPP v26.11.2 section 4.6
+            // item 6).
+            std::thread::spawn(move || {
+                tell_and_clear(
+                    Requester::new(RequesterConfig::this_computer(), store),
+                    &[pair_id],
+                );
+            });
         }
         Err(error) => set_remote_status(&format!("Forget failed: {error:?}")),
     }
@@ -2549,18 +2613,17 @@ fn combo_add(combo: HWND, text: &str) {
     send(combo, CB_ADDSTRING, 0, wide.as_ptr() as isize);
 }
 
-const IDENTITY_ROW_LABELS: [&str; 9] = [
+const IDENTITY_ROW_LABELS: [&str; 8] = [
     "Reader",
     "Serial",
     "Holder",
     "Card",
-    "Generation",
-    "Activation code",
-    "PIN1",
-    "PIN2",
+    "Activation PIN",
+    "PIN 1",
+    "PIN 2",
     "PUK",
 ];
-const PIN_ROW_LABELS: [&str; 5] = ["Holder", "Serial", "PIN1", "PIN2", "PUK"];
+const PIN_ROW_LABELS: [&str; 5] = ["Holder", "Serial", "PIN 1", "PIN 2", "PUK"];
 
 /// Add a title + subtitle header. Handles need no later updates.
 #[allow(

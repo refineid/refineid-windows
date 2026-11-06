@@ -23,17 +23,16 @@
 //!
 //! All four commands share the ISO 7816-4 §7.5 PIN-management
 //! shape `CLA INS P1 P2 Lc <data>`. P2 always comes from a
-//! [`PinSlot`] (compile-time-known PIN1 vs PIN2 distinction); Lc
-//! and `data` are filled by each command's role.
-//!
-//! [`PinSlot`]: crate::auth::PinSlot
+//! [`CredentialReference`] (the credential under the card's
+//! numbering); Lc and `data` are filled by each command's role.
 //!
 //! [refinement types]: https://github.com/refineid/refineid-core/blob/main/doc/architecture/refinement-types.md
 
 use crate::apdu::iso7816::ApduClass;
 use crate::apdu::status_word::PinRetries;
 use crate::auth::{
-    CredentialPolicyCounters, PUK_REFERENCE_PKCS15, PinSlot, UnblockingCounter, UsageCounter,
+    CredentialPolicyCounters, CredentialReference, PUK_REFERENCE_PKCS15, PinReferenceScheme,
+    PinSlot, UnblockingCounter, UsageCounter,
 };
 use crate::transport::CommandApdu;
 
@@ -102,8 +101,8 @@ pub enum VerifyData {
 ///   (`0Ch`).
 /// - `INS`: fixed at `20h`.
 /// - `P1`: [`VerifyMode`] -- Verify (`00h`) or Unverify (`FFh`).
-/// - `P2`: PIN reference. PIN1 (`11h` global) / PIN2 (`82h`
-///   local) via [`PinSlot::p2_reference`].
+/// - `P2`: credential reference under the card's numbering, via
+///   [`CredentialReference::as_byte`].
 /// - `Lc` + `Data`: see [`VerifyData`].
 /// - `Le`: empty.
 ///
@@ -116,9 +115,9 @@ pub struct Verify {
     pub class: ApduClass,
     /// P1 selector: Verify vs Unverify.
     pub mode: VerifyMode,
-    /// P2 selector: which PIN slot.
-    pub slot: PinSlot,
-    /// Lc + Data: empty (probe) or padded PIN bytes.
+    /// P2 selector: which credential.
+    pub reference: CredentialReference,
+    /// Lc + Data: empty (probe) or the credential block.
     pub data: VerifyData,
 }
 
@@ -150,7 +149,7 @@ impl Verify {
         out.push(self.class.as_byte());
         out.push(Self::INS);
         out.push(self.mode.as_p1());
-        out.push(self.slot.p2_reference());
+        out.push(self.reference.as_byte());
         // §3.5.1.1: Lc=00h with no Data is the probe form. We
         // always emit Lc (00 for probe, len for PinBlock) so
         // the wire is a valid short APDU.
@@ -161,13 +160,12 @@ impl Verify {
 }
 
 /// ISO 7816-4 `CHANGE REFERENCE DATA` (`INS=0x24 P1=0x00`)
-/// with the current and new PINs concatenated, each padded to
-/// the slot's stored length.
+/// with the current and new credential blocks concatenated.
 #[derive(Debug, Clone)]
 pub struct ChangeReferenceData {
-    /// Which PIN slot the change targets.
-    pub slot: PinSlot,
-    /// Concatenation `current_padded || new_padded`.
+    /// Which PIN the change targets, under the card's numbering.
+    pub reference: CredentialReference,
+    /// Concatenation `current_block || new_block`.
     pub padded_pair: Vec<u8>,
 }
 
@@ -183,14 +181,14 @@ impl ChangeReferenceData {
     /// (`00 24 00 <p2> <lc> <current_padded><new_padded>`).
     #[must_use]
     pub fn into_apdu(self) -> CommandApdu {
-        // padded_pair = current_padded || new_padded, both
+        // padded_pair = current_block || new_block, each
         // bounded by PinSlot::stored_length() = 12; total 24
         // bytes fits in u8 by the spec invariant.
         let Ok(lc) = u8::try_from(self.padded_pair.len()) else {
             unreachable!("CHANGE REFERENCE DATA padded_pair exceeds short-form Lc")
         };
         let mut out = Vec::with_capacity(self.padded_pair.len().saturating_add(5));
-        out.extend_from_slice(&[Self::CLA, Self::INS, Self::P1, self.slot.p2_reference(), lc]);
+        out.extend_from_slice(&[Self::CLA, Self::INS, Self::P1, self.reference.as_byte(), lc]);
         out.extend_from_slice(&self.padded_pair);
         CommandApdu::new(out)
     }
@@ -206,8 +204,8 @@ impl ChangeReferenceData {
 /// - `P1 P2`: `0x00 0xFF` (PIN-info template selector).
 /// - `Lc`: `0x05` (length of the constructed PIN-Container TLV).
 /// - `Data`: `A0 03 83 01 <slot_ref>` where `<slot_ref>` is the
-///   FINEID PKCS#15 PIN reference byte (`PinSlot::p2_reference()`,
-///   `0x11`/`0x82`).
+///   PIN's reference byte under the card's numbering
+///   ([`CredentialReference::as_byte`]).
 /// - `Le`: `0x00` (return all bytes -- per §3.15.2 example
 ///   patterns).
 ///
@@ -220,6 +218,8 @@ impl ChangeReferenceData {
 /// extract the "PIN changed" flag (`DF 2F 01 xx`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GetPinInfo {
+    /// The card's credential numbering.
+    pub scheme: PinReferenceScheme,
     /// Which PIN slot to query.
     pub slot: PinSlot,
 }
@@ -227,8 +227,8 @@ pub struct GetPinInfo {
 /// Closed set of FINEID PIN-container references used by `GET DATA`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PinInfoReference {
-    /// User PIN1 or PIN2.
-    User(PinSlot),
+    /// User PIN1 or PIN2 under the card's numbering.
+    User(PinReferenceScheme, PinSlot),
     /// Shared recovery PUK.
     Puk,
 }
@@ -237,7 +237,7 @@ impl PinInfoReference {
     /// Encode the typed reference at the APDU boundary.
     const fn as_byte(self) -> u8 {
         match self {
-            Self::User(slot) => slot.p2_reference(),
+            Self::User(scheme, slot) => CredentialReference::Pin(scheme, slot).as_byte(),
             Self::Puk => PUK_REFERENCE_PKCS15,
         }
     }
@@ -260,7 +260,7 @@ impl GetPinInfo {
     /// (`00 CB 00 FF 05 A0 03 83 01 <slot_ref> 00`).
     #[must_use]
     pub fn into_apdu(self) -> CommandApdu {
-        Self::for_reference(PinInfoReference::User(self.slot))
+        Self::for_reference(PinInfoReference::User(self.scheme, self.slot))
     }
 
     /// Build the fixed PIN-container query for a validated FINEID
@@ -364,6 +364,44 @@ impl PinInfoResponse {
             })
     }
 
+    /// Extract the length range of the PIN policy (`DF 3F 14`, FINEID S1
+    /// v4.2 §3.15.3 Table 19): its second octet is the minimum length and
+    /// its third the maximum, each within 4 to 64. `None` when the body
+    /// carries no policy, or its lengths fall outside that range or
+    /// admit nothing.
+    #[must_use]
+    pub(crate) fn policy_lengths_from_response_body(
+        body: &[u8],
+    ) -> Option<refineid_pkcs15::PasswordLengthRange> {
+        const POLICY_TAG_HI: u8 = 0xDF;
+        const POLICY_TAG_LO: u8 = 0x3F;
+        const POLICY_LENGTH: u8 = 20;
+        const POLICY_HEADER_LENGTH: usize = 3;
+        const POLICY_TLV_LENGTH: usize = POLICY_HEADER_LENGTH + POLICY_LENGTH as usize;
+        const LENGTH_FLOOR: u8 = 4;
+        const LENGTH_CEILING: u8 = 64;
+
+        let in_range = |length: u8| (LENGTH_FLOOR..=LENGTH_CEILING).contains(&length);
+        body.windows(POLICY_TLV_LENGTH).find_map(|window| {
+            let [
+                POLICY_TAG_HI,
+                POLICY_TAG_LO,
+                POLICY_LENGTH,
+                _tries,
+                min,
+                max,
+                ..,
+            ] = window
+            else {
+                return None;
+            };
+            if !in_range(*min) || !in_range(*max) {
+                return None;
+            }
+            refineid_pkcs15::PasswordLengthRange::new(*min, *max)
+        })
+    }
+
     /// Extract the usage and unblocking allowances from `DF 21 04`.
     #[must_use]
     pub(crate) fn policy_counters_from_response_body(
@@ -408,14 +446,46 @@ impl PinInfoResponse {
     }
 }
 
-/// ISO 7816-4 `RESET RETRY COUNTER` (`INS=0x2C P1=0x00`) with
-/// PUK and new PIN concatenated.
+/// What the `RESET RETRY COUNTER` data field carries (ISO 7816-4
+/// §7.5.10 P1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetRetryCounterMode {
+    /// The unblocking code followed by the new reference data: the
+    /// citizen card's single-command form.
+    CodeThenNew,
+    /// Only the new reference data; the PUK was verified as its own
+    /// object first. The organization card's second command (FINEID
+    /// S4-2 v4.0 §4.3.2).
+    NewOnly,
+}
+
+impl ResetRetryCounterMode {
+    /// P1 for the unblocking code followed by the new reference data.
+    const P1_CODE_THEN_NEW: u8 = 0x00;
+    /// P1 for the new reference data alone.
+    const P1_NEW_ONLY: u8 = 0x02;
+
+    /// Encode the mode as the P1 byte.
+    #[must_use]
+    pub const fn as_p1(self) -> u8 {
+        match self {
+            Self::CodeThenNew => Self::P1_CODE_THEN_NEW,
+            Self::NewOnly => Self::P1_NEW_ONLY,
+        }
+    }
+}
+
+/// ISO 7816-4 `RESET RETRY COUNTER` (`INS=0x2C`) with the PUK and
+/// the new PIN, or the new PIN alone.
 #[derive(Debug, Clone)]
 pub struct ResetRetryCounter {
-    /// Which PIN slot the unblock targets (the new PIN value
-    /// replaces this slot's stored PIN).
-    pub target_slot: PinSlot,
-    /// Concatenation `puk_padded || new_pin_padded`.
+    /// Which PIN the unblock targets, under the card's numbering (the
+    /// new PIN value replaces this PIN's stored value).
+    pub target: CredentialReference,
+    /// What the data field carries.
+    pub mode: ResetRetryCounterMode,
+    /// The data field: `puk_block || new_pin_block`, or
+    /// `new_pin_block` alone.
     pub padded_pair: Vec<u8>,
 }
 
@@ -424,15 +494,13 @@ impl ResetRetryCounter {
     pub const CLA: u8 = 0x00;
     /// ISO 7816-4 `RESET RETRY COUNTER` instruction.
     pub const INS: u8 = 0x2C;
-    /// P1: reset + replace (`0x00`; PUK + new PIN both present).
-    pub const P1: u8 = 0x00;
 
     /// Serialise into the wire APDU
-    /// (`00 2C 00 <p2> <lc> <puk_padded><new_pin_padded>`).
+    /// (`00 2C <p1> <p2> <lc> <data>`).
     #[must_use]
     pub fn into_apdu(self) -> CommandApdu {
-        // padded_pair = puk_padded (12) || new_pin_padded (12)
-        // = 24 bytes; fits in u8 by FINEID-S4-1 v3.1 invariant.
+        // The data field is at most puk_block (12) || new_pin_block (12)
+        // = 24 bytes; fits in u8 by the FINEID stored-length invariant.
         let Ok(lc) = u8::try_from(self.padded_pair.len()) else {
             unreachable!("RESET RETRY COUNTER padded_pair exceeds short-form Lc")
         };
@@ -440,8 +508,8 @@ impl ResetRetryCounter {
         out.extend_from_slice(&[
             Self::CLA,
             Self::INS,
-            Self::P1,
-            self.target_slot.p2_reference(),
+            self.mode.as_p1(),
+            self.target.as_byte(),
             lc,
         ]);
         out.extend_from_slice(&self.padded_pair);
@@ -452,7 +520,7 @@ impl ResetRetryCounter {
 #[cfg(test)]
 mod tests {
 
-    use super::{GetPinInfo, GetPukInfo, PinInfoResponse, PinSlot};
+    use super::{GetPinInfo, GetPukInfo, PinInfoResponse, PinReferenceScheme, PinSlot};
     use crate::apdu::status_word::PinRetries;
 
     #[test]
@@ -485,6 +553,55 @@ mod tests {
                 PUK_REFERENCE,
                 MAX_RESPONSE_LENGTH,
             ]
+        );
+    }
+
+    /// A PIN container carrying a PIN policy of `min` to `max` digits.
+    fn container_with_policy(min: u8, max: u8) -> Vec<u8> {
+        const POLICY_TAG_HI: u8 = 0xDF;
+        const POLICY_TAG_LO: u8 = 0x3F;
+        const POLICY_LENGTH: u8 = 20;
+        const TRY_LIMIT: u8 = 5;
+        const FILLER: u8 = 0;
+        let mut body = vec![
+            POLICY_TAG_HI,
+            POLICY_TAG_LO,
+            POLICY_LENGTH,
+            TRY_LIMIT,
+            min,
+            max,
+        ];
+        body.resize(body.len() + usize::from(POLICY_LENGTH) - 3, FILLER);
+        body
+    }
+
+    #[test]
+    fn pin_info_extracts_policy_lengths() {
+        const FOUR: u8 = 4;
+        const EIGHT: u8 = 8;
+        let range =
+            PinInfoResponse::policy_lengths_from_response_body(&container_with_policy(FOUR, EIGHT))
+                .expect("a policy range");
+        assert_eq!(range.min(), usize::from(FOUR));
+        assert_eq!(range.max(), usize::from(EIGHT));
+    }
+
+    #[test]
+    fn pin_info_refuses_policy_lengths_outside_the_specified_range() {
+        const THREE: u8 = 3;
+        const EIGHT: u8 = 8;
+        const SIXTY_FIVE: u8 = 65;
+        assert_eq!(
+            PinInfoResponse::policy_lengths_from_response_body(&container_with_policy(
+                THREE, EIGHT
+            )),
+            None
+        );
+        assert_eq!(
+            PinInfoResponse::policy_lengths_from_response_body(&container_with_policy(
+                EIGHT, SIXTY_FIVE
+            )),
+            None
         );
     }
 
@@ -556,6 +673,7 @@ mod tests {
     #[test]
     fn get_pin_info_pin1_apdu_wire_shape() {
         let bytes = GetPinInfo {
+            scheme: PinReferenceScheme::Citizen,
             slot: PinSlot::Pin1,
         }
         .into_apdu()
@@ -572,6 +690,7 @@ mod tests {
     #[test]
     fn get_pin_info_pin2_apdu_wire_shape() {
         let bytes = GetPinInfo {
+            scheme: PinReferenceScheme::Citizen,
             slot: PinSlot::Pin2,
         }
         .into_apdu()

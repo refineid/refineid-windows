@@ -30,6 +30,8 @@ hmac.workspace = true
 # Secret-material zeroize-on-drop -- `PinBytes` in `pin`.
 zeroize.workspace = true
 x509-cert = { version = "0.3", default-features = false }
+# EF.AOD password-object parsing (FINEID S4-1 v4.2 section 8.1.5).
+refineid-pkcs15.workspace = true
 
 [dev-dependencies]
 hex.workspace = true

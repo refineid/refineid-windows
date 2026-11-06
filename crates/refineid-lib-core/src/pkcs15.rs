@@ -40,7 +40,7 @@ use crate::apdu::iso7816::{
 };
 use crate::apdu::primitives::{Aid, AidError};
 use crate::apdu::status_word::StatusWord;
-use crate::transport::{CardTransport, TransportDispatchError};
+use crate::transport::{CardTransport, CommandApdu, TransportDispatchError};
 
 /// Convenience alias for [`TransportDispatchError`] specialised to
 /// a [`CardTransport`] implementation's own error type.
@@ -94,6 +94,22 @@ pub const EF_SIGN_CERT_ALT_FID: [u8; 2] = [0x43, 0x35];
 pub const EF_ISSUING_CA_ECC_FID: [u8; 2] = [0x43, 0x36];
 /// PKCS#15 `EF.TokenInfo` -- card label / manufacturer / serial.
 pub const EF_TOKEN_INFO_FID: [u8; 2] = [0x50, 0x32];
+
+/// DF.ESIGN, the signature directory beneath the MF: its file
+/// identifier, which citizen cards answer to.
+pub const DF_ESIGN_FID: [u8; 2] = [0x50, 0x16];
+
+/// DF.ESIGN's application identifier, ASCII `E.SIGN`, which FINEID
+/// S4-2 v4.0 section 4.6.21 publishes for the organizational card's
+/// qualified-signature directory.
+pub const ESIGN_AID: &[u8] = b"E.SIGN";
+
+// Compile-time guard: keep the published directory name inside the
+// ISO 7816-5 AID length range `Aid::from_slice` accepts.
+const _: () = assert!(
+    ESIGN_AID.len() >= 5 && ESIGN_AID.len() <= 16,
+    "ESIGN_AID must satisfy ISO 7816-5 AID length range 5..=16"
+);
 
 /// Where a slot lives in the card's file tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -407,6 +423,27 @@ pub trait Pkcs15Ops: CardTransport {
         Err(Pkcs15Error::Sw(last_sw))
     }
 
+    /// Read and parse EF.AOD, the card's authentication objects, under
+    /// the PKCS#15 application (FINEID S4-1 v4.2 §8.1.5; FINEID S4-2 v4.0
+    /// §4.6.10, §4.7.10). Leaves the PKCS#15 application selected.
+    ///
+    /// # Errors
+    /// Transport failures, a non-success status word, an empty or
+    /// oversized file, or [`Pkcs15Error::InvalidData`] when the file does
+    /// not decode.
+    fn read_authentication_objects(
+        &mut self,
+    ) -> Result<refineid_pkcs15::AuthenticationObjects, Pkcs15Error<TxError<Self>>>
+    where
+        Self: Sized,
+    {
+        self.select_pkcs15_application()?;
+        self.select_ef(*refineid_pkcs15::EF_AOD_FID.as_bytes())?;
+        let bytes = self.read_binary_to_end(None)?;
+        refineid_pkcs15::AuthenticationObjects::parse(&bytes)
+            .map_err(|_parse_error| Pkcs15Error::InvalidData("EF.AOD"))
+    }
+
     /// SELECT MF (`3F00`). Tries `P1=0x00` then `P1=0x04` because
     /// FINEID variants disagree on which they accept after a
     /// deep-DF SELECT.
@@ -418,19 +455,9 @@ pub trait Pkcs15Ops: CardTransport {
     where
         Self: Sized,
     {
-        let attempts: &[[u8; 7]] = &[
-            [0x00, 0xA4, 0x00, 0x0C, 0x02, 0x3F, 0x00],
-            [0x00, 0xA4, 0x04, 0x0C, 0x02, 0x3F, 0x00],
-        ];
-        let mut last_sw: u16 = 0;
-        for apdu in attempts {
-            let r = self.transmit(apdu).map_err(Pkcs15Error::Transport)?;
-            if r.is_ok() {
-                return Ok(());
-            }
-            last_sw = r.sw();
-        }
-        Err(Pkcs15Error::Sw(last_sw))
+        accepted_or_refusal(
+            first_accepted(self, mf_select_attempts()).map_err(Pkcs15Error::Transport)?,
+        )
     }
 
     /// SELECT a child DF under the current context. Helper for
@@ -446,19 +473,40 @@ pub trait Pkcs15Ops: CardTransport {
     where
         Self: Sized,
     {
-        let variants: &[[u8; 7]] = &[
-            [0x00, 0xA4, 0x01, 0x0C, 0x02, fid[0], fid[1]],
-            [0x00, 0xA4, 0x00, 0x0C, 0x02, fid[0], fid[1]],
-        ];
-        let mut last_sw: u16 = 0;
-        for apdu in variants {
-            let r = self.transmit(apdu).map_err(Pkcs15Error::Transport)?;
-            if r.is_ok() {
-                return Ok(());
-            }
-            last_sw = r.sw();
+        accepted_or_refusal(
+            first_accepted(self, child_df_select_attempts(fid)).map_err(Pkcs15Error::Transport)?,
+        )
+    }
+
+    /// SELECT DF.ESIGN, the qualified-signature directory beneath
+    /// the MF, and answer the status word the walk ended on:
+    /// [`StatusWord::Success`] once DF.ESIGN is current, otherwise
+    /// the card's last refusal.
+    ///
+    /// Organizational cards publish the directory by the
+    /// [`ESIGN_AID`] name; citizen cards answer to [`DF_ESIGN_FID`].
+    /// The name is tried first because an organizational card can
+    /// acknowledge a file-identifier SELECT without making DF.ESIGN
+    /// current.
+    ///
+    /// # Errors
+    /// Transport failures.
+    #[inline]
+    fn select_esign_directory(&mut self) -> Result<StatusWord, TxError<Self>>
+    where
+        Self: Sized,
+    {
+        let mf = first_accepted(self, mf_select_attempts())?;
+        if !mf.is_success() {
+            return Ok(mf);
         }
-        Err(Pkcs15Error::Sw(last_sw))
+        if let Ok(aid) = Aid::from_slice(ESIGN_AID) {
+            let by_name = self.transmit(SelectByAidNoFci { aid }.into_apdu().as_bytes())?;
+            if by_name.is_ok() {
+                return Ok(StatusWord::Success);
+            }
+        }
+        first_accepted(self, child_df_select_attempts(DF_ESIGN_FID))
     }
 
     /// `READ BINARY` in 128-byte chunks against the currently
@@ -623,7 +671,7 @@ pub trait Pkcs15Ops: CardTransport {
             }
             SlotPath::UnderDf5016 => {
                 self.select_mf()?;
-                self.select_child_df([0x50, 0x16])?;
+                self.select_child_df(DF_ESIGN_FID)?;
                 self.select_ef(slot.fid())?;
                 self.read_binary_der_object(slot.label())?
             }
@@ -658,6 +706,75 @@ pub trait Pkcs15Ops: CardTransport {
 }
 
 impl<T: CardTransport + ?Sized> Pkcs15Ops for T {}
+
+/// SELECT FILE P1: any file by its identifier (ISO 7816-4 SELECT P1
+/// coding).
+const SELECT_P1_ANY_BY_FID: u8 = 0x00;
+/// SELECT FILE P1: a child DF of the current DF by its identifier.
+const SELECT_P1_CHILD_DF: u8 = 0x01;
+/// SELECT FILE P1: by DF name.
+const SELECT_P1_BY_NAME: u8 = 0x04;
+/// Lc of a SELECT carrying one file identifier.
+const SELECT_FID_LC: u8 = 2;
+
+/// A SELECT FILE without response data naming `fid` under `p1`.
+fn select_no_fci(p1: u8, fid: [u8; 2]) -> CommandApdu {
+    let [high, low] = fid;
+    CommandApdu::new(vec![
+        SelectEfNoFci::CLA,
+        SelectEfNoFci::INS,
+        p1,
+        SelectEfNoFci::P2,
+        SELECT_FID_LC,
+        high,
+        low,
+    ])
+}
+
+/// SELECT MF variants, tried in order: FINEID variants disagree on
+/// which they accept after a deep-DF SELECT.
+fn mf_select_attempts() -> [CommandApdu; 2] {
+    [
+        select_no_fci(SELECT_P1_ANY_BY_FID, *FileId::MF.as_bytes()),
+        select_no_fci(SELECT_P1_BY_NAME, *FileId::MF.as_bytes()),
+    ]
+}
+
+/// SELECT child-DF variants for `fid`, tried in order: the
+/// short-form child-DF SELECT, then any file by identifier.
+pub(crate) fn child_df_select_attempts(fid: [u8; 2]) -> [CommandApdu; 2] {
+    [
+        select_no_fci(SELECT_P1_CHILD_DF, fid),
+        select_no_fci(SELECT_P1_ANY_BY_FID, fid),
+    ]
+}
+
+/// Send the preferred SELECT variant, then the fallback when the card
+/// refuses it. Answers [`StatusWord::Success`] for the accepted one, or
+/// the card's refusal of the fallback.
+fn first_accepted<T: CardTransport>(
+    transport: &mut T,
+    [first, second]: [CommandApdu; 2],
+) -> Result<StatusWord, TxError<T>> {
+    if transport.transmit(first.as_bytes())?.is_ok() {
+        return Ok(StatusWord::Success);
+    }
+    let fallback = transport.transmit(second.as_bytes())?;
+    Ok(if fallback.is_ok() {
+        StatusWord::Success
+    } else {
+        fallback.status_word()
+    })
+}
+
+/// A SELECT walk's ending status as the [`Pkcs15Error`] contract.
+const fn accepted_or_refusal<TE>(status: StatusWord) -> Result<(), Pkcs15Error<TE>> {
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(Pkcs15Error::Sw(status.as_u16()))
+    }
+}
 
 /// File Control Information (FCI) bytes returned by a SELECT
 /// EF that requested FCI (P2=0x00).
@@ -847,117 +964,6 @@ impl TokenInfo {
             }
         }
         Ok(info)
-    }
-}
-
-/// Which generation of FINEID card we're talking to.
-///
-/// DVV has shipped two production card families that differ
-/// in their activation-PIN length: the **older** RSA-based
-/// generation requires an 8-digit activation PIN / PUK, and
-/// the **newer** ECC-based generation requires a 7-digit
-/// one-time activation PIN (plus a separately-orderable PUK
-/// of unspecified length). The card OS itself rejects wrong-
-/// length input and burns one of the 5 try-counter slots, so
-/// the host needs to know which length is correct *before*
-/// sending the APDU.
-///
-/// Detection rides on the auth cert's issuer Common Name --
-/// DVV's CSCAs encode the family in the suffix:
-///
-/// - `"... - G4R"` / `"... - G3R"` (R for RSA) -> older
-/// - `"... - G4E"` / `"... - G3E"` (E for ECC) -> newer.
-///
-/// Any other shape returns [`CardGeneration::Unknown`], and
-/// callers should refuse to make activation-length decisions
-/// on its behalf. The correlation between issuer family and
-/// card-OS generation is empirical, not protocol-guaranteed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CardGeneration {
-    /// Older FINEID card (RSA-based citizen certs, DVV G3/G4 R
-    /// issuer). Activation PIN is 8 digits.
-    Older,
-    /// Newer FINEID card (ECC-based citizen certs, DVV G3/G4 E
-    /// issuer). Activation PIN is 7 digits.
-    Newer,
-    /// Couldn't classify (issuer DN missing, unfamiliar suffix,
-    /// auth cert unreadable). Callers should not infer
-    /// activation PIN length.
-    Unknown,
-}
-
-impl CardGeneration {
-    /// Hardcoded activation-PIN length for this generation, or
-    /// `None` when the generation didn't classify and we refuse
-    /// to guess. The card-OS will only accept this length;
-    /// anything else burns a try-counter slot.
-    #[must_use]
-    #[inline]
-    pub const fn activation_pin_length(self) -> Option<usize> {
-        match self {
-            Self::Older => Some(8),
-            Self::Newer => Some(7),
-            Self::Unknown => None,
-        }
-    }
-}
-
-/// Classify a FINEID card by auth-cert issuance date.
-///
-/// **Authoritative classifier.** DVV cut over to the new
-/// activation-PIN model on 2026-01-13; the auth cert's
-/// `notBefore` is the most reliable card-side signal for which
-/// side of that boundary a card sits on. Per
-/// <https://dvv.fi/en/activation-of-the-citizen-certificate>,
-/// the issuance date is also printed on the card surface for
-/// human verification.
-///
-/// Compared with [`classify_card_generation`] (issuer-CN
-/// suffix), this approach reads the date the spec itself
-/// names as the cutoff, so it survives DVV CA renaming /
-/// renumbering without code churn.
-#[must_use]
-#[inline]
-pub fn classify_card_generation_by_issuance(not_before: crate::x509::DateTime) -> CardGeneration {
-    // 2026-01-13 is the cutoff DVV publishes.
-    let cutoff_year: u16 = 2026;
-    let cutoff_month: u8 = 1;
-    let cutoff_day: u8 = 13;
-    let date_tuple = (not_before.year(), not_before.month(), not_before.day());
-    let cutoff_tuple = (cutoff_year, cutoff_month, cutoff_day);
-    if date_tuple >= cutoff_tuple {
-        CardGeneration::Newer
-    } else {
-        CardGeneration::Older
-    }
-}
-
-/// Classify a FINEID card by its auth-cert issuer DN.
-///
-/// Heuristic fallback for when the issuance date isn't
-/// available (e.g. malformed cert validity, very early test
-/// builds). The authoritative classifier is
-/// [`classify_card_generation_by_issuance`]; callers that have
-/// access to the parsed cert should prefer that one and use
-/// this only as a cross-check or when `not_before` couldn't
-/// be parsed.
-///
-/// See [`CardGeneration`] for the matching rules.
-#[must_use]
-#[inline]
-pub fn classify_card_generation(issuer: crate::x509::Name<'_>) -> CardGeneration {
-    let Some(cn) = issuer.common_name() else {
-        return CardGeneration::Unknown;
-    };
-    // Match the family suffix at the end of the issuer CN so a
-    // future "G5E" / "G5R" generation still classifies. Use
-    // case-sensitive match against DVV's own spelling.
-    if cn.ends_with('R') && (cn.contains("G3") || cn.contains("G4") || cn.contains("G5")) {
-        CardGeneration::Older
-    } else if cn.ends_with('E') && (cn.contains("G3") || cn.contains("G4") || cn.contains("G5")) {
-        CardGeneration::Newer
-    } else {
-        CardGeneration::Unknown
     }
 }
 
@@ -1209,7 +1215,7 @@ where
     let printed_serial = derive_printed_serial(&token_full);
 
     // Cert read for human-readable identity. Best effort.
-    let (surname, given_names, peuin) = transport
+    let (surname, given_names, peuin, organization) = transport
         .read_certificate(CertSlot::Authentication)
         .ok()
         .and_then(|der| {
@@ -1217,7 +1223,12 @@ where
                 .ok()
                 .map(|cert| {
                     let subject = cert.subject;
-                    (subject.surname(), subject.given_names(), subject.peuin())
+                    (
+                        subject.surname(),
+                        subject.given_names(),
+                        subject.peuin(),
+                        subject.organization_name(),
+                    )
                 })
         })
         .unwrap_or_default();
@@ -1235,6 +1246,9 @@ where
     id = id.with_additional_names(given_names.additional);
     if let Some(p) = peuin {
         id = id.with_peuin(p);
+    }
+    if let Some(o) = organization {
+        id = id.with_organization(o);
     }
     if let Some(s) = printed_serial {
         id = id.with_printed_serial(s);
@@ -1446,6 +1460,45 @@ where
         }
     }
     Ok(out)
+}
+
+/// Expected SELECT wire for the DF.ESIGN walk, assembled from the
+/// typed command builders, for the scripted tests of every flow that
+/// enters the directory.
+#[cfg(test)]
+pub(crate) mod esign_wire {
+    use super::{DF_ESIGN_FID, ESIGN_AID};
+    use crate::apdu::iso7816::{
+        ApduClass, FileId, SelectByAidNoFci, SelectFile, SelectFileResponseMode, SelectFileTarget,
+    };
+    use crate::apdu::primitives::Aid;
+    use crate::transport::CommandApdu;
+
+    fn select_any_by_fid(fid: FileId) -> CommandApdu {
+        SelectFile {
+            class: ApduClass::Plain,
+            target: SelectFileTarget::AnyByFileId(Some(fid)),
+            response_mode: SelectFileResponseMode::None,
+        }
+        .into_apdu()
+    }
+
+    /// SELECT MF, the walk's first command.
+    pub fn select_mf() -> CommandApdu {
+        select_any_by_fid(FileId::MF)
+    }
+
+    /// SELECT DF.ESIGN by its published name.
+    pub fn select_esign_by_name() -> CommandApdu {
+        let aid = Aid::from_slice(ESIGN_AID).expect("published E.SIGN AID length is valid");
+        SelectByAidNoFci { aid }.into_apdu()
+    }
+
+    /// SELECT DF.ESIGN as any file by its identifier, the walk's last
+    /// variant.
+    pub fn select_esign_any_by_fid() -> CommandApdu {
+        select_any_by_fid(FileId::new(DF_ESIGN_FID))
+    }
 }
 
 #[cfg(test)]

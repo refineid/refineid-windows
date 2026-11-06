@@ -43,8 +43,8 @@ use refineid_rapp_core::store::{
     MemoryPairingStore, PairingRecord, PairingState, PairingStore, forget_pairing,
 };
 use refineid_rapp_core::stream::{
-    DialPurpose, PairingAddress, PairingServices, STREAM_CANDIDATE_ID, StreamError, dial,
-    dial_session,
+    DialCause, DialPurpose, PairingAddress, PairingServices, STREAM_CANDIDATE_ID, StreamError,
+    attempt_revocations, dial, dial_session,
 };
 use refineid_rapp_core::transport::TcpFrameTransport;
 use refineid_windows_credential_store::ProtectedPairingStore;
@@ -58,6 +58,9 @@ const PAIRING_WINDOW: Duration = Duration::from_millis(refineid_rapp::OFFER_TTL_
 
 /// One DNS-SD browse round.
 const BROWSE_WINDOW: Duration = Duration::from_secs(3);
+
+/// How long one browse of a revocation attempt listens for the phone.
+const FORGET_BROWSE_WINDOW: Duration = Duration::from_millis(1_500);
 
 /// Pause between session dial rounds that found no custodian.
 const SESSION_RETRY: Duration = Duration::from_secs(2);
@@ -100,7 +103,7 @@ fn main() {
         _ => {
             eprintln!("usage:");
             eprintln!("  refineid-rapp pair-demo --code <code> [--connect <host:port>] \\");
-            eprintln!("      [--name <label>] [--auto-confirm] [--count <n>] \\");
+            eprintln!("      [--auto-confirm] [--count <n>] \\");
             eprintln!("      [--sign-profile rsa3072|ecdsa384] [--durable]");
             eprintln!("  refineid-rapp reconnect [--connect <host:port>] \\");
             eprintln!("      [--sign-profile rsa3072|ecdsa384] [--count <n>]");
@@ -122,9 +125,7 @@ fn main() {
             #[cfg(windows)]
             {
                 eprintln!("  refineid-rapp ble-scan [--seconds <n>]");
-                eprintln!(
-                    "  refineid-rapp ble-pair --code <code> [--name <label>] [--auto-confirm]"
-                );
+                eprintln!("  refineid-rapp ble-pair --code <code> [--auto-confirm]");
                 eprintln!("  refineid-rapp ble-session");
             }
             std::process::exit(2);
@@ -138,7 +139,6 @@ fn main() {
 
 struct DemoOptions {
     connect: Option<String>,
-    name: String,
     code: Option<String>,
     auto_confirm: bool,
     count: Option<usize>,
@@ -148,7 +148,6 @@ struct DemoOptions {
 
 fn parse_options(arguments: &[String]) -> Result<DemoOptions, String> {
     let mut connect = None;
-    let mut name = "RefineID Windows".to_owned();
     let mut code = None;
     let mut auto_confirm = false;
     let mut count = None;
@@ -164,7 +163,6 @@ fn parse_options(arguments: &[String]) -> Result<DemoOptions, String> {
         };
         match flag.as_str() {
             "--connect" => connect = Some(value()?),
-            "--name" => name = value()?,
             "--code" => {
                 code = Some(
                     normalize_pairing_code(&value()?)
@@ -192,7 +190,6 @@ fn parse_options(arguments: &[String]) -> Result<DemoOptions, String> {
     }
     Ok(DemoOptions {
         connect,
-        name,
         code,
         auto_confirm,
         count,
@@ -214,20 +211,15 @@ fn pair_demo(arguments: &[String]) -> Result<(), String> {
 
 fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(), String> {
     let code = options.code.as_deref().ok_or("--code is required")?;
-    let mut requester = Requester::new(
-        RequesterConfig {
-            display_name: options.name.clone(),
-            platform: "Windows".into(),
-        },
-        store,
-    );
+    let mut requester = Requester::new(RequesterConfig::this_computer(), store);
     let auto_confirm = options.auto_confirm;
     let confirm = move |peer: &PeerIntroduction, requested: &[ProfileName]| {
         if auto_confirm {
             println!();
             println!(
                 "auto-confirming pairing request from {} ({})",
-                peer.display_name, peer.platform
+                peer.display_name.as_str(),
+                peer.platform
             );
             println!("granted: {}", profile_list(requested));
             Some(requested.to_vec())
@@ -270,12 +262,14 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
             .map_err(|error| format!("stored pairing unreadable: {error:?}"))?;
         println!(
             "paired with {} ({}); granted: {}",
-            record.peer().display_name,
-            record.peer().platform,
+            record.peer_display_name().as_str(),
+            record.peer_platform(),
             profile_list(record.granted_profiles())
         );
     }
     flush_now();
+
+    forget_replaced_pairings_and_tell(&mut requester, pair_id);
 
     serve_sessions(
         &mut requester,
@@ -284,6 +278,59 @@ fn run_pair_demo<S: PairingStore>(options: &DemoOptions, store: S) -> Result<(),
         options.sign_profile,
         options.count,
     )
+}
+
+/// Forgets every stored pairing but the fresh one and tells each replaced
+/// phone once: this computer holds one pairing (RAPP v26.11.2 section 4.6
+/// item 6). Shared by `pair-demo` and `ble-pair`.
+fn forget_replaced_pairings_and_tell<S: PairingStore>(requester: &mut Requester<S>, fresh: PairId) {
+    let replaced = forget_replaced_pairings(requester, fresh);
+    if replaced.is_empty() {
+        return;
+    }
+    for stored in &replaced {
+        println!(
+            "Forgot pairing {}; telling its phone once",
+            hex::encode(stored.as_bytes())
+        );
+    }
+    flush_now();
+    // One bounded attempt tells each replaced phone (RAPP v26.11.2
+    // section 4.6 item 6), the same the settings app makes.
+    attempt_revocations(requester, FORGET_BROWSE_WINDOW);
+    clear_revoked_pairings(requester, &replaced);
+}
+
+/// Forgets every stored pairing but the fresh one: this computer holds
+/// one pairing (RAPP v26.11.2 section 4.6 item 6). Returns the forgotten.
+fn forget_replaced_pairings<S: PairingStore>(
+    requester: &mut Requester<S>,
+    fresh: PairId,
+) -> Vec<PairId> {
+    let replaced: Vec<PairId> = requester
+        .store()
+        .pair_ids()
+        .into_iter()
+        .filter(|stored| *stored != fresh)
+        .collect();
+    for stored in &replaced {
+        let _ = requester.forget_pairing(*stored);
+    }
+    replaced
+}
+
+/// Removes what is left of `forgotten` once its phones were told, or its
+/// attempt passed: a pairing the attempt revoked is removed.
+fn clear_revoked_pairings<S: PairingStore>(requester: &mut Requester<S>, forgotten: &[PairId]) {
+    for pair_id in forgotten {
+        let revoked = requester
+            .store()
+            .get(*pair_id)
+            .is_ok_and(|record| matches!(record.state(), PairingState::Revoked { .. }));
+        if revoked {
+            let _ = requester.forget_pairing(*pair_id);
+        }
+    }
 }
 
 /// What a typed code that paired with no phone tells the user; it names no
@@ -332,13 +379,7 @@ fn reconnect(arguments: &[String]) -> Result<(), String> {
         return Err("no pairing is stored; pair first in the settings app".into());
     }
 
-    let mut requester = Requester::new(
-        RequesterConfig {
-            display_name: options.name.clone(),
-            platform: "Windows".into(),
-        },
-        store,
-    );
+    let mut requester = Requester::new(RequesterConfig::this_computer(), store);
 
     let pair_id = {
         let record = requester
@@ -347,8 +388,8 @@ fn reconnect(arguments: &[String]) -> Result<(), String> {
             .ok_or("the stored pairing serves nothing; pair again in the settings app")?;
         println!(
             "reconnecting to {} ({}); granted: {}",
-            record.peer().display_name,
-            record.peer().platform,
+            record.peer_display_name().as_str(),
+            record.peer_platform(),
             profile_list(record.granted_profiles())
         );
         record.pair_id()
@@ -426,7 +467,8 @@ fn serve_sessions<S: PairingStore>(
             .ok()
             .and_then(PairingRecord::serving_record)
             .ok_or("the pairing serves nothing; pair again")?;
-        let Ok(transport) = dial_session(keys, &preferred, &[], BROWSE_WINDOW) else {
+        let Ok(transport) = dial_session(keys, &preferred, BROWSE_WINDOW, DialCause::Holding)
+        else {
             std::thread::sleep(SESSION_RETRY);
             continue;
         };
@@ -547,12 +589,13 @@ fn flush_now() {
     let _ = std::io::Write::flush(&mut std::io::stdout());
 }
 
-/// The grant confirmation of RAPP v26.10.29 section 4.3 item 3.
+/// The grant confirmation of RAPP v26.11.2 section 4.3 item 3.
 fn confirm_grants(peer: &PeerIntroduction, requested: &[ProfileName]) -> Option<Vec<ProfileName>> {
     println!();
     println!(
         "pairing request from {} ({})",
-        peer.display_name, peer.platform
+        peer.display_name.as_str(),
+        peer.platform
     );
     println!("grants to confirm: {}", profile_list(requested));
     print!("confirm this exact pairing? [y/N] ");
@@ -677,13 +720,7 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
     let store = ProtectedPairingStore::load()
         .map_err(|e| format!("cannot load ProtectedPairingStore: {e}"))?;
 
-    let mut requester = Requester::new(
-        RequesterConfig {
-            display_name: "RefineID Windows".into(),
-            platform: "Windows".into(),
-        },
-        store,
-    );
+    let mut requester = Requester::new(RequesterConfig::this_computer(), store);
 
     let transport = dial_for_pairing(
         &[DEFAULT_LISTEN.to_owned()],
@@ -737,7 +774,7 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
 /// Deletes this user's whole pairing set, keys included, and tells no
 /// phone: a local wipe for a development machine, for instance of a set
 /// that no longer decodes. `forget-pairing` is the user's forget action of
-/// RAPP v26.10.29 section 4.6.
+/// RAPP v26.11.2 section 4.6.
 fn clear_pairing() -> Result<(), String> {
     refineid_windows_credential_store::delete_pairing_set()
         .map_err(|e| format!("failed to clear pairing: {e:?}"))?;
@@ -745,7 +782,7 @@ fn clear_pairing() -> Result<(), String> {
     Ok(())
 }
 
-/// The user's forget action on one pairing (RAPP v26.10.29 section 4.6): a
+/// The user's forget action on one pairing (RAPP v26.11.2 section 4.6): a
 /// confirmed pairing keeps its keys only for the `pairing_revoked` close
 /// its phone is given on the next session, and serves nothing from now on;
 /// an unconfirmed or revoked one is removed.
@@ -800,8 +837,8 @@ fn list_pairing() -> Result<(), String> {
         );
         println!(
             "      Peer: {} ({})",
-            record.peer().display_name,
-            record.peer().platform
+            record.peer_display_name().as_str(),
+            record.peer_platform()
         );
         println!("      State: {:?}", record.state());
         println!(
@@ -874,4 +911,102 @@ fn import_pairing(arguments: &[String]) -> Result<(), String> {
     }
     println!("Imported {count} pairing record(s) into Windows Credential Store");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clear_revoked_pairings, forget_replaced_pairings};
+    use refineid_rapp::noise::x25519_public_key;
+    use refineid_rapp::{
+        DisplayName, EndpointRole, PairRecord, ProfileName, X25519_KEY_SIZE, compute_grants_hash,
+    };
+    use refineid_rapp_core::engine::{Requester, RequesterConfig};
+    use refineid_rapp_core::ids::PairId;
+    use refineid_rapp_core::store::{
+        MemoryPairingStore, PairingRecord, PairingStore, revoke_pairing,
+    };
+
+    /// A synthetic held pairing.
+    const FIRST_PAIR: PairId = PairId::from_array(*b"cli held pair 01");
+    /// A synthetic fresh pairing.
+    const SECOND_PAIR: PairId = PairId::from_array(*b"cli fresh pair 1");
+
+    /// A synthetic requester static private key.
+    const REQUESTER_PRIVATE: [u8; X25519_KEY_SIZE] = *b"synthetic requester private key.";
+    /// A synthetic custodian static private key.
+    const CUSTODIAN_PRIVATE: [u8; X25519_KEY_SIZE] = *b"synthetic custodian private key.";
+    /// The pairing creation time the fixtures record.
+    const CREATED_AT_MS: u64 = 1_700_000_000_000;
+
+    /// A confirmed pairing record granting card status.
+    fn record(pair_id: PairId) -> PairingRecord {
+        let profiles = vec![ProfileName::CardStatus];
+        let grants_hash = compute_grants_hash(&profiles).expect("grants hash");
+        let keys = PairRecord::new(
+            pair_id,
+            EndpointRole::Requester,
+            REQUESTER_PRIVATE,
+            x25519_public_key(&REQUESTER_PRIVATE),
+            x25519_public_key(&CUSTODIAN_PRIVATE),
+            grants_hash,
+            profiles,
+            DisplayName::parse("Phone".to_owned()).expect("a display name"),
+            CREATED_AT_MS,
+        )
+        .expect("a pair record");
+        PairingRecord::new(keys, "iOS".to_owned())
+    }
+
+    fn requester(first: bool) -> Requester<MemoryPairingStore> {
+        let mut store = MemoryPairingStore::new();
+        if first {
+            store.insert(record(FIRST_PAIR)).expect("insert held");
+        }
+        store.insert(record(SECOND_PAIR)).expect("insert fresh");
+        Requester::new(RequesterConfig::this_computer(), store)
+    }
+
+    #[test]
+    fn pairing_again_forgets_the_pairing_held_before() {
+        let mut requester = requester(true);
+        let replaced = forget_replaced_pairings(&mut requester, SECOND_PAIR);
+        assert_eq!(replaced, vec![FIRST_PAIR]);
+        assert!(
+            !requester
+                .store()
+                .get(FIRST_PAIR)
+                .expect("held record")
+                .serves(),
+            "the held pairing serves nothing from now on"
+        );
+        assert!(
+            requester
+                .store()
+                .get(SECOND_PAIR)
+                .expect("fresh record")
+                .serves()
+        );
+    }
+
+    #[test]
+    fn a_first_pairing_forgets_nothing() {
+        let mut requester = requester(false);
+        assert!(forget_replaced_pairings(&mut requester, SECOND_PAIR).is_empty());
+        assert!(
+            requester
+                .store()
+                .get(SECOND_PAIR)
+                .expect("fresh record")
+                .serves()
+        );
+    }
+
+    #[test]
+    fn clearing_removes_only_what_the_attempt_revoked() {
+        let mut requester = requester(true);
+        revoke_pairing(requester.store_mut(), FIRST_PAIR, false).expect("revoke held");
+        clear_revoked_pairings(&mut requester, &[FIRST_PAIR, SECOND_PAIR]);
+        assert!(requester.store().get(FIRST_PAIR).is_err());
+        assert!(requester.store().get(SECOND_PAIR).is_ok());
+    }
 }

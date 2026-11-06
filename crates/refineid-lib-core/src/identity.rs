@@ -63,7 +63,7 @@ use core::ops::Deref;
 /// string via [`render_token_serial`]. Format varies by chip
 /// generation (ASCII on v4.0+ cards, hex-of-BCD on v3.1), but
 /// the value is stable per physical card and serves as the
-/// "session identity" binding for trust-gated flows: read once
+/// "session identity" binding for bound card flows: read once
 /// at session open, re-read before each modify APDU, compare
 /// for equality. Different physical card => different value =>
 /// session revocation.
@@ -953,6 +953,50 @@ impl PartialEq<str> for CommonName {
 impl PartialEq<&str> for CommonName {
     fn eq(&self, other: &&str) -> bool {
         self.0 == *other
+    }
+}
+
+/// X.509 subject `organizationName` attribute value (OID 2.5.4.10),
+/// verbatim as the certificate carries it.
+///
+/// An organization card's certificate names the organization here; a
+/// citizen certificate has no such attribute.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OrganizationName(String);
+
+impl OrganizationName {
+    /// # Errors
+    /// [`FreeTextError::Empty`] if `s` is empty,
+    /// [`FreeTextError::TooLong`] if `s` exceeds
+    /// [`FREE_TEXT_MAX_BYTES`].
+    pub(crate) fn new(s: String) -> Result<Self, FreeTextError> {
+        FreeText::parse(&s)?;
+        Ok(Self(s))
+    }
+
+    /// Borrow the underlying organization-name string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Deref for OrganizationName {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for OrganizationName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for OrganizationName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -2936,8 +2980,29 @@ pub struct CredentialIdentity {
     /// Note: `CredentialIdentity` no longer carries the full
     /// chip-side serial ([`TokenSerial`]). That value is
     /// session state, not person identity, and lives on the
-    /// trust-gated card session (`bound_serial` field).
+    /// bound card session (`bound_serial` field).
     pub printed_serial: Option<PrintedSerial>,
+    /// X.520 `organizationName` (OID 2.5.4.10) from the
+    /// certificate subject. `Some` on an organization card,
+    /// `None` on a citizen card.
+    pub organization: Option<OrganizationName>,
+}
+
+/// What joins the holder's name to the organization on the
+/// holder line.
+const ORGANIZATION_SEPARATOR: &str = ", ";
+
+/// The holder line a window shows: the holder's name, followed by
+/// the organization when the certificate names one. A name alone
+/// when there is no organization; empty when there is no name.
+#[must_use]
+pub fn holder_line(person: String, organization: Option<&OrganizationName>) -> String {
+    match organization {
+        Some(organization) if !person.is_empty() => {
+            format!("{person}{ORGANIZATION_SEPARATOR}{organization}")
+        }
+        _ => person,
+    }
 }
 
 impl CredentialIdentity {
@@ -2990,6 +3055,13 @@ impl CredentialIdentity {
         self
     }
 
+    /// Set the [`organization`](Self::organization) and return `self`.
+    #[must_use]
+    pub fn with_organization(mut self, value: OrganizationName) -> Self {
+        self.organization = Some(value);
+        self
+    }
+
     /// Set the [`peuin`](Self::peuin) and return `self`.
     #[must_use]
     pub const fn with_peuin(mut self, value: Peuin) -> Self {
@@ -3014,7 +3086,7 @@ impl CredentialIdentity {
     /// Best available serial for human-facing render paths.
     /// Now just the printed form (the full chip serial moved
     /// out of `CredentialIdentity`); callers that want the
-    /// full serial pull `bound_serial` from the trust-gated
+    /// full serial pull `bound_serial` from the bound
     /// session.
     #[must_use]
     pub fn best_serial(&self) -> Option<&str> {
@@ -3053,6 +3125,17 @@ impl CredentialIdentity {
         parts.join(" ")
     }
 
+    /// The holder line a window shows: [`person_string`] followed
+    /// by the organization when the certificate names one, as an
+    /// organization card's does. A citizen card shows the name
+    /// alone. Empty when no name is known.
+    ///
+    /// [`person_string`]: Self::person_string
+    #[must_use]
+    pub fn holder_line(&self) -> String {
+        holder_line(self.person_string(), self.organization.as_ref())
+    }
+
     /// Iterate every given-name slot in canonical order:
     /// first, second, then each additional name.
     pub fn iter_given_names(&self) -> impl Iterator<Item = &str> {
@@ -3075,6 +3158,7 @@ impl CredentialIdentity {
             && self.peuin.is_none()
             && self.date_of_birth.is_none()
             && self.printed_serial.is_none()
+            && self.organization.is_none()
     }
 
     /// Render for a PIN / PUK prompt with a bounded byte
@@ -3429,6 +3513,34 @@ mod tests {
             .with_peuin(Peuin::new(SAMPLE_PEUIN).expect("sample PEUIN is valid"))
     }
 
+    #[test]
+    fn an_organization_card_holder_line_names_the_organization() {
+        let id = sample_identity().with_organization(
+            OrganizationName::new("Testiorganisaatio Oy".to_owned())
+                .expect("sample organization is valid"),
+        );
+        assert_eq!(id.person_string(), "SPECIMEN-TRAVEL VILMA SOFIA");
+        assert_eq!(
+            id.holder_line(),
+            "SPECIMEN-TRAVEL VILMA SOFIA, Testiorganisaatio Oy"
+        );
+    }
+
+    #[test]
+    fn a_citizen_card_holder_line_is_the_name_alone() {
+        let id = sample_identity();
+        assert_eq!(id.holder_line(), id.person_string());
+    }
+
+    #[test]
+    fn an_organization_without_a_name_shows_nothing() {
+        let id = CredentialIdentity::new().with_organization(
+            OrganizationName::new("Testiorganisaatio Oy".to_owned())
+                .expect("sample organization is valid"),
+        );
+        assert_eq!(id.holder_line(), "");
+    }
+
     fn full_with_both_serials() -> CredentialIdentity {
         sample_identity().with_printed_serial(PrintedSerial::new(SAMPLE_PRINTED.to_owned()))
     }
@@ -3450,7 +3562,7 @@ mod tests {
     fn display_omits_serial_when_printed_none() {
         // After CredentialIdentity dropped token_serial_full,
         // a printed-None identity has no serial to render. The
-        // chip-side full form lives on the trust-gated session,
+        // chip-side full form lives on the bound session,
         // not in CredentialIdentity.
         assert_eq!(
             format!("{}", full_full_serial_only()),
