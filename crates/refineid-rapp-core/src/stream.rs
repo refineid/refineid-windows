@@ -1208,6 +1208,111 @@ impl core::error::Error for StreamError {
 }
 
 #[cfg(test)]
+mod dns_name_tests {
+    use std::time::Duration;
+
+    use super::{MdnsRecords, parse_dns_name, parse_mdns_response};
+
+    /// A label length's top bits that RFC 1035 section 4.1.4 reserves.
+    const DNS_RESERVED_LABEL_TAG: u8 = 0x40;
+    /// A label of a name in the parser tests.
+    const LABEL: &[u8] = b"phone";
+
+    /// `count` copies of [`LABEL`], each with its length, and no end.
+    fn unended_name(count: usize) -> Vec<u8> {
+        let length = u8::try_from(LABEL.len()).expect("a short label");
+        (0..count)
+            .flat_map(|_| core::iter::once(length).chain(LABEL.iter().copied()))
+            .collect()
+    }
+
+    #[test]
+    fn a_name_that_runs_off_the_datagram_is_malformed() {
+        assert_eq!(parse_dns_name(&unended_name(1), 0), None);
+    }
+
+    /// A name of exactly `total` bytes on the wire, terminator included.
+    fn name_of_bytes(total: usize) -> Vec<u8> {
+        let longest_label = 63;
+        let mut name = Vec::new();
+        let mut left = total - super::DNS_TERMINATOR_BYTES;
+        while left > 0 {
+            let length = (left - 1).min(longest_label).max(1);
+            name.push(u8::try_from(length).expect("a label length"));
+            name.resize(name.len() + length, LABEL[0]);
+            left -= length + 1;
+        }
+        name.push(0);
+        assert_eq!(name.len(), total);
+        name
+    }
+
+    #[test]
+    fn a_name_at_the_dns_limit_is_read_and_one_byte_more_is_malformed() {
+        let limit = super::DNS_NAME_BYTES;
+        assert!(parse_dns_name(&name_of_bytes(limit), 0).is_some());
+        assert_eq!(parse_dns_name(&name_of_bytes(limit + 1), 0), None);
+    }
+
+    #[test]
+    fn a_label_length_with_reserved_top_bits_is_malformed() {
+        let mut name = unended_name(1);
+        name[0] |= DNS_RESERVED_LABEL_TAG;
+        name.resize(usize::from(name[0]) + 2, 0);
+        assert_eq!(parse_dns_name(&name, 0), None);
+    }
+
+    #[test]
+    fn a_name_ends_after_its_terminator_or_first_pointer() {
+        let mut name = unended_name(1);
+        name.push(0);
+        let end = name.len();
+        assert_eq!(parse_dns_name(&name, 0), Some(("phone".to_owned(), end)));
+
+        let pointer_at = name.len();
+        name.extend_from_slice(&[super::DNS_POINTER_TAG, 0]);
+        assert_eq!(
+            parse_dns_name(&name, pointer_at),
+            Some(("phone".to_owned(), pointer_at + super::DNS_POINTER_BYTES))
+        );
+    }
+
+    #[test]
+    fn a_pointer_to_itself_is_malformed() {
+        assert_eq!(parse_dns_name(&[super::DNS_POINTER_TAG, 0], 0), None);
+    }
+
+    /// How long reading one datagram may take: far beyond a read that walks
+    /// it once, far below one its counts make walk it again and again.
+    const ONE_DATAGRAM_READ: Duration = Duration::from_millis(250);
+
+    /// A datagram whose question count, read as a name, jumps off the end,
+    /// so the next name starts in the header and runs to the end with no
+    /// terminator. A name with no end must not send the read back to the
+    /// start: every question would walk the datagram again.
+    #[test]
+    fn a_datagram_cannot_make_its_read_walk_it_again() {
+        let question_count_at = 4;
+        let name_in_header_at = 10;
+        let mut datagram = vec![0u8; super::DNS_HEADER_BYTES];
+        datagram[question_count_at] = u8::MAX;
+        datagram[question_count_at + 1] = u8::MAX;
+        datagram[name_in_header_at] = 1;
+        datagram[name_in_header_at + 1] = LABEL[0];
+        let label = [1, LABEL[0]];
+        while datagram.len() + label.len() <= super::MDNS_RESPONSE_BYTES {
+            datagram.extend_from_slice(&label);
+        }
+
+        let started = std::time::Instant::now();
+        parse_mdns_response(&datagram, None, &mut MdnsRecords::default());
+        let read_for = started.elapsed();
+
+        assert!(read_for < ONE_DATAGRAM_READ, "read for {read_for:?}");
+    }
+}
+
+#[cfg(test)]
 #[allow(
     clippy::unwrap_used,
     reason = "test fixtures are constructed to be infallible"
@@ -1218,7 +1323,7 @@ mod tests {
 
     use super::{
         DialPurpose, DiscoveryMode, MdnsRecords, StreamAccept, StreamError, StreamListener,
-        StreamService, browse_interfaces_among, dial, parse_dns_name, parse_mdns_response,
+        StreamService, browse_interfaces_among, dial, parse_mdns_response,
     };
     use crate::ids::{GrantsHash, PairId};
     use crate::transport::FrameTransport;
@@ -1628,103 +1733,5 @@ mod tests {
             ),
             Err(StreamError::Unreachable)
         ));
-    }
-
-    /// A label length's top bits that RFC 1035 section 4.1.4 reserves.
-    const DNS_RESERVED_LABEL_TAG: u8 = 0x40;
-    /// A label of a name in the parser tests.
-    const LABEL: &[u8] = b"phone";
-
-    /// `count` copies of [`LABEL`], each with its length, and no end.
-    fn unended_name(count: usize) -> Vec<u8> {
-        let length = u8::try_from(LABEL.len()).expect("a short label");
-        (0..count)
-            .flat_map(|_| core::iter::once(length).chain(LABEL.iter().copied()))
-            .collect()
-    }
-
-    #[test]
-    fn a_name_that_runs_off_the_datagram_is_malformed() {
-        assert_eq!(parse_dns_name(&unended_name(1), 0), None);
-    }
-
-    /// A name of exactly `total` bytes on the wire, terminator included.
-    fn name_of_bytes(total: usize) -> Vec<u8> {
-        let longest_label = 63;
-        let mut name = Vec::new();
-        let mut left = total - super::DNS_TERMINATOR_BYTES;
-        while left > 0 {
-            let length = (left - 1).min(longest_label).max(1);
-            name.push(u8::try_from(length).expect("a label length"));
-            name.resize(name.len() + length, LABEL[0]);
-            left -= length + 1;
-        }
-        name.push(0);
-        assert_eq!(name.len(), total);
-        name
-    }
-
-    #[test]
-    fn a_name_at_the_dns_limit_is_read_and_one_byte_more_is_malformed() {
-        let limit = super::DNS_NAME_BYTES;
-        assert!(parse_dns_name(&name_of_bytes(limit), 0).is_some());
-        assert_eq!(parse_dns_name(&name_of_bytes(limit + 1), 0), None);
-    }
-
-    #[test]
-    fn a_label_length_with_reserved_top_bits_is_malformed() {
-        let mut name = unended_name(1);
-        name[0] |= DNS_RESERVED_LABEL_TAG;
-        name.resize(usize::from(name[0]) + 2, 0);
-        assert_eq!(parse_dns_name(&name, 0), None);
-    }
-
-    #[test]
-    fn a_name_ends_after_its_terminator_or_first_pointer() {
-        let mut name = unended_name(1);
-        name.push(0);
-        let end = name.len();
-        assert_eq!(parse_dns_name(&name, 0), Some(("phone".to_owned(), end)));
-
-        let pointer_at = name.len();
-        name.extend_from_slice(&[super::DNS_POINTER_TAG, 0]);
-        assert_eq!(
-            parse_dns_name(&name, pointer_at),
-            Some(("phone".to_owned(), pointer_at + super::DNS_POINTER_BYTES))
-        );
-    }
-
-    #[test]
-    fn a_pointer_to_itself_is_malformed() {
-        assert_eq!(parse_dns_name(&[super::DNS_POINTER_TAG, 0], 0), None);
-    }
-
-    /// How long reading one datagram may take: far beyond a read that walks
-    /// it once, far below one its counts make walk it again and again.
-    const ONE_DATAGRAM_READ: Duration = Duration::from_millis(250);
-
-    /// A datagram whose question count, read as a name, jumps off the end,
-    /// so the next name starts in the header and runs to the end with no
-    /// terminator. A name with no end must not send the read back to the
-    /// start: every question would walk the datagram again.
-    #[test]
-    fn a_datagram_cannot_make_its_read_walk_it_again() {
-        let question_count_at = 4;
-        let name_in_header_at = 10;
-        let mut datagram = vec![0u8; super::DNS_HEADER_BYTES];
-        datagram[question_count_at] = u8::MAX;
-        datagram[question_count_at + 1] = u8::MAX;
-        datagram[name_in_header_at] = 1;
-        datagram[name_in_header_at + 1] = LABEL[0];
-        let label = [1, LABEL[0]];
-        while datagram.len() + label.len() <= super::MDNS_RESPONSE_BYTES {
-            datagram.extend_from_slice(&label);
-        }
-
-        let started = std::time::Instant::now();
-        parse_mdns_response(&datagram, None, &mut MdnsRecords::default());
-        let read_for = started.elapsed();
-
-        assert!(read_for < ONE_DATAGRAM_READ, "read for {read_for:?}");
     }
 }
