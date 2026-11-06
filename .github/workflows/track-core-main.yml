@@ -1,0 +1,87 @@
+name: track-core-main
+
+# RefineID's own crates are never pinned: every app builds the head of
+# refineid-core main. A commit moves the lock file there through the
+# pre-commit hook; this moves it on a day nobody commits, in the
+# background, checks that the tree still builds, stamps the version as a
+# code-level change, and merges. A move that does not build is not
+# merged: the maintainer is assigned to an issue instead. Nothing here
+# runs on a pull request.
+on:
+  schedule:
+    - cron: '15 4 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+env:
+  MAINTAINER: petri-koistinen-refineid
+
+jobs:
+  track:
+    name: Build the head of refineid-core main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The move is pushed back with the workflow's own token.
+          persist-credentials: true
+
+      - name: Move every lock file to the head of core main
+        run: |
+          cargo update --package refineid-rapp
+      - name: Stop when every lock file already names the head
+        id: moved
+        run: |
+          if git diff --quiet; then
+            echo "moved=no" >> "$GITHUB_OUTPUT"
+          else
+            echo "moved=yes" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stamp the version as a code-level change
+        if: steps.moved.outputs.moved == 'yes'
+        run: ./scripts/version-stamp.sh
+
+      - name: Check that the tree builds on the moved core
+        id: check
+        if: steps.moved.outputs.moved == 'yes'
+        run: |
+          cargo check --workspace --all-targets --locked
+      - name: Merge the move
+        if: steps.moved.outputs.moved == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          branch="track-core-main/$(date -u +%Y%m%d-%H%M)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -b "$branch"
+          git commit -am 'Build the head of refineid-core main'
+          git push -u origin "$branch"
+          gh pr create --base main --head "$branch" --title 'Build the head of refineid-core main' \
+            --body "RefineID's own crates are never pinned: the lock file moves to the head of refineid-core main, and the tree was checked on it."
+          gh pr merge "$branch" --squash --delete-branch
+
+      - name: Report a move that does not build
+        if: failure() && steps.check.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh label create core-tracking --description 'The head of refineid-core main does not build here' --color B60205 --force
+          number=$(gh issue list --label core-tracking --state open --json number --jq '.[0].number')
+          if [ -z "$number" ]; then
+            gh issue create --title 'The head of refineid-core main does not build here' --label core-tracking --assignee "$MAINTAINER" \
+              --body "The daily move to the head of refineid-core main did not build, so it was not merged. See the run: $RUN_URL"
+          else
+            gh issue comment "$number" --body "Still not building on the head of core main: $RUN_URL"
+          fi
