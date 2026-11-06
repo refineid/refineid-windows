@@ -320,6 +320,20 @@ pub fn run() {
     }
 }
 
+/// Development test hook: the CAN a debug build takes from the
+/// `REFINEID_TEST_CAN` environment variable. The value is never logged.
+#[cfg(debug_assertions)]
+fn test_can() -> Option<String> {
+    std::env::var("REFINEID_TEST_CAN").ok()
+}
+
+/// A release build has no CAN test hook: it never reads the CAN from the
+/// environment.
+#[cfg(not(debug_assertions))]
+const fn test_can() -> Option<String> {
+    None
+}
+
 /// Headless self-check for SSH sessions, where the GUI would land
 /// in invisible session 0: read the card panel and print it.
 /// Read-only; no credential-bearing command is sent.
@@ -329,9 +343,7 @@ fn smoke() {
         println!("SMOKE-NO-CARD");
         return;
     };
-    let can = std::env::var("REFINEID_TEST_CAN")
-        .ok()
-        .and_then(|value| identity::parse_can(value.into_bytes()).ok());
+    let can = test_can().and_then(|value| identity::parse_can(value.into_bytes()).ok());
     let outcome = can.map_or_else(
         || identity::read_identity(&reader),
         |can| identity::read_identity_and_photo(&reader, can),
@@ -747,9 +759,9 @@ fn on_create(main: HWND) -> windows::core::Result<()> {
         instance,
     )?;
     set_font(identity_can, font);
-    // Test hook: prefill the CAN from the environment when it
-    // parses. The value is never logged.
-    if let Ok(prefill) = std::env::var("REFINEID_TEST_CAN")
+    // Test hook: a debug build prefills the CAN from the environment
+    // when it parses.
+    if let Some(prefill) = test_can()
         && refineid_lib_core::can::Can::new(&prefill).is_ok()
     {
         set_text(identity_can, &prefill);
