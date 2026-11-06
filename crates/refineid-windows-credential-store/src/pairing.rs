@@ -206,11 +206,13 @@ impl ProtectedPairingStore {
         write_pairing_set(&self.directory, &blob)
     }
 
-    /// Re-reads the stored set, applies `change`, and writes it.
+    /// Re-reads the stored set, applies `change`, and writes it, under the
+    /// set's lock, so no other process writes between the read and the write.
     fn change(
         &mut self,
         change: impl FnOnce(&mut Vec<PairingRecord>) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
+        let _lock = lock_set(&self.directory)?;
         self.refresh()?;
         change(&mut self.records)?;
         self.persist().map_err(|_error| StoreError::WriteRefused)
@@ -311,6 +313,7 @@ impl PairingStore for ProtectedPairingStore {
         now_ms: u64,
         session_established: bool,
     ) -> Result<SweepOutcome, RecordStoreError<StoreError>> {
+        let _lock = lock_set(&self.directory).map_err(RecordStoreError::Store)?;
         self.refresh().map_err(RecordStoreError::Store)?;
         let index = self
             .records
@@ -338,6 +341,27 @@ const PROFILE_DIRECTORY: &str = "RefineID";
 /// The protected pairing set.
 #[cfg(windows)]
 const PAIRING_SET_FILE: &str = "pairing-set.dpapi";
+/// The file whose exclusive lock every change to the set holds.
+///
+/// The app, the agent and the card module each re-read the set, change it
+/// and write it back. The lock keeps one from writing back a set it read
+/// before another stored a record, which would lose that record.
+const PAIRING_SET_LOCK_FILE: &str = "pairing-set.lock";
+
+/// Takes the set's exclusive lock, waiting for another process to release
+/// it; the lock lasts as long as the returned file is open.
+fn lock_set(directory: &Path) -> Result<std::fs::File, StoreError> {
+    std::fs::create_dir_all(directory).map_err(|_error| StoreError::WriteRefused)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(directory.join(PAIRING_SET_LOCK_FILE))
+        .map_err(|_error| StoreError::WriteRefused)?;
+    file.lock().map_err(|_error| StoreError::WriteRefused)?;
+    Ok(file)
+}
+
 /// The directory of the last card a session heard present for each
 /// pairing, one unprotected file per pairing: nothing in it is secret.
 const CARD_SIGHTINGS_DIRECTORY: &str = "card-sightings";
@@ -921,6 +945,40 @@ mod tests {
         );
         delete_pairing_set_in(&directory.0).expect("delete");
         assert!(!directory.0.join(PAIRING_SET_FILE).exists());
+    }
+
+    #[test]
+    fn a_record_stored_once_survives_another_store_writing_meanwhile() {
+        // One store adds pairings, each exactly once, as the app stores a
+        // new pairing; another store over the same directory keeps
+        // rewriting the set, as the agent does. No pairing may be lost.
+        const ADDED: u8 = 30;
+        const REWRITES: usize = 60;
+        const WRITERS: usize = 2;
+        let directory = TestDirectory::new("concurrent");
+        let start = std::sync::Arc::new(std::sync::Barrier::new(WRITERS));
+        let rewriter = {
+            let path = directory.0.clone();
+            let start = start.clone();
+            std::thread::spawn(move || {
+                let mut store = ProtectedPairingStore::load_from(path).expect("load");
+                start.wait();
+                for _ in 0..REWRITES {
+                    store.insert(record(SECOND_PAIR)).expect("rewrite");
+                }
+            })
+        };
+        let mut adder = ProtectedPairingStore::load_from(directory.0.clone()).expect("load");
+        start.wait();
+        for index in 0..ADDED {
+            let mut id = *b"added pairing   ";
+            let last = id.last_mut().expect("an identifier has bytes");
+            *last = index;
+            adder.insert(record(PairId::from_array(id))).expect("add");
+        }
+        rewriter.join().expect("rewriter");
+        let reloaded = ProtectedPairingStore::load_from(directory.0.clone()).expect("reload");
+        assert_eq!(reloaded.len(), usize::from(ADDED) + 1);
     }
 
     #[test]
