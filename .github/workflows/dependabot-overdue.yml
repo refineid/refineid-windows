@@ -1,0 +1,38 @@
+name: dependabot-overdue
+
+# A pinned version is only as good as the review that keeps it fresh.
+# Dependabot opens the update; this names the maintainer on any update
+# still open after the due time, which GitHub reports by notification.
+on:
+  schedule:
+    - cron: '30 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  pull-requests: write
+  issues: write
+
+env:
+  MAINTAINER: petri-koistinen-refineid
+  DUE_DAYS: '14'
+
+jobs:
+  overdue:
+    name: Name the maintainer on overdue dependency updates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find Dependabot pull requests open past the due time
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh label create dependency-overdue --description 'A dependency update open past its due time' --color D93F0B --force --repo "$REPO"
+          cutoff=$(date -u -d "-${DUE_DAYS} days" +%Y-%m-%dT%H:%M:%SZ)
+          gh pr list --repo "$REPO" --author app/dependabot --state open --limit 100 \
+            --json number,createdAt,labels,url \
+            --jq --arg cutoff "$cutoff" '.[] | select(.createdAt < $cutoff) | select(all(.labels[]; .name != "dependency-overdue")) | "\(.number) \(.url)"' |
+          while read -r number url; do
+            echo "overdue: $url"
+            gh pr edit "$number" --repo "$REPO" --add-label dependency-overdue --add-assignee "$MAINTAINER"
+            gh pr comment "$number" --repo "$REPO" --body "@${MAINTAINER} this dependency update has been open for more than ${DUE_DAYS} days. Merge it, or close it with the reason."
+          done
