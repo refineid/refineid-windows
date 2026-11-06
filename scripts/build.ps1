@@ -63,8 +63,11 @@ $profileDirectory = if ($Configuration -eq 'Release') { 'release' } else { 'debu
 # Prunes Rust build artifacts not touched in the last $Days days. Uses
 # cargo-sweep, which reads cargo's fingerprints and removes only unreferenced
 # output -- unlike deleting by modification time, which can strand an
-# incremental build. Housekeeping is best-effort: a missing tool, no network,
-# or a sweep error warns and continues rather than failing the build.
+# incremental build. Housekeeping is best-effort: a missing tool or a sweep
+# error warns and continues rather than failing the build. The build never
+# installs a tool: software that runs on the build machine is installed and
+# updated on purpose, not fetched by a build script at whatever version is
+# current that day.
 function Invoke-StaleArtifactPrune {
     param(
         [Parameter(Mandatory)][string]$CargoExecutable,
@@ -76,12 +79,8 @@ function Invoke-StaleArtifactPrune {
     }
 
     if (-not (Get-Command cargo-sweep -ErrorAction SilentlyContinue)) {
-        Write-Host 'Installing cargo-sweep to prune stale Rust artifacts...'
-        & $CargoExecutable install cargo-sweep --version 0.8.0 --locked
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning 'cargo-sweep is unavailable; skipping the stale-artifact prune.'
-            return
-        }
+        Write-Warning 'cargo-sweep is not installed; skipping the stale-artifact prune.'
+        return
     }
 
     Write-Host "Pruning Rust artifacts older than $Days days..."

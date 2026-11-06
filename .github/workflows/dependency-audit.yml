@@ -1,0 +1,68 @@
+name: dependency-audit
+
+# Runs after the fact, never on a pull request: it must not slow the
+# review of a change. A pinned dependency that gains an advisory is
+# caught here and reported to the maintainer, who is assigned to the
+# issue and so notified by GitHub.
+on:
+  schedule:
+    - cron: '0 5 * * 1'
+  push:
+    branches:
+      - main
+    paths:
+      - '**/Cargo.lock'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  MAINTAINER: petri-koistinen-refineid
+  LOCK_DIRS: '.'
+
+jobs:
+  audit:
+    name: Audit the lock files against the RustSec advisory database
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: cargo-audit
+
+      - name: Audit every lock file
+        id: audit
+        run: |
+          status=0
+          for dir in $LOCK_DIRS; do
+            echo "::group::$dir"
+            cargo audit --file "$dir/Cargo.lock" || status=1
+            echo "::endgroup::"
+          done
+          exit $status
+
+      - name: Report a failed audit to the maintainer
+        if: failure() && steps.audit.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh label create dependency-audit --description 'A dependency carries a published advisory' --color B60205 --force
+          number=$(gh issue list --label dependency-audit --state open --json number --jq '.[0].number')
+          if [ -z "$number" ]; then
+            gh issue create --title 'Dependency audit failed' --label dependency-audit --assignee "$MAINTAINER" \
+              --body "The scheduled advisory audit failed. See the run: $RUN_URL"
+          else
+            gh issue comment "$number" --body "The advisory audit failed again: $RUN_URL"
+          fi
