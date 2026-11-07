@@ -40,7 +40,7 @@ use refineid_lib_core::backend::{
 use refineid_lib_core::fineid_card::{CardClassificationError, FineidCardModel};
 use refineid_lib_core::pin::{ActivationCode, PinBytes, PinRoleError, Puk};
 use refineid_lib_core::pin_retry_risk::{
-    RetryFloorRefusal, check_puk_retry_floor, check_retry_floor,
+    RetryFloorRefusal, check_activation_last_tries, check_puk_retry_floor, check_retry_floor,
 };
 use refineid_lib_core::pkcs15::{CertSlot, FineidReaderPick};
 use refineid_lib_core::pkcs15::{FineidReaderPicker as _, Pkcs15Ops as _};
@@ -1071,10 +1071,16 @@ fn puk_retry_floor<T: refineid_lib_core::transport::CardTransport>(
 ///
 /// - §4.6.2 ([`ActivationScheme::PresetActivationPin`]):
 ///   `CHANGE REFERENCE DATA` from the preset activation PIN, behind
-///   the slot's retry floor.
+///   the slot's last-tries rule: refused at two or one tries left and
+///   at an unreadable counter, sent at zero or blocked.
 /// - §4.6.1 ([`ActivationScheme::ActivationCodeIsPuk`]):
 ///   `RESET RETRY COUNTER` presenting the activation PIN as the
-///   PUK, behind the PUK's retry floor.
+///   PUK, behind the PUK's retry floor, which reads the same.
+///
+/// Either way the card answers an exhausted or blocked credential for
+/// itself and spends nothing, and the code in the holder's hand may be
+/// the other scheme's; the software does not close a recovery the card
+/// would allow.
 ///
 /// `new_pin` is consumed by value so the PIN material drops +
 /// zeroizes at function return; the activation PIN's transient copy
@@ -1089,11 +1095,11 @@ fn activate_slot_setup<T: refineid_lib_core::transport::CardTransport>(
     match activation_code {
         ActivationCode::Seven(_) => {
             // The activation PIN is the slot's current PIN: a wrong one
-            // spends that slot's tries, so the retry floor applies.
+            // spends that slot's tries, so its last two are guarded.
             let status = transport
                 .pin_status_with_scheme(lengths.numbering(), slot)
                 .map_err(auth_to_card_pin)?;
-            check_retry_floor(slot.into(), status).map_err(CardPinError::RetryFloor)?;
+            check_activation_last_tries(slot.into(), status).map_err(CardPinError::RetryFloor)?;
             transport
                 .change_pin(lengths, slot, activation_code.to_pin_bytes(), new_pin)
                 .map(change_to_unblock)
@@ -1410,11 +1416,10 @@ mod activate_tests {
 
     /// Tries left at which a PIN attempt is served.
     const SERVED: [u8; 3] = [5, 4, 3];
-    /// Tries left at which a PIN attempt is refused.
-    const REFUSED: [u8; 3] = [2, 1, 0];
-    /// Tries left at which a PUK presentation is refused; at zero the
-    /// card answers for itself.
-    const PUK_REFUSED: [u8; 2] = [2, 1];
+    /// Tries left at which an activation code is not presented, as the
+    /// PUK or as a preset activation PIN; at zero the card answers for
+    /// itself.
+    const LAST_TWO_TRIES: [u8; 2] = [2, 1];
     /// A full counter.
     const FULL_COUNTER: u8 = 5;
     /// A counter with no tries left (`63C0`).
@@ -1620,8 +1625,8 @@ mod activate_tests {
     }
 
     #[test]
-    fn preset_pin_activation_is_refused_at_two_one_and_zero_tries() -> TestResult {
-        for count in REFUSED {
+    fn preset_pin_activation_is_refused_at_two_and_one_tries() -> TestResult {
+        for count in LAST_TWO_TRIES {
             let mut transport = FixedStatusTransport::new(tries(count)?);
             let outcome = setup(
                 &mut transport,
@@ -1646,6 +1651,79 @@ mod activate_tests {
     }
 
     #[test]
+    fn preset_pin_activation_at_zero_tries_reaches_the_card() -> TestResult {
+        // The card answers for itself and spends nothing; the code may
+        // be a PUK the card still accepts. Here it answers `63C0`.
+        let mut transport = FixedStatusTransport::new(tries(NO_TRIES)?);
+        let outcome = setup(
+            &mut transport,
+            PinReferenceScheme::Citizen,
+            ActivationScheme::PresetActivationPin,
+        )?;
+        check_true(
+            matches!(
+                outcome,
+                Ok(UnblockOutcome::WrongPuk { retries_left }) if retries_left.get() == NO_TRIES
+            ),
+            "the card's own answer is reported",
+        )?;
+        check_true(
+            transport.sent.len() == PROBE_AND_CHANGE,
+            "the probe and CHANGE REFERENCE DATA are sent at zero tries",
+        )
+    }
+
+    #[test]
+    fn preset_pin_activation_on_a_blocked_pin_reports_the_cards_answer() -> TestResult {
+        for status in [
+            StatusWord::AuthenticationBlocked,
+            StatusWord::ReferenceDataInvalidated,
+        ] {
+            let mut transport = FixedStatusTransport::new(status);
+            let outcome = setup(
+                &mut transport,
+                PinReferenceScheme::Citizen,
+                ActivationScheme::PresetActivationPin,
+            )?;
+            check_true(
+                matches!(outcome, Ok(UnblockOutcome::PukLocked)),
+                "the card's own answer is reported",
+            )?;
+            check_true(
+                transport.sent.len() == PROBE_AND_CHANGE,
+                "the probe and CHANGE REFERENCE DATA are sent to a blocked PIN",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn preset_pin_activation_is_refused_on_an_unreadable_counter() -> TestResult {
+        for status in [
+            StatusWord::AuthenticationFailed,
+            StatusWord::from_u16(UNMODELED_SW),
+        ] {
+            let mut transport = FixedStatusTransport::new(status);
+            let outcome = setup(
+                &mut transport,
+                PinReferenceScheme::Citizen,
+                ActivationScheme::PresetActivationPin,
+            )?;
+            check_true(
+                matches!(
+                    outcome,
+                    Err(CardPinError::RetryFloor(
+                        RetryFloorRefusal::CounterUnreadable { .. }
+                    ))
+                ),
+                "unreadable counter refused",
+            )?;
+            check_true(transport.sent.len() == PROBE_ONLY, "only the probe sent")?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn puk_code_activation_is_served_at_five_four_and_three_puk_tries() -> TestResult {
         for count in SERVED {
             let mut transport = FixedStatusTransport::new(tries(count)?);
@@ -1665,7 +1743,7 @@ mod activate_tests {
 
     #[test]
     fn puk_code_activation_is_refused_at_two_and_one_puk_tries() -> TestResult {
-        for count in PUK_REFUSED {
+        for count in LAST_TWO_TRIES {
             let mut transport = FixedStatusTransport::new(tries(count)?);
             let outcome = setup(
                 &mut transport,
