@@ -38,6 +38,8 @@ mod console;
 mod offer_gate;
 #[cfg(windows)]
 mod session;
+#[cfg(all(windows, debug_assertions))]
+mod test_card_cas;
 
 #[cfg(windows)]
 fn main() -> std::process::ExitCode {

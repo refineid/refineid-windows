@@ -18,6 +18,7 @@ refineid-rapp-core.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+refineid-doc-sign = { workspace = true, features = ["testkit"] }
 refineid-rapp.workspace = true
 
 [target.'cfg(windows)'.dependencies]
