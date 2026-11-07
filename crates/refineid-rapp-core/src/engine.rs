@@ -1455,7 +1455,13 @@ impl<Store: PairingStore> Requester<Store> {
         // The echo, or a close that crossed this one, ends the wait; the
         // keys go either way once it ends.
         let _ = await_handshake_echo(&mut authentication, &mut transport, deadline);
-        revoke_pairing(&mut self.store, pair_id, false).map_err(SessionError::Store)
+        revoke_pairing(
+            &mut self.store,
+            pair_id,
+            false,
+            crate::clock::unix_time_ms(),
+        )
+        .map_err(SessionError::Store)
     }
 
     /// The user forgets a pairing that has no open session here (RAPP
@@ -1504,7 +1510,13 @@ impl<Store: PairingStore> Requester<Store> {
         }
         crate::view::pairing_left(session.pair_id);
         if delivered {
-            revoke_pairing(&mut self.store, session.pair_id, false).map_err(SessionError::Store)
+            revoke_pairing(
+                &mut self.store,
+                session.pair_id,
+                false,
+                crate::clock::unix_time_ms(),
+            )
+            .map_err(SessionError::Store)
         } else {
             self.forget_pairing(session.pair_id)
         }
@@ -1692,7 +1704,8 @@ impl<Store: PairingStore> Requester<Store> {
     fn apply_peer_close(&mut self, pair_id: PairId, reason: CloseReason) {
         match reason {
             CloseReason::PairingRevoked => {
-                let _ = revoke_pairing(&mut self.store, pair_id, true);
+                let _ =
+                    revoke_pairing(&mut self.store, pair_id, true, crate::clock::unix_time_ms());
             }
             CloseReason::ServiceWithdrawn | CloseReason::CardUnavailable => {
                 self.store.drop_card_sighting(pair_id);

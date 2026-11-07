@@ -114,7 +114,7 @@ fn main() {
                 "      [--count <n>] [--identity-name <name>] [--person-id <id>] [--card-absent]"
             );
             eprintln!(
-                "  refineid-rapp setup-mock-pairing [--cert <path>] [--root-ca <path>] [--intermediate-ca <path>] [--state <path>] [--serve]"
+                "  refineid-rapp setup-mock-pairing [--cert <path>] [--state <path>] [--serve]"
             );
             eprintln!("  refineid-rapp forget-pairing <pair-id>");
             eprintln!("  refineid-rapp clear-pairing   (local wipe; no phone is told)");
@@ -683,8 +683,6 @@ fn read_optional(path: Option<&str>, label: &str) -> Result<Option<OwnedCert>, S
 
 fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
     let mut cert_path = None;
-    let mut root_ca_path = None;
-    let mut intermediate_ca_path = None;
     let mut state_path = "mock-proxy.state".to_owned();
     let mut serve = false;
     let mut cursor = arguments.iter();
@@ -697,8 +695,6 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
         };
         match flag.as_str() {
             "--cert" => cert_path = Some(value()?),
-            "--root-ca" => root_ca_path = Some(value()?),
-            "--intermediate-ca" => intermediate_ca_path = Some(value()?),
             "--state" => state_path = value()?,
             "--serve" => serve = true,
             other => return Err(format!("unknown flag {other}")),
@@ -708,8 +704,6 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
     let defaults = MockProxyOptions::with_mock_certificate()?;
     let certificate =
         read_optional(cert_path.as_deref(), "certificate")?.unwrap_or(defaults.certificate);
-    let root = read_optional(root_ca_path.as_deref(), "root CA")?;
-    let intermediate = read_optional(intermediate_ca_path.as_deref(), "intermediate CA")?;
 
     let options = MockProxyOptions {
         code: Some(MOCK_PAIRING_CODE.to_owned()),
@@ -746,25 +740,12 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
         .store_mut()
         .update(pair_id, &mut |rec| {
             rec.remember_authentication_certificate(certificate.clone());
-            rec.remember_signature_certificate(certificate.clone());
-            if let Some(root) = &root {
-                rec.remember_root_certificate(root.clone());
-            }
-            if let Some(intermediate) = &intermediate {
-                rec.remember_intermediate_certificate(intermediate.clone());
-            }
         })
         .map_err(|e| format!("failed to update pairing record: {e:?}"))?;
 
     println!("Mock pairing established and stored in Windows Credential Store:");
     println!("  pair_id: {}", hex::encode(pair_id.as_bytes()));
     println!("  auth_cert: {} bytes", certificate.as_der().len());
-    if let Some(r) = &root {
-        println!("  root_ca: {} bytes", r.as_der().len());
-    }
-    if let Some(i) = &intermediate {
-        println!("  intermediate_ca: {} bytes", i.as_der().len());
-    }
     println!("  proxy state saved to: {state_path}");
 
     if serve {
@@ -851,11 +832,6 @@ fn list_pairing() -> Result<(), String> {
         println!(
             "      Has Auth Cert: {}",
             record.authentication_certificate().is_some()
-        );
-        println!("      Has Root CA: {}", record.root_certificate().is_some());
-        println!(
-            "      Has Intermediate CA: {}",
-            record.intermediate_certificate().is_some()
         );
     }
     Ok(())
@@ -1007,7 +983,8 @@ mod tests {
     #[test]
     fn clearing_removes_only_what_the_attempt_revoked() {
         let mut requester = requester(true);
-        revoke_pairing(requester.store_mut(), FIRST_PAIR, false).expect("revoke held");
+        revoke_pairing(requester.store_mut(), FIRST_PAIR, false, CREATED_AT_MS)
+            .expect("revoke held");
         clear_revoked_pairings(&mut requester, &[FIRST_PAIR, SECOND_PAIR]);
         assert!(requester.store().get(FIRST_PAIR).is_err());
         assert!(requester.store().get(SECOND_PAIR).is_ok());

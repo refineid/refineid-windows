@@ -4,7 +4,6 @@
 
 use crate::{card, identity, pin, version};
 use std::cell::RefCell;
-use std::os::windows::ffi::OsStrExt as _;
 use std::sync::Mutex;
 use zeroize::Zeroize;
 
@@ -17,7 +16,7 @@ use windows::Win32::Graphics::Gdi::{
     HDC, HFONT, HGDIOBJ, ReleaseDC, SelectObject, SetBkColor, SetTextColor,
 };
 use windows::Win32::Graphics::GdiPlus::{
-    GdipCreateBitmapFromFile, GdipCreateFromHDC, GdipDeleteGraphics, GdipDisposeImage,
+    GdipCreateBitmapFromStream, GdipCreateFromHDC, GdipDeleteGraphics, GdipDisposeImage,
     GdipDrawImageRectI, GdipGetImageDimension, GdipGraphicsClear, GdiplusShutdown, GdiplusStartup,
     GdiplusStartupInput, GpBitmap, GpGraphics, GpImage,
 };
@@ -31,6 +30,7 @@ use windows::Win32::UI::Controls::{
     TAB_CONTROL_ITEM_STATE, TCIF_TEXT, TCITEMW, TCM_ADJUSTRECT, TCM_GETCURSEL, TCM_INSERTITEMW,
     TCM_SETCURSEL, TCN_SELCHANGE,
 };
+use windows::Win32::UI::Shell::SHCreateMemStream;
 use windows::Win32::UI::WindowsAndMessaging::{
     BN_CLICKED, BS_PUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBN_SELCHANGE,
     CBS_DROPDOWNLIST, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
@@ -241,12 +241,8 @@ static INBOX: Mutex<Option<InboxItem>> = Mutex::new(None);
 fn probe_ui() {
     match create_main_window() {
         Ok(window) => {
-            // Exercise the photo pipeline too when a saved JPEG is
-            // around (a `--smoke` with the test CAN leaves one).
-            let photo = std::env::temp_dir().join("refineid-photo.jpg");
-            let bitmap = photo.is_file() && load_photo_bitmap(&photo);
             let _ = unsafe { DestroyWindow(window) };
-            println!("UI-PROBE-OK bitmap={bitmap}");
+            println!("UI-PROBE-OK");
         }
         Err(error) => println!("UI-PROBE-FAIL\n{error}"),
     }
@@ -290,6 +286,7 @@ fn create_main_window() -> windows::core::Result<HWND> {
 }
 
 pub fn run() {
+    identity::remove_photo_leftovers(&std::env::temp_dir());
     if std::env::args().any(|arg| arg == "--smoke") {
         smoke();
         return;
@@ -1811,8 +1808,8 @@ fn show_photo_result(outcome: &identity::PhotoOutcome) {
     let Some(caption) = caption else {
         return;
     };
-    if let Some(path) = outcome.display_jpeg.as_ref() {
-        if load_photo_bitmap(path) {
+    if let Some(jpeg) = outcome.display_jpeg.as_ref() {
+        if load_photo_bitmap(jpeg) {
             set_tint(caption, GRAY);
             set_text(caption, "Card photo");
         } else {
@@ -1825,7 +1822,7 @@ fn show_photo_result(outcome: &identity::PhotoOutcome) {
     }
 }
 
-/// Load a JPEG into the photo well, scaled to fit 150x190 on a
+/// Load a JPEG held in memory into the photo well, scaled to fit 150x190 on a
 /// white ground. Any failure leaves the previous bitmap and
 /// reports `false`. Main thread only.
 #[allow(
@@ -1833,23 +1830,19 @@ fn show_photo_result(outcome: &identity::PhotoOutcome) {
     clippy::cast_possible_truncation,
     reason = "photo-well geometry: dimensions are small positive pixel counts, exactly representable in f32, and the float-to-int scale factors saturate rather than wrap"
 )]
-fn load_photo_bitmap(path: &Path) -> bool {
+fn load_photo_bitmap(jpeg: &[u8]) -> bool {
     const W: i32 = 150;
     const H: i32 = 190;
     let target = STATE.with(|cell| cell.borrow().as_ref().map(|state| state.photo));
     let Some(well) = target else {
         return false;
     };
-    let wide: Vec<u16> = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
     unsafe {
+        let Some(stream) = SHCreateMemStream(Some(jpeg)) else {
+            return false;
+        };
         let mut bitmap: *mut GpBitmap = std::ptr::null_mut();
-        if GdipCreateBitmapFromFile(PCWSTR(wide.as_ptr()), &raw mut bitmap).0 != 0
-            || bitmap.is_null()
-        {
+        if GdipCreateBitmapFromStream(&stream, &raw mut bitmap).0 != 0 || bitmap.is_null() {
             return false;
         }
         let image = bitmap.cast::<GpImage>();

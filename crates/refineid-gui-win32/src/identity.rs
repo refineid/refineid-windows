@@ -8,7 +8,7 @@ use refineid_lib_core::can::{Can, CanError};
 use refineid_lib_core::emrtd::{self, EmrtdError};
 use refineid_lib_core::pkcs15::FineidReaderPicker as _;
 use refineid_lib_pcsc::{PcscBackend, PcscError};
-use std::path::PathBuf;
+use std::path::Path;
 use zeroize::Zeroize;
 
 use crate::pin::flatten;
@@ -181,22 +181,33 @@ pub fn read_identity_and_photo(reader: &str, can: Can) -> Result<String, String>
     Ok(format!("{identity}\r\nPhoto: {photo}"))
 }
 
-/// Photo outcome: a report line plus, for JPEG faces, the saved
-/// file the GUI displays.
+/// Photo outcome: a report line plus, for JPEG faces, the bytes the
+/// GUI displays. The face stays in memory: no file holds it.
 pub struct PhotoOutcome {
-    /// One-line report (`saved ...`).
+    /// One-line report (`read ...`).
     pub report: String,
-    /// Saved JPEG path for in-window display. `None` for
-    /// JPEG2000 (no OS decoder) and when no face was found.
-    pub display_jpeg: Option<PathBuf>,
+    /// The JPEG for in-window display. `None` for JPEG2000 (no OS
+    /// decoder) and when no face was found.
+    pub display_jpeg: Option<Vec<u8>>,
+}
+
+/// The files in the per-user temp directory that hold a holder's face if
+/// they exist: `RefineID` writes none, and removes any it finds at start.
+const PHOTO_LEFTOVER_FILES: [&str; 2] = ["refineid-photo.jpg", "refineid-photo.jp2"];
+
+/// Removes every face photo left in `directory`. One that cannot be removed
+/// is tried again at the next start.
+pub fn remove_photo_leftovers(directory: &Path) {
+    for file in PHOTO_LEFTOVER_FILES {
+        let _ = std::fs::remove_file(directory.join(file));
+    }
 }
 
 fn read_photo(reader: &str, can: Can) -> Result<String, String> {
     Ok(read_photo_saved(reader, can)?.report)
 }
 
-/// Run PACE with the CAN, read DG2, and save the facial image to
-/// the per-user temp dir.
+/// Run PACE with the CAN and read DG2 into memory.
 pub fn read_photo_saved(reader: &str, can: Can) -> Result<PhotoOutcome, String> {
     let filter = service::reader_filter(reader.to_owned());
     let backend = PcscBackend;
@@ -215,16 +226,9 @@ pub fn read_photo_saved(reader: &str, can: Can) -> Result<PhotoOutcome, String> 
                 emrtd::DocumentImage::Jpeg(bytes) => ("JPEG", bytes),
                 emrtd::DocumentImage::Jpeg2000(bytes) => ("JPEG2000", bytes),
             };
-            let path = std::env::temp_dir().join(format!("refineid-photo.{}", image.extension()));
-            std::fs::write(&path, bytes)
-                .map_err(|error| format!("could not save photo: {error}"))?;
-            let report = format!(
-                "saved {} bytes ({format}) to {}",
-                bytes.len(),
-                path.display()
-            );
+            let report = format!("read {} bytes ({format})", bytes.len());
             let display_jpeg = match image {
-                emrtd::DocumentImage::Jpeg(_) => Some(path),
+                emrtd::DocumentImage::Jpeg(jpeg) => Some(jpeg.clone()),
                 emrtd::DocumentImage::Jpeg2000(_) => None,
             };
             Ok(PhotoOutcome {
@@ -294,4 +298,32 @@ pub fn short_error(error: &impl core::fmt::Debug) -> String {
     let mut text = format!("{error:?}").replace(['\r', '\n'], " ");
     text.truncate(200);
     text.trim().to_owned()
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test scaffolding is constructed to be infallible"
+)]
+mod tests {
+    use super::{PHOTO_LEFTOVER_FILES, remove_photo_leftovers};
+
+    #[test]
+    fn a_start_removes_every_face_photo_left_and_nothing_else() {
+        let directory =
+            std::env::temp_dir().join(format!("refineid-photo-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        for file in PHOTO_LEFTOVER_FILES {
+            std::fs::write(directory.join(file), b"a face").unwrap();
+        }
+        let other = directory.join("other.jpg");
+        std::fs::write(&other, b"not ours").unwrap();
+        remove_photo_leftovers(&directory);
+        for file in PHOTO_LEFTOVER_FILES {
+            assert!(!directory.join(file).exists());
+        }
+        assert!(other.exists());
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
 }

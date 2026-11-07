@@ -179,7 +179,11 @@ CryptoAPI and CNG. For a mutual-TLS site (such as `https://suomi.fi` or
      It stays offered between sessions while a session heard the card within
      120 seconds, and is removed once that lapses, at once when a session
      hears another card, and when the app's watch ends.
-   - Forgetting the pairing removes every certificate bound to the provider.
+   - An entry stands only while its pairing's record may hold the certificate
+     (refineid-core `doc/security/certificate-custody.md`): every load and
+     written change of the pairing store, in any RefineID process, removes an
+     entry whose pairing is forgotten, revoked, expired, replaced or past the
+     7-day retention, so one a crash left goes as soon as a process runs.
 2. **Provider registration**:
    - The DLL registers itself through `BCryptRegisterProvider` and
      `BCryptAddContextFunctionProvider` (`ksp_register.rs`), which write

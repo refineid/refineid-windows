@@ -23,8 +23,15 @@
 //! provider can find the pairing and sign through RAPP. This module writes
 //! and removes those certificates; it never touches a private key, because
 //! there is none on this computer.
+//!
+//! An entry stands only while its pairing's record may hold the certificate:
+//! the pairing serves and its certificate is within retention. The pairing
+//! store judges every entry by [`stale_browser_entries`] at each load and
+//! after each change it writes, so an entry goes with its record, also after
+//! a crash, as soon as any `RefineID` process of this user runs.
 
 use refineid_rapp_core::ids::PairId;
+use refineid_rapp_core::store::PairingRecord;
 
 #[cfg(windows)]
 use crate::CredentialStoreError;
@@ -75,6 +82,29 @@ pub fn browser_key_pair_id(name: &str) -> Option<PairId> {
         })
         .collect::<Option<Vec<u8>>>()?;
     PairId::reconstruct(&bytes).ok()
+}
+
+/// The key names among `names` whose entries must leave the personal store
+/// at `now_ms`: each is not a name the provider serves, or its pairing is not
+/// in `records`, serves no longer, or holds no certificate within retention.
+pub fn stale_browser_entries(
+    names: &[String],
+    records: &[&PairingRecord],
+    now_ms: u64,
+) -> Vec<String> {
+    names
+        .iter()
+        .filter(|name| {
+            !browser_key_pair_id(name).is_some_and(|pair_id| {
+                records.iter().any(|record| {
+                    record.pair_id() == pair_id
+                        && record.serves()
+                        && record.authentication_certificate_at(now_ms).is_some()
+                })
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 /// Wide, NUL-terminated copy of `text`.
@@ -232,6 +262,53 @@ pub fn install_browser_certificate(
 /// store.
 #[cfg(windows)]
 pub fn remove_browser_certificates() -> Result<usize, CredentialStoreError> {
+    visit_browser_entries(&mut |_name| true)
+}
+
+/// The key names of the current user's `RefineID` entries in the personal
+/// store. A store that cannot be read names none; the next judgement sees
+/// them again.
+#[cfg(windows)]
+pub fn browser_entry_names() -> Vec<String> {
+    let mut names = Vec::new();
+    let listed = visit_browser_entries(&mut |name| {
+        names.push(name.to_owned());
+        false
+    });
+    if let Err(error) = listed {
+        refineid_dev_errors::report!(Rapp, "offered certificates not listed", error);
+    }
+    names
+}
+
+/// Removes the `RefineID` entries of the personal store whose key name is
+/// `names`. One that cannot be removed stays for the next judgement.
+#[cfg(windows)]
+pub fn remove_browser_entries(names: &[String]) {
+    let removed = visit_browser_entries(&mut |name| names.iter().any(|stale| stale == name));
+    if let Err(error) = removed {
+        refineid_dev_errors::report!(Rapp, "offered certificates not withdrawn", error);
+    }
+}
+
+/// Nothing is offered to browsers off Windows.
+#[cfg(not(windows))]
+pub const fn browser_entry_names() -> Vec<String> {
+    Vec::new()
+}
+
+/// Nothing is offered to browsers off Windows.
+#[cfg(not(windows))]
+pub const fn remove_browser_entries(_names: &[String]) {}
+
+/// Calls `remove` with the key name of each certificate in the current user's
+/// personal store whose private key the `RefineID` provider serves, and
+/// deletes the certificate when it answers true. Returns how many it deleted.
+/// Certificates bound to any other provider are neither named nor touched.
+#[cfg(windows)]
+fn visit_browser_entries(
+    remove: &mut dyn FnMut(&str) -> bool,
+) -> Result<usize, CredentialStoreError> {
     use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::Security::Cryptography::{
         CERT_CONTEXT, CERT_KEY_PROV_INFO_PROP_ID, CRYPT_KEY_PROV_INFO,
@@ -263,26 +340,36 @@ pub fn remove_browser_certificates() -> Result<usize, CredentialStoreError> {
         if sized == 0 || (size as usize) < size_of::<CRYPT_KEY_PROV_INFO>() {
             continue;
         }
-        let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
+        let units = (size as usize).div_ceil(size_of::<u64>());
+        let mut buffer = vec![0u64; units];
         // SAFETY: `buffer` holds at least `size` bytes with the alignment
         // the structure needs; the property is a `CRYPT_KEY_PROV_INFO`
-        // whose string pointers point into this same buffer.
-        let serves_ours = unsafe {
+        // whose string pointers point into this same buffer, or are null.
+        let name = unsafe {
             let read = CertGetCertificateContextProperty(
                 context,
                 CERT_KEY_PROV_INFO_PROP_ID,
                 buffer.as_mut_ptr().cast(),
                 &raw mut size,
             );
-            read != 0 && {
+            if read == 0 {
+                None
+            } else {
                 let info = buffer
                     .as_ptr()
                     .cast::<CRYPT_KEY_PROV_INFO>()
                     .read_unaligned();
-                !info.pwszProvName.is_null() && wide_equals(info.pwszProvName, &provider)
+                if !info.pwszProvName.is_null() && wide_equals(info.pwszProvName, &provider) {
+                    Some(wide_text(info.pwszContainerName, size as usize))
+                } else {
+                    None
+                }
             }
         };
-        if !serves_ours {
+        let Some(name) = name else {
+            continue;
+        };
+        if !remove(&name) {
             continue;
         }
         // SAFETY: deletion consumes a context of its own, so the enumeration
@@ -302,6 +389,31 @@ pub fn remove_browser_certificates() -> Result<usize, CredentialStoreError> {
         removed += 1;
     }
     Ok(removed)
+}
+
+/// The NUL-terminated wide string at `text`, read no further than
+/// `limit_bytes`; a null pointer is an empty string.
+///
+/// # Safety
+/// `text` must be null or point at a wide string readable up to its NUL or
+/// `limit_bytes`, whichever comes first.
+#[cfg(windows)]
+unsafe fn wide_text(text: *const u16, limit_bytes: usize) -> String {
+    if text.is_null() {
+        return String::new();
+    }
+    let limit = limit_bytes / size_of::<u16>();
+    let mut units = Vec::new();
+    for index in 0..limit {
+        // SAFETY: every unit read so far was non-NUL and `index` is within
+        // the bound the caller guarantees.
+        let unit = unsafe { text.add(index).read() };
+        if unit == 0 {
+            break;
+        }
+        units.push(unit);
+    }
+    String::from_utf16_lossy(&units)
 }
 
 /// Whether the NUL-terminated wide string at `text` equals `expected`,
@@ -327,8 +439,15 @@ unsafe fn wide_equals(text: *const u16, expected: &[u16]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{browser_key_name, browser_key_pair_id};
+    use super::{browser_key_name, browser_key_pair_id, stale_browser_entries};
+    use crate::pairing::test_records::{
+        CERTIFIED_PAIR, DAY_6_MS, DAY_8_MS, UNCERTIFIED_PAIR, certified_record, uncertified_record,
+    };
     use refineid_rapp_core::ids::PairId;
+    use refineid_rapp_core::store::{MemoryPairingStore, PairingStore as _, forget_pairing};
+
+    /// A key name the provider does not serve.
+    const FOREIGN_KEY_NAME: &str = "rapp:zz";
 
     fn pair_id() -> PairId {
         let bytes: Vec<u8> = (0u8..16).collect();
@@ -347,5 +466,35 @@ mod tests {
         assert_eq!(browser_key_pair_id("card:0001"), None);
         assert_eq!(browser_key_pair_id("rapp:zz"), None);
         assert_eq!(browser_key_pair_id("rapp:0001"), None);
+    }
+
+    #[test]
+    fn an_entry_stands_while_its_record_holds_its_certificate() {
+        let names = vec![browser_key_name(CERTIFIED_PAIR)];
+        let record = certified_record();
+        assert!(stale_browser_entries(&names, &[&record], DAY_6_MS).is_empty());
+        assert_eq!(stale_browser_entries(&names, &[&record], DAY_8_MS), names);
+    }
+
+    #[test]
+    fn an_entry_goes_when_its_record_is_gone_or_holds_no_certificate() {
+        let gone = vec![browser_key_name(CERTIFIED_PAIR)];
+        assert_eq!(stale_browser_entries(&gone, &[], DAY_6_MS), gone);
+        let empty = vec![browser_key_name(UNCERTIFIED_PAIR)];
+        let record = uncertified_record();
+        assert_eq!(stale_browser_entries(&empty, &[&record], DAY_6_MS), empty);
+    }
+
+    #[test]
+    fn an_entry_goes_when_its_pairing_is_forgotten_and_a_foreign_name_goes_too() {
+        let mut store = MemoryPairingStore::new();
+        store.insert(certified_record()).expect("inserted");
+        forget_pairing(&mut store, CERTIFIED_PAIR, DAY_6_MS).expect("forgotten");
+        let names = vec![
+            browser_key_name(CERTIFIED_PAIR),
+            FOREIGN_KEY_NAME.to_owned(),
+        ];
+        let forgotten = store.get(CERTIFIED_PAIR).expect("held");
+        assert_eq!(stale_browser_entries(&names, &[forgotten], DAY_6_MS), names);
     }
 }
