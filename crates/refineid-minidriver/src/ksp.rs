@@ -22,10 +22,13 @@
 //! name refers to and asks the phone for a `BrowserAuthenticate` signature
 //! over RAPP, the same operation the Card Module's remote arm uses.
 //!
-//! The provider is read-only. It opens keys that the `RefineID` app placed in
-//! the user's certificate store (`rapp:<pair id>`), reports their public
-//! half from the cached certificate, and signs. Everything else in the
-//! function table returns `NTE_NOT_SUPPORTED`.
+//! The provider is read-only and holds no secret. It opens keys that the
+//! `RefineID` app placed in the user's certificate store (`rapp:<pair id>`),
+//! reports their public half from the certificate the agent answers with,
+//! and signs through the agent. The pairing store, with its keys, stays in
+//! the agent and never loads in the browser or Schannel process that opens
+//! a key (Windows STPA W-R-14). Everything else in the function table
+//! returns `NTE_NOT_SUPPORTED`.
 //!
 //! Buffers handed to the caller (`EnumKeys`, `EnumAlgorithms`) come from the
 //! process heap so that either this module's `FreeBuffer` or a plain
@@ -40,16 +43,18 @@ use core::mem::size_of;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
-use refineid_agent_pipe::client::request_signature;
-use refineid_agent_pipe::wire::{SignAnswer, SignRequest};
+use refineid_agent_pipe::client::{request_signature, request_usable_key};
+use refineid_agent_pipe::wire::{KeyAnswer, SignAnswer, SignRequest};
 use refineid_agent_pipe::{PipeError, SIGNATURE_DEADLINE};
-use refineid_lib_core::x509::{EcCurve, OwnedCert, PublicKeyAlgorithm, extract_rsa_public_key};
+use refineid_lib_core::x509::{
+    EcCurve, OwnedCert, PublicKeyAlgorithm, UnvalidatedCertificate, extract_rsa_public_key,
+};
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::operations::{KeyProfile, SignatureAlgorithm};
-use refineid_rapp_core::store::PairingRecord;
 use refineid_windows_credential_store::{
-    KEY_STORAGE_PROVIDER, ProtectedPairingStore, browser_key_name, browser_key_pair_id,
+    KEY_STORAGE_PROVIDER, browser_key_name, browser_key_pair_id,
 };
 use windows_sys::Win32::Foundation::{
     HANDLE, NTE_BAD_FLAGS, NTE_BAD_KEYSET, NTE_BAD_SIGNATURE, NTE_BUFFER_TOO_SMALL,
@@ -137,36 +142,42 @@ fn key_kind(certificate: &OwnedCert) -> Option<KeyKind> {
     }
 }
 
-/// The key of a pairing that serves (confirmed by both sides, neither
-/// revoked nor forgotten), like the store's own usable pairing.
-fn key_from_record(record: &PairingRecord) -> Option<OpenKey> {
-    if !record.serves() {
-        return None;
-    }
-    let certificate = record.authentication_certificate()?.clone();
+/// How long the provider waits for the agent to say which key it offers.
+const KEY_QUERY_DEADLINE: Duration = Duration::from_secs(2);
+
+/// The last key the agent answered with: a public certificate. The agent
+/// serves one client at a time and is busy for as long as a signature takes,
+/// so a query that times out is answered from here.
+static LAST_KEY: Mutex<Option<(PairId, Vec<u8>)>> = Mutex::new(None);
+
+/// The key of a pairing and its certificate's DER.
+fn key_from_answer(pair_id: PairId, certificate: &[u8]) -> Option<OpenKey> {
+    let certificate =
+        OwnedCert::from_der(UnvalidatedCertificate::new(certificate.to_vec())).ok()?;
     let kind = key_kind(&certificate)?;
     Some(OpenKey {
-        name: browser_key_name(record.pair_id()),
-        pair_id: record.pair_id(),
+        name: browser_key_name(pair_id),
+        pair_id,
         certificate,
         kind,
     })
 }
 
-/// The key of the store's usable pairing, the one the agent serves; an
-/// older pairing the agent would refuse is not offered.
+/// The key the agent offers, the one it serves. With no agent there is none.
 fn usable_keys() -> Vec<OpenKey> {
-    match ProtectedPairingStore::load() {
-        Ok(store) => store
-            .usable_pairing()
-            .and_then(key_from_record)
-            .into_iter()
-            .collect(),
-        Err(error) => {
-            refineid_dev_errors::report!(KeyStorageProvider, "pairing store not loaded", error);
-            Vec::new()
-        }
+    let mut last = LAST_KEY.lock().unwrap_or_else(PoisonError::into_inner);
+    match request_usable_key(KEY_QUERY_DEADLINE) {
+        Ok(KeyAnswer::Key {
+            pair_id,
+            certificate,
+        }) => *last = Some((pair_id, certificate)),
+        Ok(KeyAnswer::NoKey) | Err(PipeError::NoAgent | PipeError::Stranger) => *last = None,
+        Err(_) => {}
     }
+    last.as_ref()
+        .and_then(|(pair_id, certificate)| key_from_answer(*pair_id, certificate))
+        .into_iter()
+        .collect()
 }
 
 /// The CNG public key blob for the opened key.

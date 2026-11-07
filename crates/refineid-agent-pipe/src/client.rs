@@ -24,7 +24,7 @@ use windows_sys::Win32::System::Pipes::{
 use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
 use crate::identity::{ProcessIdentity, installed_agent_image};
-use crate::wire::{MAX_MESSAGE, SignAnswer, SignRequest};
+use crate::wire::{AgentRequest, KeyAnswer, MAX_MESSAGE, SignAnswer, SignRequest};
 use crate::{PipeError, is_same_image, pipe_name, wide};
 
 /// How long a provider waits for a busy pipe instance before each retry.
@@ -52,8 +52,31 @@ pub fn request_signature(
     answer
 }
 
+/// Asks the user's agent which key it offers and waits at most `deadline`.
+///
+/// # Errors
+/// As [`request_signature`].
+pub fn request_usable_key(deadline: Duration) -> Result<KeyAnswer, PipeError> {
+    let answer = exchange(&AgentRequest::UsableKey.encode(), deadline)
+        .and_then(|bytes| Ok(KeyAnswer::decode(&bytes)?));
+    match &answer {
+        Ok(_) | Err(PipeError::NoAgent) => {}
+        Err(PipeError::Identity(code) | PipeError::Pipe(code)) => {
+            refineid_dev_errors::report!(AgentPipe, "key request failed", status code);
+        }
+        Err(error) => refineid_dev_errors::report!(AgentPipe, "key request failed", error),
+    }
+    answer
+}
+
 /// [`request_signature`], unreported.
 fn requested_signature(request: &SignRequest, deadline: Duration) -> Result<SignAnswer, PipeError> {
+    let answer = exchange(&request.encode(), deadline)?;
+    Ok(SignAnswer::decode(&answer)?)
+}
+
+/// Sends `message` to the installed agent and returns its one answer.
+fn exchange(message: &[u8], deadline: Duration) -> Result<Vec<u8>, PipeError> {
     let ends = Instant::now() + deadline;
     let identity = ProcessIdentity::current()?;
     let name = wide(&pipe_name(&identity.user.to_sddl()?, identity.session));
@@ -82,10 +105,8 @@ fn requested_signature(request: &SignRequest, deadline: Duration) -> Result<Sign
         return Err(PipeError::last(PipeError::Pipe));
     }
     let event = Event::new()?;
-    let message = request.encode();
-    pipe.write(&message, &event, ends)?;
-    let answer = pipe.read(&event, ends)?;
-    Ok(SignAnswer::decode(&answer)?)
+    pipe.write(message, &event, ends)?;
+    pipe.read(&event, ends)
 }
 
 /// Opens the pipe, waiting while its one instance serves another client.

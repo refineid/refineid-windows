@@ -21,13 +21,13 @@ use windows_sys::Win32::System::Pipes::{
 use windows_sys::Win32::System::Threading::CreateMutexW;
 
 use crate::identity::ProcessIdentity;
-use crate::wire::{MAX_MESSAGE, SignAnswer, SignRequest};
+use crate::wire::{AgentRequest, KeyAnswer, MAX_MESSAGE, SignAnswer};
 use crate::{AGENT_MUTEX_PREFIX, PipeError, pipe_name, wide};
 
 /// One pipe instance: clients are served one after another.
 const MAX_INSTANCES: u32 = 1;
 /// Kernel buffer sizes for each direction, one message's worth.
-const BUFFER_BYTES: u32 = 4096;
+const BUFFER_BYTES: u32 = 8192;
 /// How long a client's `WaitNamedPipeW` waits by default, in milliseconds.
 const DEFAULT_WAIT_MS: u32 = 5_000;
 
@@ -209,7 +209,7 @@ impl Client<'_> {
     /// # Errors
     /// [`PipeError::Wire`] when the message is refused at its border, and
     /// [`PipeError::Pipe`] when the read fails.
-    pub fn request(&mut self) -> Result<SignRequest, PipeError> {
+    pub fn request(&mut self) -> Result<AgentRequest, PipeError> {
         let mut buffer = vec![0u8; MAX_MESSAGE];
         let mut read = 0u32;
         let capacity = u32::try_from(buffer.len()).map_err(|_| PipeError::Pipe(0))?;
@@ -233,7 +233,7 @@ impl Client<'_> {
             });
         }
         buffer.truncate(read as usize);
-        Ok(SignRequest::decode(&buffer)?)
+        Ok(AgentRequest::decode(&buffer)?)
     }
 
     /// Writes the answer and ends the client's connection.
@@ -241,7 +241,19 @@ impl Client<'_> {
     /// # Errors
     /// [`PipeError::Pipe`] when the write fails.
     pub fn answer(self, answer: &SignAnswer) -> Result<(), PipeError> {
-        let bytes = answer.encode();
+        self.deliver(&answer.encode())
+    }
+
+    /// Writes the key answer and ends the client's connection.
+    ///
+    /// # Errors
+    /// [`PipeError::Pipe`] when the write fails.
+    pub fn answer_key(self, answer: &KeyAnswer) -> Result<(), PipeError> {
+        self.deliver(&answer.encode())
+    }
+
+    /// Writes `bytes` and waits until the client has read them.
+    fn deliver(self, bytes: &[u8]) -> Result<(), PipeError> {
         let mut written = 0u32;
         let length = u32::try_from(bytes.len()).map_err(|_| PipeError::Pipe(0))?;
         // SAFETY: `bytes` holds `length` bytes for a synchronous write.
