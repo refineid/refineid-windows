@@ -99,7 +99,10 @@ delete a loaded DLL. It moves the old copy to `C:\Config.Msi\<name>.rbf`,
 installs the new file in its place at once, and deletes the moved copy when
 Windows restarts (`PendingFileRenameOperations`, log message 1903). Every
 process started after the installation loads the new module; a process
-that had the old one loaded keeps it until it exits. The installation
+that had the old one loaded keeps it until it exits. The sign-in sweep
+stays running in each signed-in user's session, so its file is in use in
+the same way: the upgrade replaces it, the running sweep keeps the earlier
+build until the user signs out, and the next sign-in starts the new one. The installation
 still reports success (exit code 0): nothing of the new build waits for
 the restart. Windows Installer's Restart Manager may also close and
 restart applications in the installing session that hold a file the
@@ -111,7 +114,7 @@ itself and deletes it at restart with
 
 A per-machine package does not reach into user profiles. The protected
 pairing store (`crates/refineid-windows-credential-store/src/pairing.rs`)
-judges `%LOCALAPPDATA%\RefineID` at every load, and the login sweep loads it
+judges `%LOCALAPPDATA%\RefineID` at every load, and the sign-in sweep loads it
 at every sign-in:
 
 - `agent.log` (a log of builds that logged), `pairing-set.lock` (an
@@ -147,7 +150,8 @@ deleted at restart. `scripts/uninstall-dev.ps1` is replaced by
 - Certificates in any store. The roots and issuing CAs that Windows
   propagated from earlier builds' `msroots` file, and card certificates in
   `CurrentUser\My`, are handled by the Card Module's own root removal and
-  the login sweep (`crates/refineid-minidriver/README.md`,
+  the sign-in sweep, which removes a card's entries when the card leaves
+  (`crates/refineid-minidriver/README.md`,
   `doc/stpa-windows-ble-requester.md` W-R-22).
 - The RefineID app's MSIX package: Windows replaces it by its package
   identity when a newer version is installed.

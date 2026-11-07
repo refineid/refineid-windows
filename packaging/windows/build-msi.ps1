@@ -233,7 +233,7 @@ foreach ($arch in $Architecture) {
 
     $sweep = Join-Path $repositoryRoot "target\$rustTarget\release\refineid-sweep.exe"
     if (-not (Test-Path -LiteralPath $sweep)) {
-        throw "Expected the built login sweep at '$sweep'."
+        throw "Expected the built sign-in sweep at '$sweep'."
     }
 
     # Sign the binaries before packaging so the MSI carries the signed images.

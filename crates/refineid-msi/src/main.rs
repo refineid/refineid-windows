@@ -51,13 +51,13 @@ mod windows_main {
     /// The per-user agent's file name, under `Program Files\RefineID`.
     const AGENT_FILE: &str = "refineid-agent.exe";
 
-    /// The login sweep's file name, beside the agent.
+    /// The sign-in sweep's file name, beside the agent.
     const SWEEP_FILE: &str = "refineid-sweep.exe";
     /// Where Windows starts a program at every user's sign-in, and removes
-    /// it from with the package. The sweep runs once and exits; no service
-    /// stays behind.
+    /// it from with the package. The sweep stays in the user's session,
+    /// watching the card readers, and ends with it; no service runs.
     const RUN_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
-    /// The Run value of the login sweep.
+    /// The Run value of the sign-in sweep.
     const RUN_VALUE: &str = "RefineIDSweep";
     /// The sweep's command line: Windows Installer writes the installed
     /// file's path in place of the bracketed key.
@@ -290,7 +290,7 @@ mod windows_main {
     }
 
     /// The Calais registration of every card, under `keys` in the order of
-    /// [`CARDS`], and the login sweep's Run value.
+    /// [`CARDS`], and the sign-in sweep's Run value.
     fn registry_values(keys: &[String]) -> Vec<RegistryValue<'_>> {
         let mut registry = Vec::with_capacity(CARDS.len() * 5);
         for (card, key) in CARDS.iter().zip(keys) {

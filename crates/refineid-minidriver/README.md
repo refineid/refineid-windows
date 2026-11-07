@@ -152,6 +152,10 @@ when every card Windows recorded as having propagated it
 (`CERT_SMART_CARD_ROOT_INFO_PROP_ID`: per card, the card module's `cardid` and
 the logon session) is a card this module identified, by the `cardid` it derives
 from a FINEID authentication certificate in the same user's Personal store.
+The sign-in sweep removes a card's certificates from the Personal store when
+the card leaves its reader (`refineid-windows-credential-store`
+`card_certificates`), so a root is found this way only while its card's
+authentication certificate is still there.
 
 Windows writes each propagated entry under a registry key that only `SYSTEM`
 may change, so no process of the user can remove one; the custom action runs as

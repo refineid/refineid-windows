@@ -24,7 +24,7 @@
     windows,
     expect(
         unsafe_code,
-        reason = "CredReadW, CredWriteW, CredDeleteW, CredFree, CryptProtectData, CryptUnprotectData, LocalFree, and the certificate store and registry calls are the small Windows FFI boundary"
+        reason = "CredReadW, CredWriteW, CredDeleteW, CredFree, CryptProtectData, CryptUnprotectData, LocalFree, and the certificate store, registry, card database and smart card key storage provider calls are the small Windows FFI boundary"
     )
 )]
 
@@ -38,6 +38,8 @@ use refineid_lib_core::can::Can;
 use zeroize::Zeroize as _;
 
 pub mod card_certificates;
+#[cfg(any(windows, test))]
+pub mod card_reading;
 pub mod card_roots;
 mod certstore;
 mod pairing;

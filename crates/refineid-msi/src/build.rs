@@ -31,7 +31,7 @@ const CABINET_NAME: &str = "payload.cab";
 const COMPONENT_FILE: &str = "MinidriverDll";
 /// The component holding the per-user agent.
 const COMPONENT_AGENT: &str = "AgentExe";
-/// The component holding the login sweep.
+/// The component holding the sign-in sweep.
 const COMPONENT_SWEEP: &str = "SweepExe";
 /// The Program Files directory of the machine's own architecture.
 const PROGRAM_FILES_DIRECTORY: &str = "ProgramFiles64Folder";
@@ -449,7 +449,7 @@ pub struct Package<'a> {
     pub file: SystemFile<'a>,
     /// The per-user agent, installed under Program Files.
     pub agent: SystemFile<'a>,
-    /// The login sweep, installed beside the agent.
+    /// The sign-in sweep, installed beside the agent.
     pub sweep: SystemFile<'a>,
     /// The driver package, installed beside the agent, when one is
     /// supplied.
