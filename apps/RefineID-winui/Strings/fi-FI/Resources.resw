@@ -322,6 +322,9 @@
   <data name="DocumentSigned" xml:space="preserve">
     <value>Allekirjoitettu</value>
   </data>
+  <data name="SignedDevelopmentBuild" xml:space="preserve">
+    <value>Allekirjoitettu kehitysversiolla alemmalle tasolle kuin julkaistu versio vaatii</value>
+  </data>
   <data name="SignatureDidNotVerify" xml:space="preserve">
     <value>{0}: allekirjoituksen tarkastus ei onnistunut</value>
   </data>

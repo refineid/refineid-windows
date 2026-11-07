@@ -660,6 +660,7 @@ mod tests {
             signer_anchors: Vec::new(),
             timestamp_authorities: Vec::new(),
             timestamp_credentials: None,
+            build: refineid_doc_sign::service::SigningBuild::Release,
         }
     }
 
@@ -775,6 +776,59 @@ mod tests {
             text.contains("reason: trusted lists not fetched: nothing can be anchored\n"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_release_build_refuses_an_unanchored_path_before_the_phone_asks_for_pin_2() {
+        use refineid_doc_sign::material::MaterialError;
+        use refineid_doc_sign::service::{MaterialPath, SigningBuild};
+
+        let dir = TempDir::new("unanchored");
+        let mut document = pdf(&dir, "contract.pdf");
+        // The apps' own request, anchored on a certificate that did not
+        // issue the phone's and with no CA Issuers address to fetch one.
+        let mut phone = ScriptedPhone::new(Answer::Sign);
+        let unrelated = {
+            let other = TestKey::derive(TestCurve::P384, b"unrelated anchor");
+            let spec = CertificateSpec {
+                serial: SIGNER_SERIAL,
+                subject: "Unrelated CA",
+                issuer: "Unrelated CA",
+                not_before: day(NOT_BEFORE),
+                not_after: day(NOT_AFTER),
+                extensions: Vec::new(),
+            };
+            certificate(&spec, &other, &other)
+        };
+        document.document = DocumentRequest {
+            build: SigningBuild::Release,
+            ..crate::sign::document_request(
+                Format::Pades,
+                None,
+                refineid_doc_sign::pades::StampLanguage::English,
+                SIGNING_TIME,
+                vec![unrelated],
+            )
+        };
+        let written = outputs(std::slice::from_ref(&document));
+        let Err(failure) = sign_over(&mut phone, vec![document]) else {
+            panic!("an unanchored release signing went on");
+        };
+        assert!(matches!(
+            failure.kind,
+            SignErrorKind::Material {
+                path: MaterialPath::Signer,
+                error: MaterialError::NoIssuer(_),
+            }
+        ));
+        assert!(
+            !phone
+                .seen
+                .iter()
+                .any(|operation| !matches!(operation, CardOperation::ReadCertificate { .. })),
+            "only the certificate was read; PIN 2 was never asked for"
+        );
+        assert!(!written.iter().any(|path| path.exists()));
     }
 
     #[test]

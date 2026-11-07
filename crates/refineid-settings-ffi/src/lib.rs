@@ -421,6 +421,9 @@ struct DocumentSignJson {
     /// check counts as passed, a failed one does not.
     verified: bool,
     local_verify: String,
+    /// Set only when a development build saved the document below the
+    /// level a release build requires: the level reached and why.
+    development_build: Option<String>,
 }
 
 impl From<SignReport> for DocumentSignJson {
@@ -429,6 +432,10 @@ impl From<SignReport> for DocumentSignJson {
             output_path: report.signature_path,
             output_len: report.output_len,
             signer_cn: report.cert_subject_cn.map(|cn| cn.as_str().to_owned()),
+            development_build: report
+                .below_requested_level
+                .as_ref()
+                .map(ToString::to_string),
             verified: !matches!(report.local_verify, LocalVerifyOutcome::Failed(_)),
             local_verify: match report.local_verify {
                 LocalVerifyOutcome::Ok => "ok".to_owned(),

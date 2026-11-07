@@ -322,6 +322,9 @@
   <data name="DocumentSigned" xml:space="preserve">
     <value>Signerat</value>
   </data>
+  <data name="SignedDevelopmentBuild" xml:space="preserve">
+    <value>Signerat med en utvecklingsversion på en lägre nivå än en släppt version kräver</value>
+  </data>
   <data name="SignatureDidNotVerify" xml:space="preserve">
     <value>{0}: signaturen kunde inte verifieras</value>
   </data>

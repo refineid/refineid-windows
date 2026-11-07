@@ -18,9 +18,9 @@
 //! refineid-core ships no root and refuses an LT or LTA request that
 //! names no anchor before the reader is opened
 //! (`MaterialError::NoTrustAnchor`), so every request leaves here
-//! with what this computer has: the card's issuing CA and root from
-//! the CA cache ([`crate::ca_certificates`]), read from the card and
-//! cached on a miss while a card is in a reader, and the
+//! with what this computer has: the card's issuing CA and root, read
+//! from the card in a reader on every signing and cached, the CA cache
+//! ([`crate::ca_certificates`]), and the
 //! certificate-issuing anchors of the EU trusted lists
 //! ([`crate::trusted_lists`]). The paired phone's card is not in a
 //! reader here, so a phone request carries the cache and the lists.
@@ -59,30 +59,38 @@ pub fn for_phone(now: DateTime) -> SignerAnchors {
     collect(&cached, now)
 }
 
-/// The anchors for signing with the card in a reader at `now`: the
-/// cached CA certificates, read from the card and cached when the
-/// cache holds none, and the lists' certificate-issuing anchors.
+/// The anchors for signing with the card in a reader at `now`.
+///
+/// They are the issuing CA and root the card itself holds, admitted
+/// under the custody rule and cached, the cached CA certificates, and
+/// the lists' certificate-issuing anchors.
+///
+/// The card's own CA certificates are read on every signing, not only
+/// when the cache is empty: a cache filled from another card, a
+/// citizen card's say, holds nothing that anchors an organisation or
+/// test card's path, and its signing would be refused before PIN 2 for
+/// want of an anchor the card carries.
 #[must_use]
 pub fn for_card(now: DateTime) -> SignerAnchors {
     let cache = CaCache::user();
-    let mut cached = cache
-        .as_ref()
-        .map_or_else(Vec::new, |cache| cache.load(now));
-    if cached.is_empty() {
-        let (issuing_ca, root) = read_card_ca_certificates();
-        cached = crate::ca_certificates::admit(
-            issuing_ca.as_ref().map(UnvalidatedCertificate::as_bytes),
-            root.as_ref().map(UnvalidatedCertificate::as_bytes),
-            now,
-        );
-        if let Some(cache) = &cache
-            && let Err(error) = cache.store(&cached)
-        {
-            let kind = error.kind();
-            refineid_dev_errors::report!(DocumentSigning, "CA certificates not cached", kind);
-        }
+    let (issuing_ca, root) = read_card_ca_certificates();
+    let mut certificates = crate::ca_certificates::admit(
+        issuing_ca.as_ref().map(UnvalidatedCertificate::as_bytes),
+        root.as_ref().map(UnvalidatedCertificate::as_bytes),
+        now,
+    );
+    if let Some(cache) = &cache
+        && let Err(error) = cache.store(&certificates)
+    {
+        let kind = error.kind();
+        refineid_dev_errors::report!(DocumentSigning, "CA certificates not cached", kind);
     }
-    collect(&cached, now)
+    certificates.extend(
+        cache
+            .as_ref()
+            .map_or_else(Vec::new, |cache| cache.load(now)),
+    );
+    collect(&certificates, now)
 }
 
 /// `certificates` and the lists' certificate-issuing anchors, each

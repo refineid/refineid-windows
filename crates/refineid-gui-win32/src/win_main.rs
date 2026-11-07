@@ -2562,13 +2562,18 @@ fn render_sign_report(report: &SignReport) -> String {
         .cert_subject_cn
         .as_ref()
         .map_or("unknown signer", CommonName::as_str);
-    format!(
+    let summary = format!(
         "Signed:\r\n{}\r\n{} bytes · qualified signature · local verify: {}\r\nSigner: {signer}",
         report.signature_path.display(),
         report.output_len,
         report.local_verify,
         signer = signer,
-    )
+    );
+    // A development build's document below the release level says so.
+    match &report.below_requested_level {
+        Some(below) => format!("{summary}\r\n{below}"),
+        None => summary,
+    }
 }
 
 /// `true` for a `.pdf` extension in any ASCII case.
