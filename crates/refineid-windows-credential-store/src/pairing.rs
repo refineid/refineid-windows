@@ -801,14 +801,16 @@ mod tests {
     /// The moment the fixtures' pairing has had no session for the idle
     /// limit, counted from its creation.
     const IDLE_EXPIRED_AT_MS: u64 = CREATED_AT_MS + PAIRING_IDLE_EXPIRY_MS;
-    /// Two public FINEID intermediate CA certificates, as large as the
-    /// cards' own, so the set exceeds what one generic credential holds
-    /// (`CRED_MAX_CREDENTIAL_BLOB_SIZE`).
-    const LARGE_CERTIFICATE: &[u8] =
-        include_bytes!("../../refineid-pkcs11/ca-certs/fineid-intermediate-02-citizen-g4r.der");
-    const OTHER_LARGE_CERTIFICATE: &[u8] = include_bytes!(
-        "../../refineid-pkcs11/ca-certs/fineid-intermediate-03-organisation-g4r.der"
-    );
+    /// The synthetic P-384 certificates of the RAPP mock pairing
+    /// fixtures stand in for a card's own; two records holding them
+    /// exceed what one generic credential holds
+    /// ([`CRED_MAX_CREDENTIAL_BLOB_SIZE`]).
+    const LARGE_CERTIFICATE: &[u8] = include_bytes!("../../refineid-rapp-cli/src/mock_ca.der");
+    const OTHER_LARGE_CERTIFICATE: &[u8] =
+        include_bytes!("../../refineid-rapp-cli/src/mock_cert.der");
+    /// `CRED_MAX_CREDENTIAL_BLOB_SIZE` (wincred.h): the most bytes a
+    /// generic credential's blob holds.
+    const CRED_MAX_CREDENTIAL_BLOB_SIZE: usize = 2560;
     const FIRST_PAIR: PairId = PairId::from_array(*b"synthetic pair 1");
     const SECOND_PAIR: PairId = PairId::from_array(*b"synthetic pair 2");
 
@@ -901,8 +903,10 @@ mod tests {
         let mut store = ProtectedPairingStore::load_from(directory.0.clone()).expect("load");
         assert!(store.is_empty());
         store.insert(record(pair_id)).expect("insert");
+        store.insert(record(SECOND_PAIR)).expect("insert");
 
         let on_disk = std::fs::read(directory.0.join(PAIRING_SET_FILE)).expect("file written");
+        assert!(on_disk.len() > CRED_MAX_CREDENTIAL_BLOB_SIZE);
         assert!(
             !on_disk
                 .as_slice()
@@ -911,9 +915,10 @@ mod tests {
         );
 
         let mut reloaded = ProtectedPairingStore::load_from(directory.0.clone()).expect("reload");
-        assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded.len(), 2);
         assert_eq!(reloaded.get(pair_id).expect("stored").pair_id(), pair_id);
         reloaded.remove(pair_id).expect("remove");
+        reloaded.remove(SECOND_PAIR).expect("remove");
         assert!(
             ProtectedPairingStore::load_from(directory.0.clone())
                 .expect("reload after remove")
