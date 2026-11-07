@@ -267,7 +267,7 @@ pub fn credential_label(status: Option<&PinStatus>, changed: Option<bool>) -> St
         Some(PinStatus::Verified) => String::from("verified"),
         Some(PinStatus::Remaining(retries)) => format!("ready ({} tries left)", retries.get()),
         Some(PinStatus::NoInfo) => String::from("no information"),
-        Some(PinStatus::Locked) => String::from("locked"),
+        Some(PinStatus::Locked) => String::from("blocked"),
         Some(PinStatus::Other(word)) => format!("other (0x{word:04X})"),
     };
     match changed {
@@ -282,7 +282,7 @@ pub fn puk_label(status: Option<&PukStatus>) -> String {
         None => String::from("unknown"),
         Some(PukStatus::Remaining(retries)) => format!("ready ({} tries left)", retries.get()),
         Some(PukStatus::NoInfo) => String::from("no information"),
-        Some(PukStatus::Locked) => String::from("locked"),
+        Some(PukStatus::Locked) => String::from("blocked"),
         Some(PukStatus::Invalidated) => String::from("invalidated"),
         Some(PukStatus::Other(word)) => format!("other (0x{word:04X})"),
     }

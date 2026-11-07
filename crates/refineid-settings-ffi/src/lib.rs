@@ -968,7 +968,7 @@ fn change_result(outcome: ChangePinOutcome, slot: PinManageSlot) -> MutationResu
         ChangePinOutcome::Locked => MutationResult {
             succeeded: false,
             outcome: "locked",
-            message: format!("{label} is blocked and must be recovered before it can be changed."),
+            message: format!("{label} is blocked. The PUK can set a new {label}."),
             attempts_remaining: None,
             status_word: None,
         },

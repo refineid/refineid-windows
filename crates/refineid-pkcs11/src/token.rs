@@ -53,7 +53,7 @@ use refineid_lib_core::identity::{TokenSerial, derive_printed_serial, render_tok
 use refineid_lib_core::pin::PinBytes;
 use refineid_lib_core::pin_cache::PinSafetyCache;
 use refineid_lib_core::pin_retry_risk::{
-    RetryFloorRefusal, check_retry_floor, pin1_status_permits_reusable_cache,
+    RetryFloorRefusal, check_retry_floor, pin1_status_permits_reusable_cache, reports_no_tries_left,
 };
 use refineid_lib_core::pkcs15::{CertSlot, Pkcs15Ops as _};
 use refineid_lib_core::x509::{
@@ -1339,11 +1339,19 @@ pub(super) fn card_sign(
         clear_positive(pin_cache);
         return Err(error);
     }
+    // A blocked PIN 1 is the card's to answer, but a held value is never
+    // handed out for one; the lock is reported as the reason, from this
+    // reading, with nothing presented.
+    let no_pin_to_present = if reports_no_tries_left(pin1_status) {
+        CKR_PIN_LOCKED
+    } else {
+        CKR_USER_NOT_LOGGED_IN
+    };
     let checkout = pin_cache
         .lock()
         .map_err(|_poisoned| CKR_DEVICE_ERROR)?
         .checkout_pin1(&serial, pin1_status)
-        .ok_or(CKR_USER_NOT_LOGGED_IN)?;
+        .ok_or(no_pin_to_present)?;
 
     // The held PIN 1 is presented to the card for every operation; the
     // card's verified state is never taken as lasting (credential custody).
@@ -1711,7 +1719,7 @@ pub(super) fn card_login(
         return Err(error);
     }
     let mut cache = pin_cache.lock().map_err(|_poisoned| CKR_DEVICE_ERROR)?;
-    if cache.is_rejected(&serial, PinSlot::Pin1, &pin1) {
+    if cache.bars_presenting(&serial, PinSlot::Pin1, &pin1, pin1_status) {
         return Err(CKR_PIN_INCORRECT);
     }
     match card
@@ -1737,12 +1745,13 @@ pub(super) fn card_login(
 }
 
 /// Apply the retry floor to PIN 1 before any command that can spend a
-/// PIN 1 attempt. A refusal below the floor or at a blocked PIN answers
-/// `CKR_PIN_LOCKED`; a counter the card did not report answers
-/// `CKR_DEVICE_ERROR`.
+/// PIN 1 attempt. A refusal below the floor answers `CKR_PIN_LOCKED`; a
+/// counter the card did not report answers `CKR_DEVICE_ERROR`. At zero
+/// tries left or a blocked PIN 1 the command goes out and the card's
+/// answer reports it blocked.
 fn pin1_verify_guard(status: PinStatus) -> Result<(), CkRv> {
     check_retry_floor(PinSlot::Pin1.into(), status).map_err(|refusal| match refusal {
-        RetryFloorRefusal::TriesBelowFloor { .. } | RetryFloorRefusal::Blocked { .. } => {
+        RetryFloorRefusal::TriesBelowFloor { .. } => {
             refineid_dev_errors::report!(
                 Pkcs11,
                 "PIN 1 not tried",
@@ -1887,9 +1896,9 @@ mod tests {
     }
 
     #[test]
-    fn pin1_verify_guard_serves_five_four_three_and_refuses_the_rest() {
-        const SERVED: [u8; 3] = [5, 4, 3];
-        const REFUSED: [u8; 3] = [2, 1, 0];
+    fn pin1_verify_guard_refuses_the_last_two_tries_and_an_unreadable_counter() {
+        const SERVED: [u8; 4] = [5, 4, 3, 0];
+        const REFUSED: [u8; 2] = [2, 1];
         const UNMODELED_SW: u16 = 0x6F00;
         let retries = |count| {
             PinRetries::from_nibble(count).expect("test retry count fits the status-word nibble")
@@ -1908,7 +1917,7 @@ mod tests {
             );
         }
         assert_eq!(pin1_verify_guard(PinStatus::Verified), Ok(()));
-        assert_eq!(pin1_verify_guard(PinStatus::Locked), Err(CKR_PIN_LOCKED));
+        assert_eq!(pin1_verify_guard(PinStatus::Locked), Ok(()));
         assert_eq!(pin1_verify_guard(PinStatus::NoInfo), Err(CKR_DEVICE_ERROR));
         assert_eq!(
             pin1_verify_guard(PinStatus::Other(UNMODELED_SW)),

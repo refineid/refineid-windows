@@ -164,7 +164,8 @@ use refineid_lib_core::pin::PinBytes;
 use refineid_lib_core::pin_cache::PinSafetyCache;
 #[cfg(windows)]
 use refineid_lib_core::pin_retry_risk::{
-    RetryFloorRefusal, check_puk_retry_floor, check_retry_floor, pin1_status_permits_reusable_cache,
+    RetryFloorRefusal, check_puk_retry_floor, check_retry_floor,
+    pin1_status_permits_reusable_cache, reports_no_tries_left,
 };
 #[cfg(windows)]
 use refineid_lib_core::pkcs15::{CertSlot, Pkcs15Ops};
@@ -226,14 +227,15 @@ fn live_verify_floor(
 }
 
 /// Apply the retry floor to `slot` before any command that can spend one
-/// of its attempts. A refusal below the floor or at a blocked PIN answers
+/// of its attempts. A refusal below the floor answers
 /// `SCARD_W_CHV_BLOCKED`, which routes the user to the PUK; a counter the
 /// card did not report answers `SCARD_F_INTERNAL_ERROR`, since no PIN was
-/// presented.
+/// presented. At zero tries left or a blocked PIN the command goes out and
+/// the card's answer reports it blocked.
 #[cfg(windows)]
 fn retry_floor_answer(slot: PinSlot, status: PinStatus) -> Result<(), DWORD> {
     check_retry_floor(slot.into(), status).map_err(|refusal| match refusal {
-        RetryFloorRefusal::TriesBelowFloor { .. } | RetryFloorRefusal::Blocked { .. } => {
+        RetryFloorRefusal::TriesBelowFloor { .. } => {
             refineid_dev_errors::report!(
                 CardModule,
                 "PIN not tried",
@@ -265,7 +267,7 @@ fn puk_floor_answer(tx: &mut CardSessionTransport) -> Result<(), DWORD> {
         .map_err(|_error| SCARD_F_INTERNAL_ERROR)?;
     let status = tx.puk_status().map_err(|_error| SCARD_F_INTERNAL_ERROR)?;
     check_puk_retry_floor(status).map_err(|refusal| match refusal {
-        RetryFloorRefusal::TriesBelowFloor { .. } | RetryFloorRefusal::Blocked { .. } => {
+        RetryFloorRefusal::TriesBelowFloor { .. } => {
             refineid_dev_errors::report!(
                 CardModule,
                 "PUK not tried",
@@ -997,8 +999,14 @@ fn reverify_cached_pin(
     let checkout = with_pin_safety(|cache| cache.checkout_pin1(&serial, status))
         .ok()
         .flatten();
+    // A held value is never handed out for a blocked PIN 1; the lock is
+    // reported as the reason, from this reading, with nothing presented.
     let Some(checkout) = checkout else {
-        return Some(SCARD_W_WRONG_CHV);
+        return Some(if reports_no_tries_left(status) {
+            SCARD_W_CHV_BLOCKED
+        } else {
+            SCARD_W_WRONG_CHV
+        });
     };
     let pin = checkout.pin().clone();
     let is_rejected =
@@ -1028,6 +1036,15 @@ fn reverify_cached_pin(
                 "the card rejected it"
             );
             Some(SCARD_W_WRONG_CHV)
+        }
+        Ok(VerifyOutcome::Locked) => {
+            clear_pin_state(pin1_authenticated, pin2_authenticated);
+            refineid_dev_errors::report!(
+                CardModule,
+                "held PIN 1 not verified",
+                "the PIN is blocked"
+            );
+            Some(SCARD_W_CHV_BLOCKED)
         }
         Ok(other) => {
             clear_pin_state(pin1_authenticated, pin2_authenticated);
@@ -1901,8 +1918,8 @@ unsafe extern "system" fn CardAuthenticatePin(
         Ok(admitted) => admitted,
         Err(error) => return error,
     };
-    let is_rejected =
-        with_pin_safety(|cache| cache.is_rejected(&serial, slot, &pin)).unwrap_or(false);
+    let is_rejected = with_pin_safety(|cache| cache.bars_presenting(&serial, slot, &pin, status))
+        .unwrap_or(false);
     if is_rejected {
         return SCARD_W_WRONG_CHV;
     }
@@ -2796,11 +2813,13 @@ unsafe extern "system" fn CardChangeAuthenticator(
         Ok(serial) => serial,
         Err(error) => return error,
     };
-    if let Err(error) = live_retry_floor(&mut tx, slot, PinReferenceScheme::Citizen) {
-        return error;
-    }
+    let status = match live_retry_floor(&mut tx, slot, PinReferenceScheme::Citizen) {
+        Ok(status) => status,
+        Err(error) => return error,
+    };
     let is_rejected = with_pin_safety(|cache| {
-        cache.is_rejected(&serial, slot, &current_pin) || cache.is_rejected(&serial, slot, &new_pin)
+        cache.bars_presenting(&serial, slot, &current_pin, status)
+            || cache.bars_presenting(&serial, slot, &new_pin, status)
     })
     .unwrap_or(false);
     if is_rejected {
@@ -2897,8 +2916,8 @@ unsafe extern "system" fn CardAuthenticateEx(
         Ok(admitted) => admitted,
         Err(error) => return error,
     };
-    let is_rejected =
-        with_pin_safety(|cache| cache.is_rejected(&serial, slot, &pin)).unwrap_or(false);
+    let is_rejected = with_pin_safety(|cache| cache.bars_presenting(&serial, slot, &pin, status))
+        .unwrap_or(false);
     if is_rejected {
         return SCARD_W_WRONG_CHV;
     }
@@ -3038,12 +3057,13 @@ unsafe extern "system" fn CardChangeAuthenticatorEx(
         Ok(serial) => serial,
         Err(error) => return error,
     };
-    if let Err(error) = live_retry_floor(&mut tx, target_slot, PinReferenceScheme::Citizen) {
-        return error;
-    }
+    let status = match live_retry_floor(&mut tx, target_slot, PinReferenceScheme::Citizen) {
+        Ok(status) => status,
+        Err(error) => return error,
+    };
     let is_rejected = with_pin_safety(|cache| {
-        cache.is_rejected(&serial, target_slot, &current_pin)
-            || cache.is_rejected(&serial, target_slot, &new_pin)
+        cache.bars_presenting(&serial, target_slot, &current_pin, status)
+            || cache.bars_presenting(&serial, target_slot, &new_pin, status)
     })
     .unwrap_or(false);
     if is_rejected {

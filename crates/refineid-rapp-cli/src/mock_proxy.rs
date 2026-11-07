@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use refineid_lib_core::apdu::status_word::PinRetries;
 use refineid_lib_core::auth::{PinSlot, PinStatus};
-use refineid_lib_core::pin_retry_risk::check_retry_floor;
+use refineid_lib_core::pin_retry_risk::{check_retry_floor, reports_no_tries_left};
 use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
 use refineid_rapp::{
     BinaryFrame, CardIdentity, CardInspection, CardOperation, CardOperationResult, CardPresence,
@@ -989,7 +989,9 @@ fn execute(
         _ => (PinSlot::Pin2, options.pin2_attempts),
     };
     let status = PinRetries::from_nibble(remaining).map_or(PinStatus::NoInfo, PinStatus::Remaining);
-    if check_retry_floor(slot.into(), status).is_err() {
+    // At zero tries the card would answer for itself, and a blocked PIN is
+    // a RAPP `retry_floor` result on the wire: this mock has no card to ask.
+    if check_retry_floor(slot.into(), status).is_err() || reports_no_tries_left(status) {
         println!("refusing {operation:?}: the retry floor");
         return Ok(session
             .operations

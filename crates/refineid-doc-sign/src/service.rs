@@ -479,8 +479,8 @@ pub enum SignErrorKind {
         outcome: VerifyOutcome,
     },
     /// The retry floor refused the signing PIN before any VERIFY went
-    /// out: the card reports two, one or no tries left, the PIN blocked,
-    /// or no readable counter. Counter is unaffected.
+    /// out: the card reports two or one tries left, or no readable
+    /// counter. Counter is unaffected.
     RetryFloor(RetryFloorRefusal),
     /// Local-policy rejection (PIN length / non-digit) before any
     /// APDU went out. Counter is unaffected.
@@ -2664,9 +2664,11 @@ mod tests {
     }
 
     /// Tries left at which the signing PIN is served.
-    const FLOOR_SERVED: [u8; 3] = [5, 4, 3];
+    const FLOOR_SERVED: [u8; 4] = [5, 4, 3, 0];
+    /// Tries left at which the card reports the signing PIN out of tries.
+    const NO_TRIES: u8 = 0;
     /// Tries left at which the signing PIN is refused.
-    const FLOOR_REFUSED: [u8; 3] = [2, 1, 0];
+    const FLOOR_REFUSED: [u8; 2] = [2, 1];
     /// Offset of P2 in a short command APDU.
     const P2_OFFSET: usize = 3;
 
@@ -2691,7 +2693,7 @@ mod tests {
     }
 
     #[test]
-    fn signing_pin_is_refused_at_two_one_and_zero_tries() -> TestResult {
+    fn signing_pin_is_refused_at_two_and_one_tries() -> TestResult {
         for count in FLOOR_REFUSED {
             let FloorProbe { outcome, sent } = floor_probe(count, PinReferenceScheme::Citizen)?;
             let Err(error) = outcome else {
@@ -2709,6 +2711,33 @@ mod tests {
             check_true(text.contains("Signature PIN 2"), "refusal names the PIN")?;
             check_true(text.contains(&count.to_string()), "refusal names the tries")?;
             check_true(text.contains("PUK"), "refusal names the PUK")?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_blocked_signing_pin_goes_to_the_card_and_its_answer_says_blocked() -> TestResult {
+        let mut transport = FloorProbeTransport {
+            status: StatusWord::AuthenticationBlocked,
+            sent: Vec::new(),
+        };
+        check_true(
+            signing_pin_retry_floor(&mut transport, PinReferenceScheme::Citizen).is_ok(),
+            "the floor admits the VERIFY of a blocked PIN",
+        )?;
+        for status in [
+            StatusWord::AuthenticationBlocked,
+            StatusWord::PinIncorrect {
+                retries: pin_retries(NO_TRIES)?,
+            },
+        ] {
+            let text = SignErrorKind::PinRejected {
+                outcome: refineid_lib_core::auth::classify_verify_sw(status),
+            }
+            .to_string();
+            check_true(text.contains("Signature PIN 2"), "the answer names the PIN")?;
+            check_true(text.contains("blocked"), "the answer says blocked")?;
+            check_true(text.contains("PUK"), "the answer names the PUK")?;
         }
         Ok(())
     }
