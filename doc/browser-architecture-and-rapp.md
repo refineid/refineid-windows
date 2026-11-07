@@ -207,20 +207,34 @@ CryptoAPI and CNG. For a mutual-TLS site (such as `https://suomi.fi` or
 `https://card.refineid.fi`) the path to the phone is:
 
 1. **Certificate in the user store**:
-   - The `read_identity` answer carries the authentication certificate: the
-     one whose SHA-256 fingerprint the session's `card.status` names (RAPP
-     v26.11.2 section 8.4). The RefineID app keeps it on the pairing record,
-     and its offering session adds it to `Cert:\CurrentUser\My` with
-     `CERT_KEY_PROV_INFO` naming the provider `RefineID Key Storage Provider`
-     and the key `rapp:<pair id>` once a session hears that card present.
-     It stays offered between sessions while a session heard the card within
-     120 seconds, and is removed once that lapses, at once when a session
-     hears another card, and when the app's watch ends.
-   - An entry stands only while its pairing's record may hold the certificate
-     (refineid-core `doc/security/certificate-custody.md`): every load and
-     written change of the pairing store, in any RefineID process, removes an
-     entry whose pairing is forgotten, revoked, expired, replaced or past the
-     7-day retention, so one a crash left goes as soon as a process runs.
+   - A session's `card.status` names the card by the SHA-256 fingerprint
+     of its authentication certificate (RAPP v26.11.2 section 8.4). The
+     process that holds the phone's session, the agent or the RefineID app,
+     reads that certificate on every session and keeps it in memory only: no
+     pairing record or other file holds it (refineid-core
+     `doc/security/certificate-custody.md`). It adds it to
+     `Cert:\CurrentUser\My` with `CERT_KEY_PROV_INFO` naming the provider
+     `RefineID Key Storage Provider` and the key `rapp:<pair id>` once a
+     session hears that card present.
+   - The entry stands only while the phone is present: a session heard its
+     card within 120 seconds. It is removed once that lapses, and the
+     certificate leaves the process's memory with it; at once when a session
+     hears another card, when the pairing is forgotten, revoked or expires,
+     and when the holding process quits. Every load and written change of
+     the pairing store, in any RefineID process, removes an entry no
+     sighting within the grace stands for, so one a crash left goes as soon
+     as a process runs.
+   - The agent runs from sign-in to sign-out (`HKLM\...\Run`, value
+     `RefineIDAgent`) and dials the phone when it appears (RAPP section
+     8.3), so the entry is in place before a browser asks once the phone is
+     in reach. A browser chooses a client certificate from the store
+     (Chromium's `ClientCertStoreWin` enumerates `CurrentUser\My`) before
+     any key storage provider is called, so when no entry stands nothing of
+     RefineID is asked, and nothing can wake the phone for that handshake;
+     the KSP's key calls come only after a certificate was chosen.
+   - The KSP, the PKCS#11 module and the card module's remote arm read the
+     offered certificate from this entry, while the pairing store's sighting
+     says the offer stands (`offered_phone_certificate`).
 2. **Provider registration**:
    - The DLL registers itself through `BCryptRegisterProvider` and
      `BCryptAddContextFunctionProvider` (`ksp_register.rs`), which write

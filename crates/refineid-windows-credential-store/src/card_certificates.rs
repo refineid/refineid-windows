@@ -16,9 +16,11 @@
 //!
 //! Windows' Certificate Propagation Service reads an inserted card through
 //! the Card Module and writes its certificates to the user's Personal store,
-//! where they stay when the card leaves. The login sweep removes a FINEID
-//! entry not seen for [`CERTIFICATE_RETENTION_DAYS`], the bound a pairing's
-//! certificate has (Windows STPA W-R-22).
+//! where Microsoft documents they remain when the card is removed. A FINEID
+//! card's entries stand only while that card is in a reader of this
+//! computer (Windows STPA W-R-22): the agent, started at every sign-in,
+//! removes every entry whose card is not in a reader when it starts, and
+//! again whenever a card leaves.
 //!
 //! An entry is FINEID's only when all three of these hold, and every other
 //! entry is neither read further nor touched:
@@ -27,14 +29,16 @@
 //! - its container is one the Card Module names; the authentication
 //!   container embeds a PIV tag Windows needs at a fixed offset, so that name
 //!   alone could recur on another vendor's card;
-//! - the certificate carries an object identifier of DVV's arc.
+//! - the certificate carries an object identifier of DVV's arc, which holds
+//!   the production policies and the DVV TEST hierarchy's alike.
 //!
-//! When an entry was seen is kept on the entry itself, as a certificate
-//! property, and leaves with it. A sweep that finds no date on an entry dates
-//! it now, so a store entry written afresh by propagation counts as seen, and
-//! an entry whose certificate is on a card in a reader at the sweep is seen.
-
-use refineid_rapp_core::store::CERTIFICATE_RETENTION_DAYS;
+//! A card is in a reader when the reader reports it present, and the
+//! entries it holds are the certificates Windows reads from it through the
+//! Card Module, which are the ones propagation wrote. A pass judges by one
+//! reading of the readers, reads every card in them, and removes only when
+//! a second reading of the readers, taken after the store was read, is the
+//! same: a card that arrived or left in between makes it judge again. A card
+//! the pass cannot read keeps every entry until a later pass reads it.
 
 #[cfg(windows)]
 use crate::CredentialStoreError;
@@ -57,8 +61,10 @@ const SMART_CARD_PROVIDERS: [&str; 2] = [
 
 /// The DER body of the object identifier arc 1.2.246.517, DVV's, under which
 /// the FINEID certificate policies lie: the DVV citizen CA's policy is
-/// 1.2.246.517.1.10.351.1 (`http://www.fineid.fi/cps61/`). An opaque registered
-/// identifier, per X.690 section 8.19.
+/// 1.2.246.517.1.10.351.1 (`http://www.fineid.fi/cps61/`), and the DVV TEST
+/// hierarchy's lie under 1.2.246.517.99, as in the policy
+/// 1.2.246.517.99.10.352.1 that `DVV TEST Certificates - G5E` certificates
+/// carry. An opaque registered identifier, per X.690 section 8.19.
 const DVV_ARC_DER: &[u8] = b"\x2a\x81\x76\x84\x05";
 
 /// The bytes the Card Module puts before a card's authentication certificate
@@ -102,11 +108,6 @@ impl CardId {
     }
 }
 
-/// Seconds in a day.
-const SECONDS_PER_DAY: u64 = 86_400;
-/// How long an entry stays unseen.
-pub const CARD_CERTIFICATE_RETENTION_SECONDS: u64 = CERTIFICATE_RETENTION_DAYS * SECONDS_PER_DAY;
-
 /// Whether an entry with key `provider`, key `container` and certificate
 /// `certificate` is FINEID's. See the module's description.
 #[must_use]
@@ -120,116 +121,364 @@ pub fn is_fineid_entry(provider: &str, container: &str, certificate: &[u8]) -> b
             .any(|window| window == DVV_ARC_DER)
 }
 
-/// What a sweep does with a FINEID entry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EntryAction {
-    /// Date it `now`: it has no date, its date lies ahead, or it is on a card
-    /// in a reader.
-    MarkSeen,
-    /// Leave it and its date.
-    Keep,
-    /// It has not been seen for the retention: remove it.
-    Remove,
-}
+/// A certificate's DER as a card holds it or the Personal store keeps it:
+/// transit bytes, compared whole and never parsed here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CardCertificate(Vec<u8>);
 
-/// What to do at `now`, in seconds, with an entry dated `seen` and which is
-/// or is not on a card in a reader.
-#[must_use]
-pub const fn entry_action(seen: Option<u64>, now: u64, on_a_card: bool) -> EntryAction {
-    if on_a_card {
-        return EntryAction::MarkSeen;
+impl CardCertificate {
+    /// The certificate whose DER is `der`.
+    #[must_use]
+    pub const fn new(der: Vec<u8>) -> Self {
+        Self(der)
     }
-    match seen {
-        None => EntryAction::MarkSeen,
-        Some(seen) if seen > now => EntryAction::MarkSeen,
-        Some(seen) if now - seen > CARD_CERTIFICATE_RETENTION_SECONDS => EntryAction::Remove,
-        Some(_) => EntryAction::Keep,
+
+    /// The certificate's DER.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
     }
 }
 
-/// The certificate property holding when an entry was seen: the first
-/// identifier an application may use.
-#[cfg(windows)]
-const SEEN_PROPERTY: u32 = windows_sys::Win32::Security::Cryptography::CERT_FIRST_USER_PROP_ID;
+/// A reader's name as PC/SC reports it.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ReaderName(String);
 
-/// Sweeps the current user's Personal store at `now`, in seconds; `on_cards`
-/// are the certificates on the cards in readers. Returns how many entries it
-/// removed.
+impl ReaderName {
+    /// The reader PC/SC names `name`.
+    #[must_use]
+    pub const fn new(name: String) -> Self {
+        Self(name)
+    }
+
+    /// The name.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The answer to reset a reader reports for the card in it: transit bytes
+/// handed to Windows' card database unread.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnswerToReset(Vec<u8>);
+
+impl AnswerToReset {
+    /// The answer to reset whose bytes are `bytes`.
+    #[must_use]
+    pub const fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    /// Its bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// One reader, as one reading of the readers found it. Reading a reader's
+/// state touches no card.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReaderReading {
+    /// The reader.
+    pub name: ReaderName,
+    /// How many card insertions and removals Windows has counted for the
+    /// reader: the upper half of `dwEventState` that `SCardGetStatusChange`
+    /// reports. A card that left and another that arrived between two
+    /// readings change it although both readings see a card.
+    pub card_events: u32,
+    /// The card in the reader, by its answer to reset; `None` when the
+    /// reader is empty.
+    pub card: Option<AnswerToReset>,
+}
+
+/// One reading of every reader of this computer, in name order, so two
+/// readings that saw the same are equal.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReadersReading(Vec<ReaderReading>);
+
+impl ReadersReading {
+    /// The reading of `readers`.
+    #[must_use]
+    pub fn new(mut readers: Vec<ReaderReading>) -> Self {
+        readers.sort_by(|one, other| one.name.cmp(&other.name));
+        Self(readers)
+    }
+
+    /// The readers, in name order.
+    #[must_use]
+    pub fn readers(&self) -> &[ReaderReading] {
+        &self.0
+    }
+}
+
+/// What reading a card's certificates gave.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CardRead {
+    /// The Card Module serves the card and Windows read these certificates
+    /// from it.
+    Certificates(Vec<CardCertificate>),
+    /// The Card Module does not serve the card, so it holds no FINEID entry.
+    NotServed,
+    /// The card was not read: what it holds is not known.
+    Unread,
+}
+
+/// The readers of this computer and the cards in them.
+pub trait CardReaders {
+    /// Reads every reader's state now, touching no card; `None` when the
+    /// readers cannot be read.
+    fn reading(&mut self) -> Option<ReadersReading>;
+
+    /// Reads the certificates of the card whose answer to reset is `card`,
+    /// in `reader`.
+    fn certificates(&mut self, reader: &ReaderName, card: &AnswerToReset) -> CardRead;
+}
+
+/// The FINEID entries of a certificate store.
+pub trait FineidEntries {
+    /// A store failure.
+    type Error;
+
+    /// The certificate of every FINEID entry.
+    ///
+    /// # Errors
+    /// The store cannot be read.
+    fn certificates(&mut self) -> Result<Vec<CardCertificate>, Self::Error>;
+
+    /// Removes every FINEID entry whose certificate is `certificate`, and
+    /// returns how many it removed.
+    ///
+    /// # Errors
+    /// The store refused a removal.
+    fn remove(&mut self, certificate: &CardCertificate) -> Result<usize, Self::Error>;
+}
+
+/// How many times one pass judges before it leaves the decision to the
+/// next: it judges again only when a card arrived or left while it judged.
+pub const JUDGEMENTS_PER_PASS: usize = 3;
+
+/// What a pass did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Pass {
+    /// It judged by `readers` and removed `removed` entries.
+    Judged {
+        /// The entries it removed.
+        removed: usize,
+        /// The reading it judged by.
+        readers: ReadersReading,
+    },
+    /// It removed nothing and leaves the decision to a later pass: a card
+    /// was not read, the readers were not, or cards kept arriving or
+    /// leaving.
+    Deferred {
+        /// The last reading it took, if any.
+        readers: Option<ReadersReading>,
+    },
+}
+
+impl Pass {
+    /// The last reading of the readers the pass took.
+    #[must_use]
+    pub const fn readers(&self) -> Option<&ReadersReading> {
+        match self {
+            Self::Judged { readers, .. } => Some(readers),
+            Self::Deferred { readers } => readers.as_ref(),
+        }
+    }
+}
+
+/// Removes every FINEID entry of `entries` whose card is not in a reader
+/// of `readers`. See the module's description.
 ///
 /// # Errors
-/// A Windows certificate store failure.
-#[cfg(windows)]
-pub fn sweep_card_certificates(
-    now: u64,
-    on_cards: &[Vec<u8>],
-) -> Result<usize, CredentialStoreError> {
-    let store = PersonalStore::open()?;
-    sweep_store(store.0, now, on_cards, &is_fineid_entry)
+/// The store failed; entries removed before the failure stay removed.
+pub fn remove_entries_of_absent_cards<R, S>(
+    readers: &mut R,
+    entries: &mut S,
+) -> Result<Pass, S::Error>
+where
+    R: CardReaders + ?Sized,
+    S: FineidEntries + ?Sized,
+{
+    let mut last = None;
+    for _ in 0..JUDGEMENTS_PER_PASS {
+        let Some(before) = readers.reading() else {
+            return Ok(Pass::Deferred { readers: last });
+        };
+        let mut on_cards = Vec::new();
+        for reader in before.readers() {
+            let Some(card) = &reader.card else {
+                continue;
+            };
+            match readers.certificates(&reader.name, card) {
+                CardRead::Certificates(certificates) => on_cards.extend(certificates),
+                CardRead::NotServed => {}
+                CardRead::Unread => {
+                    return Ok(Pass::Deferred {
+                        readers: Some(before),
+                    });
+                }
+            }
+        }
+        let absent: Vec<CardCertificate> = entries
+            .certificates()?
+            .into_iter()
+            .filter(|certificate| !on_cards.contains(certificate))
+            .collect();
+        if absent.is_empty() {
+            return Ok(Pass::Judged {
+                removed: 0,
+                readers: before,
+            });
+        }
+        if readers.reading().as_ref() != Some(&before) {
+            last = Some(before);
+            continue;
+        }
+        let mut removed = 0;
+        for certificate in &absent {
+            removed += entries.remove(certificate)?;
+        }
+        return Ok(Pass::Judged {
+            removed,
+            readers: before,
+        });
+    }
+    Ok(Pass::Deferred { readers: last })
 }
 
-/// [`sweep_card_certificates`] over the open `store`, judging entries by
-/// `is_fineid`.
+/// The current user's Personal store, as its FINEID entries.
 #[cfg(windows)]
-fn sweep_store(
+pub struct PersonalCardEntries(PersonalStore);
+
+#[cfg(windows)]
+impl core::fmt::Debug for PersonalCardEntries {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("PersonalCardEntries")
+    }
+}
+
+#[cfg(windows)]
+impl PersonalCardEntries {
+    /// Opens the current user's Personal store.
+    ///
+    /// # Errors
+    /// The store cannot be opened.
+    pub fn open() -> Result<Self, CredentialStoreError> {
+        PersonalStore::open().map(Self)
+    }
+}
+
+#[cfg(windows)]
+impl FineidEntries for PersonalCardEntries {
+    type Error = CredentialStoreError;
+
+    fn certificates(&mut self) -> Result<Vec<CardCertificate>, Self::Error> {
+        Ok(fineid_certificates_in(self.0.0, &is_fineid_entry))
+    }
+
+    fn remove(&mut self, certificate: &CardCertificate) -> Result<usize, Self::Error> {
+        remove_fineid_entries(self.0.0, &is_fineid_entry, certificate)
+    }
+}
+
+/// An entry's certificate filter: provider, container, certificate.
+#[cfg(windows)]
+type EntryFilter = dyn Fn(&str, &str, &[u8]) -> bool;
+
+/// Calls `visit` with each entry of the open `store` that `is_fineid`
+/// accepts, and its certificate, until `visit` returns `false`.
+#[cfg(windows)]
+fn each_fineid_entry(
     store: *mut core::ffi::c_void,
-    now: u64,
-    on_cards: &[Vec<u8>],
-    is_fineid: &dyn Fn(&str, &str, &[u8]) -> bool,
-) -> Result<usize, CredentialStoreError> {
-    use windows_sys::Win32::Foundation::GetLastError;
+    is_fineid: &EntryFilter,
+    mut visit: impl FnMut(
+        *const windows_sys::Win32::Security::Cryptography::CERT_CONTEXT,
+        &[u8],
+    ) -> bool,
+) {
     use windows_sys::Win32::Security::Cryptography::{
-        CERT_CONTEXT, CertDeleteCertificateFromStore, CertDuplicateCertificateContext,
-        CertEnumCertificatesInStore, CertFreeCertificateContext,
+        CERT_CONTEXT, CertEnumCertificatesInStore, CertFreeCertificateContext,
     };
 
-    let mut removed = 0;
     let mut context: *const CERT_CONTEXT = core::ptr::null();
     loop {
         // SAFETY: `context` is null or the context the previous iteration
         // received from this same enumeration, which frees it.
         context = unsafe { CertEnumCertificatesInStore(store, context) };
         if context.is_null() {
-            return Ok(removed);
+            return;
         }
         let Some((provider, container)) = key_provider_info(context) else {
             continue;
         };
         // SAFETY: the context is live; its encoded certificate is
-        // `cbCertEncoded` bytes at `pbCertEncoded`.
+        // `cbCertEncoded` bytes at `pbCertEncoded`, null only when empty.
         let certificate = unsafe {
-            core::slice::from_raw_parts((*context).pbCertEncoded, (*context).cbCertEncoded as usize)
+            let encoded = (*context).pbCertEncoded;
+            if encoded.is_null() {
+                continue;
+            }
+            core::slice::from_raw_parts(encoded, (*context).cbCertEncoded as usize)
         };
-        if !is_fineid(&provider, &container, certificate) {
-            continue;
-        }
-        let on_a_card = on_cards.iter().any(|der| der.as_slice() == certificate);
-        match entry_action(read_seen(context), now, on_a_card) {
-            EntryAction::Keep => {}
-            EntryAction::MarkSeen => {
-                // A date not written is written by a later sweep; the entry
-                // only stays longer.
-                let _written = write_seen(context, now);
-            }
-            EntryAction::Remove => {
-                // SAFETY: deletion consumes a context of its own, so the
-                // enumeration keeps the original and continues from it.
-                let deleted = unsafe {
-                    CertDeleteCertificateFromStore(CertDuplicateCertificateContext(context))
-                };
-                if deleted == 0 {
-                    // SAFETY: read before any other Windows call; the
-                    // enumeration context is ours to free once the loop ends.
-                    let code = unsafe {
-                        let code = GetLastError();
-                        CertFreeCertificateContext(context);
-                        code
-                    };
-                    return Err(CredentialStoreError::CertificateStore { code });
-                }
-                removed += 1;
-            }
+        if is_fineid(&provider, &container, certificate) && !visit(context, certificate) {
+            // SAFETY: the enumeration stops here, so its context is ours to
+            // free.
+            unsafe { CertFreeCertificateContext(context) };
+            return;
         }
     }
+}
+
+/// The certificates of the FINEID entries of the open `store`.
+#[cfg(windows)]
+fn fineid_certificates_in(
+    store: *mut core::ffi::c_void,
+    is_fineid: &EntryFilter,
+) -> Vec<CardCertificate> {
+    let mut certificates = Vec::new();
+    each_fineid_entry(store, is_fineid, |_, certificate| {
+        certificates.push(CardCertificate::new(certificate.to_vec()));
+        true
+    });
+    certificates
+}
+
+/// Removes the FINEID entries of the open `store` whose certificate is
+/// `certificate`, and returns how many it removed.
+#[cfg(windows)]
+fn remove_fineid_entries(
+    store: *mut core::ffi::c_void,
+    is_fineid: &EntryFilter,
+    certificate: &CardCertificate,
+) -> Result<usize, CredentialStoreError> {
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::Security::Cryptography::{
+        CertDeleteCertificateFromStore, CertDuplicateCertificateContext,
+    };
+
+    let mut removed = 0;
+    let mut failure = None;
+    each_fineid_entry(store, is_fineid, |context, der| {
+        if der != certificate.as_bytes() {
+            return true;
+        }
+        // SAFETY: deletion consumes a context of its own, so the enumeration
+        // keeps the original and continues from it.
+        let deleted =
+            unsafe { CertDeleteCertificateFromStore(CertDuplicateCertificateContext(context)) };
+        if deleted == 0 {
+            // SAFETY: read before any other Windows call.
+            let code = unsafe { GetLastError() };
+            failure = Some(CredentialStoreError::CertificateStore { code });
+            return false;
+        }
+        removed += 1;
+        true
+    });
+    failure.map_or(Ok(removed), Err)
 }
 
 /// The key provider and container of an entry, or `None` when it has none.
@@ -279,74 +528,136 @@ pub(crate) fn key_provider_info(
     }
 }
 
-/// When the entry was seen, in seconds, as the last sweep wrote it.
-#[cfg(windows)]
-fn read_seen(
-    context: *const windows_sys::Win32::Security::Cryptography::CERT_CONTEXT,
-) -> Option<u64> {
-    use windows_sys::Win32::Security::Cryptography::CertGetCertificateContextProperty;
-
-    let mut bytes = [0u8; size_of::<u64>()];
-    let mut size = u32::try_from(bytes.len()).ok()?;
-    // SAFETY: `bytes` holds `size` bytes; a property of another size fails.
-    let read = unsafe {
-        CertGetCertificateContextProperty(
-            context,
-            SEEN_PROPERTY,
-            bytes.as_mut_ptr().cast(),
-            &raw mut size,
-        )
-    };
-    (read != 0 && size as usize == bytes.len()).then(|| u64::from_le_bytes(bytes))
-}
-
-/// Dates the entry `now`, in seconds. Returns whether it was written.
-#[cfg(windows)]
-fn write_seen(
-    context: *const windows_sys::Win32::Security::Cryptography::CERT_CONTEXT,
-    now: u64,
-) -> bool {
-    use windows_sys::Win32::Security::Cryptography::{
-        CRYPT_INTEGER_BLOB, CertSetCertificateContextProperty,
-    };
-
-    let mut bytes = now.to_le_bytes();
-    let Ok(length) = u32::try_from(bytes.len()) else {
-        return false;
-    };
-    let blob = CRYPT_INTEGER_BLOB {
-        cbData: length,
-        pbData: bytes.as_mut_ptr(),
-    };
-    // SAFETY: `blob` and `bytes` live for the call, which copies them.
-    unsafe {
-        CertSetCertificateContextProperty(context, SEEN_PROPERTY, 0, (&raw const blob).cast()) != 0
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use super::*;
 
     /// A provider that is not a smart card's.
     const OTHER_PROVIDER: &str = "Microsoft Software Key Storage Provider";
     /// A container no FINEID card has.
     const OTHER_CONTAINER: &str = "{11111111-2222-3333-4444-555555555555}";
-    /// The moment of a sweep.
-    const NOW: u64 = 2_000_000_000;
-    /// One second.
-    const SECOND: u64 = 1;
+    /// The DER body of 1.2.246.517.99.10.352.1, the policy of the
+    /// `DVV TEST Certificates - G5E` CA's end-entity certificates, as such a
+    /// certificate carries it (X.690 section 8.19).
+    const DVV_TEST_POLICY_DER: &[u8] = b"\x2a\x81\x76\x84\x05\x63\x0a\x82\x60\x01";
+    /// The DER body of 1.2.246.517.1.10.352.1, the policy of the
+    /// `DVV Citizen Certificates - G4E` CA's end-entity certificates.
+    const DVV_CITIZEN_POLICY_DER: &[u8] = b"\x2a\x81\x76\x84\x05\x01\x0a\x82\x60\x01";
+    /// The reader of the tests.
+    const READER: &str = "Synthetic Reader 0";
+    /// A second reader.
+    const OTHER_READER: &str = "Synthetic Reader 1";
+    /// The card events a reader has counted when a test starts.
+    const EVENTS: u32 = 4;
+    /// One more card insertion or removal.
+    const ONE_EVENT: u32 = 1;
+    /// How many times one judgement reads the readers.
+    const READINGS_PER_JUDGEMENT: usize = 2;
 
-    fn certificate_with_dvv_arc() -> Vec<u8> {
+    fn certificate_with(policy: &[u8]) -> Vec<u8> {
         let mut certificate = b"synthetic before ".to_vec();
-        certificate.extend_from_slice(DVV_ARC_DER);
+        certificate.extend_from_slice(policy);
         certificate.extend_from_slice(b" synthetic after");
         certificate
     }
 
+    fn certificate(text: &str) -> CardCertificate {
+        CardCertificate::new(text.as_bytes().to_vec())
+    }
+
+    fn atr(text: &str) -> AnswerToReset {
+        AnswerToReset::new(text.as_bytes().to_vec())
+    }
+
+    fn reader(name: &str, card_events: u32, card: Option<&str>) -> ReaderReading {
+        ReaderReading {
+            name: ReaderName::new(name.to_owned()),
+            card_events,
+            card: card.map(atr),
+        }
+    }
+
+    fn readers(list: Vec<ReaderReading>) -> ReadersReading {
+        ReadersReading::new(list)
+    }
+
+    /// Readers whose readings follow `readings` (the last one repeats) and
+    /// whose cards, by answer to reset, read as `cards`.
+    struct FakeReaders {
+        readings: VecDeque<Option<ReadersReading>>,
+        cards: Vec<(AnswerToReset, CardRead)>,
+    }
+
+    impl FakeReaders {
+        fn new<T: Into<Option<ReadersReading>>>(
+            readings: Vec<T>,
+            cards: Vec<(&str, CardRead)>,
+        ) -> Self {
+            Self {
+                readings: readings.into_iter().map(Into::into).collect(),
+                cards: cards
+                    .into_iter()
+                    .map(|(answer, read)| (atr(answer), read))
+                    .collect(),
+            }
+        }
+    }
+
+    impl CardReaders for FakeReaders {
+        fn reading(&mut self) -> Option<ReadersReading> {
+            if self.readings.len() > 1 {
+                self.readings.pop_front().flatten()
+            } else {
+                self.readings.front().cloned().flatten()
+            }
+        }
+
+        fn certificates(&mut self, _reader: &ReaderName, card: &AnswerToReset) -> CardRead {
+            self.cards
+                .iter()
+                .find(|(answer, _)| answer == card)
+                .map_or(CardRead::Unread, |(_, read)| read.clone())
+        }
+    }
+
+    /// A store holding FINEID entries only.
+    #[derive(Default)]
+    struct FakeStore {
+        entries: Vec<CardCertificate>,
+    }
+
+    impl FineidEntries for FakeStore {
+        type Error = ();
+
+        fn certificates(&mut self) -> Result<Vec<CardCertificate>, ()> {
+            Ok(self.entries.clone())
+        }
+
+        fn remove(&mut self, certificate: &CardCertificate) -> Result<usize, ()> {
+            let before = self.entries.len();
+            self.entries.retain(|entry| entry != certificate);
+            Ok(before - self.entries.len())
+        }
+    }
+
+    fn store(entries: &[&str]) -> FakeStore {
+        FakeStore {
+            entries: entries.iter().map(|text| certificate(text)).collect(),
+        }
+    }
+
+    fn removed(pass: &Pass) -> Option<usize> {
+        match pass {
+            Pass::Judged { removed, .. } => Some(*removed),
+            Pass::Deferred { .. } => None,
+        }
+    }
+
     #[test]
     fn a_fineid_entry_needs_provider_container_and_arc() {
-        let fineid = certificate_with_dvv_arc();
+        let fineid = certificate_with(DVV_ARC_DER);
         for provider in SMART_CARD_PROVIDERS {
             for container in [FINEID_AUTHENTICATION_CONTAINER, FINEID_QUALIFIED_CONTAINER] {
                 assert!(is_fineid_entry(provider, container, &fineid));
@@ -367,29 +678,202 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_goes_only_past_the_retention() {
-        let limit = NOW - CARD_CERTIFICATE_RETENTION_SECONDS;
-        assert_eq!(entry_action(Some(limit), NOW, false), EntryAction::Keep);
+    fn production_and_dvv_test_policies_are_both_fineid() {
+        let provider = SMART_CARD_PROVIDERS[1];
+        for policy in [DVV_CITIZEN_POLICY_DER, DVV_TEST_POLICY_DER] {
+            assert!(is_fineid_entry(
+                provider,
+                FINEID_AUTHENTICATION_CONTAINER,
+                &certificate_with(policy)
+            ));
+        }
+    }
+
+    #[test]
+    fn a_card_in_a_reader_keeps_its_entries_and_an_absent_one_loses_them() {
+        let mut readers = FakeReaders::new(
+            vec![readers(vec![
+                reader(READER, EVENTS, Some("present card")),
+                reader(OTHER_READER, EVENTS, None),
+            ])],
+            vec![(
+                "present card",
+                CardRead::Certificates(vec![
+                    certificate("present authentication"),
+                    certificate("present signature"),
+                ]),
+            )],
+        );
+        let mut entries = store(&[
+            "present authentication",
+            "present signature",
+            "absent authentication",
+            "absent signature",
+        ]);
+        let pass = remove_entries_of_absent_cards(&mut readers, &mut entries);
+        assert_eq!(pass.as_ref().map(removed), Ok(Some(2)));
         assert_eq!(
-            entry_action(Some(limit - SECOND), NOW, false),
-            EntryAction::Remove
+            entries.entries,
+            vec![
+                certificate("present authentication"),
+                certificate("present signature")
+            ]
         );
     }
 
     #[test]
-    fn an_undated_future_or_present_entry_is_seen_now() {
-        assert_eq!(entry_action(None, NOW, false), EntryAction::MarkSeen);
-        assert_eq!(
-            entry_action(Some(NOW + SECOND), NOW, false),
-            EntryAction::MarkSeen
+    fn with_no_reader_every_entry_goes() {
+        let mut readers = FakeReaders::new(vec![readers(Vec::new())], Vec::new());
+        let mut entries = store(&["one card", "another card"]);
+        let pass = remove_entries_of_absent_cards(&mut readers, &mut entries);
+        assert_eq!(pass.as_ref().map(removed), Ok(Some(2)));
+        assert!(entries.entries.is_empty());
+    }
+
+    #[test]
+    fn a_card_the_module_does_not_serve_keeps_nothing() {
+        let mut readers = FakeReaders::new(
+            vec![readers(vec![reader(READER, EVENTS, Some("bank card"))])],
+            vec![("bank card", CardRead::NotServed)],
         );
-        assert_eq!(entry_action(Some(0), NOW, true), EntryAction::MarkSeen);
+        let mut entries = store(&["absent card"]);
+        let pass = remove_entries_of_absent_cards(&mut readers, &mut entries);
+        assert_eq!(pass.as_ref().map(removed), Ok(Some(1)));
+        assert!(entries.entries.is_empty());
+    }
+
+    #[test]
+    fn a_card_not_read_keeps_every_entry() {
+        let mut readers = FakeReaders::new(
+            vec![readers(vec![
+                reader(READER, EVENTS, Some("busy card")),
+                reader(OTHER_READER, EVENTS, Some("present card")),
+            ])],
+            vec![
+                ("busy card", CardRead::Unread),
+                (
+                    "present card",
+                    CardRead::Certificates(vec![certificate("present")]),
+                ),
+            ],
+        );
+        let mut entries = store(&["present", "absent"]);
+        let pass = remove_entries_of_absent_cards(&mut readers, &mut entries);
+        assert_eq!(pass.as_ref().map(removed), Ok(None));
+        assert_eq!(entries.entries.len(), 2);
+    }
+
+    #[test]
+    fn readers_not_read_keep_every_entry() {
+        let mut readers = FakeReaders::new(vec![None::<ReadersReading>], Vec::new());
+        let mut entries = store(&["absent"]);
+        let pass = remove_entries_of_absent_cards(&mut readers, &mut entries);
+        assert_eq!(pass, Ok(Pass::Deferred { readers: None }));
+        assert_eq!(entries.entries.len(), 1);
+    }
+
+    #[test]
+    fn a_card_inserted_while_the_pass_judges_keeps_its_entry() {
+        // The first reading sees an empty reader; the card arrives, and
+        // propagation has written its entry, before the second reading.
+        let empty = readers(vec![reader(READER, EVENTS, None)]);
+        let inserted = readers(vec![reader(READER, EVENTS + ONE_EVENT, Some("card"))]);
+        let mut readers = FakeReaders::new(
+            vec![empty, inserted],
+            vec![("card", CardRead::Certificates(vec![certificate("card")]))],
+        );
+        let mut entries = store(&["card"]);
+        let pass = remove_entries_of_absent_cards(&mut readers, &mut entries);
+        assert_eq!(pass.as_ref().map(removed), Ok(Some(0)));
+        assert_eq!(entries.entries, vec![certificate("card")]);
+    }
+
+    #[test]
+    fn a_card_swapped_between_readings_is_judged_again() {
+        // Both readings see a card in the reader, but its count moved: one
+        // card left and another arrived.
+        let first = readers(vec![reader(READER, EVENTS, Some("first card"))]);
+        let swapped = readers(vec![reader(
+            READER,
+            EVENTS + ONE_EVENT + ONE_EVENT,
+            Some("second card"),
+        )]);
+        let mut readers = FakeReaders::new(
+            vec![first, swapped],
+            vec![
+                (
+                    "first card",
+                    CardRead::Certificates(vec![certificate("first")]),
+                ),
+                (
+                    "second card",
+                    CardRead::Certificates(vec![certificate("second")]),
+                ),
+            ],
+        );
+        let mut entries = store(&["first", "second"]);
+        let pass = remove_entries_of_absent_cards(&mut readers, &mut entries);
+        assert_eq!(pass.as_ref().map(removed), Ok(Some(1)));
+        assert_eq!(entries.entries, vec![certificate("second")]);
+    }
+
+    #[test]
+    fn readers_that_keep_changing_defer_the_removal() {
+        // Each judgement reads the readers twice, and every reading differs.
+        let readings = (0..=READINGS_PER_JUDGEMENT * JUDGEMENTS_PER_PASS)
+            .map(|step| {
+                let step = u32::try_from(step).expect("a few steps");
+                readers(vec![reader(READER, EVENTS + step, None)])
+            })
+            .collect();
+        let mut readers = FakeReaders::new(readings, Vec::new());
+        let mut entries = store(&["absent"]);
+        let pass = remove_entries_of_absent_cards(&mut readers, &mut entries);
+        assert_eq!(pass.as_ref().map(removed), Ok(None));
+        assert_eq!(entries.entries.len(), 1);
+    }
+
+    #[test]
+    fn an_entry_propagation_writes_again_stays_while_its_card_is_present() {
+        let mut entries = store(&["card"]);
+        let mut absent = FakeReaders::new(
+            vec![readers(vec![reader(READER, EVENTS, None)])],
+            Vec::new(),
+        );
+        let pass = remove_entries_of_absent_cards(&mut absent, &mut entries);
+        assert_eq!(pass.as_ref().map(removed), Ok(Some(1)));
+
+        // The card is inserted again and propagation writes its entry anew.
+        entries.entries.push(certificate("card"));
+        let mut present = FakeReaders::new(
+            vec![readers(vec![reader(
+                READER,
+                EVENTS + ONE_EVENT,
+                Some("card"),
+            )])],
+            vec![("card", CardRead::Certificates(vec![certificate("card")]))],
+        );
+        let pass = remove_entries_of_absent_cards(&mut present, &mut entries);
+        assert_eq!(pass.as_ref().map(removed), Ok(Some(0)));
+        assert_eq!(entries.entries, vec![certificate("card")]);
+    }
+
+    #[test]
+    fn readings_compare_in_name_order() {
+        let one = ReadersReading::new(vec![
+            reader(READER, EVENTS, None),
+            reader(OTHER_READER, EVENTS, Some("card")),
+        ]);
+        let other = ReadersReading::new(vec![
+            reader(OTHER_READER, EVENTS, Some("card")),
+            reader(READER, EVENTS, None),
+        ]);
+        assert_eq!(one, other);
     }
 
     #[cfg(windows)]
     mod store {
         use super::super::*;
-        use super::NOW;
         use windows_sys::Win32::Security::Cryptography::{
             CERT_CLOSE_STORE_FORCE_FLAG, CERT_CONTEXT, CERT_KEY_PROV_INFO_PROP_ID,
             CERT_STORE_ADD_ALWAYS, CERT_STORE_PROV_MEMORY, CRYPT_KEY_PROV_INFO,
@@ -404,7 +888,7 @@ mod tests {
         const OTHER: &[u8] = include_bytes!("../../refineid-rapp-cli/src/mock_ca.der");
         /// The provider both carry.
         const PROVIDER: &str = "Microsoft Base Smart Card Crypto Provider";
-        /// The container of the entry the test sweeps.
+        /// The container of the entry the test removes.
         const SWEPT_CONTAINER: &str = FINEID_QUALIFIED_CONTAINER;
         /// The container of the entry it must leave.
         const OTHER_CONTAINER: &str = "{11111111-2222-3333-4444-555555555555}";
@@ -461,7 +945,7 @@ mod tests {
         }
 
         #[test]
-        fn a_sweep_dates_then_removes_and_leaves_every_other_entry() {
+        fn only_the_fineid_entry_with_the_certificate_goes() {
             // SAFETY: an in-memory store with no parameter; closed below. The
             // user's own Personal store is never opened by this test.
             let store =
@@ -470,22 +954,24 @@ mod tests {
             add(store, SWEPT, SWEPT_CONTAINER);
             add(store, OTHER, OTHER_CONTAINER);
             let is_fineid = |_: &str, container: &str, _: &[u8]| container == SWEPT_CONTAINER;
-            let late = NOW + CARD_CERTIFICATE_RETENTION_SECONDS + 1;
 
-            let run = |now, on_cards: &[Vec<u8>]| {
-                sweep_store(store, now, on_cards, &is_fineid).expect("the sweep runs")
-            };
-            assert_eq!(run(NOW, &[]), 0, "the first sweep only dates it");
-            assert_eq!(run(NOW, &[]), 0, "a fresh date keeps it");
+            let swept = CardCertificate::new(SWEPT.to_vec());
             assert_eq!(
-                run(late, &[SWEPT.to_vec()]),
-                0,
-                "on a card in a reader it is seen"
+                fineid_certificates_in(store, &is_fineid),
+                vec![swept.clone()]
             );
-            assert_eq!(count(store), 2);
-            let later = late + CARD_CERTIFICATE_RETENTION_SECONDS + 1;
-            assert_eq!(run(later, &[]), 1, "past the retention it goes");
+            let other = CardCertificate::new(OTHER.to_vec());
+            assert_eq!(
+                remove_fineid_entries(store, &is_fineid, &other).expect("the store answers"),
+                0,
+                "another vendor's entry is not FINEID's"
+            );
+            assert_eq!(
+                remove_fineid_entries(store, &is_fineid, &swept).expect("the store answers"),
+                1
+            );
             assert_eq!(count(store), 1, "the other entry stays");
+            assert!(fineid_certificates_in(store, &is_fineid).is_empty());
             // SAFETY: closes the store opened above, once.
             unsafe { CertCloseStore(store, CERT_CLOSE_STORE_FORCE_FLAG) };
         }

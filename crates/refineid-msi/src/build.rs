@@ -31,8 +31,6 @@ const CABINET_NAME: &str = "payload.cab";
 const COMPONENT_FILE: &str = "MinidriverDll";
 /// The component holding the per-user agent.
 const COMPONENT_AGENT: &str = "AgentExe";
-/// The component holding the login sweep.
-const COMPONENT_SWEEP: &str = "SweepExe";
 /// The Program Files directory of the machine's own architecture.
 const PROGRAM_FILES_DIRECTORY: &str = "ProgramFiles64Folder";
 /// The product's directory under Program Files; only administrators write
@@ -447,10 +445,9 @@ pub struct Package<'a> {
     pub architecture: Architecture,
     /// The Card Module.
     pub file: SystemFile<'a>,
-    /// The per-user agent, installed under Program Files.
+    /// The per-user agent, installed under Program Files and started at
+    /// every sign-in.
     pub agent: SystemFile<'a>,
-    /// The login sweep, installed beside the agent.
-    pub sweep: SystemFile<'a>,
     /// The driver package, installed beside the agent, when one is
     /// supplied.
     pub driver_package: Option<DriverPackage<'a>>,
@@ -803,12 +800,6 @@ fn component_rows<'a>(package: &Package<'a>, first_registry_key: &'a str) -> Vec
             key_path: package.agent.key,
         },
         ComponentRow {
-            component: COMPONENT_SWEEP,
-            directory: PRODUCT_DIRECTORY,
-            attributes: schema::COMPONENT_64BIT,
-            key_path: package.sweep.key,
-        },
-        ComponentRow {
             component: COMPONENT_REGISTRY,
             directory: SYSTEM_DIRECTORY,
             attributes: schema::COMPONENT_64BIT | schema::COMPONENT_REGISTRY_KEY_PATH,
@@ -892,10 +883,6 @@ fn payload<'a>(package: &Package<'a>) -> Vec<PayloadEntry<'a>> {
         PayloadEntry {
             file: package.agent,
             component: COMPONENT_AGENT,
-        },
-        PayloadEntry {
-            file: package.sweep,
-            component: COMPONENT_SWEEP,
         },
     ];
     if let Some(driver) = package.driver_package {

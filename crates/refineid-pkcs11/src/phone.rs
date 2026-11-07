@@ -34,10 +34,10 @@ use refineid_rapp_core::engine::{OperationOutcome, Requester, RequesterConfig, S
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::message::{CloseReason, ResultError};
 use refineid_rapp_core::operations::{CardKeyProfile, CardOperationResult, SignatureAlgorithm};
-use refineid_rapp_core::store::{PairingRecord, PairingStore as _, offered_certificate};
+use refineid_rapp_core::store::{PairingRecord, PairingStore as _};
 use refineid_rapp_core::stream::{DialCause, dial_session};
 use refineid_remote::{DisplayText, RemoteKeyProfile, RemoteSignatureAlgorithm, SignatureRequest};
-use refineid_windows_credential_store::ProtectedPairingStore;
+use refineid_windows_credential_store::{ProtectedPairingStore, offered_phone_certificate};
 
 /// The token label of the phone's slot: the PIN it asks for is the phone's.
 const TOKEN_LABEL: &str = "Phone Basic PIN 1";
@@ -63,7 +63,7 @@ impl RemoteTokenSource for PhoneSource {
         };
         let record = store.usable_pairing()?;
         let slot = RemoteSlotId::parse(&hex_of(record.pair_id())).ok()?;
-        let certificate = offered_certificate(&store, record.pair_id(), unix_time_ms())
+        let certificate = offered_phone_certificate(&store, record.pair_id(), unix_time_ms())
             .map(|certificate| SessionCertificate::new(certificate.as_der().to_vec()));
         Some(RemoteOffer::new(
             slot,

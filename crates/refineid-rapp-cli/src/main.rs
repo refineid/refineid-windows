@@ -91,7 +91,6 @@ fn main() {
         Some("clear-pairing") => clear_pairing(),
         Some("forget-pairing") => forget_pairing_cmd(&arguments[1..]),
         Some("list-pairing") => list_pairing(),
-        Some("export-cert") => export_cert(&arguments[1..]),
         Some("export-pairing") => export_pairing(&arguments[1..]),
         Some("import-pairing") => import_pairing(&arguments[1..]),
         #[cfg(windows)]
@@ -119,7 +118,6 @@ fn main() {
             eprintln!("  refineid-rapp forget-pairing <pair-id>");
             eprintln!("  refineid-rapp clear-pairing   (local wipe; no phone is told)");
             eprintln!("  refineid-rapp list-pairing");
-            eprintln!("  refineid-rapp export-cert [<path>]");
             eprintln!("  refineid-rapp export-pairing [<path>]");
             eprintln!("  refineid-rapp import-pairing <path>");
             #[cfg(windows)]
@@ -414,40 +412,6 @@ pub(crate) fn profile_list(profiles: &[ProfileName]) -> String {
         .join(", ")
 }
 
-fn record_certificate_outcome<S: PairingStore>(
-    requester: &mut Requester<S>,
-    pair_id: PairId,
-    operation: &CardOperation,
-    outcome: &OperationOutcome,
-) {
-    let OperationOutcome::Completed(CardOperationResult::Certificate(der)) = outcome else {
-        return;
-    };
-    if !matches!(
-        operation,
-        CardOperation::ReadCertificate {
-            kind: CertificateKind::Authentication,
-        }
-    ) {
-        return;
-    }
-    let Ok(certificate) = OwnedCert::from_der(UnvalidatedCertificate::new(der.clone())) else {
-        println!("warning: the phone's certificate does not parse");
-        return;
-    };
-    let update_res = requester.store_mut().update(pair_id, &mut |rec| {
-        rec.remember_authentication_certificate(certificate.clone());
-    });
-    if let Err(e) = update_res {
-        println!("warning: could not keep the certificate in the pairing store: {e:?}");
-    } else {
-        println!(
-            "persisted authentication certificate ({} bytes) to store",
-            der.len()
-        );
-    }
-}
-
 /// Dials sessions for one pairing until interrupted: each session runs the
 /// read operations and an optional signature, then disconnects. Shared by
 /// `pair-demo` and `reconnect`.
@@ -504,7 +468,6 @@ fn serve_sessions<S: PairingStore>(
             match requester.execute(&mut session, operation, OPERATION_EXPIRY_MS) {
                 Ok(outcome) => {
                     report(operation, &outcome);
-                    record_certificate_outcome(requester, pair_id, operation, &outcome);
                     flush_now();
                 }
                 Err(error) => {
@@ -736,13 +699,6 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
         )
         .map_err(|e| format!("pairing failed: {e:?}"))?;
 
-    requester
-        .store_mut()
-        .update(pair_id, &mut |rec| {
-            rec.remember_authentication_certificate(certificate.clone());
-        })
-        .map_err(|e| format!("failed to update pairing record: {e:?}"))?;
-
     println!("Mock pairing established and stored in Windows Credential Store:");
     println!("  pair_id: {}", hex::encode(pair_id.as_bytes()));
     println!("  auth_cert: {} bytes", certificate.as_der().len());
@@ -829,31 +785,7 @@ fn list_pairing() -> Result<(), String> {
             "      Profiles: {}",
             profile_list(record.granted_profiles())
         );
-        println!(
-            "      Has Auth Cert: {}",
-            record.authentication_certificate().is_some()
-        );
     }
-    Ok(())
-}
-
-fn export_cert(arguments: &[String]) -> Result<(), String> {
-    let out_path = arguments
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "auth_cert.der".to_owned());
-    let store = ProtectedPairingStore::load()
-        .map_err(|e| format!("cannot load ProtectedPairingStore: {e}"))?;
-    let record = store.usable_pairing().ok_or("no usable pairing found")?;
-    let auth_der = record
-        .authentication_certificate()
-        .ok_or("no auth cert stored in pairing")?
-        .as_der();
-    std::fs::write(&out_path, auth_der).map_err(|e| format!("failed to write {out_path}: {e}"))?;
-    println!(
-        "Exported auth cert ({} bytes) to {out_path}",
-        auth_der.len()
-    );
     Ok(())
 }
 

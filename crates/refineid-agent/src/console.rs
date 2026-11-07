@@ -1,7 +1,8 @@
-//! The agent's console: Ctrl+C, Ctrl+Break and closing the agent's console
-//! window are its user quitting it (RAPP v26.11.2 section 4.5 item 8).
-//! Log-off and shutdown keep the default handling: the operating system
-//! ending the agent is not a withdrawal.
+//! The agent's console: an agent started from a console attaches to it, and
+//! Ctrl+C, Ctrl+Break and closing that console are its user quitting it
+//! (RAPP v26.11.2 section 4.5 item 8). An agent Windows started at sign-in
+//! has no console. Log-off and shutdown keep the default handling: the
+//! operating system ending the agent is not a withdrawal.
 
 #![expect(unsafe_code, reason = "the console control handler boundary")]
 
@@ -9,7 +10,8 @@ use std::sync::OnceLock;
 
 use windows_sys::Win32::Foundation::{FALSE, GetLastError, TRUE};
 use windows_sys::Win32::System::Console::{
-    CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, SetConsoleCtrlHandler,
+    ATTACH_PARENT_PROCESS, AttachConsole, CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT,
+    SetConsoleCtrlHandler,
 };
 use windows_sys::core::BOOL;
 
@@ -18,6 +20,13 @@ const QUIT_EXIT_STATUS: i32 = 0;
 
 /// What the agent does when its user quits it, before it exits.
 static ON_QUIT: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+/// Attaches the agent to the console of the program that started it.
+/// Returns false when that program has none, as at sign-in.
+pub fn attach() -> bool {
+    // SAFETY: no pointers; the call only attaches this process to a console.
+    unsafe { AttachConsole(ATTACH_PARENT_PROCESS) != FALSE }
+}
 
 /// Runs `on_quit` and then exits when the user quits the agent from its
 /// console. Windows calls it on a thread of its own; for a closed window it
