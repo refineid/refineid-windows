@@ -454,21 +454,10 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
             );
             return SCARD_E_UNKNOWN_CARD;
         };
-        let sig = pairing.signature_certificate().unwrap_or(auth);
-        let (auth_der, sig_der) = (auth.as_der().to_vec(), sig.as_der().to_vec());
-
-        // Cache root/intermediate CA certificates from pairing record if present
-        if let Some(root) = pairing.root_certificate() {
-            let roots = refineid_lib_core::trust_roots::RootCertificates::new(
-                Some(root.as_der().to_vec()),
-                pairing
-                    .intermediate_certificate()
-                    .map(|certificate| certificate.as_der().to_vec()),
-            );
-            let bundle = roots.to_pkcs7_bundle();
-            msroots::set_root_certificates(bundle);
-            let _ = refineid_lib_core::trust_roots::set_root_certificates(roots);
-        }
+        // The pairing record keeps the authentication certificate alone
+        // (refineid-core `doc/security/certificate-custody.md`); it answers
+        // for both containers of the remote card.
+        let (auth_der, sig_der) = (auth.as_der().to_vec(), auth.as_der().to_vec());
 
         let remote_tx = RemoteCardTransport::new(atr, pair_id);
         (CardSessionTransport::remote(remote_tx), auth_der, sig_der)
