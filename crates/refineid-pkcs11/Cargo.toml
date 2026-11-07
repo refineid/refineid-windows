@@ -1,6 +1,6 @@
 [package]
 name = "refineid-pkcs11"
-description = "PKCS#11 v2.40 cryptoki module for FINEID -- a minimal read-only, sign-only cdylib exposing the card's authentication certificate + private key for Firefox / NSS client-certificate TLS. Sibling to the Windows minidriver; card-edge logic is shared with refineid-lib-core."
+description = "The PKCS#11 v2.40 module for FINEID on Windows: refineid-core's module, with the paired phone as its remote slot."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,28 +8,19 @@ authors.workspace = true
 repository.workspace = true
 publish = false
 
-[features]
-default = []
-pin-change = []
-test-pin-env = []
-
-[build-dependencies]
-refineid-stamp.workspace = true
-
 [lints]
 workspace = true
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib"]
 name = "refineid_pkcs11"
 
 [dependencies]
 refineid-dev-errors.workspace = true
-refineid-lib-core.workspace = true
-refineid-lib-pcsc.workspace = true
-refineid-rapp-core.workspace = true
-refineid-windows-credential-store.workspace = true
-hex.workspace = true
+refineid-pkcs11.workspace = true
+refineid-remote.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 refineid-agent-pipe.workspace = true
+refineid-rapp-core.workspace = true
+refineid-windows-credential-store.workspace = true
