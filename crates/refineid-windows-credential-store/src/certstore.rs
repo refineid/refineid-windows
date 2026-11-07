@@ -115,11 +115,11 @@ fn wide(text: &str) -> Vec<u16> {
 
 /// The current user's personal store, closed on drop.
 #[cfg(windows)]
-struct PersonalStore(*mut core::ffi::c_void);
+pub struct PersonalStore(pub *mut core::ffi::c_void);
 
 #[cfg(windows)]
 impl PersonalStore {
-    fn open() -> Result<Self, CredentialStoreError> {
+    pub fn open() -> Result<Self, CredentialStoreError> {
         use windows_sys::Win32::Foundation::GetLastError;
         use windows_sys::Win32::Security::Cryptography::{
             CERT_STORE_OPEN_EXISTING_FLAG, CERT_STORE_PROV_SYSTEM_W,
@@ -398,7 +398,7 @@ fn visit_browser_entries(
 /// `text` must be null or point at a wide string readable up to its NUL or
 /// `limit_bytes`, whichever comes first.
 #[cfg(windows)]
-unsafe fn wide_text(text: *const u16, limit_bytes: usize) -> String {
+pub unsafe fn wide_text(text: *const u16, limit_bytes: usize) -> String {
     if text.is_null() {
         return String::new();
     }

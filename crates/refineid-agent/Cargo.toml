@@ -11,10 +11,16 @@ repository.workspace = true
 name = "refineid-agent"
 path = "src/main.rs"
 
+[[bin]]
+name = "refineid-sweep"
+path = "src/bin/refineid-sweep.rs"
+
 [target.'cfg(windows)'.dependencies]
 refineid-agent-pipe.workspace = true
 refineid-dev-errors.workspace = true
 refineid-lib-core.workspace = true
+refineid-pcsc.workspace = true
+refineid-pkcs15.workspace = true
 refineid-rapp.workspace = true
 refineid-rapp-ble.workspace = true
 refineid-rapp-core.workspace = true

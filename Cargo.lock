@@ -916,6 +916,8 @@ dependencies = [
  "refineid-agent-pipe",
  "refineid-dev-errors",
  "refineid-lib-core",
+ "refineid-pcsc",
+ "refineid-pkcs15",
  "refineid-rapp",
  "refineid-rapp-ble",
  "refineid-rapp-core",
