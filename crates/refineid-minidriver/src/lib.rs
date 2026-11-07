@@ -2575,8 +2575,11 @@ unsafe extern "system" fn CardGetProperty(
             &["Cache Mode", "CP_CARD_CACHE_MODE", "CardCacheMode"],
         )
     } {
+        // A read-only card, whose certificates name its holder: the Base CSP
+        // and KSP keep its files per process and clear them when the card
+        // leaves, not in the global cache keyed by the card.
         return unsafe {
-            write_dword_out(pbData, cbData, pdwDataLen, CARD_CACHE_MODE_GLOBAL_CACHE)
+            write_dword_out(pbData, cbData, pdwDataLen, CARD_CACHE_MODE_SESSION_ONLY)
         };
     }
 
