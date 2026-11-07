@@ -8,7 +8,9 @@
 //! first instance of its name, grants the current user alone, refuses remote
 //! clients, and serves a client only when Windows reports it running as the
 //! same user in the same Windows session. The provider in turn talks only to a
-//! server Windows reports the same way.
+//! server Windows reports the same way, whose image is the installed agent:
+//! a same-user process that creates the pipe first is refused before it
+//! receives anything.
 //!
 //! [`wire`] is the safe message codec and builds on any host. The Windows
 //! system calls, and the only `unsafe` code here, are in the
@@ -32,6 +34,26 @@ pub mod client;
 pub mod identity;
 #[cfg(windows)]
 pub mod server;
+
+/// The agent's directory under Program Files, as the installer lays it out.
+pub const PRODUCT_DIRECTORY_NAME: &str = "RefineID";
+/// The agent's file name, as the installer lays it out.
+pub const AGENT_IMAGE_NAME: &str = "refineid-agent.exe";
+
+/// Whether `image`, the path Windows reports for a process, is `installed`.
+///
+/// Paths are compared component by component, ignoring case and accepting
+/// `\\` and `/` as separators; a path with a `..` component is neither.
+#[must_use]
+pub fn is_same_image(image: &Path, installed: &Path) -> bool {
+    match (
+        path_components(&image.to_string_lossy()),
+        path_components(&installed.to_string_lossy()),
+    ) {
+        (Some(image), Some(installed)) => !installed.is_empty() && image == installed,
+        _ => false,
+    }
+}
 
 /// The pipe name prefix; the user's SID and Windows session complete it,
 /// so each user's agent in each session has its own name.
@@ -230,7 +252,7 @@ pub enum PipeError {
     /// Another agent already serves this user (W-R-15).
     AgentRunning,
     /// The process at the other end runs as another user or in another
-    /// session.
+    /// session, or, seen from the provider, is not the installed agent.
     Stranger,
     /// The other end did not answer in time.
     TimedOut,
@@ -313,6 +335,27 @@ mod tests {
             Ok(CardOperation::BrowserAuthenticate { origin, .. }) => origin,
             other => panic!("not an authentication: {other:?}"),
         }
+    }
+
+    #[test]
+    fn only_the_installed_image_is_the_agent() {
+        let installed = Path::new(r"C:\Program Files\RefineID\refineid-agent.exe");
+        assert!(is_same_image(installed, installed));
+        assert!(is_same_image(
+            Path::new(r"c:/program files/REFINEID/Refineid-Agent.EXE"),
+            installed
+        ));
+        for other in [
+            r"C:\Users\someone\AppData\Local\Temp\refineid-agent.exe",
+            r"C:\Program Files\RefineID\other.exe",
+            r"C:\Program Files\RefineID\..\RefineID\refineid-agent.exe",
+            r"C:\Program Files\RefineID",
+            "refineid-agent.exe",
+            "",
+        ] {
+            assert!(!is_same_image(Path::new(other), installed), "{other}");
+        }
+        assert!(!is_same_image(Path::new(""), Path::new("")));
     }
 
     #[test]
