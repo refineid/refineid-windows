@@ -77,7 +77,7 @@ pub struct CardId([u8; CARD_ID_BYTES]);
 impl CardId {
     /// The identifier of the card whose authentication certificate is
     /// `certificate`: the first [`CARD_ID_BYTES`] of the SHA-256 of
-    /// [`CARD_ID_DOMAIN`] followed by the certificate.
+    /// the `refineid-card-id` domain string followed by the certificate.
     #[must_use]
     pub fn of_authentication_certificate(certificate: &[u8]) -> Self {
         let mut seeded = Vec::with_capacity(CARD_ID_DOMAIN.len() + certificate.len());
