@@ -41,10 +41,18 @@ internal sealed partial class DocumentPage : Page
     /// <summary>How often the page looks for a card in a reader here.</summary>
     private static readonly TimeSpan CardPollInterval = TimeSpan.FromSeconds(2);
 
+    /// <summary>
+    /// How many readings in a row must find no card before the PIN box goes:
+    /// a contactless card that drops out of the field for one reading, or one
+    /// reading that fails, keeps what is typed.
+    /// </summary>
+    private const int AbsentReadingsBeforeHiding = 2;
+
     private readonly DispatcherTimer cardPollTimer;
     private DocumentMode mode;
     private bool busy;
     private bool polling;
+    private int absentReadings;
 
     public DocumentPage()
     {
@@ -78,7 +86,11 @@ internal sealed partial class DocumentPage : Page
         try
         {
             bool cardHere = await Task.Run(LocalCardService.CardInAReader).ConfigureAwait(true);
-            this.ShowPinBox(cardHere);
+            this.absentReadings = cardHere ? 0 : this.absentReadings + 1;
+            if (cardHere || this.absentReadings >= AbsentReadingsBeforeHiding)
+            {
+                this.ShowPinBox(cardHere);
+            }
         }
         catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException)
         {
