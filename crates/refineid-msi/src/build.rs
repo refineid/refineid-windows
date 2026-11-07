@@ -15,7 +15,10 @@
 //! The package description and the code that writes it to a database.
 
 use core::fmt::{self, Write as _};
+use std::collections::BTreeMap;
 use std::path::Path;
+
+use sha1::{Digest as _, Sha1};
 
 use crate::cabinet::{self, CabinetError, Member};
 use crate::guid::Guid;
@@ -52,6 +55,31 @@ const OLDER_VERSION: &str = "OLDERVERSIONBEINGUPGRADED";
 const NEWER_VERSION: &str = "NEWERVERSIONDETECTED";
 /// The lowest product version, the bottom of the removing upgrade range.
 const LOWEST_VERSION: &str = "0.0.0";
+/// The properties the client passes to the elevated installation: the
+/// related products `FindRelatedProducts` found. Without this list an
+/// installation started from a user's session would find the older product
+/// and not remove it.
+const SECURE_CUSTOM_PROPERTIES: &str = "OLDERVERSIONBEINGUPGRADED;NEWERVERSIONDETECTED";
+/// Standard directory property for `ProgramData`.
+const COMMON_APP_DATA_DIRECTORY: &str = "CommonAppDataFolder";
+/// Prefix of the directory keys of folders under `ProgramData` that
+/// installations outside the package left.
+const STRAY_FOLDER_PREFIX: &str = "StrayFolder";
+/// Prefix of the `RemoveFile` keys.
+const REMOVE_FILE_PREFIX: &str = "RemoveStray";
+/// The `RemoveFile` key that replaces a Card Module copy in the system
+/// directory.
+const REMOVE_CARD_MODULE_COPY: &str = "RemoveCardModuleCopy";
+/// Prefix of the `RemoveRegistry` keys.
+const REMOVE_REGISTRY_PREFIX: &str = "RemoveStrayKey";
+/// Prefix of the `Registry` keys of the rows that remove an owned key whole.
+const OWNED_KEY_PREFIX: &str = "OwnedKey";
+/// The separator of the folders in a path relative to `ProgramData`.
+const PATH_SEPARATOR: char = '\\';
+/// The longest stem of an 8.3 name.
+const SHORT_STEM_LENGTH: usize = 8;
+/// The longest extension of an 8.3 name.
+const SHORT_EXTENSION_LENGTH: usize = 3;
 /// `msidbFileAttributesVital`.
 const FILE_VITAL: i32 = 512;
 
@@ -273,8 +301,27 @@ pub enum Schedule<'a> {
     /// On install and repair, after the files are in place, with no undo:
     /// an installation that rolls back leaves what the action did.
     InstallWithoutUndo,
+    /// On the first installation of this package's product code, a new
+    /// one or an upgrade, after the files are in place and before the
+    /// registry values are written; with no undo. A repair does not run
+    /// it.
+    FirstInstall,
     /// On uninstall, before the files go.
     Uninstall,
+}
+
+/// What installations outside the package left, which the package removes
+/// when it installs. A copy of the Card Module in the system directory is
+/// always replaced, whatever its dates say.
+#[derive(Debug, Clone, Copy)]
+pub struct Strays<'a> {
+    /// Files under `ProgramData`, as paths relative to it with `\`
+    /// between folders. Each goes with the folders above it that are left
+    /// empty.
+    pub program_data_files: &'a [&'a str],
+    /// Keys under `HKEY_LOCAL_MACHINE`, removed with every value and
+    /// subkey.
+    pub machine_keys: &'a [&'a str],
 }
 
 /// An entry point of the installed module that the installer calls with
@@ -357,6 +404,16 @@ fn custom_action_rows<'a>(actions: &[CustomAction<'a>]) -> Vec<CustomActionRow<'
                     sequence: next_install,
                 });
             }
+            Schedule::FirstInstall => {
+                next_install += 1;
+                rows.push(CustomActionRow {
+                    action: action.name.to_owned(),
+                    kind: schema::CUSTOM_ACTION_INSTALLED_DLL_DEFERRED,
+                    entry_point: action.entry_point,
+                    condition: FIRST_INSTALL_CONDITION,
+                    sequence: next_install,
+                });
+            }
             Schedule::Uninstall => {
                 next_uninstall += 1;
                 rows.push(CustomActionRow {
@@ -399,6 +456,11 @@ pub struct Package<'a> {
     pub driver_package: Option<DriverPackage<'a>>,
     /// Registry values binding the module to supported cards.
     pub registry: &'a [RegistryValue<'a>],
+    /// Keys under `HKEY_LOCAL_MACHINE` the package owns whole: on
+    /// uninstall each goes with every value and subkey, whoever wrote them.
+    pub owned_keys: &'a [String],
+    /// What installations outside the package left.
+    pub strays: Strays<'a>,
     /// Entry points of the module the installer calls.
     pub custom_actions: &'a [CustomAction<'a>],
     /// A service stopped before installation and started afterwards.
@@ -563,13 +625,17 @@ pub fn build(package: &Package<'_>, output: &Path, scratch: &Path) -> Result<(),
         .collect();
     let cabinet = cabinet::build(scratch, CABINET_NAME, &members)?;
 
+    // Two builds with the same stamp but different files are different
+    // products, so the later one replaces the earlier; the same files give
+    // the same codes again.
+    let digest = payload_digest(&payload)?;
     let product_code = package
         .upgrade_code
-        .derive(&format!("ProductCode/{}", package.version));
+        .derive(&format!("ProductCode/{}/{digest}", package.version));
     // A package code identifies one built image, so it varies with the
-    // architecture as well as the version.
+    // architecture as well as the version and the files.
     let package_code = package.upgrade_code.derive(&format!(
-        "PackageCode/{}/{}",
+        "PackageCode/{}/{}/{digest}",
         package.version,
         package.architecture.name()
     ));
@@ -598,6 +664,7 @@ pub fn build(package: &Package<'_>, output: &Path, scratch: &Path) -> Result<(),
     write_layout(&database, package)?;
     write_payload(&database, &payload, &cabinet)?;
     write_registry(&database, package)?;
+    write_strays(&database, package)?;
 
     write_custom_actions(&database, package)?;
     write_service(&database, package)?;
@@ -642,6 +709,7 @@ fn write_identity(
         ("ProductLanguage", "1033"),
         ("Manufacturer", package.manufacturer),
         ("UpgradeCode", upgrade_code),
+        ("SecureCustomProperties", SECURE_CUSTOM_PROPERTIES),
         // Per-machine: the module lands in a system directory.
         ("ALLUSERS", "1"),
         // There are no optional features, so offer no Change button.
@@ -696,6 +764,15 @@ fn write_directories(database: &Database) -> Result<(), BuildError> {
             Value::Text(PRODUCT_DIRECTORY),
             Value::Text(PROGRAM_FILES_DIRECTORY),
             Value::Text(PRODUCT_DIRECTORY_NAME),
+        ],
+    )?;
+    insert(
+        database,
+        directory_sql,
+        &[
+            Value::Text(COMMON_APP_DATA_DIRECTORY),
+            Value::Text("TARGETDIR"),
+            Value::Text("."),
         ],
     )?;
     Ok(())
@@ -832,6 +909,21 @@ fn payload<'a>(package: &Package<'a>) -> Vec<PayloadEntry<'a>> {
     entries
 }
 
+/// The SHA-1 of the payload files' contents in cabinet order, in
+/// hexadecimal. It tells builds apart; it is not a security boundary.
+fn payload_digest(payload: &[PayloadEntry<'_>]) -> Result<String, BuildError> {
+    let mut hasher = Sha1::new();
+    for entry in payload {
+        hasher.update(std::fs::read(entry.file.source)?);
+    }
+    let mut digest = String::new();
+    for byte in hasher.finalize() {
+        // Writing into a String cannot fail.
+        let _ = write!(digest, "{byte:02x}");
+    }
+    Ok(digest)
+}
+
 /// The size of the payload file at `path`.
 fn file_size(path: &Path) -> Result<i32, BuildError> {
     i32::try_from(std::fs::metadata(path)?.len())
@@ -915,7 +1007,165 @@ fn write_registry(database: &Database, package: &Package<'_>) -> Result<(), Buil
             ],
         )?;
     }
+    for (index, key) in package.owned_keys.iter().enumerate() {
+        let identifier = format!("{OWNED_KEY_PREFIX}{index}");
+        insert(
+            database,
+            "INSERT INTO `Registry` \
+                (`Registry`,`Root`,`Key`,`Name`,`Value`,`Component_`) VALUES (?,?,?,?,?,?)",
+            &[
+                Value::Text(&identifier),
+                Value::Integer(schema::REGISTRY_ROOT_LOCAL_MACHINE),
+                Value::Text(key),
+                Value::Text(schema::REGISTRY_WHOLE_KEY),
+                Value::Text(""),
+                Value::Text(COMPONENT_REGISTRY),
+            ],
+        )?;
+    }
 
+    Ok(())
+}
+
+/// A folder under `ProgramData` that an installation outside the package
+/// left: its `Directory` key, its parent's, and its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StrayFolder {
+    directory: String,
+    parent: String,
+    name: String,
+}
+
+/// One `RemoveFile` row: a file, or a folder when `name` is `None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoveFileRow {
+    key: String,
+    name: Option<String>,
+    directory: String,
+}
+
+/// The `Directory` rows of the folders that hold `files`, and the
+/// `RemoveFile` rows that remove each file and then each folder, deepest
+/// first, as Windows Installer removes a folder only once it is empty.
+fn stray_rows(files: &[&str]) -> (Vec<StrayFolder>, Vec<RemoveFileRow>) {
+    let mut folders: BTreeMap<String, StrayFolder> = BTreeMap::new();
+    let mut removals = Vec::new();
+    for file in files {
+        let mut parent = COMMON_APP_DATA_DIRECTORY.to_owned();
+        let mut path = String::new();
+        let mut parts: Vec<&str> = file.split(PATH_SEPARATOR).collect();
+        let Some(name) = parts.pop() else { continue };
+        for part in parts {
+            path.push(PATH_SEPARATOR);
+            path.push_str(part);
+            let count = folders.len();
+            let folder = folders.entry(path.clone()).or_insert_with(|| StrayFolder {
+                directory: format!("{STRAY_FOLDER_PREFIX}{count}"),
+                parent: parent.clone(),
+                name: part.to_owned(),
+            });
+            parent.clone_from(&folder.directory);
+        }
+        removals.push(RemoveFileRow {
+            key: format!("{REMOVE_FILE_PREFIX}{}", removals.len()),
+            name: Some(long_file_name(name)),
+            directory: parent,
+        });
+    }
+    // The map orders a folder before the folders under it, so the reverse
+    // removes the deepest first.
+    for folder in folders.values().rev() {
+        removals.push(RemoveFileRow {
+            key: format!("{REMOVE_FILE_PREFIX}{}", removals.len()),
+            name: None,
+            directory: folder.directory.clone(),
+        });
+    }
+    (folders.into_values().collect(), removals)
+}
+
+/// Whether `name` is already a valid 8.3 name, ignoring case.
+fn fits_short_name(name: &str) -> bool {
+    let (stem, extension) = name.split_once('.').unwrap_or((name, ""));
+    !stem.is_empty()
+        && stem.len() <= SHORT_STEM_LENGTH
+        && extension.len() <= SHORT_EXTENSION_LENGTH
+        && !extension.contains('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+}
+
+/// The `Filename` form of `name`: the name itself when it fits 8.3, else
+/// `short|long`.
+fn long_file_name(name: &str) -> String {
+    if fits_short_name(name) {
+        name.to_owned()
+    } else {
+        format!("{}|{name}", short_name(name))
+    }
+}
+
+/// Writes what removes the strays when the package installs: the Card
+/// Module copy in the system directory, the files and folders under
+/// `ProgramData`, and the registry keys.
+fn write_strays(database: &Database, package: &Package<'_>) -> Result<(), BuildError> {
+    let (folders, removals) = stray_rows(package.strays.program_data_files);
+    for folder in &folders {
+        insert(
+            database,
+            "INSERT INTO `Directory` (`Directory`,`Directory_Parent`,`DefaultDir`) VALUES (?,?,?)",
+            &[
+                Value::Text(&folder.directory),
+                Value::Text(&folder.parent),
+                Value::Text(&long_file_name(&folder.name)),
+            ],
+        )?;
+    }
+    let remove_file_sql = "INSERT INTO `RemoveFile` \
+        (`FileKey`,`Component_`,`FileName`,`DirProperty`,`InstallMode`) VALUES (?,?,?,?,?)";
+    // Windows Installer leaves an unversioned file whose modification date
+    // is later than its creation date, as a user's own; removing it first
+    // makes the package's copy land whatever the earlier one's dates say.
+    insert(
+        database,
+        remove_file_sql,
+        &[
+            Value::Text(REMOVE_CARD_MODULE_COPY),
+            Value::Text(COMPONENT_FILE),
+            Value::Text(&long_file_name(package.file.name)),
+            Value::Text(SYSTEM_DIRECTORY),
+            Value::Integer(schema::REMOVE_FILE_ON_INSTALL),
+        ],
+    )?;
+    for removal in &removals {
+        insert(
+            database,
+            remove_file_sql,
+            &[
+                Value::Text(&removal.key),
+                Value::Text(COMPONENT_FILE),
+                Value::Text(removal.name.as_deref().unwrap_or_default()),
+                Value::Text(&removal.directory),
+                Value::Integer(schema::REMOVE_FILE_ON_INSTALL | schema::REMOVE_FILE_ON_REMOVE),
+            ],
+        )?;
+    }
+    for (index, key) in package.strays.machine_keys.iter().enumerate() {
+        let identifier = format!("{REMOVE_REGISTRY_PREFIX}{index}");
+        insert(
+            database,
+            "INSERT INTO `RemoveRegistry` \
+                (`RemoveRegistry`,`Root`,`Key`,`Name`,`Component_`) VALUES (?,?,?,?,?)",
+            &[
+                Value::Text(&identifier),
+                Value::Integer(schema::REGISTRY_ROOT_LOCAL_MACHINE),
+                Value::Text(key),
+                Value::Text(schema::REGISTRY_WHOLE_KEY),
+                Value::Text(COMPONENT_REGISTRY),
+            ],
+        )?;
+    }
     Ok(())
 }
 
@@ -1074,10 +1324,11 @@ fn write_sequences(database: &Database) -> Result<(), BuildError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CustomAction, CustomActionRow, FIRST_INSTALL_CONDITION, INSTALL_CONDITION, LOWEST_VERSION,
-        MINUTES_PER_DAY, NEWER_VERSION, OLDER_VERSION, ROLLBACK_PREFIX, RegistryData, Schedule,
-        UNINSTALL_CONDITION, Version, custom_action_rows, encode_registry, short_name,
-        upgrade_rows,
+        COMMON_APP_DATA_DIRECTORY, CustomAction, CustomActionRow, FIRST_INSTALL_CONDITION,
+        INSTALL_CONDITION, LOWEST_VERSION, MINUTES_PER_DAY, NEWER_VERSION, OLDER_VERSION,
+        REMOVE_FILE_PREFIX, ROLLBACK_PREFIX, RegistryData, RemoveFileRow, SECURE_CUSTOM_PROPERTIES,
+        STRAY_FOLDER_PREFIX, Schedule, StrayFolder, UNINSTALL_CONDITION, Version,
+        custom_action_rows, encode_registry, long_file_name, short_name, stray_rows, upgrade_rows,
     };
     use crate::schema;
 
@@ -1145,6 +1396,173 @@ mod tests {
                 condition: INSTALL_CONDITION,
                 sequence: schema::INSTALL_ACTION_SEQUENCE + 1,
             }]
+        );
+    }
+
+    #[test]
+    fn a_first_install_action_runs_on_a_new_product_code_only_and_records_no_rollback() {
+        let actions = [CustomAction {
+            name: "Clean",
+            entry_point: "DoClean",
+            schedule: Schedule::FirstInstall,
+        }];
+        assert_eq!(
+            custom_action_rows(&actions),
+            [CustomActionRow {
+                action: "Clean".to_owned(),
+                kind: schema::CUSTOM_ACTION_INSTALLED_DLL_DEFERRED,
+                entry_point: "DoClean",
+                condition: FIRST_INSTALL_CONDITION,
+                sequence: schema::INSTALL_ACTION_SEQUENCE + 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn every_schedule_gets_a_sequence_of_its_own() {
+        let actions = [
+            CustomAction {
+                name: "Register",
+                entry_point: "DoRegister",
+                schedule: Schedule::Install {
+                    rollback_entry_point: "UndoRegister",
+                },
+            },
+            CustomAction {
+                name: "Unregister",
+                entry_point: "DoUnregister",
+                schedule: Schedule::Uninstall,
+            },
+            CustomAction {
+                name: "RemoveRoots",
+                entry_point: "DoRemoveRoots",
+                schedule: Schedule::InstallWithoutUndo,
+            },
+            CustomAction {
+                name: "RemoveRootsOnUninstall",
+                entry_point: "DoRemoveRoots",
+                schedule: Schedule::Uninstall,
+            },
+            CustomAction {
+                name: "RemoveEarlier",
+                entry_point: "DoRemoveEarlier",
+                schedule: Schedule::FirstInstall,
+            },
+        ];
+        let rows = custom_action_rows(&actions);
+        let mut sequences: Vec<i32> = rows.iter().map(|row| row.sequence).collect();
+        sequences.sort_unstable();
+        sequences.dedup();
+        assert_eq!(sequences.len(), rows.len());
+        let sequence_of = |name: &str| {
+            rows.iter()
+                .find(|row| row.action == name)
+                .map(|row| row.sequence)
+                .expect("row")
+        };
+        assert!(sequence_of("Register") < sequence_of("RemoveRoots"));
+        assert!(sequence_of("RemoveRoots") < sequence_of("RemoveEarlier"));
+        assert!(sequence_of("Unregister") < sequence_of("RemoveRootsOnUninstall"));
+    }
+
+    #[test]
+    fn install_actions_run_between_the_files_and_the_registry_values() {
+        let position = |action: &str| {
+            schema::INSTALL_EXECUTE_SEQUENCE
+                .iter()
+                .find(|(name, _, _)| *name == action)
+                .map(|(_, _, sequence)| *sequence)
+                .expect("sequenced")
+        };
+        assert!(position("InstallFiles") < schema::INSTALL_ACTION_SEQUENCE);
+        assert!(schema::INSTALL_ACTION_SEQUENCE < position("WriteRegistryValues"));
+        assert!(position("RemoveFiles") < position("InstallFiles"));
+        assert!(position("RemoveRegistryValues") < position("WriteRegistryValues"));
+    }
+
+    #[test]
+    fn related_products_are_found_before_the_launch_conditions_read_them() {
+        for sequence in [
+            schema::INSTALL_EXECUTE_SEQUENCE,
+            schema::INSTALL_UI_SEQUENCE,
+        ] {
+            let position = |action: &str| {
+                sequence
+                    .iter()
+                    .find(|(name, _, _)| *name == action)
+                    .map(|(_, _, order)| *order)
+                    .expect("sequenced")
+            };
+            assert!(position("FindRelatedProducts") < position("LaunchConditions"));
+        }
+    }
+
+    #[test]
+    fn the_secured_properties_are_the_upgrade_action_properties() {
+        let secured: Vec<&str> = SECURE_CUSTOM_PROPERTIES.split(';').collect();
+        assert_eq!(secured, [OLDER_VERSION, NEWER_VERSION]);
+    }
+
+    #[test]
+    fn a_stray_file_goes_before_its_folders_and_a_folder_before_its_parent() {
+        let (folders, removals) = stray_rows(&["RefineID\\backup\\refineid_minidriver.dll"]);
+        assert_eq!(
+            folders,
+            [
+                StrayFolder {
+                    directory: format!("{STRAY_FOLDER_PREFIX}0"),
+                    parent: COMMON_APP_DATA_DIRECTORY.to_owned(),
+                    name: "RefineID".to_owned(),
+                },
+                StrayFolder {
+                    directory: format!("{STRAY_FOLDER_PREFIX}1"),
+                    parent: format!("{STRAY_FOLDER_PREFIX}0"),
+                    name: "backup".to_owned(),
+                },
+            ]
+        );
+        assert_eq!(
+            removals,
+            [
+                RemoveFileRow {
+                    key: format!("{REMOVE_FILE_PREFIX}0"),
+                    name: Some("REFINEID.DLL|refineid_minidriver.dll".to_owned()),
+                    directory: format!("{STRAY_FOLDER_PREFIX}1"),
+                },
+                RemoveFileRow {
+                    key: format!("{REMOVE_FILE_PREFIX}1"),
+                    name: None,
+                    directory: format!("{STRAY_FOLDER_PREFIX}1"),
+                },
+                RemoveFileRow {
+                    key: format!("{REMOVE_FILE_PREFIX}2"),
+                    name: None,
+                    directory: format!("{STRAY_FOLDER_PREFIX}0"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn stray_files_in_one_folder_share_its_directory_row() {
+        let (folders, removals) = stray_rows(&["RefineID\\a.txt", "RefineID\\b.txt"]);
+        assert_eq!(folders.len(), 1);
+        assert_eq!(removals.len(), 3);
+        assert!(
+            removals
+                .iter()
+                .take(2)
+                .all(|row| row.directory == folders[0].directory)
+        );
+    }
+
+    #[test]
+    fn a_name_that_fits_eight_three_is_written_alone() {
+        assert_eq!(long_file_name("RefineID"), "RefineID");
+        assert_eq!(long_file_name("backup"), "backup");
+        assert_eq!(
+            long_file_name("refineid_minidriver.dll"),
+            "REFINEID.DLL|refineid_minidriver.dll"
         );
     }
 

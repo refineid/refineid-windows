@@ -206,8 +206,10 @@ unsigned or test-signed DLL to end users.
 
 For an isolated development machine with Windows test-signing policy configured,
 build the matching architecture and run an elevated PowerShell. The script
-also registers the `RefineID` event source that development builds report to,
-and `uninstall-dev.ps1` removes it:
+first uninstalls any RefineID Card Driver MSI and whatever an earlier
+development install left, so a development install and the MSI never stand
+side by side (`doc/installer-upgrade.md`). It also registers the `RefineID`
+event source that development builds report to:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass `
@@ -250,12 +252,15 @@ python3 scripts/test-browser-edge.py --url https://card.refineid.fi `
   --expect-title "Card-authenticated guestbook"
 ```
 
-Remove the development installation:
+Remove the development installation, and any RefineID Card Driver MSI:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass `
-  -File scripts/uninstall-dev.ps1
+  -File scripts/install-dev.ps1 -Uninstall
 ```
+
+A Card Module that a running program has loaded is deleted when Windows
+restarts; the script says when that is needed.
 
 ## Remote authorization (RAPP)
 

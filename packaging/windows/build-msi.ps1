@@ -25,6 +25,11 @@
     MSI packages are architecture-specific, so this produces one file per
     architecture rather than a single universal installer.
 
+    Every package replaces an installed RefineID Card Driver of the same or
+    an earlier version, refuses to install over a later one, and removes
+    what development installs outside the package left
+    (doc/installer-upgrade.md).
+
     The packages carry the Plug and Play driver package that names FINEID
     cards in Device Manager only when its catalog is signed: Windows
     refuses an unsigned driver package. -DriverPackage takes a directory
@@ -163,11 +168,13 @@ if ($CertificateThumbprint) {
     Write-Host "Signing as: $($certificate.Subject)"
 }
 
-# The version is the UTC build instant as CalVer YY.M.D.B, the same stamp
-# RefineID.csproj gives the app: B is the ten-minute bucket of the day.
+# The version is the UTC build instant as CalVer YY.M.D.HHMM, the same stamp
+# RefineID.csproj gives the app and refineid-stamp reads: HHMM is the time
+# of day as hour * 100 + minute. The MSI's upgrade order follows it, so a
+# later build always replaces an earlier one.
 $now = [datetime]::UtcNow
 $productVersion = '{0}.{1}.{2}.{3}' -f ($now.Year - 2000), $now.Month, $now.Day,
-    ($now.Hour * 10 + [math]::Floor($now.Minute / 10))
+    ($now.Hour * 100 + $now.Minute)
 $env:REFINEID_VERSION = $productVersion
 
 # Cargo builds the tree this script belongs to, whatever the current directory,
