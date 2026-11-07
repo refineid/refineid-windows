@@ -654,6 +654,12 @@ pub const CKO_CERTIFICATE: CkUlong = 0x0000_0001;
 pub const CKO_PUBLIC_KEY: CkUlong = 0x0000_0002;
 /// `CKO_PRIVATE_KEY`: object class for a private key.
 pub const CKO_PRIVATE_KEY: CkUlong = 0x0000_0003;
+/// `CKO_PROFILE` (pkcs11t.h, new in v3.0): object class of a profile
+/// object, which names one PKCS#11 profile the token implements
+/// (v3.0 base specification s4.14).
+///
+/// The header assigns it nine, the class after `CKO_OTP_KEY`.
+pub const CKO_PROFILE: CkUlong = 0x0000_0009;
 /// `CKC_X_509`: certificate type for an X.509 public-key cert.
 pub const CKC_X_509: CkUlong = 0x0000_0000;
 /// `CK_CERTIFICATE_CATEGORY` value `token user` (v2.40 s4.6.2 table
@@ -661,7 +667,7 @@ pub const CKC_X_509: CkUlong = 0x0000_0000;
 /// entity). The FINEID auth certificate belongs to the cardholder.
 pub const CK_CERTIFICATE_CATEGORY_TOKEN_USER: CkUlong = 0x0000_0001;
 /// `CK_CERTIFICATE_CATEGORY` value `authority` (v2.40 s4.6.2 table 24).
-/// Used for CA certificates exposed by the token to build the certificate chain.
+/// The CA certificates read from the card.
 pub const CK_CERTIFICATE_CATEGORY_AUTHORITY: CkUlong = 0x0000_0002;
 /// `CKK_RSA`: key type for an RSA key.
 pub const CKK_RSA: CkUlong = 0x0000_0000;
@@ -729,12 +735,129 @@ pub const CKA_LOCAL: CkAttributeType = 0x0000_0163;
 pub const CKA_NEVER_EXTRACTABLE: CkAttributeType = 0x0000_0164;
 /// `CKA_ALWAYS_SENSITIVE`: the key has always been sensitive.
 pub const CKA_ALWAYS_SENSITIVE: CkAttributeType = 0x0000_0165;
+/// `CKA_MODIFIABLE`: the object can be modified (false on every
+/// object here; the token is write-protected).
+pub const CKA_MODIFIABLE: CkAttributeType = 0x0000_0170;
 /// `CKA_EC_PARAMS`: EC domain parameters (named-curve OID DER).
 pub const CKA_EC_PARAMS: CkAttributeType = 0x0000_0180;
 /// `CKA_EC_POINT`: EC public point (DER OCTET STRING of SEC1 point).
 pub const CKA_EC_POINT: CkAttributeType = 0x0000_0181;
 /// `CKA_ALWAYS_AUTHENTICATE`: per-op re-auth flag (false here).
 pub const CKA_ALWAYS_AUTHENTICATE: CkAttributeType = 0x0000_0202;
+/// `CKA_PROFILE_ID` (pkcs11t.h, v3.0): the [`CkProfileId`] a
+/// [`CKO_PROFILE`] object carries. The header places it at 1537, the
+/// first attribute of its own block, one past six times 256.
+pub const CKA_PROFILE_ID: CkAttributeType = 0x0000_0601;
+
+// ---- Profile identifiers (CKP_*, pkcs11t.h, v3.0) ----
+//
+// A profile object (`CKO_PROFILE`) names one profile of the PKCS#11
+// profiles specification that the token implements. This token
+// claims exactly one, `CKP_PUBLIC_CERTIFICATES_TOKEN`, and never
+// `CKP_AUTHENTICATION_TOKEN` (see `token.rs`, `ObjectKind`). The
+// header numbers the profiles from one in the order of the profiles
+// document.
+
+/// `CK_PROFILE_ID` (pkcs11t.h, v3.0): a profile identifier, a
+/// [`CkUlong`].
+pub type CkProfileId = CkUlong;
+/// `CKP_AUTHENTICATION_TOKEN` (pkcs11t.h, v3.0): the third profile,
+/// a token used for authentication. This module never claims it;
+/// the constant exists so a test can assert that no profile object
+/// answers it.
+pub const CKP_AUTHENTICATION_TOKEN: CkProfileId = 0x0000_0003;
+/// `CKP_PUBLIC_CERTIFICATES_TOKEN` (pkcs11t.h, v3.0): the fourth
+/// profile, a token whose certificates are readable without a login.
+///
+/// NSS reads it as the token being friendly: its certificate and
+/// trust objects are searched as soon as the token is present
+/// instead of after the session's first login
+/// (`lib/pk11wrap/pk11slot.c`, `PK11_IsFriendly`).
+pub const CKP_PUBLIC_CERTIFICATES_TOKEN: CkProfileId = 0x0000_0004;
+
+// ---- NSS vendor-defined trust objects (pkcs11n.h) ----
+//
+// NSS records what a certificate may be trusted for in a companion
+// object of its own class, found by the certificate's issuer and
+// serial number (NSS `lib/dev/devtoken.c`,
+// `nssToken_FindTrustForCertificate`; the standard `CKO_TRUST` class
+// of PKCS#11 v3.2 is tried first and applies only to modules that
+// report that version). Every constant below is transcribed from NSS
+// `lib/util/pkcs11n.h`, and each derivation is the header's own.
+
+/// `CK_TRUST` (pkcs11n.h): an NSS trust level, a [`CkUlong`].
+pub type CkTrust = CkUlong;
+/// `CKO_VENDOR_DEFINED` (pkcs11t.h): the high bit that marks a
+/// vendor-defined object class.
+pub const CKO_VENDOR_DEFINED: CkUlong = 0x8000_0000;
+/// `CKA_VENDOR_DEFINED` (pkcs11t.h): the high bit that marks a
+/// vendor-defined attribute type.
+pub const CKA_VENDOR_DEFINED: CkAttributeType = 0x8000_0000;
+/// `CKT_VENDOR_DEFINED` (pkcs11n.h): the high bit that marks a
+/// vendor-defined trust level.
+pub const CKT_VENDOR_DEFINED: CkTrust = 0x8000_0000;
+/// `NSSCK_VENDOR_NSS` (pkcs11n.h): the offset NSS adds inside each
+/// vendor-defined space, the ASCII bytes `NSCP` read as one
+/// big-endian word.
+pub const NSSCK_VENDOR_NSS: CkUlong = 0x4E53_4350;
+/// `CKO_NSS` (pkcs11n.h): `CKO_VENDOR_DEFINED | NSSCK_VENDOR_NSS`,
+/// the base of the NSS object classes.
+pub const CKO_NSS: CkUlong = CKO_VENDOR_DEFINED | NSSCK_VENDOR_NSS;
+/// `CKO_NSS_TRUST` (pkcs11n.h): `CKO_NSS + 3`, the class of a trust
+/// record for one certificate.
+pub const CKO_NSS_TRUST: CkUlong = CKO_NSS + 3;
+/// `CKA_NSS` (pkcs11n.h): `CKA_VENDOR_DEFINED | NSSCK_VENDOR_NSS`,
+/// the base of the NSS attribute types.
+pub const CKA_NSS: CkAttributeType = CKA_VENDOR_DEFINED | NSSCK_VENDOR_NSS;
+/// `CKA_NSS_TRUST_BASE` (pkcs11n.h): `CKA_NSS` plus the header's
+/// trust offset of 8192, the base of the trust attributes.
+pub const CKA_NSS_TRUST_BASE: CkAttributeType = CKA_NSS + 0x2000;
+/// `CKA_NSS_TRUST_SERVER_AUTH` (pkcs11n.h): `CKA_NSS_TRUST_BASE + 8`,
+/// the trust level for TLS server authentication.
+pub const CKA_NSS_TRUST_SERVER_AUTH: CkAttributeType = CKA_NSS_TRUST_BASE + 8;
+/// `CKA_NSS_TRUST_CLIENT_AUTH` (pkcs11n.h): `CKA_NSS_TRUST_BASE + 9`,
+/// the trust level for TLS client authentication.
+pub const CKA_NSS_TRUST_CLIENT_AUTH: CkAttributeType = CKA_NSS_TRUST_BASE + 9;
+/// `CKA_NSS_TRUST_CODE_SIGNING` (pkcs11n.h):
+/// `CKA_NSS_TRUST_BASE + 10`, the trust level for code signing.
+pub const CKA_NSS_TRUST_CODE_SIGNING: CkAttributeType = CKA_NSS_TRUST_BASE + 10;
+/// `CKA_NSS_TRUST_EMAIL_PROTECTION` (pkcs11n.h):
+/// `CKA_NSS_TRUST_BASE + 11`, the trust level for S/MIME.
+pub const CKA_NSS_TRUST_EMAIL_PROTECTION: CkAttributeType = CKA_NSS_TRUST_BASE + 11;
+/// `CKA_NSS_TRUST_STEP_UP_APPROVED` (pkcs11n.h):
+/// `CKA_NSS_TRUST_BASE + 16`, the legacy export-cipher step-up flag,
+/// a [`CkBbool`].
+pub const CKA_NSS_TRUST_STEP_UP_APPROVED: CkAttributeType = CKA_NSS_TRUST_BASE + 16;
+/// `CKA_NSS_CERT_SHA1_HASH` (pkcs11n.h): `CKA_NSS_TRUST_BASE + 100`,
+/// the SHA-1 digest of the certificate's DER.
+pub const CKA_NSS_CERT_SHA1_HASH: CkAttributeType = CKA_NSS_TRUST_BASE + 100;
+/// `CKA_NSS_CERT_MD5_HASH` (pkcs11n.h): `CKA_NSS_TRUST_BASE + 101`,
+/// the MD5 digest of the certificate's DER.
+pub const CKA_NSS_CERT_MD5_HASH: CkAttributeType = CKA_NSS_TRUST_BASE + 101;
+/// `CKT_NSS` (pkcs11n.h): `CKT_VENDOR_DEFINED | NSSCK_VENDOR_NSS`,
+/// the base of the NSS trust levels.
+pub const CKT_NSS: CkTrust = CKT_VENDOR_DEFINED | NSSCK_VENDOR_NSS;
+/// `CKT_NSS_TRUSTED` (pkcs11n.h): `CKT_NSS + 1`, the certificate
+/// itself is trusted for the purpose, as a leaf, not as an issuer.
+pub const CKT_NSS_TRUSTED: CkTrust = CKT_NSS + 1;
+/// `CKT_NSS_TRUSTED_DELEGATOR` (pkcs11n.h): `CKT_NSS + 2`, a trust
+/// anchor for the purpose: certificates it issued are trusted
+/// (`CERTDB_VALID_CA | CERTDB_TRUSTED_CA` in NSS's own flags,
+/// `lib/pki/certificate.c`).
+pub const CKT_NSS_TRUSTED_DELEGATOR: CkTrust = CKT_NSS + 2;
+/// `CKT_NSS_MUST_VERIFY_TRUST` (pkcs11n.h): `CKT_NSS + 3`, no trust
+/// asserted for the purpose: a chain through the certificate must
+/// reach some other anchor. Not a distrust; it maps to no NSS flag.
+pub const CKT_NSS_MUST_VERIFY_TRUST: CkTrust = CKT_NSS + 3;
+/// `CKT_NSS_TRUST_UNKNOWN` (pkcs11n.h): `CKT_NSS + 5`, the header's
+/// default: no record for the purpose.
+pub const CKT_NSS_TRUST_UNKNOWN: CkTrust = CKT_NSS + 5;
+/// `CKT_NSS_NOT_TRUSTED` (pkcs11n.h): `CKT_NSS + 10`, active
+/// distrust for the purpose (`CERTDB_TERMINAL_RECORD` without trust).
+pub const CKT_NSS_NOT_TRUSTED: CkTrust = CKT_NSS + 10;
+/// `CKT_NSS_VALID_DELEGATOR` (pkcs11n.h): `CKT_NSS + 11`, a valid CA
+/// that is no anchor; NSS uses it to cache path resolution.
+pub const CKT_NSS_VALID_DELEGATOR: CkTrust = CKT_NSS + 11;
 
 // ---- Mechanism types (CKM_*) ----
 

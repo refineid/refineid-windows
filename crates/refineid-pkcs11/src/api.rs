@@ -42,23 +42,23 @@ use refineid_lib_core::pin_retry_risk::PinRetryRisk;
 use crate::ck::CKF_WRITE_PROTECTED;
 use crate::ck::{
     CK_EFFECTIVELY_INFINITE, CK_UNAVAILABLE_INFORMATION, CKF_DONT_BLOCK, CKF_EC_F_P,
-    CKF_EC_NAMEDCURVE, CKF_EC_UNCOMPRESS, CKF_HW_SLOT, CKF_LOGIN_REQUIRED,
-    CKF_PROTECTED_AUTHENTICATION_PATH, CKF_REMOVABLE_DEVICE, CKF_SERIAL_SESSION, CKF_SIGN,
-    CKF_TOKEN_INITIALIZED, CKF_TOKEN_PRESENT, CKF_USER_PIN_COUNT_LOW, CKF_USER_PIN_FINAL_TRY,
-    CKF_USER_PIN_INITIALIZED, CKF_USER_PIN_LOCKED, CKR_ARGUMENTS_BAD, CKR_ATTRIBUTE_SENSITIVE,
-    CKR_ATTRIBUTE_TYPE_INVALID, CKR_BUFFER_TOO_SMALL, CKR_CRYPTOKI_ALREADY_INITIALIZED,
-    CKR_CRYPTOKI_NOT_INITIALIZED, CKR_DEVICE_ERROR, CKR_FUNCTION_NOT_PARALLEL,
-    CKR_FUNCTION_NOT_SUPPORTED, CKR_GENERAL_ERROR, CKR_KEY_FUNCTION_NOT_PERMITTED,
-    CKR_KEY_HANDLE_INVALID, CKR_KEY_INDIGESTIBLE, CKR_MECHANISM_INVALID, CKR_NO_EVENT,
-    CKR_OBJECT_HANDLE_INVALID, CKR_OK, CKR_OPERATION_ACTIVE, CKR_OPERATION_NOT_INITIALIZED,
-    CKR_PIN_INVALID, CKR_PIN_LEN_RANGE, CKR_RANDOM_SEED_NOT_SUPPORTED, CKR_SESSION_CLOSED,
-    CKR_SESSION_HANDLE_INVALID, CKR_SESSION_PARALLEL_NOT_SUPPORTED, CKR_SLOT_ID_INVALID,
-    CKR_TOKEN_NOT_PRESENT, CKR_TOKEN_WRITE_PROTECTED, CKR_USER_ALREADY_LOGGED_IN,
-    CKR_USER_NOT_LOGGED_IN, CKR_USER_TYPE_INVALID, CKU_USER, CkAttributePtr, CkBbool, CkBytePtr,
-    CkCInitializeArgs, CkFlags, CkFunctionList, CkFunctionListPtrPtr, CkInfo, CkInfoPtr,
-    CkMechanismInfo, CkMechanismInfoPtr, CkMechanismPtr, CkMechanismType, CkMechanismTypePtr,
-    CkNotify, CkObjectHandle, CkObjectHandlePtr, CkRv, CkSessionHandle, CkSessionHandlePtr,
-    CkSessionInfo, CkSessionInfoPtr, CkSlotId, CkSlotIdPtr, CkSlotInfo, CkSlotInfoPtr, CkTokenInfo,
+    CKF_EC_NAMEDCURVE, CKF_EC_UNCOMPRESS, CKF_LOGIN_REQUIRED, CKF_PROTECTED_AUTHENTICATION_PATH,
+    CKF_REMOVABLE_DEVICE, CKF_SERIAL_SESSION, CKF_SIGN, CKF_TOKEN_INITIALIZED, CKF_TOKEN_PRESENT,
+    CKF_USER_PIN_COUNT_LOW, CKF_USER_PIN_FINAL_TRY, CKF_USER_PIN_INITIALIZED, CKF_USER_PIN_LOCKED,
+    CKR_ARGUMENTS_BAD, CKR_ATTRIBUTE_SENSITIVE, CKR_ATTRIBUTE_TYPE_INVALID, CKR_BUFFER_TOO_SMALL,
+    CKR_CRYPTOKI_ALREADY_INITIALIZED, CKR_CRYPTOKI_NOT_INITIALIZED, CKR_DEVICE_ERROR,
+    CKR_FUNCTION_NOT_PARALLEL, CKR_FUNCTION_NOT_SUPPORTED, CKR_GENERAL_ERROR,
+    CKR_KEY_FUNCTION_NOT_PERMITTED, CKR_KEY_HANDLE_INVALID, CKR_KEY_INDIGESTIBLE,
+    CKR_MECHANISM_INVALID, CKR_NO_EVENT, CKR_OBJECT_HANDLE_INVALID, CKR_OK, CKR_OPERATION_ACTIVE,
+    CKR_OPERATION_NOT_INITIALIZED, CKR_PIN_INVALID, CKR_PIN_LEN_RANGE,
+    CKR_RANDOM_SEED_NOT_SUPPORTED, CKR_SESSION_CLOSED, CKR_SESSION_HANDLE_INVALID,
+    CKR_SESSION_PARALLEL_NOT_SUPPORTED, CKR_SLOT_ID_INVALID, CKR_TOKEN_NOT_PRESENT,
+    CKR_TOKEN_WRITE_PROTECTED, CKR_USER_ALREADY_LOGGED_IN, CKR_USER_NOT_LOGGED_IN,
+    CKR_USER_TYPE_INVALID, CKU_USER, CkAttributePtr, CkBbool, CkBytePtr, CkCInitializeArgs,
+    CkFlags, CkFunctionList, CkFunctionListPtrPtr, CkInfo, CkInfoPtr, CkMechanismInfo,
+    CkMechanismInfoPtr, CkMechanismPtr, CkMechanismType, CkMechanismTypePtr, CkNotify,
+    CkObjectHandle, CkObjectHandlePtr, CkRv, CkSessionHandle, CkSessionHandlePtr, CkSessionInfo,
+    CkSessionInfoPtr, CkSlotId, CkSlotIdPtr, CkSlotInfo, CkSlotInfoPtr, CkTokenInfo,
     CkTokenInfoPtr, CkUlong, CkUlongPtr, CkUserType, CkUtf8Char, CkUtf8CharPtr, CkVersion,
     CkVoidPtr,
 };
@@ -401,7 +401,17 @@ unsafe extern "C" fn c_get_slot_info(slot_id: CkSlotId, info: CkSlotInfoPtr) -> 
     let Some(slot) = module.slot(slot_id) else {
         return CKR_SLOT_ID_INVALID;
     };
-    let mut flags = CKF_HW_SLOT | CKF_REMOVABLE_DEVICE;
+    // Not CKF_HW_SLOT, although the reader is hardware: NSS gives a
+    // hardware slot an object cache (lib/pk11wrap/dev3hack.c,
+    // nssToken_CreateFromPK11SlotInfo) and answers trust lookups from
+    // it, but it never caches a trust record's CKA_SERIAL_NUMBER while
+    // its lookup template requires it (lib/dev/devutil.c nssTrustAttr,
+    // find_objects_in_array; lib/dev/devtoken.c
+    // nssToken_FindTrustForCertificate), so the trust records this
+    // module presents for the card's CA certificates would never be
+    // found. Without the flag NSS searches the token directly, and this
+    // module answers from its own card-read cache.
+    let mut flags = CKF_REMOVABLE_DEVICE;
     if slot.card_present() {
         flags |= CKF_TOKEN_PRESENT;
     }

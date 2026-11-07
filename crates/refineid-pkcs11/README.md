@@ -29,12 +29,18 @@ Implemented:
   session's close, finalize); a transport failure keeps it (RAPP v26.11.2
   section 11 item 2).
   It is verified on the card inside each sign, never logged, and zeroized when it ends.
-- Objects: `C_FindObjectsInit` / `C_FindObjects` / `C_FindObjectsFinal` and `C_GetAttributeValue` over three objects
-  -- the authentication certificate (`CKO_CERTIFICATE`, `CKC_X_509`),
+- Objects: `C_FindObjectsInit` / `C_FindObjects` / `C_FindObjectsFinal` and `C_GetAttributeValue` over
+  the authentication certificate (`CKO_CERTIFICATE`, `CKC_X_509`),
   its public key (`CKO_PUBLIC_KEY`, from the certificate SPKI, for
   consumers such as p11tool / libp11 that enumerate public keys),
-  and its private key (`CKO_PRIVATE_KEY`, `CKK_RSA` or `CKK_EC`).
-  They share one `CKA_ID` so NSS pairs them.
+  its private key (`CKO_PRIVATE_KEY`, `CKK_RSA` or `CKK_EC`),
+  the CA certificates the card carries (`CKO_CERTIFICATE`,
+  `CK_CERTIFICATE_CATEGORY_AUTHORITY`), one NSS trust record
+  (`CKO_NSS_TRUST`) per CA certificate, and one profile object
+  (`CKO_PROFILE`, `CKP_PUBLIC_CERTIFICATES_TOKEN`) declaring the
+  certificates readable without a login -- see
+  [NSS trust records](#nss-trust-records).
+  The three authentication objects share one `CKA_ID` so NSS pairs them.
   The private key answers `CKA_EXTRACTABLE` false and
   `CKA_NEVER_EXTRACTABLE` / `CKA_ALWAYS_SENSITIVE` true -- the FINEID
   key never leaves the card.
@@ -72,14 +78,101 @@ browser's address space, and an implicit file in a world-writable
 directory would be a symlink-attack surface. The environment is read
 once per process.
 
-`examples/nss_debug.rs` answers "why doesn't Firefox see the card"
-without launching Firefox: it dlopens the built module exactly like
-NSS and replays NSS's discovery probes, including the vendor-defined
-builtin-root class and the `CKO_PROFILE` search this module must
-answer with zero matches (the eager-PIN1 rule). Run
-`cargo run -p refineid-pkcs11 --example nss_debug` with a card
-present; add `--login` (PIN1 from `REFINEID_PIN1`) and
-`--sign-probe` for the key path.
+`examples/nss_debug.rs` in the
+[refineid-unix](https://github.com/refineid/refineid-unix) repository
+answers "why doesn't Firefox see the card" without launching Firefox:
+it dlopens a built module exactly like NSS and replays NSS's discovery
+probes, including the vendor-defined builtin-root class and the
+`CKO_PROFILE` search, which this module answers with its one
+public-certificates profile object and never with
+`CKP_AUTHENTICATION_TOKEN` (the eager-PIN1 rule: a PIN prompt appears
+only when a TLS handshake needs the key).
+
+## CA certificates from the card
+
+The module ships no certificate. Every FINEID card carries its issuing
+CA certificate (EF.4336) and the DVV root (EF.4334), both directly
+under the MF and readable without a PIN, and the module reads both
+when it builds a token's objects, in the same card session as the
+authentication certificate. Each one that parses as an unexpired CA
+certificate becomes a `CKO_CERTIFICATE` object of category
+`CK_CERTIFICATE_CATEGORY_AUTHORITY` with `CKA_TRUSTED` false (its
+trust, per purpose, is the companion trust record's to state), and is
+written to a per-user cache so a later session, and the phone-served
+token, can present it without a card read: `REFINEID_CA_CACHE_DIR`,
+else `LOCALAPPDATA` or `APPDATA` under `refineid\ca-certificates` on
+Windows, `~/Library/Caches/fi.refineid/ca-certificates` on macOS, and
+`XDG_CACHE_HOME/refineid/ca-certificates` or
+`~/.cache/refineid/ca-certificates` elsewhere. The cache only ever
+holds certificates read from a card; an expired, oversized, non-CA or
+unparseable file in it is deleted on load. The objects, their trust
+records and the held PIN are dropped together when the card leaves
+the reader.
+
+## NSS trust records
+
+NSS trusts a certificate on a token only when the token also presents
+a trust record for it, so the module presents, next to each CA
+certificate object, one object of NSS's vendor class `CKO_NSS_TRUST`
+(NSS `lib/util/pkcs11n.h`; the standard `CKO_TRUST` class of PKCS#11
+v3.2 applies only to modules reporting that version, and this one
+reports 2.40). NSS finds the record by `CKA_CLASS`, `CKA_ISSUER` and
+`CKA_SERIAL_NUMBER` (NSS `lib/dev/devtoken.c`,
+`nssToken_FindTrustForCertificate`), the same issuer and serial the
+certificate object answers, and reads from it the label, the
+certificate's SHA-1 and MD5 digests (`CKA_NSS_CERT_SHA1_HASH`,
+`CKA_NSS_CERT_MD5_HASH`; the MD5 is a lookup key every NSS trust record
+carries, never a decision), the subject, and one trust level per
+purpose:
+
+| Purpose | Attribute | Level |
+| --- | --- | --- |
+| TLS client authentication | `CKA_NSS_TRUST_CLIENT_AUTH` | `CKT_NSS_TRUSTED_DELEGATOR` |
+| Email protection (S/MIME) | `CKA_NSS_TRUST_EMAIL_PROTECTION` | `CKT_NSS_TRUSTED_DELEGATOR` |
+| TLS server authentication | `CKA_NSS_TRUST_SERVER_AUTH` | `CKT_NSS_MUST_VERIFY_TRUST` |
+| Code signing | `CKA_NSS_TRUST_CODE_SIGNING` | `CKT_NSS_MUST_VERIFY_TRUST` |
+
+`CKT_NSS_TRUSTED_DELEGATOR` makes the CA a trust anchor for the
+purpose: NSS accepts a chain that ends at it. `CKT_NSS_MUST_VERIFY_TRUST`
+asserts nothing for the purpose: a chain through the CA must reach some
+other anchor, so a web site or a signed program chaining to the DVV root
+is no more trusted than before. It is not `CKT_NSS_NOT_TRUSTED`, which
+would be an active distrust. `CKA_NSS_TRUST_STEP_UP_APPROVED` is false,
+the record is a public, unmodifiable token object, and `certutil -L`
+shows the pair as the trust string `T,C,` (trusted client CA for TLS,
+trusted CA for email, nothing for object signing).
+
+A trust record exists exactly while its CA certificate object does: it
+is built with the token's objects and dropped with them when the card
+leaves the reader. Nothing is written to the NSS database and no policy
+file or privilege is involved.
+
+NSS searches the certificates and trust records of a token that
+requires a login only once the user has logged in to it, unless the
+token is friendly, that is, declares its certificates publicly readable
+(NSS `lib/dev/devutil.c`, `search_for_objects`; `lib/pk11wrap/pk11slot.c`,
+`PK11_IsFriendly`). This token is friendly by its own declaration: it
+presents one profile object (class `CKO_PROFILE`, a PKCS#11 v3.0 object
+class) whose `CKA_PROFILE_ID` is `CKP_PUBLIC_CERTIFICATES_TOKEN`, as a
+public, unmodifiable token object. NSS reads the profile objects of
+every token when the token appears, before any login and whatever
+cryptoki version the module reports (`PK11_InitToken`,
+`pk11_ReadProfileList` in `pk11slot.c`), so the DVV root is trusted
+from the moment a FINEID card is in the reader, with no PIN login. The
+declaration is true: the card hands out its certificates to anyone, and
+no PIN, PUK or CAN is involved in reading them. The profile says nothing
+about the key: the private key stays a private object and a PIN prompt
+appears only when a TLS handshake needs it. This is the only profile
+the token claims; in particular it never presents
+`CKP_AUTHENTICATION_TOKEN` (see `token.rs`, `ObjectKind`).
+
+The slot is not declared a hardware slot (`CKF_HW_SLOT`): NSS gives a
+hardware slot an object cache and answers trust lookups from it, but
+never caches a trust record's serial number while its lookup template
+requires one (NSS `lib/pk11wrap/dev3hack.c`, `lib/dev/devutil.c`), so
+the trust records would never be found. Without the flag NSS searches
+the token directly and the module answers from its own card-read
+objects.
 
 ## Hardware test rigs (`test/`)
 
