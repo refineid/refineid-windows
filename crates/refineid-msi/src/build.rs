@@ -28,6 +28,8 @@ const CABINET_NAME: &str = "payload.cab";
 const COMPONENT_FILE: &str = "MinidriverDll";
 /// The component holding the per-user agent.
 const COMPONENT_AGENT: &str = "AgentExe";
+/// The component holding the login sweep.
+const COMPONENT_SWEEP: &str = "SweepExe";
 /// The Program Files directory of the machine's own architecture.
 const PROGRAM_FILES_DIRECTORY: &str = "ProgramFiles64Folder";
 /// The product's directory under Program Files; only administrators write
@@ -364,6 +366,8 @@ pub struct Package<'a> {
     pub file: SystemFile<'a>,
     /// The per-user agent, installed under Program Files.
     pub agent: SystemFile<'a>,
+    /// The login sweep, installed beside the agent.
+    pub sweep: SystemFile<'a>,
     /// Registry values binding the module to supported cards.
     pub registry: &'a [RegistryValue<'a>],
     /// Entry points of the module the installer calls.
@@ -522,6 +526,7 @@ pub fn build(package: &Package<'_>, output: &Path, scratch: &Path) -> Result<(),
     }
     let payload_size = file_size(package.file.source)?;
     let agent_size = file_size(package.agent.source)?;
+    let sweep_size = file_size(package.sweep.source)?;
 
     let cabinet = cabinet::build(
         scratch,
@@ -534,6 +539,10 @@ pub fn build(package: &Package<'_>, output: &Path, scratch: &Path) -> Result<(),
             Member {
                 source: package.agent.source,
                 key: package.agent.key,
+            },
+            Member {
+                source: package.sweep.source,
+                key: package.sweep.key,
             },
         ],
     )?;
@@ -571,7 +580,12 @@ pub fn build(package: &Package<'_>, output: &Path, scratch: &Path) -> Result<(),
         &upgrade_code,
     )?;
     write_layout(&database, package)?;
-    write_payload(&database, package, &cabinet, payload_size, agent_size)?;
+    write_payload(
+        &database,
+        package,
+        &cabinet,
+        [payload_size, agent_size, sweep_size],
+    )?;
     write_registry(&database, package)?;
 
     write_custom_actions(&database, package)?;
@@ -681,6 +695,7 @@ fn write_layout(database: &Database, package: &Package<'_>) -> Result<(), BuildE
 
     let file_component_id = package.upgrade_code.derive(COMPONENT_FILE).to_string();
     let agent_component_id = package.upgrade_code.derive(COMPONENT_AGENT).to_string();
+    let sweep_component_id = package.upgrade_code.derive(COMPONENT_SWEEP).to_string();
     let registry_component_id = package.upgrade_code.derive(COMPONENT_REGISTRY).to_string();
     let first_registry_key = registry_identifier(0);
     let component_sql = "INSERT INTO `Component` \
@@ -714,6 +729,18 @@ fn write_layout(database: &Database, package: &Package<'_>) -> Result<(), BuildE
         database,
         component_sql,
         &[
+            Value::Text(COMPONENT_SWEEP),
+            Value::Text(&sweep_component_id),
+            Value::Text(PRODUCT_DIRECTORY),
+            Value::Integer(schema::COMPONENT_64BIT),
+            Value::Text(""),
+            Value::Text(package.sweep.key),
+        ],
+    )?;
+    insert(
+        database,
+        component_sql,
+        &[
             Value::Text(COMPONENT_REGISTRY),
             Value::Text(&registry_component_id),
             Value::Text(SYSTEM_DIRECTORY),
@@ -739,7 +766,12 @@ fn write_layout(database: &Database, package: &Package<'_>) -> Result<(), BuildE
             Value::Integer(0),
         ],
     )?;
-    for component in [COMPONENT_FILE, COMPONENT_AGENT, COMPONENT_REGISTRY] {
+    for component in [
+        COMPONENT_FILE,
+        COMPONENT_AGENT,
+        COMPONENT_SWEEP,
+        COMPONENT_REGISTRY,
+    ] {
         insert(
             database,
             "INSERT INTO `FeatureComponents` (`Feature_`,`Component_`) VALUES (?,?)",
@@ -751,8 +783,10 @@ fn write_layout(database: &Database, package: &Package<'_>) -> Result<(), BuildE
 
 /// The Card Module's place in the cabinet.
 const SEQUENCE_MODULE: i32 = 1;
-/// The agent's place in the cabinet, the last.
+/// The agent's place in the cabinet.
 const SEQUENCE_AGENT: i32 = 2;
+/// The login sweep's place in the cabinet, the last.
+const SEQUENCE_SWEEP: i32 = 3;
 
 /// The size of the payload file at `path`.
 fn file_size(path: &Path) -> Result<i32, BuildError> {
@@ -765,12 +799,12 @@ fn write_payload(
     database: &Database,
     package: &Package<'_>,
     cabinet: &Path,
-    payload_size: i32,
-    agent_size: i32,
+    [payload_size, agent_size, sweep_size]: [i32; 3],
 ) -> Result<(), BuildError> {
     for (file, component, size, sequence) in [
         (&package.file, COMPONENT_FILE, payload_size, SEQUENCE_MODULE),
         (&package.agent, COMPONENT_AGENT, agent_size, SEQUENCE_AGENT),
+        (&package.sweep, COMPONENT_SWEEP, sweep_size, SEQUENCE_SWEEP),
     ] {
         let file_name = format!("{}|{}", short_name(file.name), file.name);
         insert(
@@ -801,7 +835,7 @@ fn write_payload(
             VALUES (?,?,?,?,?,?)",
         &[
             Value::Integer(1),
-            Value::Integer(SEQUENCE_AGENT),
+            Value::Integer(SEQUENCE_SWEEP),
             Value::Text(""),
             Value::Text(&embedded),
             Value::Text(""),

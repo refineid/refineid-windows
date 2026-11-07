@@ -66,8 +66,10 @@ const PIN_ID_QUALIFIED_SIG: DWORD = 3;
 // 30..36 of the container name as a PIV certificate file tag before
 // it calls into CardSignData. Keep 5fc10a (PIV digital-signature cert)
 // at that offset so TLS client-auth key opens progress to PIN1/signing.
-const AUTH_CONTAINER_GUID: &str = "{00000000-0000-0000-0000-000005fc10a0}";
-const QUAL_SIG_CONTAINER_GUID: &str = "{7A6D5E7C-FE1D-4F1A-B8C2-FA1B1B7C3A02}";
+const AUTH_CONTAINER_GUID: &str =
+    refineid_windows_credential_store::card_certificates::FINEID_AUTHENTICATION_CONTAINER;
+const QUAL_SIG_CONTAINER_GUID: &str =
+    refineid_windows_credential_store::card_certificates::FINEID_QUALIFIED_CONTAINER;
 const MAX_VIRTUAL_CONTAINERS: usize = 32;
 
 /// Bounded buffer limits enforced at the ABI boundary so an

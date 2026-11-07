@@ -51,6 +51,18 @@ mod windows_main {
     /// The per-user agent's file name, under `Program Files\RefineID`.
     const AGENT_FILE: &str = "refineid-agent.exe";
 
+    /// The login sweep's file name, beside the agent.
+    const SWEEP_FILE: &str = "refineid-sweep.exe";
+    /// Where Windows starts a program at every user's sign-in, and removes
+    /// it from with the package. The sweep runs once and exits; no service
+    /// stays behind.
+    const RUN_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
+    /// The Run value of the login sweep.
+    const RUN_VALUE: &str = "RefineIDSweep";
+    /// The sweep's command line: Windows Installer writes the installed
+    /// file's path in place of the bracketed key.
+    const SWEEP_COMMAND: &str = "\"[#SweepExe]\"";
+
     /// The one authored identifier; every other GUID derives from it.
     const UPGRADE_CODE: &str = "{DBD5521A-AA2C-45D1-B79C-8535E2C262A5}";
 
@@ -131,13 +143,14 @@ mod windows_main {
         architecture: Architecture,
         minidriver: PathBuf,
         agent: PathBuf,
+        sweep: PathBuf,
         output: PathBuf,
         version: Version,
     }
 
     fn usage() -> String {
         "usage: refineid-msi --architecture <x64|arm64> --minidriver <path> \
-         --agent <path> --output <path> --version <YY.M.D.HHMM>"
+         --agent <path> --sweep <path> --output <path> --version <YY.M.D.HHMM>"
             .to_owned()
     }
 
@@ -145,6 +158,7 @@ mod windows_main {
         let mut architecture = None;
         let mut minidriver = None;
         let mut agent = None;
+        let mut sweep = None;
         let mut output = None;
         let mut version = None;
         let mut arguments = std::env::args().skip(1);
@@ -164,6 +178,7 @@ mod windows_main {
                 }
                 "--minidriver" => minidriver = Some(PathBuf::from(value()?)),
                 "--agent" => agent = Some(PathBuf::from(value()?)),
+                "--sweep" => sweep = Some(PathBuf::from(value()?)),
                 "--output" => output = Some(PathBuf::from(value()?)),
                 "--version" => {
                     version = Some(Version::parse(&value()?).map_err(|error| error.to_string())?);
@@ -176,6 +191,7 @@ mod windows_main {
             architecture: architecture.ok_or_else(|| format!("--architecture\n{}", usage()))?,
             minidriver: minidriver.ok_or_else(|| format!("--minidriver\n{}", usage()))?,
             agent: agent.ok_or_else(|| format!("--agent\n{}", usage()))?,
+            sweep: sweep.ok_or_else(|| format!("--sweep\n{}", usage()))?,
             output: output.ok_or_else(|| format!("--output\n{}", usage()))?,
             version: version.ok_or_else(|| format!("--version\n{}", usage()))?,
         })
@@ -221,6 +237,12 @@ mod windows_main {
             ]);
         }
 
+        registry.push(RegistryValue {
+            key: RUN_KEY,
+            name: RUN_VALUE,
+            data: RegistryData::Text(SWEEP_COMMAND),
+        });
+
         let package = Package {
             product_name: "RefineID Card Driver",
             manufacturer: "RefineID",
@@ -237,6 +259,11 @@ mod windows_main {
                 key: "AgentExe",
                 name: AGENT_FILE,
                 source: &arguments.agent,
+            },
+            sweep: SystemFile {
+                key: "SweepExe",
+                name: SWEEP_FILE,
+                source: &arguments.sweep,
             },
             registry: &registry,
             custom_actions: CUSTOM_ACTIONS,

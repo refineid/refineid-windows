@@ -37,6 +37,7 @@ use refineid_lib_core::can::Can;
 #[cfg(windows)]
 use zeroize::Zeroize as _;
 
+pub mod card_certificates;
 mod certstore;
 mod pairing;
 
