@@ -72,8 +72,8 @@ impl FlooredCredential {
     /// The name the refusal text uses.
     const fn name(self) -> &'static str {
         match self {
-            Self::Pin1 => "PIN 1",
-            Self::Pin2 => "PIN 2",
+            Self::Pin1 => "Basic PIN 1",
+            Self::Pin2 => "Signature PIN 2",
             Self::Puk => "the PUK",
         }
     }
@@ -543,14 +543,14 @@ mod tests {
             let refusal = check_retry_floor(FlooredCredential::Pin2, remaining(count))
                 .expect_err("below the floor");
             let text = refusal.to_string();
-            assert!(text.contains("PIN 2"), "{text}");
+            assert!(text.contains("Signature PIN 2"), "{text}");
             assert!(text.contains(&count.to_string()), "{text}");
             assert!(text.contains("PUK"), "{text}");
         }
         let blocked = check_retry_floor(FlooredCredential::Pin1, PinStatus::Locked)
             .expect_err("blocked")
             .to_string();
-        assert!(blocked.contains("PIN 1"), "{blocked}");
+        assert!(blocked.contains("Basic PIN 1"), "{blocked}");
         assert!(blocked.contains("PUK"), "{blocked}");
     }
 

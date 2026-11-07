@@ -915,8 +915,8 @@ pub unsafe extern "C" fn refineid_settings_activate(
             copy_optional_pin_pair(
                 (new_pin1, new_pin1_length),
                 (pin1_confirmation, pin1_confirmation_length),
-                "new PIN1",
-                "PIN1 confirmation",
+                "new Basic PIN 1",
+                "Basic PIN 1 confirmation",
             )
         }?;
         // SAFETY: As above.
@@ -924,8 +924,8 @@ pub unsafe extern "C" fn refineid_settings_activate(
             copy_optional_pin_pair(
                 (new_pin2, new_pin2_length),
                 (pin2_confirmation, pin2_confirmation_length),
-                "new PIN2",
-                "PIN2 confirmation",
+                "new Signature PIN 2",
+                "Signature PIN 2 confirmation",
             )
         }?;
 

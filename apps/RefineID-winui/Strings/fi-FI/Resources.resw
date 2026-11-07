@@ -307,7 +307,7 @@
     <value>Virheellinen</value>
   </data>
   <data name="Pin2LengthRule" xml:space="preserve">
-    <value>PIN 2:n on oltava {0}–{1} numeroa.</value>
+    <value>Allekirjoitustunnusluvun 2 on oltava {0}–{1} numeroa.</value>
   </data>
   <data name="ReasonTooLong" xml:space="preserve">
     <value>Syy on liian pitkä.</value>

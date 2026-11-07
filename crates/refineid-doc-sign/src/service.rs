@@ -177,8 +177,8 @@ const SIGNING_PIN: PinSlot = PinSlot::Pin2;
 /// once at session start and reused by the local verify.
 const SIGNING_CERT: CertSlot = CertSlot::Signature;
 
-/// The PIN's name as the activation letter prints it.
-const SIGNING_PIN_LABEL: &str = "PIN2";
+/// The PIN's name as the user sees it everywhere.
+const SIGNING_PIN_LABEL: &str = "Signature PIN 2";
 
 /// The key's name in reports and errors.
 const SIGNING_KEY_LABEL: &str = "qualified-signature";
@@ -2394,7 +2394,7 @@ mod tests {
             },
         }
         .to_string();
-        check_true(wrong.contains("PIN2"), "wrong-pin label")?;
+        check_true(wrong.contains("Signature PIN 2"), "wrong-pin label")?;
         check_true(wrong.contains("wrong PIN"), "wrong-pin reason")?;
         check_true(wrong.contains("retries left"), "wrong-pin counter")?;
 
@@ -2402,7 +2402,7 @@ mod tests {
             outcome: VerifyOutcome::Locked,
         }
         .to_string();
-        check_true(locked.contains("PIN2"), "locked label")?;
+        check_true(locked.contains("Signature PIN 2"), "locked label")?;
         check_true(locked.contains("blocked"), "locked reason")?;
 
         let other = SignErrorKind::PinRejected {
@@ -2427,7 +2427,7 @@ mod tests {
                 reason: PinPolicyReason::NonDigit { byte_offset: 2 },
             }
             .to_string()
-            .contains("PIN2 rejected locally"),
+            .contains("Signature PIN 2 rejected locally"),
             "pin policy",
         )?;
         check_true(
@@ -2706,7 +2706,7 @@ mod tests {
             )?;
             check_true(sent.len() == 1, "only the counter-safe probe sent")?;
             let text = error.to_string();
-            check_true(text.contains("PIN 2"), "refusal names the PIN")?;
+            check_true(text.contains("Signature PIN 2"), "refusal names the PIN")?;
             check_true(text.contains(&count.to_string()), "refusal names the tries")?;
             check_true(text.contains("PUK"), "refusal names the PUK")?;
         }

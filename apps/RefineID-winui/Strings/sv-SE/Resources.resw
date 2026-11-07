@@ -307,7 +307,7 @@
     <value>Ogiltig</value>
   </data>
   <data name="Pin2LengthRule" xml:space="preserve">
-    <value>PIN 2 måste innehålla {0}–{1} siffror.</value>
+    <value>Signaturkod 2 måste innehålla {0}–{1} siffror.</value>
   </data>
   <data name="ReasonTooLong" xml:space="preserve">
     <value>Anledningen är för lång.</value>
