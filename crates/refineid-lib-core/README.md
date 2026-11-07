@@ -10,7 +10,7 @@ card and network I/O happen behind ports (traits) that adapter crates implement.
   `transport.rs` / `backend.rs` (the `CardTransport` / `ReaderBackend` ports), `fineid_card.rs`,
   `pkcs15.rs` (on-card file layout), `pin.rs` (zeroizing PIN containers), `sign.rs` (PSO sign/decipher operations).
 - **eMRTD / ICAO**: `pace.rs` (PACE key agreement), `secure_messaging.rs` (AES CBC/CMAC session channel),
-  `emrtd.rs` (data-group reads), `aa.rs` / `ca.rs` (Active/Chip Authentication), `icao_pkd.rs`, `ldif.rs`,
+   `icao_pkd.rs`, `ldif.rs`,
   `card_access.rs`, `can.rs`.
 - **PKI**: `x509.rs`, `crl.rs`, `ocsp.rs`, `cms.rs`, `revocation.rs`, `cert_state.rs`
   -- parsing plus signature verification, with "verified" wrapper types so unchecked data cannot be consumed.

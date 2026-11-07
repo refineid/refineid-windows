@@ -1039,14 +1039,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "refineid-emrtd"
+version = "26.11.7"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#6bd4852ba073f81d38f30cdf92929ceecf433011"
+dependencies = [
+ "refineid-apdu",
+ "refineid-ber",
+]
+
+[[package]]
 name = "refineid-gui-win32"
 version = "26.11.7"
 dependencies = [
  "pcsc",
  "refineid-card-manager-core",
  "refineid-doc-sign",
+ "refineid-emrtd",
  "refineid-lib-core",
  "refineid-lib-pcsc",
+ "refineid-pace",
+ "refineid-pcsc",
+ "refineid-pkcs15",
  "refineid-rapp-core",
  "refineid-stamp",
  "refineid-windows-credential-store",

@@ -2,12 +2,13 @@
 //! Identity screen backend: one-shot snapshot reads, rendered for display.
 //! Read-only; the photo path runs PACE with the operator-supplied CAN.
 use refineid_card_manager_core::service::{self, CardSnapshot};
+use refineid_emrtd::{CardFaceImage, EmrtdOps as _, ImageFormat};
 use refineid_lib_core::auth::{PinStatus, PukStatus};
-use refineid_lib_core::backend::{ReaderAccessCap, ReaderBackend as _};
-use refineid_lib_core::can::{Can, CanError};
-use refineid_lib_core::emrtd::{self, EmrtdError};
-use refineid_lib_core::pkcs15::FineidReaderPicker as _;
-use refineid_lib_pcsc::{PcscBackend, PcscError};
+use refineid_pace::{Can, CanError, SmTransport, UnvalidatedCan, read_card_access, run_pace};
+use refineid_pcsc::{
+    PcscBackend, ReaderAccessCap, ReaderBackend as _, ReaderBackendOps as _, ReaderFilter,
+};
+use refineid_pkcs15::fs::Pkcs15Ops as _;
 use std::path::Path;
 use zeroize::Zeroize;
 
@@ -156,7 +157,9 @@ pub const fn puk_kind(status: Option<&PukStatus>) -> StateKind {
 pub fn parse_can(mut buffer: Vec<u8>) -> Result<Can, String> {
     let result = std::str::from_utf8(&buffer)
         .map_err(|_| String::from("CAN must contain digits only."))
-        .and_then(|text| Can::new(text).map_err(can_error));
+        .and_then(|text| {
+            Can::reconstruct(UnvalidatedCan::from_owned_text(text.to_owned())).map_err(can_error)
+        });
     buffer.zeroize();
     result
 }
@@ -166,7 +169,6 @@ fn can_error(error: CanError) -> String {
         CanError::Empty => String::from("CAN is empty (6 digits)."),
         CanError::WrongLength => String::from("CAN must be exactly 6 digits."),
         CanError::NonDigit => String::from("CAN must contain digits only."),
-        CanError::AllZeros => String::from("CAN is not an issued card access number."),
     }
 }
 
@@ -209,52 +211,46 @@ fn read_photo(reader: &str, can: Can) -> Result<String, String> {
 
 /// Run PACE with the CAN and read DG2 into memory.
 pub fn read_photo_saved(reader: &str, can: Can) -> Result<PhotoOutcome, String> {
-    let filter = service::reader_filter(reader.to_owned());
     let backend = PcscBackend;
-    let pick = backend
-        .pick_fineid_reader(Some(&filter))
-        .map_err(|error| flatten(&error.to_string(), 300))?;
-    // A freshly opened transport sits at MF level, which is the
-    // PACE precondition (`run_pace_with_can` docs).
-    let transport = backend
-        .open_exclusive(&pick.reader_id, ReaderAccessCap::Read)
-        .map_err(|error| flatten(&error.to_string(), 300))?;
-    let data = emrtd::read_personal_data(transport, can).map_err(|error| emrtd_error(&error))?;
-    match data.face.as_ref() {
-        Some(image) => {
-            let (format, bytes) = match image {
-                emrtd::DocumentImage::Jpeg(bytes) => ("JPEG", bytes),
-                emrtd::DocumentImage::Jpeg2000(bytes) => ("JPEG2000", bytes),
-            };
-            let report = format!("read {} bytes ({format})", bytes.len());
-            let display_jpeg = match image {
-                emrtd::DocumentImage::Jpeg(jpeg) => Some(jpeg.clone()),
-                emrtd::DocumentImage::Jpeg2000(_) => None,
-            };
-            Ok(PhotoOutcome {
-                report,
-                display_jpeg,
-            })
-        }
-        None => Ok(PhotoOutcome {
-            report: format!(
-                "DG2 read ({} raw bytes) but no recognised JPEG/JPEG2000 image.",
-                data.dg2_der.len()
-            ),
-            display_jpeg: None,
-        }),
-    }
+    let failed = |error: &dyn core::fmt::Display| flatten(&error.to_string(), 300);
+    let picked = backend
+        .pick_single_reader(Some(ReaderFilter::new(reader)))
+        .map_err(|error| failed(&error))?;
+    let mut transport = backend
+        .open_exclusive(&picked, ReaderAccessCap::Read)
+        .map_err(|error| failed(&error))?;
+    // PACE's MSE:Set AT is accepted only in MF context, and EF.CardAccess,
+    // which names its domain parameter, is read from there.
+    transport.select_mf().map_err(|error| failed(&error))?;
+    let card_access = read_card_access(&mut transport).map_err(|error| failed(&error))?;
+    let session = run_pace(&mut transport, &card_access, &can).map_err(|error| failed(&error))?;
+    drop(can);
+    let mut channel = SmTransport::new(transport, session);
+    channel
+        .select_emrtd_application()
+        .map_err(|error| flatten(&error.to_string(), 400))?;
+    let face = channel
+        .read_face_image()
+        .map_err(|error| flatten(&error.to_string(), 400))?;
+    Ok(photo_outcome(face.as_ref()))
 }
 
-fn emrtd_error(error: &EmrtdError<PcscError>) -> String {
-    match error {
-        EmrtdError::BadCan => {
-            String::from("Wrong CAN. The CAN is the 6-digit number on the card front.")
-        }
-        EmrtdError::CardReset => {
-            String::from("Card reset during the read; reinsert the card and retry.")
-        }
-        other => flatten(&other.to_string(), 400),
+/// What the screen shows of the card's face image.
+fn photo_outcome(face: Option<&CardFaceImage>) -> PhotoOutcome {
+    let Some(face) = face else {
+        return PhotoOutcome {
+            report: String::from("DG2 read but no recognised JPEG/JPEG2000 image."),
+            display_jpeg: None,
+        };
+    };
+    let bytes = face.image_bytes();
+    let format = match face.format() {
+        ImageFormat::Jpeg => "JPEG",
+        ImageFormat::Jpeg2000 => "JPEG2000",
+    };
+    PhotoOutcome {
+        report: format!("read {} bytes ({format})", bytes.len()),
+        display_jpeg: (face.format() == ImageFormat::Jpeg).then(|| bytes.to_vec()),
     }
 }
 
