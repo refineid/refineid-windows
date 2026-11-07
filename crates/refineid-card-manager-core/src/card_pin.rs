@@ -40,7 +40,7 @@ use refineid_lib_core::backend::{
 use refineid_lib_core::fineid_card::{CardClassificationError, FineidCardModel};
 use refineid_lib_core::pin::{ActivationCode, PinBytes, PinRoleError, Puk};
 use refineid_lib_core::pin_retry_risk::{
-    RetryFloorRefusal, check_activation_last_tries, check_puk_retry_floor, check_retry_floor,
+    RetryFloorRefusal, check_puk_retry_floor, check_retry_floor,
 };
 use refineid_lib_core::pkcs15::{CertSlot, FineidReaderPick};
 use refineid_lib_core::pkcs15::{FineidReaderPicker as _, Pkcs15Ops as _};
@@ -240,9 +240,9 @@ pub enum CardPinError {
         /// itself failed to return a status word.
         probe: Option<PinStatus>,
     },
-    /// The retry floor refused a command that would spend a PIN attempt:
-    /// the card reports two, one or no tries left, the PIN blocked, or no
-    /// readable counter. Nothing was sent.
+    /// The retry floor refused a command that would spend an attempt: the
+    /// card reports two or one tries left, or no readable counter. Nothing
+    /// was sent.
     RetryFloor(RetryFloorRefusal),
     /// `card activate` only: the new PINs entered are not exactly the
     /// PINs that await activation. Nothing was sent.
@@ -1095,11 +1095,11 @@ fn activate_slot_setup<T: refineid_lib_core::transport::CardTransport>(
     match activation_code {
         ActivationCode::Seven(_) => {
             // The activation PIN is the slot's current PIN: a wrong one
-            // spends that slot's tries, so its last two are guarded.
+            // spends that slot's tries, so its counter is the floor's.
             let status = transport
                 .pin_status_with_scheme(lengths.numbering(), slot)
                 .map_err(auth_to_card_pin)?;
-            check_activation_last_tries(slot.into(), status).map_err(CardPinError::RetryFloor)?;
+            check_retry_floor(slot.into(), status).map_err(CardPinError::RetryFloor)?;
             transport
                 .change_pin(lengths, slot, activation_code.to_pin_bytes(), new_pin)
                 .map(change_to_unblock)
@@ -1665,7 +1665,8 @@ mod activate_tests {
     #[test]
     fn preset_pin_activation_at_zero_tries_reaches_the_card() -> TestResult {
         // The card answers for itself and spends nothing; the code may
-        // be a PUK the card still accepts. Here it answers `63C0`.
+        // be a PUK the card still accepts. Here it answers `63C0`, the
+        // PIN blocked.
         let mut transport = FixedStatusTransport::new(tries(NO_TRIES)?);
         let outcome = setup(
             &mut transport,
@@ -1673,10 +1674,7 @@ mod activate_tests {
             ActivationScheme::PresetActivationPin,
         )?;
         check_true(
-            matches!(
-                outcome,
-                Ok(UnblockOutcome::WrongPuk { retries_left }) if retries_left.get() == NO_TRIES
-            ),
+            matches!(outcome, Ok(UnblockOutcome::PukLocked)),
             "the card's own answer is reported",
         )?;
         check_true(

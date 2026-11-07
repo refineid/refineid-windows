@@ -482,16 +482,10 @@ fn render_change(report: &ChangePinReport) -> String {
         ),
         ChangePinOutcome::WrongCurrentPin { retries_left } => {
             let left = retries_left.get();
-            if left == 0 {
-                format!(
-                    "Wrong current {pin}; no tries left. {pin} is now locked; use the Unblock operation with the PUK."
-                )
-            } else {
-                format!("Wrong current {pin}; {left} tries left. Nothing was changed.")
-            }
+            format!("Wrong current {pin}; {left} tries left. Nothing was changed.")
         }
         ChangePinOutcome::Locked => {
-            format!("{pin} is locked. Use the Unblock operation with the PUK to set a new one.")
+            format!("{pin} is blocked. Use the Unblock operation with the PUK to set a new one.")
         }
         ChangePinOutcome::LengthError => {
             format!("{pin} change refused: length error (host bug, please report).")
