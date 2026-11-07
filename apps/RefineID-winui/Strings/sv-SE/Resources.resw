@@ -133,10 +133,10 @@
     <value>Kod att byta</value>
   </data>
   <data name="ChangeSlotPin1Item.Content" xml:space="preserve">
-    <value>Grundkod (PIN 1)</value>
+    <value>Grund PIN 1</value>
   </data>
   <data name="ChangeSlotPin2Item.Content" xml:space="preserve">
-    <value>Signaturkod (PIN 2)</value>
+    <value>Signaturkod 2</value>
   </data>
   <data name="CurrentPinBox.Header" xml:space="preserve">
     <value>Nuvarande PIN-kod</value>
@@ -163,10 +163,10 @@
     <value>Kod att återställa</value>
   </data>
   <data name="UnblockSlotPin1Item.Content" xml:space="preserve">
-    <value>Grundkod (PIN 1)</value>
+    <value>Grund PIN 1</value>
   </data>
   <data name="UnblockSlotPin2Item.Content" xml:space="preserve">
-    <value>Signaturkod (PIN 2)</value>
+    <value>Signaturkod 2</value>
   </data>
   <data name="PukBox.Header" xml:space="preserve">
     <value>Återställningskod (PUK)</value>
@@ -199,28 +199,28 @@
     <value>Aktiveringskod från brevet</value>
   </data>
   <data name="ActivationPin1Box.Header" xml:space="preserve">
-    <value>Ny grundkod (PIN 1)</value>
+    <value>Ny grund PIN 1</value>
   </data>
   <data name="ActivationPin1Box.AutomationProperties.Name" xml:space="preserve">
-    <value>Ny grundkod (PIN 1)</value>
+    <value>Ny grund PIN 1</value>
   </data>
   <data name="ActivationPin1ConfirmationBox.Header" xml:space="preserve">
-    <value>Upprepa PIN 1</value>
+    <value>Grund PIN 1 igen</value>
   </data>
   <data name="ActivationPin1ConfirmationBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Upprepa PIN 1</value>
+    <value>Grund PIN 1 igen</value>
   </data>
   <data name="ActivationPin2Box.Header" xml:space="preserve">
-    <value>Ny signaturkod (PIN 2)</value>
+    <value>Ny signaturkod 2</value>
   </data>
   <data name="ActivationPin2Box.AutomationProperties.Name" xml:space="preserve">
-    <value>Ny signaturkod (PIN 2)</value>
+    <value>Ny signaturkod 2</value>
   </data>
   <data name="ActivationPin2ConfirmationBox.Header" xml:space="preserve">
-    <value>Upprepa PIN 2</value>
+    <value>Signaturkod 2 igen</value>
   </data>
   <data name="ActivationPin2ConfirmationBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Upprepa PIN 2</value>
+    <value>Signaturkod 2 igen</value>
   </data>
   <data name="ActivateButton.Content" xml:space="preserve">
     <value>Aktivera identitetskort</value>
@@ -268,10 +268,10 @@
     <value>ASiC-E-paket</value>
   </data>
   <data name="PinBox.Header" xml:space="preserve">
-    <value>Signaturkod (PIN 2)</value>
+    <value>Signaturkod 2</value>
   </data>
   <data name="PinBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Signaturkod (PIN 2)</value>
+    <value>Signaturkod 2</value>
   </data>
   <data name="ReasonBox.Header" xml:space="preserve">
     <value>Anledning</value>
@@ -359,15 +359,15 @@
     <value>Åtkomstkoden kontrolleras</value>
   </data>
   <data name="NewPin1Field" xml:space="preserve">
-    <value>Ny grundkod (PIN 1)</value>
+    <value>Ny grund PIN 1</value>
   </data>
   <data name="NewPin2Field" xml:space="preserve">
-    <value>Ny signaturkod (PIN 2)</value>
+    <value>Ny signaturkod 2</value>
   </data>
   <data name="RepeatPin1Field" xml:space="preserve">
-    <value>Upprepa PIN 1</value>
+    <value>Grund PIN 1 igen</value>
   </data>
   <data name="RepeatPin2Field" xml:space="preserve">
-    <value>Upprepa PIN 2</value>
+    <value>Signaturkod 2 igen</value>
   </data>
 </root>

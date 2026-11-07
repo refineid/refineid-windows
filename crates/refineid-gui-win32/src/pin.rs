@@ -40,42 +40,48 @@ struct PinFields {
 }
 
 const PIN1_FIELDS: PinFields = PinFields {
-    current: "Current PIN 1",
-    new: "New basic PIN 1",
-    repeat: "Repeat PIN 1",
+    current: "Current Basic PIN 1",
+    new: "New Basic PIN 1",
+    repeat: "Basic PIN 1 again",
 };
 
 const PIN2_FIELDS: PinFields = PinFields {
-    current: "Current PIN 2",
-    new: "New signature PIN 2",
-    repeat: "Repeat PIN 2",
+    current: "Current Signature PIN 2",
+    new: "New Signature PIN 2",
+    repeat: "Signature PIN 2 again",
 };
 
 /// Field labels per mode, top to bottom. An empty label hides
 /// that row.
 pub const FIELDS: [[&str; 5]; 5] = [
     [
-        "Current PIN 1:",
-        "New basic PIN 1:",
-        "Repeat PIN 1:",
+        "Current Basic PIN 1:",
+        "New Basic PIN 1:",
+        "Basic PIN 1 again:",
         "",
         "",
     ],
     [
-        "Current PIN 2:",
-        "New signature PIN 2:",
-        "Repeat PIN 2:",
+        "Current Signature PIN 2:",
+        "New Signature PIN 2:",
+        "Signature PIN 2 again:",
         "",
         "",
     ],
-    ["PUK:", "New basic PIN 1:", "Repeat PIN 1:", "", ""],
-    ["PUK:", "New signature PIN 2:", "Repeat PIN 2:", "", ""],
+    ["PUK:", "New Basic PIN 1:", "Basic PIN 1 again:", "", ""],
+    [
+        "PUK:",
+        "New Signature PIN 2:",
+        "Signature PIN 2 again:",
+        "",
+        "",
+    ],
     [
         "Activation PIN:",
-        "New basic PIN 1:",
-        "Repeat PIN 1:",
-        "New signature PIN 2:",
-        "Repeat PIN 2:",
+        "New Basic PIN 1:",
+        "Basic PIN 1 again:",
+        "New Signature PIN 2:",
+        "Signature PIN 2 again:",
     ],
 ];
 

@@ -1043,7 +1043,7 @@ fn on_create(main: HWND) -> windows::core::Result<()> {
     doc_label(
         pages[3],
         instance,
-        "Signing PIN (PIN 2)",
+        "Signature PIN 2",
         16,
         132,
         120,
