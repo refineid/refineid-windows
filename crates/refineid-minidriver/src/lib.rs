@@ -251,10 +251,12 @@ fn retry_floor_answer(slot: PinSlot, status: PinStatus) -> Result<(), DWORD> {
 }
 
 /// Read the PUK's counter without spending a try and apply the retry
-/// floor to it before anything that presents the PUK. A PUK below the
-/// floor or blocked answers `SCARD_W_CHV_BLOCKED`; a counter the card did
-/// not report answers `SCARD_F_INTERNAL_ERROR`. The target PIN's counter
-/// does not gate the unblock.
+/// floor to it before anything that presents the PUK. A PUK at two or
+/// one tries left answers `SCARD_W_CHV_BLOCKED`; a counter the card did
+/// not report answers `SCARD_F_INTERNAL_ERROR`. At zero tries left or a
+/// blocked PUK the floor admits the command: the card answers for
+/// itself and spends nothing, and [`map_unblock_outcome`] reports its
+/// answer. The target PIN's counter does not gate the unblock.
 #[cfg(windows)]
 fn puk_floor_answer(tx: &mut CardSessionTransport) -> Result<(), DWORD> {
     tx.select_pkcs15_application()
