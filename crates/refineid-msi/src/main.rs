@@ -51,17 +51,15 @@ mod windows_main {
     /// The per-user agent's file name, under `Program Files\RefineID`.
     const AGENT_FILE: &str = "refineid-agent.exe";
 
-    /// The sign-in sweep's file name, beside the agent.
-    const SWEEP_FILE: &str = "refineid-sweep.exe";
     /// Where Windows starts a program at every user's sign-in, and removes
-    /// it from with the package. The sweep stays in the user's session,
-    /// watching the card readers, and ends with it; no service runs.
+    /// it from with the package. The agent stays in the user's session and
+    /// ends with it; no service runs.
     const RUN_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
-    /// The Run value of the sign-in sweep.
-    const RUN_VALUE: &str = "RefineIDSweep";
-    /// The sweep's command line: Windows Installer writes the installed
+    /// The Run value of the agent.
+    const RUN_VALUE: &str = "RefineIDAgent";
+    /// The agent's command line: Windows Installer writes the installed
     /// file's path in place of the bracketed key.
-    const SWEEP_COMMAND: &str = "\"[#SweepExe]\"";
+    const AGENT_COMMAND: &str = "\"[#AgentExe]\"";
 
     /// The one authored identifier; every other GUID derives from it.
     const UPGRADE_CODE: &str = "{DBD5521A-AA2C-45D1-B79C-8535E2C262A5}";
@@ -180,7 +178,6 @@ mod windows_main {
         architecture: Architecture,
         minidriver: PathBuf,
         agent: PathBuf,
-        sweep: PathBuf,
         driver_package: Option<PathBuf>,
         output: PathBuf,
         version: Version,
@@ -188,7 +185,7 @@ mod windows_main {
 
     fn usage() -> String {
         "usage: refineid-msi --architecture <x64|arm64> --minidriver <path> \
-         --agent <path> --sweep <path> [--driver-package <directory>] \
+         --agent <path> [--driver-package <directory>] \
          --output <path> --version <YY.M.D.HHMM>\n       \
          refineid-msi --write-inf <path> --version <YY.M.D.HHMM>"
             .to_owned()
@@ -198,7 +195,6 @@ mod windows_main {
         let mut architecture = None;
         let mut minidriver = None;
         let mut agent = None;
-        let mut sweep = None;
         let mut driver_package = None;
         let mut write_inf = None;
         let mut output = None;
@@ -220,7 +216,6 @@ mod windows_main {
                 }
                 "--minidriver" => minidriver = Some(PathBuf::from(value()?)),
                 "--agent" => agent = Some(PathBuf::from(value()?)),
-                "--sweep" => sweep = Some(PathBuf::from(value()?)),
                 "--driver-package" => driver_package = Some(PathBuf::from(value()?)),
                 "--write-inf" => write_inf = Some(PathBuf::from(value()?)),
                 "--output" => output = Some(PathBuf::from(value()?)),
@@ -239,7 +234,6 @@ mod windows_main {
             architecture: architecture.ok_or_else(|| format!("--architecture\n{}", usage()))?,
             minidriver: minidriver.ok_or_else(|| format!("--minidriver\n{}", usage()))?,
             agent: agent.ok_or_else(|| format!("--agent\n{}", usage()))?,
-            sweep: sweep.ok_or_else(|| format!("--sweep\n{}", usage()))?,
             driver_package,
             output: output.ok_or_else(|| format!("--output\n{}", usage()))?,
             version,
@@ -290,7 +284,7 @@ mod windows_main {
     }
 
     /// The Calais registration of every card, under `keys` in the order of
-    /// [`CARDS`], and the sign-in sweep's Run value.
+    /// [`CARDS`], and the agent's Run value.
     fn registry_values(keys: &[String]) -> Vec<RegistryValue<'_>> {
         let mut registry = Vec::with_capacity(CARDS.len() * 5);
         for (card, key) in CARDS.iter().zip(keys) {
@@ -325,7 +319,7 @@ mod windows_main {
         registry.push(RegistryValue {
             key: RUN_KEY,
             name: RUN_VALUE,
-            data: RegistryData::Text(SWEEP_COMMAND),
+            data: RegistryData::Text(AGENT_COMMAND),
         });
         registry
     }
@@ -394,11 +388,6 @@ mod windows_main {
                 key: "AgentExe",
                 name: AGENT_FILE,
                 source: &arguments.agent,
-            },
-            sweep: SystemFile {
-                key: "SweepExe",
-                name: SWEEP_FILE,
-                source: &arguments.sweep,
             },
             driver_package,
             registry: &registry,

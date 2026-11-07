@@ -4,8 +4,8 @@
 //! 4.3): the engine's own [`PairRecord`], which holds the pair keys,
 //! `pair_id`, the granted profiles, `grants_hash`, whether the peer
 //! confirmed its storage, and when the user forgot the pairing, together
-//! with the labels the peer introduced itself with and the authentication
-//! certificate the phone's card answered with. A record is stored before the peer
+//! with the labels the peer introduced itself with. A record is stored before
+//! the peer
 //! confirms its own storage (section 4.3 item 4) and serves nothing until
 //! that confirmation is recorded; one found unconfirmed at load was written
 //! in a confirmation window this endpoint did not complete, and is removed
@@ -18,15 +18,14 @@
 //! forget (section 4.6 items 2 and 6). A pairing the phone revoked keeps no
 //! keys and no certificate; it stays, with the phone's name, only so the user
 //! is told (section 4.7), until the user forgets it or
-//! [`CERTIFICATE_RETENTION_DAYS`] pass. A pairing this computer revoked or
+//! [`REVOCATION_NOTICE_DAYS`] pass. A pairing this computer revoked or
 //! that expired has nobody to tell, and a durable store keeps nothing of it.
 //!
-//! The certificate names the holder, so refineid-core's
-//! `doc/security/certificate-custody.md` bounds it: it is the only certificate
-//! a record holds, it leaves the record after [`CERTIFICATE_RETENTION_DAYS`]
-//! without a session while the pairing lives on, and it goes at once when the
-//! pairing is forgotten, revoked, expired or replaced. A session after the
-//! bound reads it from the phone again. CA certificates are not kept here.
+//! A record holds no certificate. The card's authentication certificate
+//! names the holder, so it is read from the phone at every session and kept
+//! in the memory of the process that holds the session, and that process
+//! offers it to local consumers only while the phone is present: a session
+//! heard its card within the grace ([`offer_stands`]).
 //!
 //! The peer's display name lives in the engine's record while the keys are
 //! held, and is refreshed at the start of every session (section 4.3 item
@@ -41,7 +40,7 @@
 //! The store also keeps, per pairing, the last [`CardSighting`]: the card a
 //! session on this computer last heard present, which bounds the identity
 //! every local consumer is offered (section 8.4 item 3,
-//! [`offered_certificate`]).
+//! [`offer_stands`]).
 //!
 //! The store is a trait so the Windows build can put pair keys behind the
 //! platform credential store, while tests use the in-memory form shipped
@@ -60,17 +59,13 @@ pub use refineid_rapp::{RecordStoreError, SweepOutcome};
 use crate::ids::PairId;
 use crate::presence::CardSighting;
 
-/// Days a pairing record keeps its authentication certificate without a
-/// session (refineid-core `doc/security/certificate-custody.md`).
-///
-/// A record the phone revoked keeps the phone's name as long. The pairing
-/// itself lives on to [`PAIRING_IDLE_EXPIRY_DAYS`], so the bound is the
-/// shorter one: a pairing that expires has no certificate left.
-pub const CERTIFICATE_RETENTION_DAYS: u64 = 7;
-const _: () = assert!(CERTIFICATE_RETENTION_DAYS < PAIRING_IDLE_EXPIRY_DAYS);
-/// [`CERTIFICATE_RETENTION_DAYS`] in milliseconds.
-pub const CERTIFICATE_RETENTION_MS: u64 =
-    CERTIFICATE_RETENTION_DAYS * (PAIRING_IDLE_EXPIRY_MS / PAIRING_IDLE_EXPIRY_DAYS);
+/// Days a record the phone revoked keeps the phone's name, so the user is
+/// told that the phone forgot this computer (RAPP v26.11.2 section 4.7).
+pub const REVOCATION_NOTICE_DAYS: u64 = 7;
+const _: () = assert!(REVOCATION_NOTICE_DAYS < PAIRING_IDLE_EXPIRY_DAYS);
+/// [`REVOCATION_NOTICE_DAYS`] in milliseconds.
+pub const REVOCATION_NOTICE_MS: u64 =
+    REVOCATION_NOTICE_DAYS * (PAIRING_IDLE_EXPIRY_MS / PAIRING_IDLE_EXPIRY_DAYS);
 
 /// The revocation time of the stand-in keys a record holds while its own are
 /// moved out for a change; it never reaches storage.
@@ -117,8 +112,6 @@ pub struct PairingRecord {
     keys: Keys,
     /// The platform the peer described itself with in `pairing.hello`.
     peer_platform: String,
-    /// The card's authentication certificate as the phone last answered it.
-    authentication_certificate: Option<OwnedCert>,
 }
 
 impl core::fmt::Debug for PairingRecord {
@@ -133,14 +126,13 @@ impl core::fmt::Debug for PairingRecord {
 
 impl PairingRecord {
     /// The record of a pairing the engine just stored, with the platform
-    /// its peer described itself with and no certificate yet. The peer's
-    /// display name is the engine record's.
+    /// its peer described itself with. The peer's display name is the
+    /// engine record's.
     #[must_use]
     pub const fn new(record: PairRecord, peer_platform: String) -> Self {
         Self {
             keys: Keys::Held(record),
             peer_platform,
-            authentication_certificate: None,
         }
     }
 
@@ -160,7 +152,6 @@ impl PairingRecord {
                 peer_display_name,
             },
             peer_platform,
-            authentication_certificate: None,
         }
     }
 
@@ -265,45 +256,10 @@ impl PairingRecord {
         self.pair_record().map_or(&[], PairRecord::profiles)
     }
 
-    /// The card's authentication certificate as the phone last answered it.
-    #[must_use]
-    pub const fn authentication_certificate(&self) -> Option<&OwnedCert> {
-        self.authentication_certificate.as_ref()
-    }
-
-    /// The certificate unless it is past retention at `now_ms`, milliseconds
-    /// since the Unix epoch: what may be offered, whether or not the store
-    /// managed to drop it yet.
-    #[must_use]
-    pub fn authentication_certificate_at(&self, now_ms: u64) -> Option<&OwnedCert> {
-        self.authentication_certificate()
-            .filter(|_| !self.certificate_outlived(now_ms))
-    }
-
-    /// Whether the record holds a certificate past retention at `now_ms`:
-    /// [`CERTIFICATE_RETENTION_MS`] have passed since the later of the
-    /// pairing's creation and its latest session, or the clock reads before
-    /// that time, which says nothing of how long ago it was. Dropping costs
-    /// one read of the card at the next session.
-    #[must_use]
-    pub fn certificate_outlived(&self, now_ms: u64) -> bool {
-        if self.authentication_certificate.is_none() {
-            return false;
-        }
-        let Some(keys) = self.pair_record() else {
-            return true;
-        };
-        let created_ms = keys.created_at_ms();
-        let since_ms = keys
-            .last_session_at_ms()
-            .map_or(created_ms, |at_ms| at_ms.max(created_ms));
-        now_ms < since_ms || now_ms - since_ms >= CERTIFICATE_RETENTION_MS
-    }
-
     /// Whether nothing of this revoked record is left to keep at `now_ms`:
     /// nobody is to be told of a pairing this computer revoked or that
     /// expired, and the notice that the phone forgot this computer stands for
-    /// [`CERTIFICATE_RETENTION_MS`], or until the clock reads before it.
+    /// [`REVOCATION_NOTICE_MS`], or until the clock reads before it.
     #[must_use]
     pub const fn revoked_record_outlived(&self, now_ms: u64) -> bool {
         match self.keys {
@@ -313,18 +269,8 @@ impl PairingRecord {
                 by_peer: true,
                 at_ms,
                 ..
-            } => now_ms < at_ms || now_ms - at_ms >= CERTIFICATE_RETENTION_MS,
+            } => now_ms < at_ms || now_ms - at_ms >= REVOCATION_NOTICE_MS,
         }
-    }
-
-    /// Takes the certificate out of the record when it is past retention at
-    /// `now_ms`. Returns whether it did.
-    pub fn drop_outlived_certificate(&mut self, now_ms: u64) -> bool {
-        let outlived = self.certificate_outlived(now_ms);
-        if outlived {
-            self.authentication_certificate = None;
-        }
-        outlived
     }
 
     /// When the pairing was revoked, while its keys are destroyed.
@@ -334,11 +280,6 @@ impl PairingRecord {
             Keys::Held(_) => None,
             Keys::Revoked { at_ms, .. } => Some(at_ms),
         }
-    }
-
-    /// Keeps the card's authentication certificate.
-    pub fn remember_authentication_certificate(&mut self, certificate: OwnedCert) {
-        self.authentication_certificate = Some(certificate);
     }
 
     /// Records the peer's storage confirmation: the engine's record becomes
@@ -360,10 +301,8 @@ impl PairingRecord {
 
     /// The user forgets the pairing at `at_ms` while no session is open:
     /// it serves nothing and keeps its keys for the close (section 4.6 item
-    /// 2), and its certificate goes at once. A pairing already forgotten
-    /// keeps its first time.
+    /// 2). A pairing already forgotten keeps its first time.
     fn forget(&mut self, at_ms: u64) {
-        self.authentication_certificate = None;
         let placeholder = self.revoked_keys(false, STAND_IN_REVOKED_AT_MS);
         self.keys = match core::mem::replace(&mut self.keys, placeholder) {
             Keys::Held(record) if record.forgotten_at_ms().is_none() => {
@@ -373,11 +312,10 @@ impl PairingRecord {
         };
     }
 
-    /// Destroys the keys and the certificate at `at_ms`; the peer's name and
-    /// platform stay so the user is told (section 4.6 items 3 and 4).
+    /// Destroys the keys at `at_ms`; the peer's name and platform stay so
+    /// the user is told (section 4.6 items 3 and 4).
     fn revoke(&mut self, by_peer: bool, at_ms: u64) {
         self.keys = self.revoked_keys(by_peer, at_ms);
-        self.authentication_certificate = None;
     }
 
     /// The keys of this pairing once destroyed, keeping the peer's name.
@@ -417,7 +355,7 @@ impl PairingRecord {
         let Keys::Held(keys) = &mut self.keys else {
             return Ok(SweepOutcome::Kept);
         };
-        let (peer_platform, certificate) = (&self.peer_platform, &self.authentication_certificate);
+        let peer_platform = &self.peer_platform;
         let outcome = keys
             .sweep(now_ms, session_established, |encoded| {
                 let checked = decode_pair_record(encoded).map_err(CheckedWrite::Encoding)?;
@@ -425,13 +363,11 @@ impl PairingRecord {
                     Self {
                         keys: expired_keys,
                         peer_platform: peer_platform.clone(),
-                        authentication_certificate: None,
                     }
                 } else {
                     Self {
                         keys: Keys::Held(checked),
                         peer_platform: peer_platform.clone(),
-                        authentication_certificate: certificate.clone(),
                     }
                 };
                 store(&stored).map_err(CheckedWrite::Store)
@@ -550,42 +486,32 @@ pub trait PairingStore {
     ) -> Result<SweepOutcome, RecordStoreError<StoreError>>;
 }
 
-/// The certificate a pairing's identity is offered to local consumers on at
-/// `now_ms` (RAPP v26.11.2 section 8.4 item 3).
+/// Whether a pairing's identity is offered on `certificate` at `now_ms`.
 ///
-/// It is the cached authentication certificate of a pairing that serves,
-/// within its retention, while the last card a session on this computer heard
-/// present is that certificate's card and was heard within the grace. `None`
-/// withdraws the offer: the pairing is forgotten or revoked, a session heard
-/// another card, no session has heard the card for the grace, or the
-/// certificate is past retention.
-pub fn offered_certificate<S: PairingStore + ?Sized>(
+/// It is (RAPP v26.11.2 section 8.4 item 3) while the pairing
+/// serves, and the last card a session on this computer heard present is
+/// that certificate's card and was heard within the grace. False withdraws
+/// the offer: the pairing is forgotten or revoked, a session heard another
+/// card, or no session has heard the card for the grace.
+pub fn offer_stands<S: PairingStore + ?Sized>(
     store: &S,
     pair_id: PairId,
+    certificate: &OwnedCert,
     now_ms: u64,
-) -> Option<&OwnedCert> {
-    let certificate = store
-        .get(pair_id)
-        .ok()
-        .filter(|record| record.serves())?
-        .authentication_certificate_at(now_ms)?;
-    store
-        .card_sighting(pair_id)
-        .filter(|sighting| sighting.stands_for(certificate, now_ms))
-        .map(|_| certificate)
+) -> bool {
+    store.get(pair_id).is_ok_and(PairingRecord::serves)
+        && store
+            .card_sighting(pair_id)
+            .is_some_and(|sighting| sighting.stands_for(certificate, now_ms))
 }
 
-/// What retention leaves of `records` at `now_ms`: every certificate past
-/// retention leaves its record, and a revoked record with nothing left to
-/// tell leaves the set. Returns whether anything changed.
-pub fn apply_retention(records: &mut Vec<PairingRecord>, now_ms: u64) -> bool {
+/// What the revocation notice leaves of `records` at `now_ms`: a revoked
+/// record with nothing left to tell leaves the set. Returns whether anything
+/// changed.
+pub fn drop_outlived_revocations(records: &mut Vec<PairingRecord>, now_ms: u64) -> bool {
     let before = records.len();
     records.retain(|record| !record.revoked_record_outlived(now_ms));
-    let mut changed = records.len() != before;
-    for record in records.iter_mut() {
-        changed |= record.drop_outlived_certificate(now_ms);
-    }
-    changed
+    records.len() != before
 }
 
 /// Revokes a pairing at `now_ms`: its keys are destroyed and the record stays
@@ -797,9 +723,6 @@ impl PairingStore for MemoryPairingStore {
         now_ms: u64,
         session_established: bool,
     ) -> Result<SweepOutcome, RecordStoreError<StoreError>> {
-        for record in &mut self.records {
-            record.drop_outlived_certificate(now_ms);
-        }
         self.records
             .iter_mut()
             .find(|entry| entry.pair_id() == pair_id)
@@ -920,9 +843,9 @@ mod tests {
         unconfirmed_record,
     };
     use super::{
-        CERTIFICATE_RETENTION_DAYS, CERTIFICATE_RETENTION_MS, MemoryPairingStore, PairingRecord,
-        PairingState, PairingStore, StoreError, apply_retention, expire_revocation_notices,
-        forget_pairing, offered_certificate, remove_unconfirmed, revoke_pairing, sweep_pairings,
+        MemoryPairingStore, PairingRecord, PairingState, PairingStore, REVOCATION_NOTICE_DAYS,
+        REVOCATION_NOTICE_MS, StoreError, drop_outlived_revocations, expire_revocation_notices,
+        forget_pairing, offer_stands, remove_unconfirmed, revoke_pairing, sweep_pairings,
     };
     use crate::ids::PairId;
     use crate::presence::CardSighting;
@@ -984,19 +907,13 @@ mod tests {
     }
 
     #[test]
-    fn a_revocation_destroys_the_keys_and_certificates_and_keeps_the_record() {
+    fn a_revocation_destroys_the_keys_and_keeps_the_record() {
         let mut store = MemoryPairingStore::new();
         store.insert(record(FIRST_PAIR)).unwrap();
-        store
-            .update(FIRST_PAIR, &mut |entry| {
-                entry.remember_authentication_certificate(certificate());
-            })
-            .unwrap();
         revoke_pairing(&mut store, FIRST_PAIR, true, CREATED_AT_MS).unwrap();
         let revoked = store.get(FIRST_PAIR).unwrap();
         assert_eq!(revoked.state(), PairingState::Revoked { by_peer: true });
         assert!(revoked.pair_record().is_none());
-        assert!(revoked.authentication_certificate().is_none());
         assert!(revoked.granted_profiles().is_empty());
         assert!(!revoked.serves());
         assert!(!revoked.owes_revocation_notice());
@@ -1023,18 +940,6 @@ mod tests {
     fn records_are_replaced_updated_and_removed() {
         let mut store = MemoryPairingStore::new();
         store.insert(record(FIRST_PAIR)).unwrap();
-        store
-            .update(FIRST_PAIR, &mut |entry| {
-                entry.remember_authentication_certificate(certificate());
-            })
-            .unwrap();
-        assert!(
-            store
-                .get(FIRST_PAIR)
-                .unwrap()
-                .authentication_certificate()
-                .is_some()
-        );
         store.insert(record(FIRST_PAIR)).unwrap();
         assert_eq!(store.pair_ids(), vec![FIRST_PAIR]);
         store.remove(FIRST_PAIR).unwrap();
@@ -1044,34 +949,24 @@ mod tests {
     /// The wall-clock time a session hears the card present in these tests.
     const HEARD_AT_MS: u64 = 1_800_000_000_000;
 
-    /// A store holding a confirmed pairing whose certificate is cached and
-    /// whose card a session open at [`HEARD_AT_MS`] heard.
+    /// A store holding a confirmed pairing whose card a session open at
+    /// [`HEARD_AT_MS`] heard.
     fn offering_store() -> MemoryPairingStore {
         let mut store = MemoryPairingStore::new();
         store.insert(record(FIRST_PAIR)).unwrap();
         store.sweep(FIRST_PAIR, HEARD_AT_MS, true).unwrap();
         let heard = offering_store_heard_at(HEARD_AT_MS);
         store
-            .update(FIRST_PAIR, &mut |entry| {
-                entry.remember_authentication_certificate(certificate());
-            })
-            .unwrap();
-        store
             .record_card_sighting(FIRST_PAIR, heard.card_sighting(FIRST_PAIR).unwrap())
             .unwrap();
         store
     }
 
-    /// A store holding a confirmed pairing whose certificate is cached and
-    /// whose card a session heard at `heard_at_ms`.
+    /// A store holding a confirmed pairing whose card a session heard at
+    /// `heard_at_ms`.
     fn offering_store_heard_at(heard_at_ms: u64) -> MemoryPairingStore {
         let mut store = MemoryPairingStore::new();
         store.insert(record(FIRST_PAIR)).unwrap();
-        store
-            .update(FIRST_PAIR, &mut |entry| {
-                entry.remember_authentication_certificate(certificate());
-            })
-            .unwrap();
         store
             .record_card_sighting(
                 FIRST_PAIR,
@@ -1087,12 +982,24 @@ mod tests {
     #[test]
     fn a_confirmed_certificate_is_offered_through_the_grace() {
         let store = offering_store();
-        assert!(offered_certificate(&store, FIRST_PAIR, HEARD_AT_MS).is_some());
-        assert!(
-            offered_certificate(&store, FIRST_PAIR, HEARD_AT_MS + IDENTITY_OFFER_GRACE_MS)
-                .is_none()
-        );
-        assert!(offered_certificate(&store, SECOND_PAIR, HEARD_AT_MS).is_none());
+        assert!(offer_stands(
+            &store,
+            FIRST_PAIR,
+            &certificate(),
+            HEARD_AT_MS
+        ));
+        assert!(!offer_stands(
+            &store,
+            FIRST_PAIR,
+            &certificate(),
+            HEARD_AT_MS + IDENTITY_OFFER_GRACE_MS
+        ));
+        assert!(!offer_stands(
+            &store,
+            SECOND_PAIR,
+            &certificate(),
+            HEARD_AT_MS
+        ));
     }
 
     #[test]
@@ -1106,7 +1013,12 @@ mod tests {
     fn a_forgotten_pairing_offers_nothing_at_once() {
         let mut store = offering_store();
         forget_pairing(&mut store, FIRST_PAIR, HEARD_AT_MS).unwrap();
-        assert!(offered_certificate(&store, FIRST_PAIR, HEARD_AT_MS).is_none());
+        assert!(!offer_stands(
+            &store,
+            FIRST_PAIR,
+            &certificate(),
+            HEARD_AT_MS
+        ));
     }
 
     #[test]
@@ -1121,7 +1033,12 @@ mod tests {
                 ),
             )
             .unwrap();
-        assert!(offered_certificate(&store, FIRST_PAIR, HEARD_AT_MS).is_none());
+        assert!(!offer_stands(
+            &store,
+            FIRST_PAIR,
+            &certificate(),
+            HEARD_AT_MS
+        ));
     }
 
     /// The moment the fixtures' pairing has had no session for the idle
@@ -1217,7 +1134,12 @@ mod tests {
             !expired.owes_revocation_notice(),
             "an expired pairing sends nothing"
         );
-        assert!(offered_certificate(&store, FIRST_PAIR, IDLE_EXPIRED_AT_MS).is_none());
+        assert!(!offer_stands(
+            &store,
+            FIRST_PAIR,
+            &certificate(),
+            IDLE_EXPIRED_AT_MS
+        ));
     }
 
     #[test]
@@ -1236,16 +1158,12 @@ mod tests {
             kept.pair_record().unwrap().last_session_at_ms(),
             Some(long_past_the_limit_ms)
         );
-        assert!(
-            kept.authentication_certificate().is_none(),
-            "the session that followed the bound reads the certificate again"
-        );
-        store
-            .update(FIRST_PAIR, &mut |entry| {
-                entry.remember_authentication_certificate(certificate());
-            })
-            .unwrap();
-        assert!(offered_certificate(&store, FIRST_PAIR, long_past_the_limit_ms).is_some());
+        assert!(offer_stands(
+            &store,
+            FIRST_PAIR,
+            &certificate(),
+            long_past_the_limit_ms
+        ));
         assert!(
             sweep_pairings(
                 &mut store,
@@ -1287,7 +1205,12 @@ mod tests {
             sweep_pairings(&mut store, IDLE_EXPIRED_AT_MS, |_| false),
             vec![FIRST_PAIR]
         );
-        assert!(offered_certificate(&store, FIRST_PAIR, IDLE_EXPIRED_AT_MS).is_none());
+        assert!(!offer_stands(
+            &store,
+            FIRST_PAIR,
+            &certificate(),
+            IDLE_EXPIRED_AT_MS
+        ));
     }
 
     #[test]
@@ -1321,7 +1244,6 @@ mod tests {
     #[test]
     fn the_store_receives_the_whole_record_as_the_check_leaves_it() {
         let mut checked = record(FIRST_PAIR);
-        checked.remember_authentication_certificate(certificate());
         let mut stored = None;
         assert_eq!(
             checked.sweep(IDLE_EXPIRED_AT_MS, false, |swept| {
@@ -1329,7 +1251,6 @@ mod tests {
                     swept.state(),
                     swept.peer_display_name().clone(),
                     swept.peer_platform().to_owned(),
-                    swept.authentication_certificate().is_some(),
                 ));
                 Err(StoreError::WriteRefused)
             }),
@@ -1341,10 +1262,8 @@ mod tests {
                 PairingState::Revoked { by_peer: false },
                 phone_name(),
                 phone(),
-                false
             )),
-            "the store saw the expired record revoked, its keys and certificate gone, \
-             the phone's name kept"
+            "the store saw the expired record revoked, its keys gone, the phone's name kept"
         );
         assert_eq!(
             checked.state(),
@@ -1382,160 +1301,82 @@ mod tests {
     }
 
     /// One day in milliseconds.
-    const DAY_MS: u64 = CERTIFICATE_RETENTION_MS / CERTIFICATE_RETENTION_DAYS;
-    /// Six days after the fixtures' pairing was created: short of retention.
-    const DAY_6_MS: u64 = CREATED_AT_MS + CERTIFICATE_RETENTION_MS - DAY_MS;
-    /// Eight days after the fixtures' pairing was created: past retention.
-    const DAY_8_MS: u64 = CREATED_AT_MS + CERTIFICATE_RETENTION_MS + DAY_MS;
-
-    /// The fixtures' pairing holding the certificate.
-    fn cached() -> PairingRecord {
-        let mut entry = record(FIRST_PAIR);
-        entry.remember_authentication_certificate(certificate());
-        entry
-    }
+    const DAY_MS: u64 = REVOCATION_NOTICE_MS / REVOCATION_NOTICE_DAYS;
+    /// Six days after the fixtures' pairing was created: short of the notice
+    /// bound.
+    const DAY_6_MS: u64 = CREATED_AT_MS + REVOCATION_NOTICE_MS - DAY_MS;
+    /// Eight days after the fixtures' pairing was created: past it.
+    const DAY_8_MS: u64 = CREATED_AT_MS + REVOCATION_NOTICE_MS + DAY_MS;
 
     #[test]
-    fn retention_is_seven_days() {
+    fn the_notice_bound_is_seven_days() {
         const NAMED_DAYS: u64 = 7;
-        assert_eq!(CERTIFICATE_RETENTION_DAYS, NAMED_DAYS);
+        assert_eq!(REVOCATION_NOTICE_DAYS, NAMED_DAYS);
     }
 
     #[test]
-    fn a_certificate_stands_for_six_days_and_goes_by_eight() {
-        let mut entry = cached();
-        assert!(entry.authentication_certificate_at(DAY_6_MS).is_some());
-        assert!(!entry.drop_outlived_certificate(DAY_6_MS));
-        assert!(entry.authentication_certificate().is_some());
-        assert!(entry.authentication_certificate_at(DAY_8_MS).is_none());
-        assert!(entry.authentication_certificate().is_some());
-        assert!(entry.drop_outlived_certificate(DAY_8_MS));
-        assert!(entry.authentication_certificate().is_none());
-        assert!(entry.serves(), "the pairing lives on to its own expiry");
-    }
-
-    #[test]
-    fn the_limit_itself_is_past_retention() {
-        let limit = CREATED_AT_MS + CERTIFICATE_RETENTION_MS;
-        assert!(!cached().certificate_outlived(limit - 1));
-        assert!(cached().certificate_outlived(limit));
-    }
-
-    #[test]
-    fn a_session_starts_the_count_again() {
+    fn an_offer_stands_on_the_sighted_certificate_only_within_the_grace() {
         let mut store = MemoryPairingStore::new();
-        store.insert(cached()).unwrap();
-        store.sweep(FIRST_PAIR, DAY_6_MS, true).unwrap();
-        let entry = store.get(FIRST_PAIR).unwrap();
-        assert!(entry.authentication_certificate_at(DAY_8_MS).is_some());
+        store.insert(record(FIRST_PAIR)).unwrap();
         assert!(
-            entry
-                .authentication_certificate_at(DAY_6_MS + CERTIFICATE_RETENTION_MS)
-                .is_none()
+            !offer_stands(&store, FIRST_PAIR, &certificate(), DAY_6_MS),
+            "a pairing whose phone no session heard offers nothing"
         );
+        store
+            .record_card_sighting(
+                FIRST_PAIR,
+                CardSighting::new(
+                    CertificateFingerprint::of_certificate(certificate().as_der()),
+                    DAY_6_MS,
+                ),
+            )
+            .unwrap();
+        assert!(offer_stands(&store, FIRST_PAIR, &certificate(), DAY_6_MS));
+        assert!(!offer_stands(
+            &store,
+            FIRST_PAIR,
+            &certificate(),
+            DAY_6_MS + IDENTITY_OFFER_GRACE_MS
+        ));
     }
 
     #[test]
-    fn a_clock_before_the_latest_session_says_nothing_and_the_certificate_goes() {
-        assert!(cached().certificate_outlived(CREATED_AT_MS - DAY_MS));
-    }
-
-    #[test]
-    fn a_record_without_a_certificate_has_nothing_past_retention() {
-        assert!(!record(FIRST_PAIR).certificate_outlived(DAY_8_MS));
-    }
-
-    #[test]
-    fn a_session_after_the_bound_finds_no_certificate() {
-        let mut store = MemoryPairingStore::new();
-        store.insert(cached()).unwrap();
-        store.sweep(FIRST_PAIR, DAY_8_MS, true).unwrap();
-        let entry = store.get(FIRST_PAIR).unwrap();
-        assert!(entry.authentication_certificate().is_none());
-        assert!(entry.serves());
-    }
-
-    #[test]
-    fn no_offer_stands_on_a_certificate_past_retention() {
-        let mut store = MemoryPairingStore::new();
-        store.insert(cached()).unwrap();
-        for at_ms in [DAY_6_MS, DAY_8_MS] {
-            store
-                .record_card_sighting(
-                    FIRST_PAIR,
-                    CardSighting::new(
-                        CertificateFingerprint::of_certificate(certificate().as_der()),
-                        at_ms,
-                    ),
-                )
-                .unwrap();
-            assert_eq!(
-                offered_certificate(&store, FIRST_PAIR, at_ms).is_some(),
-                at_ms == DAY_6_MS
-            );
+    fn a_forgotten_or_expired_pairing_offers_nothing_on_its_sighting() {
+        for leave in [
+            |store: &mut MemoryPairingStore| {
+                forget_pairing(store, FIRST_PAIR, IDLE_EXPIRED_AT_MS).unwrap();
+            },
+            |store: &mut MemoryPairingStore| {
+                store.sweep(FIRST_PAIR, IDLE_EXPIRED_AT_MS, false).unwrap();
+            },
+        ] {
+            let mut store = offering_store_heard_at(IDLE_EXPIRED_AT_MS);
+            assert!(offer_stands(
+                &store,
+                FIRST_PAIR,
+                &certificate(),
+                IDLE_EXPIRED_AT_MS
+            ));
+            leave(&mut store);
+            assert!(!offer_stands(
+                &store,
+                FIRST_PAIR,
+                &certificate(),
+                IDLE_EXPIRED_AT_MS
+            ));
         }
     }
 
     #[test]
-    fn a_forgotten_record_drops_its_certificate_at_once() {
-        let mut store = MemoryPairingStore::new();
-        store.insert(cached()).unwrap();
-        forget_pairing(&mut store, FIRST_PAIR, CREATED_AT_MS).unwrap();
-        let entry = store.get(FIRST_PAIR).unwrap();
-        assert_eq!(entry.state(), PairingState::Forgotten);
-        assert!(entry.authentication_certificate().is_none());
-    }
-
-    #[test]
-    fn a_replaced_pairing_drops_its_certificate_and_the_new_one_stands() {
-        let mut store = MemoryPairingStore::new();
-        store.insert(cached()).unwrap();
-        let mut replacement = record(SECOND_PAIR);
-        replacement.remember_authentication_certificate(certificate());
-        store.insert(replacement).unwrap();
-        forget_pairing(&mut store, FIRST_PAIR, CREATED_AT_MS).unwrap();
-        assert!(
-            store
-                .get(FIRST_PAIR)
-                .unwrap()
-                .authentication_certificate()
-                .is_none()
-        );
-        assert!(
-            store
-                .get(SECOND_PAIR)
-                .unwrap()
-                .authentication_certificate()
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn an_expired_pairing_holds_no_certificate() {
-        let mut store = MemoryPairingStore::new();
-        store.insert(cached()).unwrap();
-        assert_eq!(
-            store.sweep(FIRST_PAIR, IDLE_EXPIRED_AT_MS, false),
-            Ok(SweepOutcome::Expired)
-        );
-        assert!(
-            store
-                .get(FIRST_PAIR)
-                .unwrap()
-                .authentication_certificate()
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn retention_erases_a_revoked_record_with_nothing_left_to_tell() {
+    fn the_notice_erases_a_revoked_record_with_nothing_left_to_tell() {
         let mut records = vec![
             PairingRecord::revoked(FIRST_PAIR, false, CREATED_AT_MS, phone_name(), phone()),
             record(SECOND_PAIR),
         ];
-        assert!(apply_retention(&mut records, CREATED_AT_MS));
+        assert!(drop_outlived_revocations(&mut records, CREATED_AT_MS));
         let pair_ids: Vec<PairId> = records.iter().map(PairingRecord::pair_id).collect();
         assert_eq!(pair_ids, vec![SECOND_PAIR]);
+        assert!(!drop_outlived_revocations(&mut records, CREATED_AT_MS));
     }
 
     #[test]
@@ -1547,28 +1388,6 @@ mod tests {
         assert!(!entry.revoked_record_outlived(DAY_6_MS));
         assert!(entry.revoked_record_outlived(DAY_8_MS));
         assert!(entry.revoked_record_outlived(CREATED_AT_MS - DAY_MS));
-    }
-
-    #[test]
-    fn retention_reports_a_change_only_when_it_made_one() {
-        let mut records = vec![cached()];
-        assert!(!apply_retention(&mut records, DAY_6_MS));
-        assert!(
-            records
-                .first()
-                .unwrap()
-                .authentication_certificate()
-                .is_some()
-        );
-        assert!(apply_retention(&mut records, DAY_8_MS));
-        assert!(
-            records
-                .first()
-                .unwrap()
-                .authentication_certificate()
-                .is_none()
-        );
-        assert!(!apply_retention(&mut records, DAY_8_MS));
     }
 
     #[test]

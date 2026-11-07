@@ -231,17 +231,11 @@ foreach ($arch in $Architecture) {
         throw "Expected the built agent at '$agent'."
     }
 
-    $sweep = Join-Path $repositoryRoot "target\$rustTarget\release\refineid-sweep.exe"
-    if (-not (Test-Path -LiteralPath $sweep)) {
-        throw "Expected the built sign-in sweep at '$sweep'."
-    }
-
     # Sign the binaries before packaging so the MSI carries the signed images.
     # Signing the package afterwards would leave the loaded binaries bare.
     if ($signTool) {
         Invoke-Signing $signTool $dll
         Invoke-Signing $signTool $agent
-        Invoke-Signing $signTool $sweep
     }
 
     $msi = Join-Path $OutputDirectory "RefineID.CardDriver-$productVersion-$arch.msi"
@@ -250,7 +244,6 @@ foreach ($arch in $Architecture) {
         --architecture $arch `
         --minidriver $dll `
         --agent $agent `
-        --sweep $sweep `
         @driverArguments `
         --output $msi `
         --version $productVersion

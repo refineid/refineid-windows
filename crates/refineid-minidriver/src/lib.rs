@@ -447,8 +447,10 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
         let pair_id = pairing.pair_id();
         // The card is offered on the certificate whose card a session heard
         // present within the grace, and on nothing else (RAPP v26.11.2
-        // section 8.4 items 2 and 3).
-        let Some(auth) = refineid_rapp_core::store::offered_certificate(
+        // section 8.4 items 2 and 3). No store keeps it: the process that
+        // holds the phone's session offers it in the personal store, and it
+        // is read from there.
+        let Some(auth) = refineid_windows_credential_store::offered_phone_certificate(
             &store,
             pair_id,
             refineid_rapp_core::clock::unix_time_ms(),
@@ -460,7 +462,7 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
             );
             return SCARD_E_UNKNOWN_CARD;
         };
-        // The pairing record keeps the authentication certificate alone
+        // The authentication certificate is the only one offered
         // (refineid-core `doc/security/certificate-custody.md`); it answers
         // for both containers of the remote card.
         let (auth_der, sig_der) = (auth.as_der().to_vec(), auth.as_der().to_vec());

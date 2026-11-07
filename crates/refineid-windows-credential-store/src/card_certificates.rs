@@ -18,9 +18,9 @@
 //! the Card Module and writes its certificates to the user's Personal store,
 //! where Microsoft documents they remain when the card is removed. A FINEID
 //! card's entries stand only while that card is in a reader of this
-//! computer (Windows STPA W-R-22): the sign-in sweep removes every entry
-//! whose card is not in a reader when it starts, and again whenever a card
-//! leaves.
+//! computer (Windows STPA W-R-22): the agent, started at every sign-in,
+//! removes every entry whose card is not in a reader when it starts, and
+//! again whenever a card leaves.
 //!
 //! An entry is FINEID's only when all three of these hold, and every other
 //! entry is neither read further nor touched:

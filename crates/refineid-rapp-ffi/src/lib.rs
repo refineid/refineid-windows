@@ -67,7 +67,7 @@ use refineid_rapp_core::message::{
 };
 use refineid_rapp_core::offer::normalize_pairing_code;
 use refineid_rapp_core::operations::{CardOperation, CardOperationResult, CertificateKind};
-use refineid_rapp_core::store::{PairingRecord, PairingState, PairingStore, offered_certificate};
+use refineid_rapp_core::store::{PairingRecord, PairingState, PairingStore, offer_stands};
 use refineid_rapp_core::stream::{
     DialCause, PairingServices, StreamError, attempt_revocations, dial_session,
 };
@@ -757,10 +757,9 @@ fn read_paired_card(handle_id: u64, paired: &mut Paired) -> Result<CardReadDto, 
     // The requester screen shows only the holder identity, so the read is one
     // operation and the phone reads the card once. The answer carries the
     // authentication certificate, the one whose fingerprint the session's
-    // card status names (section 8.4 item 2), which browsers need through
-    // the key storage provider: on the pairing record for signing, and, once
-    // the offering session reports the card, in the user's certificate
-    // store so Edge and Chrome offer it.
+    // card status names (section 8.4 item 2); the read checks that it came.
+    // No store keeps it: the offering session reads it on each of its own
+    // sessions and offers it to browsers while the phone is present.
     let (identity, certificate) = match run_operation(
         handle_id,
         paired,
@@ -788,13 +787,12 @@ fn read_paired_card(handle_id: u64, paired: &mut Paired) -> Result<CardReadDto, 
         .requester
         .disconnect(&mut session, CloseReason::UserDisconnect);
 
-    let certificate = certificate.ok_or_else(|| {
-        ApiFailure::new(
+    if certificate.is_none() {
+        return Err(ApiFailure::new(
             "no_certificate",
             "The phone sent no certificate with the identity.",
-        )
-    })?;
-    remember_certificate(&mut paired.requester, paired.pair_id, &certificate);
+        ));
+    }
 
     Ok(CardReadDto { identity })
 }
@@ -949,8 +947,11 @@ fn retry_pause_ms(requester: &StreamRequester, pair_id: PairId, offer: &Offer) -
 struct Offer {
     /// The certificate offered: which pairing's, and which card's.
     offered: Option<Offered>,
-    /// The fingerprint last acted on, offered or not.
+    /// The fingerprint last acted on on this session, offered or not.
     checked: Option<CertificateFingerprint>,
+    /// The certificate read on the latest session, held in memory only
+    /// while its offer may stand.
+    learned: Option<OwnedCert>,
 }
 
 /// One certificate offered to browsers.
@@ -965,15 +966,18 @@ struct Offered {
 /// certificate is withdrawn before this one is installed, as installing adds
 /// a certificate beside it.
 fn sync_offer(requester: &StreamRequester, pair_id: PairId, offer: &mut Offer) {
-    let Some(certificate) = offered_certificate(requester.store(), pair_id, unix_time_ms()) else {
-        if offer.offered.take().is_some() {
-            forget_browser_certificates();
-        }
+    let standing = offer.learned.as_ref().filter(|certificate| {
+        offer_stands(requester.store(), pair_id, certificate, unix_time_ms())
+    });
+    let Some(certificate) = standing.cloned() else {
+        // The phone is gone past the grace, or the pairing or the card
+        // changed: nothing of the certificate is kept.
+        withdraw_offer(offer);
         return;
     };
     let wanted = Offered {
         pair_id,
-        card: fingerprint_of(certificate),
+        card: fingerprint_of(&certificate),
     };
     if offer.offered == Some(wanted) {
         return;
@@ -981,7 +985,7 @@ fn sync_offer(requester: &StreamRequester, pair_id: PairId, offer: &mut Offer) {
     if offer.offered.take().is_some() {
         forget_browser_certificates();
     }
-    if offer_to_browsers(certificate, pair_id).is_ok() {
+    if offer_to_browsers(&certificate, pair_id).is_ok() {
         offer.offered = Some(wanted);
     }
 }
@@ -995,6 +999,8 @@ fn hold_offering_session(
     offer: &mut Offer,
 ) {
     let pair_id = session.pair_id();
+    // The certificate is read again on every session.
+    offer.checked = None;
     let mut store_checked = std::time::Instant::now();
     while !ended(handle_id) && requester.keep_alive(session).is_ok() {
         let card = session.card_status();
@@ -1008,7 +1014,7 @@ fn hold_offering_session(
                 // The session recorded the card it hears, so another card's
                 // offer goes before this one's certificate is read.
                 sync_offer(requester, pair_id, offer);
-                if caches_confirmed_certificate(requester, session, fingerprint) {
+                if learns_confirmed_certificate(requester, session, fingerprint, offer) {
                     clear_watch_status(handle_id);
                 } else {
                     set_watch_status(handle_id, CARD_UNCONFIRMED_STATUS);
@@ -1046,25 +1052,15 @@ const fn card_request_status(reader: CardReader) -> &'static str {
     }
 }
 
-/// Whether the pairing caches the certificate of the card whose fingerprint
-/// the session reports (RAPP v26.11.2 section 8.4 item 2): the stored one
-/// when its fingerprint matches, or else one read afresh on the session,
-/// stored only when the phone confirmed its fingerprint.
-fn caches_confirmed_certificate(
+/// Whether the session gave the certificate of the card whose fingerprint
+/// it reports (RAPP v26.11.2 section 8.4 item 2): read on the session and
+/// kept in `offer`'s memory only when the phone confirmed its fingerprint.
+fn learns_confirmed_certificate(
     requester: &mut StreamRequester,
     session: &mut Session<TcpFrameTransport>,
     fingerprint: CertificateFingerprint,
+    offer: &mut Offer,
 ) -> bool {
-    let pair_id = session.pair_id();
-    let cached = requester
-        .store()
-        .get(pair_id)
-        .ok()
-        .and_then(PairingRecord::authentication_certificate)
-        .is_some_and(|certificate| fingerprint_of(certificate) == fingerprint);
-    if cached {
-        return true;
-    }
     let read = requester.execute(
         session,
         &CardOperation::ReadCertificate {
@@ -1081,7 +1077,7 @@ fn caches_confirmed_certificate(
     else {
         return false;
     };
-    remember_certificate(requester, pair_id, &certificate);
+    offer.learned = Some(certificate);
     true
 }
 
@@ -1190,15 +1186,10 @@ fn clear_watch_status(handle_id: u64) {
     });
 }
 
-/// Withdraws the offer at once, if one stands.
-#[cfg_attr(
-    not(windows),
-    expect(
-        clippy::missing_const_for_fn,
-        reason = "only the Windows build has browser certificates to remove"
-    )
-)]
+/// Withdraws the offer at once, if one stands, and forgets the learned
+/// certificate.
 fn withdraw_offer(offer: &mut Offer) {
+    offer.learned = None;
     if offer.offered.take().is_some() {
         forget_browser_certificates();
     }
@@ -1208,15 +1199,6 @@ fn withdraw_offer(offer: &mut Offer) {
 fn set_watch_status(handle_id: u64, status: &str) {
     registry_entry_apply(handle_id, |shared| {
         shared.status = Some(status.to_owned());
-    });
-}
-
-/// Keeps the authentication certificate on the pairing record, where the
-/// key storage provider reads it when a browser asks for a signature.
-fn remember_certificate(requester: &mut StreamRequester, pair_id: PairId, certificate: &OwnedCert) {
-    // A refused write only means the next read stores it again.
-    let _ = requester.store_mut().update(pair_id, &mut |record| {
-        record.remember_authentication_certificate(certificate.clone());
     });
 }
 

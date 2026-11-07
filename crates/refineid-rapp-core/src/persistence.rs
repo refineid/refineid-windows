@@ -7,9 +7,9 @@
 //! no external serde surface. The keys travel inside the engine's own
 //! encoding of its record ([`refineid_rapp::encode_pair_record`]), which
 //! [`refineid_rapp::decode_pair_record`] checks back into a record whose
-//! every predicate holds; the cached authentication certificate comes back
-//! only as a certificate that parses. A record holds no other certificate
-//! (refineid-core `doc/security/certificate-custody.md`).
+//! every predicate holds. A record holds no certificate: the card's
+//! authentication certificate is read from the phone at every session and
+//! kept in memory only.
 //!
 //! The encoded blob carries the private key, so [`encode_pairing_record`]
 //! returns it inside [`Zeroizing`]; callers hand it straight to device-only
@@ -25,7 +25,6 @@
 //! of the set and counts it, so the store that writes the set back drops it
 //! for good and its peer pairs again.
 
-use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
 use refineid_rapp::{
     DisplayName, EncodedPairRecord, EndpointRole, PAIR_ID_SIZE, PairRecordCodecError,
 };
@@ -38,12 +37,12 @@ use crate::store::{PairingRecord, PairingState};
 const PAIRING_BLOB_MAGIC: &[u8] = b"RAPP-pair-record";
 
 /// The pairing-record encoding revision.
-const PAIRING_BLOB_VERSION: u8 = 10;
+const PAIRING_BLOB_VERSION: u8 = 11;
 
 /// The highest superseded revision. Those records were written for an earlier
 /// RAPP protocol version, or hold certificates a record may no longer hold,
 /// so they are not loaded.
-const LAST_SUPERSEDED_BLOB_VERSION: u8 = 9;
+const LAST_SUPERSEDED_BLOB_VERSION: u8 = 10;
 
 /// The lowest revision ever written.
 const FIRST_BLOB_VERSION: u8 = 1;
@@ -105,8 +104,6 @@ pub enum PairingCodecError {
     PairRecord(PairRecordCodecError),
     /// The engine's record belongs to a custodian, not to this requester.
     NotRequester,
-    /// A cached certificate does not parse as an X.509 certificate.
-    InvalidCertificate,
 }
 
 impl core::fmt::Display for PairingCodecError {
@@ -130,9 +127,6 @@ impl core::fmt::Display for PairingCodecError {
             Self::Oversized => formatter.write_str("pairing record field too long"),
             Self::PairRecord(error) => write!(formatter, "pairing keys refused: {error}"),
             Self::NotRequester => formatter.write_str("pairing record is not a requester's"),
-            Self::InvalidCertificate => {
-                formatter.write_str("pairing record held an invalid certificate")
-            }
         }
     }
 }
@@ -174,7 +168,6 @@ pub fn encode_pairing_record(
         }
     }
     put_bytes(&mut out, record.peer_platform().as_bytes())?;
-    put_optional_certificate(&mut out, record.authentication_certificate())?;
     Ok(out)
 }
 
@@ -184,8 +177,7 @@ pub fn encode_pairing_record(
 ///
 /// Fails when the blob is not a pairing record, uses an unknown revision, ends
 /// mid-field, carries trailing bytes, or holds a malformed field: keys the
-/// engine refuses, a custodian's record, or a certificate that does not
-/// parse.
+/// engine refuses or a custodian's record.
 pub fn decode_pairing_record(blob: &[u8]) -> Result<PairingRecord, PairingCodecError> {
     let mut reader = Reader::new(blob);
     if reader.take(PAIRING_BLOB_MAGIC.len())? != PAIRING_BLOB_MAGIC {
@@ -219,15 +211,12 @@ pub fn decode_pairing_record(blob: &[u8]) -> Result<PairingRecord, PairingCodecE
         _ => return Err(PairingCodecError::InvalidKeys),
     };
     let platform = reader.take_text()?;
-    let mut record = match keys {
+    let record = match keys {
         Ok(keys) => PairingRecord::new(keys, platform),
         Err((pair_id, by_peer, at_ms, name)) => {
             PairingRecord::revoked(pair_id, by_peer, at_ms, name, platform)
         }
     };
-    if let Some(certificate) = reader.take_optional_certificate()? {
-        record.remember_authentication_certificate(certificate);
-    }
     reader.finish()?;
     Ok(record)
 }
@@ -341,20 +330,6 @@ fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), PairingCodecError> {
     Ok(())
 }
 
-/// Appends an optional certificate as its length-prefixed DER.
-fn put_optional_certificate(
-    out: &mut Vec<u8>,
-    certificate: Option<&OwnedCert>,
-) -> Result<(), PairingCodecError> {
-    if let Some(certificate) = certificate {
-        out.push(BOOLEAN_TRUE);
-        put_bytes(out, certificate.as_der())
-    } else {
-        out.push(BOOLEAN_FALSE);
-        Ok(())
-    }
-}
-
 /// A bounds-checked forward cursor over a blob.
 struct Reader<'blob> {
     remaining: &'blob [u8],
@@ -411,18 +386,6 @@ impl<'blob> Reader<'blob> {
             .map_err(|_error| PairingCodecError::InvalidText)
     }
 
-    /// Takes an optional certificate, parsed at this border.
-    fn take_optional_certificate(&mut self) -> Result<Option<OwnedCert>, PairingCodecError> {
-        if !boolean_from_tag(self.take_u8()?)? {
-            return Ok(None);
-        }
-        OwnedCert::from_der(UnvalidatedCertificate::new(
-            self.take_length_prefixed()?.to_vec(),
-        ))
-        .map(Some)
-        .map_err(|_error| PairingCodecError::InvalidCertificate)
-    }
-
     /// Confirms the blob was consumed exactly.
     const fn finish(&self) -> Result<(), PairingCodecError> {
         if self.remaining.is_empty() {
@@ -444,18 +407,17 @@ mod tests {
         PairingCodecError, Reader, decode_pairing_record, decode_pairing_records,
         encode_pairing_record, encode_pairing_records, put_bytes, put_length,
     };
-    use refineid_lib_core::x509::OwnedCert;
     use refineid_rapp::{
         PAIR_RECORD_FORMAT_VERSION, PairRecordCodecError, WireValue, decode_deterministic_cbor,
         encode_deterministic_cbor,
     };
 
     use crate::store::fixtures::{
-        CREATED_AT_MS, FIRST_PAIR, SECOND_PAIR, certificate, record, unconfirmed_record,
+        CREATED_AT_MS, FIRST_PAIR, SECOND_PAIR, record, unconfirmed_record,
     };
     use crate::store::{
-        CERTIFICATE_RETENTION_DAYS, CERTIFICATE_RETENTION_MS, MemoryPairingStore, PairingRecord,
-        PairingState, PairingStore, forget_pairing, revoke_pairing,
+        MemoryPairingStore, PairingRecord, PairingState, PairingStore, forget_pairing,
+        revoke_pairing,
     };
 
     /// The wall-clock time the user forgets a pairing in these tests.
@@ -468,21 +430,9 @@ mod tests {
     /// display name.
     const PEER_DISPLAY_NAME_FIELD: &str = "peer_display_name";
 
-    /// The full record, its certificate included.
+    /// The full record.
     fn sample() -> PairingRecord {
-        let mut sample = record(FIRST_PAIR);
-        sample.remember_authentication_certificate(certificate());
-        sample
-    }
-
-    /// Whether `record`'s encoding holds the certificate's bytes anywhere.
-    fn encoding_holds_the_certificate(record: &PairingRecord) -> bool {
-        let der = certificate();
-        let encoded = encode_pairing_record(record).unwrap();
-        encoded
-            .as_slice()
-            .windows(der.as_der().len())
-            .any(|window| window == der.as_der())
+        record(FIRST_PAIR)
     }
 
     fn round_trip(record: &PairingRecord) -> PairingRecord {
@@ -514,10 +464,6 @@ mod tests {
                 .pair_record()
                 .map(refineid_rapp::PairRecord::grants_hash)
         );
-        assert_eq!(
-            left.authentication_certificate().map(OwnedCert::as_der),
-            right.authentication_certificate().map(OwnedCert::as_der)
-        );
     }
 
     /// A store holding `record` in the state `prepare` leaves it in.
@@ -530,40 +476,6 @@ mod tests {
         store.insert(record).unwrap();
         prepare(&mut store);
         round_trip(store.get(pair_id).unwrap())
-    }
-
-    #[test]
-    fn a_certificate_stays_in_the_bytes_for_six_days_and_leaves_them_by_eight() {
-        const DAY_MS: u64 = CERTIFICATE_RETENTION_MS / CERTIFICATE_RETENTION_DAYS;
-        let mut kept = sample();
-        assert!(encoding_holds_the_certificate(&kept));
-        kept.drop_outlived_certificate(CREATED_AT_MS + CERTIFICATE_RETENTION_MS - DAY_MS);
-        assert!(encoding_holds_the_certificate(&kept));
-        kept.drop_outlived_certificate(CREATED_AT_MS + CERTIFICATE_RETENTION_MS + DAY_MS);
-        assert!(!encoding_holds_the_certificate(&kept));
-        assert_same(&kept, &round_trip(&kept));
-    }
-
-    #[test]
-    fn forgetting_and_revoking_leave_no_certificate_in_the_bytes() {
-        for leave in [
-            |store: &mut MemoryPairingStore| {
-                forget_pairing(store, FIRST_PAIR, CREATED_AT_MS).unwrap();
-            },
-            |store: &mut MemoryPairingStore| {
-                revoke_pairing(store, FIRST_PAIR, true, CREATED_AT_MS).unwrap();
-            },
-        ] {
-            let mut store = MemoryPairingStore::new();
-            store.insert(sample()).unwrap();
-            assert!(encoding_holds_the_certificate(
-                store.get(FIRST_PAIR).unwrap()
-            ));
-            leave(&mut store);
-            assert!(!encoding_holds_the_certificate(
-                store.get(FIRST_PAIR).unwrap()
-            ));
-        }
     }
 
     #[test]
@@ -611,7 +523,6 @@ mod tests {
         assert_eq!(decoded.state(), PairingState::Revoked { by_peer: true });
         assert_eq!(decoded.pair_id(), FIRST_PAIR);
         assert!(decoded.pair_record().is_none());
-        assert!(decoded.authentication_certificate().is_none());
     }
 
     #[test]

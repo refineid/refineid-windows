@@ -52,10 +52,10 @@ The `Upgrade` table has two rows for the package's UpgradeCode:
 
 | What | How |
 |---|---|
-| `System32\refineid_minidriver.dll`, `Program Files\RefineID\refineid-agent.exe`, `refineid-sweep.exe`, and the driver package's INF and catalog | `File` rows of the package's components |
+| `System32\refineid_minidriver.dll`, `Program Files\RefineID\refineid-agent.exe`, and the driver package's INF and catalog | `File` rows of the package's components |
 | The Calais registrations the package authors (`crates/refineid-msi/src/cards.rs`) | their `Registry` values, and a `Registry` row with name `-` per key, which removes the key with every value and subkey |
 | Every other Calais registration whose `80000001` names `refineid_minidriver.dll`, in both registry views | the Card Module's `RefineIdRemoveCardRegistrations` (`crates/refineid-minidriver/src/card_registrations.rs`), before the files go |
-| The `RefineIDSweep` value under `HKLM\...\CurrentVersion\Run` | its `Registry` row |
+| The `RefineIDAgent` value under `HKLM\...\CurrentVersion\Run`, which starts the agent at every sign-in | its `Registry` row |
 | The `RefineID Key Storage Provider` CNG registration | `RefineIdUnregisterKeyStorageProvider` |
 | The driver package in the driver store | `RefineIdUninstallCardDriver` |
 | `SCardSvr` | stopped and started again, so the card database is reread |
@@ -99,10 +99,10 @@ delete a loaded DLL. It moves the old copy to `C:\Config.Msi\<name>.rbf`,
 installs the new file in its place at once, and deletes the moved copy when
 Windows restarts (`PendingFileRenameOperations`, log message 1903). Every
 process started after the installation loads the new module; a process
-that had the old one loaded keeps it until it exits. The sign-in sweep
-stays running in each signed-in user's session, so its file is in use in
-the same way: the upgrade replaces it, the running sweep keeps the earlier
-build until the user signs out, and the next sign-in starts the new one. The installation
+that had the old one loaded keeps it until it exits. The agent runs in
+each signed-in user's session, so its file is in use in the same way: the
+upgrade replaces it, the running agent keeps the earlier build until the
+user signs out, and the next sign-in starts the new one. The installation
 still reports success (exit code 0): nothing of the new build waits for
 the restart. Windows Installer's Restart Manager may also close and
 restart applications in the installing session that hold a file the
@@ -114,14 +114,16 @@ itself and deletes it at restart with
 
 A per-machine package does not reach into user profiles. The protected
 pairing store (`crates/refineid-windows-credential-store/src/pairing.rs`)
-judges `%LOCALAPPDATA%\RefineID` at every load, and the sign-in sweep loads it
+judges `%LOCALAPPDATA%\RefineID` at every load, and the agent loads it
 at every sign-in:
 
 - `agent.log` (a log of builds that logged), `pairing-set.lock` (an
   unreleased build's lock file) and `bin\` (agent copies outside Program
   Files, which the pipe client refuses) are removed.
 - A stored pairing record of a superseded revision is refused and the set
-  is written back without it, as before.
+  is written back without it, as before. Revision 10 and earlier records
+  could hold the card's authentication certificate; revision 11 holds none,
+  so a pairing made by an earlier build is paired again.
 - A stored set this build cannot decode is deleted with its card sightings,
   unless it is of a revision above this build's: a later build wrote it,
   and a downgrade keeps it for that build. A set DPAPI cannot unprotect is
@@ -150,7 +152,7 @@ deleted at restart. `scripts/uninstall-dev.ps1` is replaced by
 - Certificates in any store. The roots and issuing CAs that Windows
   propagated from earlier builds' `msroots` file, and card certificates in
   `CurrentUser\My`, are handled by the Card Module's own root removal and
-  the sign-in sweep, which removes a card's entries when the card leaves
+  the agent, which removes a card's entries when the card leaves
   (`crates/refineid-minidriver/README.md`,
   `doc/stpa-windows-ble-requester.md` W-R-22).
 - The RefineID app's MSIX package: Windows replaces it by its package

@@ -21,22 +21,22 @@
 //! written as one file in the user's local application data, through a
 //! temporary file of its own and a rename, so an insert, update, or removal
 //! replaces the set at once. Only this Windows user, on this computer, can
-//! unprotect it. A Credential Manager credential cannot hold the set: a
-//! record carries its cached certificate, and a generic credential holds at
-//! most `CRED_MAX_CREDENTIAL_BLOB_SIZE` (2560) bytes.
+//! unprotect it. The set is one file rather than a Credential Manager
+//! credential, which holds at most `CRED_MAX_CREDENTIAL_BLOB_SIZE` (2560)
+//! bytes.
 //!
 //! DPAPI separates Windows users and does not separate people who share one
-//! Windows user, so what the set holds of a holder is bound, as
-//! refineid-core's `doc/security/certificate-custody.md` says: one pairing's
-//! authentication certificate, for
-//! [`CERTIFICATE_RETENTION_DAYS`](refineid_rapp_core::store::CERTIFICATE_RETENTION_DAYS)
-//! after the pairing's latest session. Every load and every change judges the
-//! set by the store's clock and writes what is left. A reader beside the
-//! owner does this too, since it may be the only program running; a write it
-//! cannot make leaves the certificate out of what it holds, and the next one
-//! tries again. The same judgement removes each entry this user's personal
-//! certificate store holds for a pairing that may no longer hold its
-//! certificate, and every card sighting that bounds no offer.
+//! Windows user, so the set holds no certificate of a holder: the card's
+//! authentication certificate is read from the phone at every session and
+//! kept in the memory of the process that holds it. A record the phone
+//! revoked keeps the phone's name for
+//! [`REVOCATION_NOTICE_DAYS`](refineid_rapp_core::store::REVOCATION_NOTICE_DAYS).
+//! Every load and every change judges the set by the store's clock and
+//! writes what is left. A reader beside the owner does this too, since it
+//! may be the only program running; a write it cannot make is tried again
+//! by the next one. The same judgement removes each entry this user's
+//! personal certificate store holds for a pairing whose phone no session
+//! heard within the grace, and every card sighting that bounds no offer.
 //!
 //! The keys stay in `Zeroizing` buffers, are wiped from every intermediate
 //! buffer, and are never logged. The store deletes, unread, every
@@ -75,16 +75,16 @@ use refineid_rapp_core::persistence::{
 };
 use refineid_rapp_core::presence::{CardSighting, decode_sighting, encode_sighting};
 use refineid_rapp_core::store::{
-    PairingRecord, PairingStore, RecordStoreError, StoreError, SweepOutcome, apply_retention,
-    expire_revocation_notices, remove_unconfirmed, revoke_pairing,
+    PairingRecord, PairingStore, RecordStoreError, StoreError, SweepOutcome,
+    drop_outlived_revocations, expire_revocation_notices, remove_unconfirmed, revoke_pairing,
 };
 use zeroize::Zeroizing;
 
 use crate::CredentialStoreError;
-use crate::certstore::{browser_entry_names, remove_browser_entries, stale_browser_entries};
+use crate::certstore::{browser_entries, remove_browser_entries, stale_browser_entries};
 
-/// The wall clock the store judges retention by: milliseconds since the Unix
-/// epoch.
+/// The wall clock the store judges its bounds by: milliseconds since the
+/// Unix epoch.
 type Clock = fn() -> u64;
 
 /// A pairing store protected to the Windows user by DPAPI.
@@ -119,8 +119,9 @@ impl ProtectedPairingStore {
     /// written back without it. A set this build cannot decode, and that no
     /// later build wrote, is deleted with its card sightings. Either way the
     /// user is told to pair again ([`Self::earlier_pairing_removed`]).
-    /// Retention is applied to what is left, and to the personal
-    /// certificate store and the card sightings beside it. What earlier
+    /// The revocation notice's bound is applied to what is left, and the
+    /// personal certificate store and the card sightings beside it are
+    /// judged. What earlier
     /// builds left in the directory and this build never reads is removed.
     ///
     /// # Errors
@@ -179,11 +180,11 @@ impl ProtectedPairingStore {
         let removed = remove_unconfirmed(&mut store);
         let now_ms = clock();
         let expired = expire_revocation_notices(&mut store, now_ms);
-        let retained = apply_retention(&mut store.records, now_ms);
+        let bounded = drop_outlived_revocations(&mut store.records, now_ms);
         if !removed.is_empty() || !expired.is_empty() || set.refused > 0 {
             store.persist()?;
-        } else if retained {
-            store.persist_retention();
+        } else if bounded {
+            store.persist_bound();
         }
         store.judge_what_lies_beside();
         Ok(store)
@@ -259,14 +260,15 @@ impl ProtectedPairingStore {
     /// could not be read would lose it.
     pub fn refresh(&mut self) -> Result<(), StoreError> {
         if self.reread()? {
-            self.persist_retention();
+            self.persist_bound();
             self.judge_what_lies_beside();
         }
         Ok(())
     }
 
-    /// Replaces the records held here with the stored set as it is now, past
-    /// retention at this moment. Returns whether retention changed anything.
+    /// Replaces the records held here with the stored set as it is now,
+    /// without a revoked record whose notice passed at this moment. Returns
+    /// whether that bound removed anything.
     fn reread(&mut self) -> Result<bool, StoreError> {
         self.sightings = read_sightings(&self.directory);
         match read_pairing_set(&self.directory) {
@@ -278,15 +280,15 @@ impl ProtectedPairingStore {
             Ok(None) => self.records.clear(),
             Err(_error) => return Err(StoreError::Unreadable),
         }
-        Ok(apply_retention(&mut self.records, (self.clock)()))
+        Ok(drop_outlived_revocations(&mut self.records, (self.clock)()))
     }
 
-    /// Writes the set after retention changed it. A refused write leaves the
-    /// certificate out of what this store holds and is tried again by the
-    /// next judgement; a program that only reads may have no right to write.
-    fn persist_retention(&self) {
+    /// Writes the set after the notice's bound changed it. A refused write
+    /// is tried again by the next judgement; a program that only reads may
+    /// have no right to write.
+    fn persist_bound(&self) {
         if let Err(error) = self.persist() {
-            refineid_dev_errors::report!(Rapp, "retention not written", error);
+            refineid_dev_errors::report!(Rapp, "outlived notice not written", error);
         }
     }
 
@@ -311,12 +313,19 @@ impl ProtectedPairingStore {
         if !self.judges_browser_entries {
             return;
         }
-        let names = browser_entry_names();
-        if names.is_empty() || self.reread().is_err() {
+        let entries = browser_entries();
+        if entries.is_empty() || self.reread().is_err() {
             return;
         }
         let records: Vec<&PairingRecord> = self.records.iter().collect();
-        let stale = stale_browser_entries(&names, &records, now_ms);
+        let sightings = &self.sightings;
+        let sighting = |pair_id: PairId| {
+            sightings
+                .iter()
+                .find(|(sighted, _)| *sighted == pair_id)
+                .map(|(_, sighting)| *sighting)
+        };
+        let stale = stale_browser_entries(&entries, &records, &sighting, now_ms);
         if !stale.is_empty() {
             remove_browser_entries(&stale);
         }
@@ -336,7 +345,7 @@ impl ProtectedPairingStore {
     ) -> Result<(), StoreError> {
         self.refresh()?;
         change(&mut self.records)?;
-        apply_retention(&mut self.records, (self.clock)());
+        drop_outlived_revocations(&mut self.records, (self.clock)());
         self.persist().map_err(|_error| StoreError::WriteRefused)?;
         self.judge_what_lies_beside();
         Ok(())
@@ -463,7 +472,7 @@ impl PairingStore for ProtectedPairingStore {
             write_pairing_set(directory, &blob).map_err(|_error| StoreError::WriteRefused)
         })?;
         if outcome == SweepOutcome::Expired {
-            apply_retention(&mut self.records, now_ms);
+            drop_outlived_revocations(&mut self.records, now_ms);
             self.judge_what_lies_beside();
         }
         Ok(outcome)
@@ -949,9 +958,9 @@ pub mod test_records {
         DisplayName, EndpointRole, PairRecord, ProfileName, X25519_KEY_SIZE, compute_grants_hash,
     };
     use refineid_rapp_core::ids::PairId;
-    use refineid_rapp_core::store::{
-        CERTIFICATE_RETENTION_DAYS, CERTIFICATE_RETENTION_MS, PairingRecord,
-    };
+    use refineid_rapp_core::store::PairingRecord;
+    #[cfg(windows)]
+    use refineid_rapp_core::store::{REVOCATION_NOTICE_DAYS, REVOCATION_NOTICE_MS};
 
     /// A synthetic requester static private key.
     pub const REQUESTER_PRIVATE: [u8; X25519_KEY_SIZE] = *b"synthetic requester private key.";
@@ -962,18 +971,18 @@ pub mod test_records {
     /// The pairing creation time the fixtures record.
     pub const CREATED_AT_MS: u64 = 1_700_000_000_000;
     /// One day in milliseconds.
-    const DAY_MS: u64 = CERTIFICATE_RETENTION_MS / CERTIFICATE_RETENTION_DAYS;
-    /// Six days after creation: short of retention.
-    pub const DAY_6_MS: u64 = CREATED_AT_MS + CERTIFICATE_RETENTION_MS - DAY_MS;
-    /// Eight days after creation: past retention.
-    pub const DAY_8_MS: u64 = CREATED_AT_MS + CERTIFICATE_RETENTION_MS + DAY_MS;
-    /// A pairing that holds the certificate.
-    pub const CERTIFIED_PAIR: PairId = PairId::from_array(*b"synthetic pair 1");
-    /// A pairing that holds no certificate.
-    pub const UNCERTIFIED_PAIR: PairId = PairId::from_array(*b"synthetic pair 2");
+    #[cfg(windows)]
+    const DAY_MS: u64 = REVOCATION_NOTICE_MS / REVOCATION_NOTICE_DAYS;
+    /// Six days after creation: short of the revocation notice's bound.
+    #[cfg(windows)]
+    pub const DAY_6_MS: u64 = CREATED_AT_MS + REVOCATION_NOTICE_MS - DAY_MS;
+    /// Eight days after creation: past it.
+    #[cfg(windows)]
+    pub const DAY_8_MS: u64 = CREATED_AT_MS + REVOCATION_NOTICE_MS + DAY_MS;
+    /// The fixtures' pairing.
+    pub const PAIR: PairId = PairId::from_array(*b"synthetic pair 1");
 
-    /// The fixtures' pairing `pair_id`, created at `created_at_ms`, with no
-    /// certificate.
+    /// The fixtures' pairing `pair_id`, created at `created_at_ms`.
     pub fn bare_record(pair_id: PairId, created_at_ms: u64) -> PairingRecord {
         let profiles = vec![ProfileName::Authentication];
         let keys = PairRecord::new(
@@ -996,17 +1005,9 @@ pub mod test_records {
         OwnedCert::from_der(UnvalidatedCertificate::new(CERTIFICATE.to_vec())).expect("certificate")
     }
 
-    /// [`CERTIFIED_PAIR`], created at [`CREATED_AT_MS`], holding the
-    /// certificate.
-    pub fn certified_record() -> PairingRecord {
-        let mut record = bare_record(CERTIFIED_PAIR, CREATED_AT_MS);
-        record.remember_authentication_certificate(certificate());
-        record
-    }
-
-    /// [`UNCERTIFIED_PAIR`], created at [`CREATED_AT_MS`].
-    pub fn uncertified_record() -> PairingRecord {
-        bare_record(UNCERTIFIED_PAIR, CREATED_AT_MS)
+    /// [`PAIR`], created at [`CREATED_AT_MS`].
+    pub fn paired_record() -> PairingRecord {
+        bare_record(PAIR, CREATED_AT_MS)
     }
 }
 
@@ -1131,7 +1132,6 @@ mod sighting_tests {
 
 #[cfg(all(test, windows))]
 mod tests {
-    use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
     use refineid_rapp::{CertificateFingerprint, PAIRING_IDLE_EXPIRY_MS};
     use refineid_rapp_core::ids::PairId;
     use refineid_rapp_core::presence::CardSighting;
@@ -1141,8 +1141,8 @@ mod tests {
     };
 
     use super::test_records::{
-        CERTIFIED_PAIR, CREATED_AT_MS, DAY_6_MS, DAY_8_MS, REQUESTER_PRIVATE, bare_record,
-        certificate, certified_record,
+        CREATED_AT_MS, DAY_6_MS, DAY_8_MS, PAIR, REQUESTER_PRIVATE, bare_record, certificate,
+        paired_record,
     };
     use super::{
         CARD_SIGHTINGS_DIRECTORY, EARLIER_BUILD_FILES, EARLIER_PAIRING_NOTICE, PAIRING_SET_FILE,
@@ -1196,20 +1196,13 @@ mod tests {
     /// The moment the fixtures' pairing has had no session for the idle
     /// limit, counted from its creation.
     const IDLE_EXPIRED_AT_MS: u64 = CREATED_AT_MS + PAIRING_IDLE_EXPIRY_MS;
-    /// The synthetic P-384 certificate of the RAPP mock pairing fixtures
-    /// stands in for a card's own; enough records holding it exceed what one
-    /// generic credential holds ([`CRED_MAX_CREDENTIAL_BLOB_SIZE`]).
-    const LARGE_CERTIFICATE: &[u8] = include_bytes!("../../refineid-rapp-cli/src/mock_ca.der");
-    /// Records that exceed one generic credential.
-    const RECORDS_BEYOND_A_CREDENTIAL: [PairId; 4] = [
+    /// Several stored pairings.
+    const STORED_PAIRS: [PairId; 4] = [
         FIRST_PAIR,
         SECOND_PAIR,
         PairId::from_array(*b"synthetic pair 3"),
         PairId::from_array(*b"synthetic pair 4"),
     ];
-    /// `CRED_MAX_CREDENTIAL_BLOB_SIZE` (wincred.h): the most bytes a
-    /// generic credential's blob holds.
-    const CRED_MAX_CREDENTIAL_BLOB_SIZE: usize = 2560;
     const FIRST_PAIR: PairId = PairId::from_array(*b"synthetic pair 1");
     const SECOND_PAIR: PairId = PairId::from_array(*b"synthetic pair 2");
 
@@ -1243,12 +1236,7 @@ mod tests {
 
     /// The fixtures' pairing as created at `created_at_ms`.
     fn record_created_at(pair_id: PairId, created_at_ms: u64) -> PairingRecord {
-        let mut record = bare_record(pair_id, created_at_ms);
-        record.remember_authentication_certificate(
-            OwnedCert::from_der(UnvalidatedCertificate::new(LARGE_CERTIFICATE.to_vec()))
-                .expect("certificate"),
-        );
-        record
+        bare_record(pair_id, created_at_ms)
     }
 
     #[test]
@@ -1353,12 +1341,12 @@ mod tests {
     }
 
     #[test]
-    fn a_set_larger_than_a_credential_survives_a_reload_protected() {
+    fn a_set_survives_a_reload_protected() {
         let directory = TestDirectory::new("reload");
         let pair_id = FIRST_PAIR;
         let mut store = load_from(directory.0.clone()).expect("load");
         assert!(store.is_empty());
-        for stored in RECORDS_BEYOND_A_CREDENTIAL {
+        for stored in STORED_PAIRS {
             store
                 .insert(record_created_at(
                     stored,
@@ -1368,7 +1356,6 @@ mod tests {
         }
 
         let on_disk = std::fs::read(directory.0.join(PAIRING_SET_FILE)).expect("file written");
-        assert!(on_disk.len() > CRED_MAX_CREDENTIAL_BLOB_SIZE);
         assert!(
             !on_disk
                 .as_slice()
@@ -1377,9 +1364,9 @@ mod tests {
         );
 
         let mut reloaded = load_from(directory.0.clone()).expect("reload");
-        assert_eq!(reloaded.len(), RECORDS_BEYOND_A_CREDENTIAL.len());
+        assert_eq!(reloaded.len(), STORED_PAIRS.len());
         assert_eq!(reloaded.get(pair_id).expect("stored").pair_id(), pair_id);
-        for stored in RECORDS_BEYOND_A_CREDENTIAL {
+        for stored in STORED_PAIRS {
             reloaded.remove(stored).expect("remove");
         }
         assert!(
@@ -1427,87 +1414,41 @@ mod tests {
         assert!(store.get(FIRST_PAIR).is_err());
         let reloaded = load_from(directory.0.clone()).expect("reload");
         assert!(reloaded.get(FIRST_PAIR).is_err());
-        let protected = std::fs::read(directory.0.join(PAIRING_SET_FILE)).expect("stored");
-        let plain = unprotect(&protected).expect("unprotected");
-        assert!(
-            !plain
-                .as_slice()
-                .windows(LARGE_CERTIFICATE.len())
-                .any(|window| window == LARGE_CERTIFICATE)
-        );
     }
 
     #[test]
-    fn the_stored_bytes_hold_the_certificate_for_six_days_and_not_by_eight() {
-        let directory = TestDirectory::new("retention");
+    fn the_stored_bytes_hold_no_certificate() {
+        let directory = TestDirectory::new("no-certificate");
         let mut store = load_at(&directory.0, at_creation);
-        store.insert(certified_record()).expect("insert");
-        assert!(stored_set_holds_the_certificate(&directory.0));
-
-        let reloaded = load_at(&directory.0, at_day_6);
+        store.insert(paired_record()).expect("insert");
+        store
+            .record_card_sighting(PAIR, sighting(CREATED_AT_MS))
+            .expect("sighting");
+        assert!(!stored_set_holds_the_certificate(&directory.0));
         assert!(
-            reloaded
-                .get(CERTIFIED_PAIR)
+            load_at(&directory.0, at_day_6)
+                .get(PAIR)
                 .expect("stored")
-                .authentication_certificate()
-                .is_some()
+                .serves()
         );
-        assert!(stored_set_holds_the_certificate(&directory.0));
-
-        let reloaded = load_at(&directory.0, at_day_8);
-        let stored = reloaded.get(CERTIFIED_PAIR).expect("the pairing lives on");
-        assert!(stored.serves());
-        assert!(stored.authentication_certificate().is_none());
-        assert!(!stored_set_holds_the_certificate(&directory.0));
-    }
-
-    #[test]
-    fn forgetting_and_revoking_take_the_certificate_from_the_stored_bytes_at_once() {
-        let directory = TestDirectory::new("forget");
-        let mut store = load_at(&directory.0, at_creation);
-        store.insert(certified_record()).expect("insert");
-        forget_pairing(&mut store, CERTIFIED_PAIR, CREATED_AT_MS).expect("forget");
-        assert_eq!(
-            store.get(CERTIFIED_PAIR).expect("held").state(),
-            PairingState::Forgotten
-        );
-        assert!(!stored_set_holds_the_certificate(&directory.0));
-
-        let directory = TestDirectory::new("revoke");
-        let mut store = load_at(&directory.0, at_creation);
-        store.insert(certified_record()).expect("insert");
-        store.revoke_by_peer(CERTIFIED_PAIR).expect("revoke");
-        assert!(!stored_set_holds_the_certificate(&directory.0));
     }
 
     #[test]
     fn a_record_this_computer_revoked_leaves_the_store_and_one_the_phone_revoked_stands_a_while() {
         let directory = TestDirectory::new("revoked-records");
         let mut store = load_at(&directory.0, at_creation);
-        store.insert(certified_record()).expect("insert");
-        revoke_pairing(&mut store, CERTIFIED_PAIR, false, CREATED_AT_MS).expect("revoke");
-        assert!(store.get(CERTIFIED_PAIR).is_err());
+        store.insert(paired_record()).expect("insert");
+        revoke_pairing(&mut store, PAIR, false, CREATED_AT_MS).expect("revoke");
+        assert!(store.get(PAIR).is_err());
 
-        store.insert(certified_record()).expect("insert");
-        store.revoke_by_peer(CERTIFIED_PAIR).expect("revoke");
+        store.insert(paired_record()).expect("insert");
+        store.revoke_by_peer(PAIR).expect("revoke");
         let reloaded = load_at(&directory.0, at_day_6);
         assert_eq!(
-            reloaded.get(CERTIFIED_PAIR).expect("told").state(),
+            reloaded.get(PAIR).expect("told").state(),
             PairingState::Revoked { by_peer: true }
         );
-        assert!(load_at(&directory.0, at_day_8).get(CERTIFIED_PAIR).is_err());
-    }
-
-    #[test]
-    fn replacing_a_pairing_takes_the_old_certificate_from_the_stored_bytes() {
-        let directory = TestDirectory::new("replace");
-        let mut store = load_at(&directory.0, at_creation);
-        store.insert(certified_record()).expect("insert");
-        store
-            .insert(bare_record(SECOND_PAIR, CREATED_AT_MS))
-            .expect("insert");
-        forget_pairing(&mut store, CERTIFIED_PAIR, CREATED_AT_MS).expect("replaced");
-        assert!(!stored_set_holds_the_certificate(&directory.0));
+        assert!(load_at(&directory.0, at_day_8).get(PAIR).is_err());
     }
 
     #[test]
@@ -1516,30 +1457,30 @@ mod tests {
         let file = directory
             .0
             .join(CARD_SIGHTINGS_DIRECTORY)
-            .join(sighting_file_name(CERTIFIED_PAIR));
+            .join(sighting_file_name(PAIR));
 
         let mut store = load_at(&directory.0, at_creation);
-        store.insert(certified_record()).expect("insert");
+        store.insert(paired_record()).expect("insert");
         store
-            .record_card_sighting(CERTIFIED_PAIR, sighting(CREATED_AT_MS))
+            .record_card_sighting(PAIR, sighting(CREATED_AT_MS))
             .expect("sighted");
         assert!(file.exists());
         let reloaded = load_at(&directory.0, at_day_6);
-        assert!(reloaded.card_sighting(CERTIFIED_PAIR).is_none());
+        assert!(reloaded.card_sighting(PAIR).is_none());
         assert!(!file.exists(), "a lapsed sighting is not kept");
 
         let mut store = load_at(&directory.0, at_creation);
         store
-            .record_card_sighting(CERTIFIED_PAIR, sighting(CREATED_AT_MS))
+            .record_card_sighting(PAIR, sighting(CREATED_AT_MS))
             .expect("sighted");
-        store.revoke_by_peer(CERTIFIED_PAIR).expect("revoke");
+        store.revoke_by_peer(PAIR).expect("revoke");
         assert!(!file.exists(), "a revoked pairing keeps no sighting");
 
-        store.insert(certified_record()).expect("insert");
+        store.insert(paired_record()).expect("insert");
         store
-            .record_card_sighting(CERTIFIED_PAIR, sighting(CREATED_AT_MS))
+            .record_card_sighting(PAIR, sighting(CREATED_AT_MS))
             .expect("sighted");
-        forget_pairing(&mut store, CERTIFIED_PAIR, CREATED_AT_MS).expect("forget");
+        forget_pairing(&mut store, PAIR, CREATED_AT_MS).expect("forget");
         assert!(!file.exists(), "a forgotten pairing keeps no sighting");
     }
 

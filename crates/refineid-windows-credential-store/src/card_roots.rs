@@ -43,7 +43,7 @@
 //! propagated. An entry whose property is not so is left.
 //!
 //! Windows writes each propagated entry under a registry key that only
-//! `SYSTEM` may change, so no process of the user, the sign-in sweep
+//! `SYSTEM` may change, so no process of the user, the agent
 //! included, can remove one. The installer's custom action runs as
 //! `LocalSystem` and removes the Card Module's entries from every user
 //! profile loaded at the time. Unless Group Policy says otherwise

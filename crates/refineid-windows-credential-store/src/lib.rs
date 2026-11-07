@@ -48,7 +48,9 @@ pub use certstore::{
     BROWSER_KEY_PREFIX, KEY_STORAGE_PROVIDER, browser_key_name, browser_key_pair_id,
 };
 #[cfg(windows)]
-pub use certstore::{install_browser_certificate, remove_browser_certificates};
+pub use certstore::{
+    install_browser_certificate, offered_phone_certificate, remove_browser_certificates,
+};
 pub use pairing::{ProtectedPairingStore, delete_pairing_set};
 
 /// Maximum PC/SC ATR size accepted by the shared credential namespace.

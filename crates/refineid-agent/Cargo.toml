@@ -1,6 +1,6 @@
 [package]
 name = "refineid-agent"
-description = "The per-user RefineID agent: holds the paired phone's RAPP session over Bluetooth and signs for the key storage provider"
+description = "The per-user RefineID agent, started at sign-in: holds the paired phone's RAPP session over Bluetooth, signs for the key storage provider, and removes the certificates of cards that left their reader"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,10 +10,6 @@ repository.workspace = true
 [[bin]]
 name = "refineid-agent"
 path = "src/main.rs"
-
-[[bin]]
-name = "refineid-sweep"
-path = "src/bin/refineid-sweep.rs"
 
 [target.'cfg(windows)'.dependencies]
 refineid-agent-pipe.workspace = true
