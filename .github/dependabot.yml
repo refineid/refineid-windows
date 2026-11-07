@@ -5,7 +5,7 @@ updates:
     schedule:
       interval: daily
     cooldown:
-      default-days: 7
+      default-days: 2
     groups:
       # RustCrypto's encoding crates share types across their public
       # interfaces, so a major release moves the whole set at once.
@@ -36,4 +36,4 @@ updates:
     schedule:
       interval: daily
     cooldown:
-      default-days: 7
+      default-days: 2
