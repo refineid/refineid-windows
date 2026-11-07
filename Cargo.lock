@@ -914,7 +914,7 @@ dependencies = [
 [[package]]
 name = "refineid-apdu"
 version = "26.11.7"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#d84a20afb3882ca1220a1c6d44b337a4b79a812d"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#57c776d86abd89030510e236fe0cc4b6d42e5290"
 dependencies = [
  "refineid-build-number",
  "zeroize",
@@ -923,12 +923,12 @@ dependencies = [
 [[package]]
 name = "refineid-ber"
 version = "26.11.7"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#d84a20afb3882ca1220a1c6d44b337a4b79a812d"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#57c776d86abd89030510e236fe0cc4b6d42e5290"
 
 [[package]]
 name = "refineid-build-number"
 version = "26.11.7"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#d84a20afb3882ca1220a1c6d44b337a4b79a812d"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#57c776d86abd89030510e236fe0cc4b6d42e5290"
 
 [[package]]
 name = "refineid-card-manager-core"
@@ -949,7 +949,7 @@ dependencies = [
 [[package]]
 name = "refineid-digest"
 version = "26.11.7"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#d84a20afb3882ca1220a1c6d44b337a4b79a812d"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#57c776d86abd89030510e236fe0cc4b6d42e5290"
 dependencies = [
  "md-5",
  "sha1",
@@ -1057,7 +1057,7 @@ dependencies = [
 [[package]]
 name = "refineid-pkcs15"
 version = "26.11.7"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#d84a20afb3882ca1220a1c6d44b337a4b79a812d"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#57c776d86abd89030510e236fe0cc4b6d42e5290"
 dependencies = [
  "refineid-apdu",
  "refineid-ber",
@@ -1067,7 +1067,7 @@ dependencies = [
 [[package]]
 name = "refineid-rapp"
 version = "26.11.7"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#d84a20afb3882ca1220a1c6d44b337a4b79a812d"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#57c776d86abd89030510e236fe0cc4b6d42e5290"
 dependencies = [
  "chacha20poly1305",
  "curve25519-dalek",
@@ -1142,7 +1142,7 @@ dependencies = [
 [[package]]
 name = "refineid-remote"
 version = "26.11.7"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#d84a20afb3882ca1220a1c6d44b337a4b79a812d"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#57c776d86abd89030510e236fe0cc4b6d42e5290"
 dependencies = [
  "refineid-digest",
 ]
@@ -1189,7 +1189,7 @@ dependencies = [
 [[package]]
 name = "refineid-x509"
 version = "26.11.7"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#d84a20afb3882ca1220a1c6d44b337a4b79a812d"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#57c776d86abd89030510e236fe0cc4b6d42e5290"
 dependencies = [
  "refineid-ber",
 ]
