@@ -61,6 +61,47 @@ const SMART_CARD_PROVIDERS: [&str; 2] = [
 /// identifier, per X.690 section 8.19.
 const DVV_ARC_DER: &[u8] = b"\x2a\x81\x76\x84\x05";
 
+/// The bytes the Card Module puts before a card's authentication certificate
+/// when it derives the card's identifier.
+const CARD_ID_DOMAIN: &[u8] = b"refineid-card-id-v8-two-container-freshness";
+/// The length of a card identifier: the minidriver specification's `cardid`
+/// file holds a GUID.
+pub const CARD_ID_BYTES: usize = 16;
+
+/// The identifier the Card Module gives a card in its `cardid` file. Windows
+/// records it with each root certificate the card propagated
+/// ([`crate::card_roots`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CardId([u8; CARD_ID_BYTES]);
+
+impl CardId {
+    /// The identifier of the card whose authentication certificate is
+    /// `certificate`: the first [`CARD_ID_BYTES`] of the SHA-256 of
+    /// [`CARD_ID_DOMAIN`] followed by the certificate.
+    #[must_use]
+    pub fn of_authentication_certificate(certificate: &[u8]) -> Self {
+        let mut seeded = Vec::with_capacity(CARD_ID_DOMAIN.len() + certificate.len());
+        seeded.extend_from_slice(CARD_ID_DOMAIN);
+        seeded.extend_from_slice(certificate);
+        let digest = refineid_lib_core::crypto::digest::Sha256::of(seeded);
+        let mut identifier = [0; CARD_ID_BYTES];
+        identifier.copy_from_slice(&digest.as_bytes()[..CARD_ID_BYTES]);
+        Self(identifier)
+    }
+
+    /// An identifier read back from Windows.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; CARD_ID_BYTES]) -> Self {
+        Self(bytes)
+    }
+
+    /// The `cardid` file's bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; CARD_ID_BYTES] {
+        &self.0
+    }
+}
+
 /// Seconds in a day.
 const SECONDS_PER_DAY: u64 = 86_400;
 /// How long an entry stays unseen.
@@ -193,7 +234,7 @@ fn sweep_store(
 
 /// The key provider and container of an entry, or `None` when it has none.
 #[cfg(windows)]
-fn key_provider_info(
+pub(crate) fn key_provider_info(
     context: *const windows_sys::Win32::Security::Cryptography::CERT_CONTEXT,
 ) -> Option<(String, String)> {
     use windows_sys::Win32::Security::Cryptography::{

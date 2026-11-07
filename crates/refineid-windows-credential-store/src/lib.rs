@@ -24,7 +24,7 @@
     windows,
     expect(
         unsafe_code,
-        reason = "CredReadW, CredWriteW, CredDeleteW, CredFree, CryptProtectData, CryptUnprotectData, LocalFree, and the certificate store calls are the small Windows FFI boundary"
+        reason = "CredReadW, CredWriteW, CredDeleteW, CredFree, CryptProtectData, CryptUnprotectData, LocalFree, and the certificate store and registry calls are the small Windows FFI boundary"
     )
 )]
 
@@ -38,6 +38,7 @@ use refineid_lib_core::can::Can;
 use zeroize::Zeroize as _;
 
 pub mod card_certificates;
+pub mod card_roots;
 mod certstore;
 mod pairing;
 
@@ -84,6 +85,11 @@ pub enum CredentialStoreError {
     /// Windows rejected a certificate store operation.
     CertificateStore {
         /// `GetLastError` value returned by the failing API.
+        code: u32,
+    },
+    /// Windows rejected a registry operation.
+    Registry {
+        /// The status the failing registry function returned.
         code: u32,
     },
     /// DPAPI refused to protect or unprotect the pairing set.
@@ -138,6 +144,9 @@ impl fmt::Display for CredentialStoreError {
                     formatter,
                     "Windows certificate store failed with code {code}"
                 )
+            }
+            Self::Registry { code } => {
+                write!(formatter, "Windows registry failed with code {code}")
             }
             Self::Protection { code } => {
                 write!(formatter, "DPAPI failed with code {code}")

@@ -108,7 +108,6 @@ pub mod secure_messaging;
 pub mod sign;
 pub mod text;
 pub mod transport;
-pub mod trust_roots;
 pub mod x509;
 
 // Library-facade re-exports of the crate's public surface.

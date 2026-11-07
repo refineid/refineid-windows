@@ -76,6 +76,13 @@ mod windows_main {
     /// registration.
     const UNREGISTER_ENTRY_POINT: &str = "RefineIdUnregisterKeyStorageProvider";
 
+    /// The entry point that removes the root certificates Windows
+    /// propagated from the `msroots` file of builds that served one. It runs
+    /// as `LocalSystem`, which alone may change what propagation wrote, on
+    /// install, repair and upgrade, and again on uninstall; with no undo,
+    /// since trust a card chose is never put back.
+    const REMOVE_CARD_ROOTS_ENTRY_POINT: &str = "RefineIdRemoveCardRoots";
+
     /// The module's own entry points that register it with CNG as the key
     /// storage provider for a paired phone, and remove that registration.
     /// CNG caches its configuration, so a registry write alone is not seen
@@ -92,6 +99,16 @@ mod windows_main {
         CustomAction {
             name: "UnregisterKeyStorageProvider",
             entry_point: UNREGISTER_ENTRY_POINT,
+            schedule: Schedule::Uninstall,
+        },
+        CustomAction {
+            name: "RemoveCardRoots",
+            entry_point: REMOVE_CARD_ROOTS_ENTRY_POINT,
+            schedule: Schedule::InstallWithoutUndo,
+        },
+        CustomAction {
+            name: "RemoveCardRootsOnUninstall",
+            entry_point: REMOVE_CARD_ROOTS_ENTRY_POINT,
             schedule: Schedule::Uninstall,
         },
     ];

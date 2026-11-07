@@ -217,6 +217,9 @@ record for RAPP and its applications.
   EF.4336 and presents them, with NSS trust records, while the card
   is present (`crates/refineid-pkcs11/README.md`). No fingerprints
   are shipped either.
+- The Windows Card Module serves no `msroots` file: Windows would put a
+  card's CAs in the user's Root store, trusted for every purpose
+  (`crates/refineid-minidriver/README.md`, "No card CA").
 - No pinning or other trust policy is added without the owner's decision.
 - Describe what the code does and cite the source; ask the owner before
   changing trust behavior.
