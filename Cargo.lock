@@ -879,7 +879,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-agent"
-version = "26.11.6"
+version = "26.11.7"
 dependencies = [
  "refineid-agent-pipe",
  "refineid-dev-errors",
@@ -893,7 +893,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-agent-pipe"
-version = "26.11.6"
+version = "26.11.7"
 dependencies = [
  "refineid-dev-errors",
  "refineid-rapp",
@@ -903,8 +903,8 @@ dependencies = [
 
 [[package]]
 name = "refineid-apdu"
-version = "26.11.6"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#d906f722d980146d06b59ba13ae666bf6b5aba09"
+version = "26.11.7"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#4dceb69231c9a83de2bd7dcc42181b09dd0e9b1f"
 dependencies = [
  "refineid-build-number",
  "zeroize",
@@ -912,17 +912,17 @@ dependencies = [
 
 [[package]]
 name = "refineid-ber"
-version = "26.11.6"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#d906f722d980146d06b59ba13ae666bf6b5aba09"
+version = "26.11.7"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#4dceb69231c9a83de2bd7dcc42181b09dd0e9b1f"
 
 [[package]]
 name = "refineid-build-number"
-version = "26.11.6"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#d906f722d980146d06b59ba13ae666bf6b5aba09"
+version = "26.11.7"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#4dceb69231c9a83de2bd7dcc42181b09dd0e9b1f"
 
 [[package]]
 name = "refineid-card-manager-core"
-version = "26.11.6"
+version = "26.11.7"
 dependencies = [
  "refineid-dev-errors",
  "refineid-lib-core",
@@ -931,15 +931,15 @@ dependencies = [
 
 [[package]]
 name = "refineid-dev-errors"
-version = "26.11.6"
+version = "26.11.7"
 dependencies = [
  "windows-sys",
 ]
 
 [[package]]
 name = "refineid-digest"
-version = "26.11.6"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#d906f722d980146d06b59ba13ae666bf6b5aba09"
+version = "26.11.7"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#4dceb69231c9a83de2bd7dcc42181b09dd0e9b1f"
 dependencies = [
  "sha1",
  "sha2 0.11.1",
@@ -947,7 +947,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-doc-sign"
-version = "26.11.6"
+version = "26.11.7"
 dependencies = [
  "const-oid",
  "crypto-bigint",
@@ -965,7 +965,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-gui-win32"
-version = "26.11.6"
+version = "26.11.7"
 dependencies = [
  "pcsc",
  "refineid-card-manager-core",
@@ -981,7 +981,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-lib-core"
-version = "26.11.6"
+version = "26.11.7"
 dependencies = [
  "aes 0.9.3",
  "cbc",
@@ -1003,7 +1003,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-lib-pcsc"
-version = "26.11.6"
+version = "26.11.7"
 dependencies = [
  "pcsc",
  "refineid-dev-errors",
@@ -1012,7 +1012,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-minidriver"
-version = "26.11.6"
+version = "26.11.7"
 dependencies = [
  "refineid-agent-pipe",
  "refineid-dev-errors",
@@ -1024,7 +1024,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-msi"
-version = "26.11.6"
+version = "26.11.7"
 dependencies = [
  "sha1",
  "windows-sys",
@@ -1032,7 +1032,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-pkcs11"
-version = "26.11.6"
+version = "26.11.7"
 dependencies = [
  "hex",
  "refineid-dev-errors",
@@ -1045,8 +1045,8 @@ dependencies = [
 
 [[package]]
 name = "refineid-pkcs15"
-version = "26.11.6"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#d906f722d980146d06b59ba13ae666bf6b5aba09"
+version = "26.11.7"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#4dceb69231c9a83de2bd7dcc42181b09dd0e9b1f"
 dependencies = [
  "refineid-apdu",
  "refineid-ber",
@@ -1055,8 +1055,8 @@ dependencies = [
 
 [[package]]
 name = "refineid-rapp"
-version = "26.11.6"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#d906f722d980146d06b59ba13ae666bf6b5aba09"
+version = "26.11.7"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#4dceb69231c9a83de2bd7dcc42181b09dd0e9b1f"
 dependencies = [
  "chacha20poly1305",
  "curve25519-dalek",
@@ -1070,7 +1070,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-rapp-ble"
-version = "26.11.6"
+version = "26.11.7"
 dependencies = [
  "refineid-dev-errors",
  "refineid-rapp",
@@ -1080,7 +1080,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-rapp-cli"
-version = "26.11.6"
+version = "26.11.7"
 dependencies = [
  "getrandom 0.4.3",
  "hex",
@@ -1097,7 +1097,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-rapp-core"
-version = "26.11.6"
+version = "26.11.7"
 dependencies = [
  "getrandom 0.4.3",
  "if-addrs",
@@ -1115,7 +1115,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-rapp-ffi"
-version = "26.11.6"
+version = "26.11.7"
 dependencies = [
  "getrandom 0.4.3",
  "hex",
@@ -1130,15 +1130,15 @@ dependencies = [
 
 [[package]]
 name = "refineid-remote"
-version = "26.11.6"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#d906f722d980146d06b59ba13ae666bf6b5aba09"
+version = "26.11.7"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#4dceb69231c9a83de2bd7dcc42181b09dd0e9b1f"
 dependencies = [
  "refineid-digest",
 ]
 
 [[package]]
 name = "refineid-settings-ffi"
-version = "26.11.6"
+version = "26.11.7"
 dependencies = [
  "refineid-card-manager-core",
  "refineid-dev-errors",
@@ -1154,11 +1154,11 @@ dependencies = [
 
 [[package]]
 name = "refineid-stamp"
-version = "26.11.6"
+version = "26.11.7"
 
 [[package]]
 name = "refineid-windows-credential-store"
-version = "26.11.6"
+version = "26.11.7"
 dependencies = [
  "refineid-lib-core",
  "refineid-rapp",
@@ -1169,7 +1169,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-windows-driver-probe"
-version = "26.11.6"
+version = "26.11.7"
 dependencies = [
  "pcsc",
  "windows-sys",
@@ -1177,8 +1177,8 @@ dependencies = [
 
 [[package]]
 name = "refineid-x509"
-version = "26.11.6"
-source = "git+https://github.com/refineid/refineid-core.git?branch=main#d906f722d980146d06b59ba13ae666bf6b5aba09"
+version = "26.11.7"
+source = "git+https://github.com/refineid/refineid-core.git?branch=main#4dceb69231c9a83de2bd7dcc42181b09dd0e9b1f"
 dependencies = [
  "refineid-ber",
 ]

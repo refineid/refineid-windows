@@ -660,14 +660,16 @@ pub fn change_pin_first(
 /// exhausted the card is dead -- no software recovery, DVV
 /// reissue required. The card's own outcome (wrong-PUK with
 /// retries-left, PUK locked, etc.) is surfaced via
-/// [`UnblockPinReport::outcome`]. The PUK is presented only at five,
-/// four or three PUK tries left; the target PIN's counter does not gate
-/// the reset.
+/// [`UnblockPinReport::outcome`]. The PUK is presented at five, four or
+/// three PUK tries left, never at two or one, and again at zero or when
+/// the card reports it blocked: the card then answers for itself and
+/// spends nothing, and the card may still accept the code as an
+/// activation code. The target PIN's counter does not gate the reset.
 ///
 /// # Errors
 /// PC/SC / PKCS#15 / local-policy / transport failures, and
-/// [`CardPinError::RetryFloor`] for a PUK below the floor, blocked or
-/// unreadable.
+/// [`CardPinError::RetryFloor`] for a PUK at two or one tries left or
+/// with a counter the card did not report.
 #[expect(
     clippy::needless_pass_by_value,
     reason = "UnblockPinOptions embeds PUK + new-PIN PinBytes; consumed by value so both drop+zeroize at function return."
@@ -1051,7 +1053,8 @@ const fn change_to_unblock(o: ChangePinOutcome) -> UnblockOutcome {
 
 /// Read the PUK's counter under `numbering` without spending a try
 /// and apply the retry floor to it, before anything that presents the
-/// PUK is sent.
+/// PUK is sent: refused at two or one tries left and at an unreadable
+/// counter; sent at zero or blocked, where the card answers for itself.
 fn puk_retry_floor<T: refineid_lib_core::transport::CardTransport>(
     transport: &mut T,
     numbering: PinReferenceScheme,
@@ -1409,6 +1412,9 @@ mod activate_tests {
     const SERVED: [u8; 3] = [5, 4, 3];
     /// Tries left at which a PIN attempt is refused.
     const REFUSED: [u8; 3] = [2, 1, 0];
+    /// Tries left at which a PUK presentation is refused; at zero the
+    /// card answers for itself.
+    const PUK_REFUSED: [u8; 2] = [2, 1];
     /// A full counter.
     const FULL_COUNTER: u8 = 5;
     /// A counter with no tries left (`63C0`).
@@ -1658,8 +1664,8 @@ mod activate_tests {
     }
 
     #[test]
-    fn puk_code_activation_is_refused_at_two_one_and_zero_puk_tries() -> TestResult {
-        for count in REFUSED {
+    fn puk_code_activation_is_refused_at_two_and_one_puk_tries() -> TestResult {
+        for count in PUK_REFUSED {
             let mut transport = FixedStatusTransport::new(tries(count)?);
             let outcome = setup(
                 &mut transport,
@@ -1689,10 +1695,43 @@ mod activate_tests {
     }
 
     #[test]
-    fn puk_code_activation_is_refused_on_a_blocked_puk() -> TestResult {
-        for status in [
-            StatusWord::AuthenticationBlocked,
-            StatusWord::ReferenceDataInvalidated,
+    fn puk_code_activation_at_zero_puk_tries_reaches_the_card() -> TestResult {
+        // The card answers for itself and spends nothing; the code may
+        // still be an activation code it accepts. Here it answers `63C0`.
+        for (numbering, sent) in [
+            (PinReferenceScheme::Citizen, PROBE_AND_RESET),
+            (PinReferenceScheme::Organizational, PROBE_AND_VERIFY),
+        ] {
+            let mut transport = FixedStatusTransport::new(tries(NO_TRIES)?);
+            let outcome = setup(
+                &mut transport,
+                numbering,
+                ActivationScheme::ActivationCodeIsPuk,
+            )?;
+            check_true(
+                matches!(
+                    outcome,
+                    Ok(UnblockOutcome::WrongPuk { retries_left })
+                        if retries_left.get() == NO_TRIES
+                ),
+                "the card's own answer is reported",
+            )?;
+            check_true(
+                transport.sent.len() == sent,
+                "the PUK probe and the PUK presentation are sent at zero tries",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn puk_code_activation_on_a_blocked_puk_reports_the_cards_answer() -> TestResult {
+        for (status, answer) in [
+            (StatusWord::AuthenticationBlocked, UnblockOutcome::PukLocked),
+            (
+                StatusWord::ReferenceDataInvalidated,
+                UnblockOutcome::Invalidated,
+            ),
         ] {
             let mut transport = FixedStatusTransport::new(status);
             let outcome = setup(
@@ -1701,13 +1740,13 @@ mod activate_tests {
                 ActivationScheme::ActivationCodeIsPuk,
             )?;
             check_true(
-                matches!(
-                    outcome,
-                    Err(CardPinError::RetryFloor(RetryFloorRefusal::Blocked { .. }))
-                ),
-                "blocked PUK refused",
+                matches!(outcome, Ok(reported) if reported == answer),
+                "the card's own answer is reported",
             )?;
-            check_true(transport.sent.len() == PROBE_ONLY, "only the probe sent")?;
+            check_true(
+                transport.sent.len() == PROBE_AND_RESET,
+                "the PUK probe and RESET RETRY COUNTER are sent to a blocked PUK",
+            )?;
         }
         Ok(())
     }
