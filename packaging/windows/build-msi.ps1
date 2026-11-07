@@ -25,6 +25,16 @@
     MSI packages are architecture-specific, so this produces one file per
     architecture rather than a single universal installer.
 
+    The packages carry the Plug and Play driver package that names FINEID
+    cards in Device Manager only when its catalog is signed: Windows
+    refuses an unsigned driver package. -DriverPackage takes a directory
+    holding refineid_card.inf and a signed refineid_card.cat, such as the
+    package Microsoft's hardware dashboard returns; its INF must be the one
+    `refineid-msi --write-inf` writes. Without it, -CertificateThumbprint
+    also generates the INF, catalogs it with makecat.exe and signs the
+    catalog. Windows on Arm64 accepts only a Microsoft-signed catalog for a
+    release-signed package, so there only -DriverPackage names the cards.
+
     Signing is optional. Without -CertificateThumbprint the output is
     unsigned. With a self-signed certificate the output carries a verifiable
     author identity and tamper-evidence, but the chain does not validate on
@@ -34,6 +44,9 @@
 
     .EXAMPLE
     .\build-msi.ps1
+
+    .EXAMPLE
+    .\build-msi.ps1 -DriverPackage C:\Signed\refineid_card
 
     .EXAMPLE
     # -CodeSigningCert selects by extended key usage, so it finds the right
@@ -50,6 +63,10 @@ param(
 
     # Thumbprint of a code-signing certificate in the current user's store.
     [string]$CertificateThumbprint,
+
+    # Directory holding a signed driver package: refineid_card.inf and
+    # refineid_card.cat.
+    [string]$DriverPackage,
 
     # RFC 3161 timestamp authority. A timestamped signature stays verifiable
     # after the signing certificate expires, so this is worth keeping even
@@ -78,19 +95,45 @@ function Get-HostArchitecture {
     }
 }
 
-function Get-SignTool {
+function Get-KitTool([string]$Name) {
     # Prefer the host architecture's build, then any other, newest SDK first.
     $architectureName = Get-HostArchitecture
     $roots = @(
-        "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\$architectureName\signtool.exe",
-        "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\*\signtool.exe")
+        "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\$architectureName\$Name",
+        "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\*\$Name")
     foreach ($root in $roots) {
         $found = Get-ChildItem $root -ErrorAction SilentlyContinue |
             Sort-Object FullName -Descending |
             Select-Object -First 1
         if ($found) { return $found.FullName }
     }
-    throw 'signtool.exe was not found. Install the Windows SDK signing tools.'
+    throw "$Name was not found. Install the Windows SDK signing tools."
+}
+
+function New-DriverCatalog([string]$MakeCat, [string]$Directory) {
+    # A SHA-256 catalog of the INF for Windows 10 and later (OSAttr 2:10.0),
+    # the attribute Inf2Cat writes for those versions.
+    $definition = Join-Path $Directory 'refineid_card.cdf'
+    $inf = Join-Path $Directory 'refineid_card.inf'
+    $osAttribute = '0x10010001:OSAttr:2:10.0'
+    @(
+        '[CatalogHeader]',
+        'Name=refineid_card.cat',
+        "ResultDir=$Directory",
+        'CatalogVersion=2',
+        'HashAlgorithms=SHA256',
+        "CATATTR1=$osAttribute",
+        '',
+        '[CatalogFiles]',
+        "<HASH>refineid_card.inf=$inf",
+        "<HASH>refineid_card.infATTR1=$osAttribute",
+        ''
+    ) | Set-Content -LiteralPath $definition -Encoding ascii
+    & $MakeCat -v $definition
+    if ($LASTEXITCODE -ne 0) {
+        throw 'makecat failed for the driver package.'
+    }
+    Remove-Item -LiteralPath $definition
 }
 
 function Invoke-Signing([string]$SignTool, [string]$Path) {
@@ -116,7 +159,7 @@ if ($CertificateThumbprint) {
     if (-not $certificate.HasPrivateKey) {
         throw 'The selected certificate has no private key.'
     }
-    $signTool = Get-SignTool
+    $signTool = Get-KitTool 'signtool.exe'
     Write-Host "Signing as: $($certificate.Subject)"
 }
 
@@ -137,6 +180,31 @@ $rustTargets = @{
 }
 
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
+
+# The driver package is the same for both architectures: one INF decorated
+# for x64 and Arm64, and one catalog.
+$driverDirectory = $null
+if ($DriverPackage) {
+    $driverDirectory = (Resolve-Path -LiteralPath $DriverPackage).Path
+} elseif ($signTool) {
+    $driverDirectory = Join-Path $OutputDirectory 'driver-package'
+    New-Item -ItemType Directory -Path $driverDirectory -Force | Out-Null
+    $inf = Join-Path $driverDirectory 'refineid_card.inf'
+    & cargo run --manifest-path $manifest --locked --quiet --package refineid-msi -- `
+        --write-inf $inf `
+        --version $productVersion
+    if ($LASTEXITCODE -ne 0) {
+        throw 'refineid-msi could not write the driver package INF.'
+    }
+    New-DriverCatalog (Get-KitTool 'makecat.exe') $driverDirectory
+    Invoke-Signing $signTool (Join-Path $driverDirectory 'refineid_card.cat')
+} else {
+    Write-Host 'No signed driver package: Device Manager keeps the inbox name for the cards.'
+}
+$driverArguments = @()
+if ($driverDirectory) {
+    $driverArguments = @('--driver-package', $driverDirectory)
+}
 
 foreach ($arch in $Architecture) {
     $rustTarget = $rustTargets[$arch]
@@ -176,6 +244,7 @@ foreach ($arch in $Architecture) {
         --minidriver $dll `
         --agent $agent `
         --sweep $sweep `
+        @driverArguments `
         --output $msi `
         --version $productVersion
     if ($LASTEXITCODE -ne 0) {
