@@ -272,6 +272,9 @@ Packaging is implemented natively in Rust via `crates/refineid-msi`:
 - Automatically notifies and restarts `SCardSvr` upon installation.
 - When given a signed driver package, installs `refineid_card.inf` and its
   catalog beside the agent and adds them to the driver store (section 4).
+- Replaces every installed package of an earlier or the same version,
+  refuses a downgrade, and removes what development installs outside the
+  package left: [installer-upgrade.md](installer-upgrade.md).
 
 ---
 

@@ -41,7 +41,7 @@ mod windows_main {
     use refineid_msi::inf::{self, DriverVersion};
     use refineid_msi::{
         Architecture, CustomAction, DriverPackage, Guid, Package, RegistryData, RegistryValue,
-        Schedule, SystemFile, Version, build,
+        Schedule, Strays, SystemFile, Version, build,
     };
 
     /// The Card Module file name. Windows loads it by bare name from the
@@ -112,6 +112,36 @@ mod windows_main {
             schedule: Schedule::Uninstall,
         },
     ];
+
+    /// The module's entry point that removes every Calais registration
+    /// naming the Card Module, in both registry views, whoever wrote it. On
+    /// a first installation it runs before the package writes its own
+    /// registrations, so what is left are those; on uninstall it takes
+    /// the ones a development install added.
+    const REMOVE_CARD_REGISTRATIONS_ENTRY_POINT: &str = "RefineIdRemoveCardRegistrations";
+
+    const CARD_REGISTRATION_CLEANUP_ACTIONS: &[CustomAction<'static>] = &[
+        CustomAction {
+            name: "RemoveEarlierCardRegistrations",
+            entry_point: REMOVE_CARD_REGISTRATIONS_ENTRY_POINT,
+            schedule: Schedule::FirstInstall,
+        },
+        CustomAction {
+            name: "RemoveCardRegistrations",
+            entry_point: REMOVE_CARD_REGISTRATIONS_ENTRY_POINT,
+            schedule: Schedule::Uninstall,
+        },
+    ];
+
+    /// What the development installer of earlier builds
+    /// (`scripts/install-dev.ps1`) left outside the package: its backup of
+    /// the Card Module it replaced, under `ProgramData`, and the event
+    /// source development builds report to, which a release build never
+    /// uses.
+    const STRAYS: Strays<'static> = Strays {
+        program_data_files: &[r"RefineID\backup\refineid_minidriver.dll"],
+        machine_keys: &[r"SYSTEM\CurrentControlSet\Services\EventLog\Application\RefineID"],
+    };
 
     /// The entry point that removes the driver package from the driver
     /// store. It runs on uninstall and as the rollback of the installation.
@@ -343,6 +373,7 @@ mod windows_main {
                 },
             });
         let mut custom_actions = KEY_STORAGE_PROVIDER_ACTIONS.to_vec();
+        custom_actions.extend_from_slice(CARD_REGISTRATION_CLEANUP_ACTIONS);
         if driver_package.is_some() {
             custom_actions.extend_from_slice(DRIVER_PACKAGE_ACTIONS);
         }
@@ -371,6 +402,8 @@ mod windows_main {
             },
             driver_package,
             registry: &registry,
+            owned_keys: &keys,
+            strays: STRAYS,
             custom_actions: &custom_actions,
             // Windows caches the card database, so it must be restarted for a
             // new or removed registration to take effect.

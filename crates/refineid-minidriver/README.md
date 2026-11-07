@@ -176,6 +176,10 @@ signs out.
   hands out, tested on the host.
 - `ksp_register.rs` -- registers the provider with CNG through the BCrypt
   registration API; entry points for the driver MSI and for `rundll32`.
+- `card_registrations.rs` -- removes every `Calais\SmartCards` registration
+  that names this module, whoever wrote it; the driver MSI calls it on a
+  first installation, before it writes its own, and on uninstall
+  (`doc/installer-upgrade.md`).
 
 ## Paired phone for browsers
 

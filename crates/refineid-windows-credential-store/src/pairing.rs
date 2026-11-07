@@ -70,7 +70,9 @@
 use std::path::{Path, PathBuf};
 
 use refineid_rapp_core::ids::PairId;
-use refineid_rapp_core::persistence::{PairingSet, decode_pairing_records, encode_pairing_records};
+use refineid_rapp_core::persistence::{
+    PairingCodecError, PairingSet, decode_pairing_records, encode_pairing_records,
+};
 use refineid_rapp_core::presence::{CardSighting, decode_sighting, encode_sighting};
 use refineid_rapp_core::store::{
     PairingRecord, PairingStore, RecordStoreError, StoreError, SweepOutcome, apply_retention,
@@ -99,6 +101,9 @@ pub struct ProtectedPairingStore {
     /// Whether this store judges this user's personal certificate store. A
     /// test's store, in a directory of its own, leaves it alone.
     judges_browser_entries: bool,
+    /// Whether a pairing stored by an earlier build was removed and no
+    /// pairing has been stored since.
+    earlier_pairing_removed: bool,
 }
 
 impl ProtectedPairingStore {
@@ -111,14 +116,19 @@ impl ProtectedPairingStore {
     /// 4.3 item 4). A forgotten pairing whose `pairing_revoked` close was
     /// not delivered within 30 days loses its keys untold (section 4.6
     /// item 3). A record the codec refuses is left out, and the set is
-    /// written back without it. Retention is applied to what is left, and
-    /// to the personal certificate store and the card sightings beside it.
+    /// written back without it. A set this build cannot decode, and that no
+    /// later build wrote, is deleted with its card sightings. Either way the
+    /// user is told to pair again ([`Self::earlier_pairing_removed`]).
+    /// Retention is applied to what is left, and to the personal
+    /// certificate store and the card sightings beside it. What earlier
+    /// builds left in the directory and this build never reads is removed.
     ///
     /// # Errors
     ///
     /// Fails when an unprotected copy in this user's profile cannot be
     /// deleted, the protected set cannot be read or unprotected, the stored
-    /// blob is malformed, or this build is not running on Windows.
+    /// set is of a later build's format or cannot be deleted, or this build
+    /// is not running on Windows.
     pub fn load() -> Result<Self, CredentialStoreError> {
         Self::load_with(
             profile_directory()?,
@@ -134,18 +144,34 @@ impl ProtectedPairingStore {
         judges_browser_entries: bool,
     ) -> Result<Self, CredentialStoreError> {
         remove_unprotected_copies(&directory)?;
+        remove_earlier_build_files(&directory);
         let set = match read_pairing_set(&directory)? {
-            Some(blob) => decode_pairing_records(&blob)
-                .map_err(|_error| CredentialStoreError::InvalidStoredPairing)?,
+            Some(blob) => match decode_pairing_records(&blob) {
+                Ok(set) => set,
+                Err(error) if written_by_a_later_build(error) => {
+                    return Err(CredentialStoreError::InvalidStoredPairing);
+                }
+                Err(error) => {
+                    refineid_dev_errors::report!(Rapp, "stored pairing set removed", error);
+                    delete_pairing_set_in(&directory)?;
+                    leave_earlier_pairing_notice(&directory);
+                    PairingSet::default()
+                }
+            },
             None => PairingSet::default(),
         };
+        if set.refused > 0 {
+            leave_earlier_pairing_notice(&directory);
+        }
         let sightings = read_sightings(&directory);
+        let earlier_pairing_removed = directory.join(EARLIER_PAIRING_NOTICE).exists();
         let mut store = Self {
             records: set.records,
             sightings,
             directory,
             clock,
             judges_browser_entries,
+            earlier_pairing_removed,
         };
         // Each change is written as it is made; one that could not be
         // written stands in memory and is written here, as is the set
@@ -161,6 +187,14 @@ impl ProtectedPairingStore {
         }
         store.judge_what_lies_beside();
         Ok(store)
+    }
+
+    /// Whether a pairing an earlier build stored, in a format this build
+    /// does not read, was removed and no pairing has been stored since: the
+    /// user is told to pair again.
+    #[must_use]
+    pub const fn earlier_pairing_removed(&self) -> bool {
+        self.earlier_pairing_removed
     }
 
     /// The number of stored pairings.
@@ -310,13 +344,18 @@ impl ProtectedPairingStore {
 }
 
 impl PairingStore for ProtectedPairingStore {
+    /// Stores the record; a pairing stored answers the notice that an
+    /// earlier build's pairing was removed.
     fn insert(&mut self, record: PairingRecord) -> Result<(), StoreError> {
         self.change(|records| {
             let pair_id = record.pair_id();
             records.retain(|entry| entry.pair_id() != pair_id);
             records.push(record);
             Ok(())
-        })
+        })?;
+        remove_earlier_pairing_notice(&self.directory);
+        self.earlier_pairing_removed = false;
+        Ok(())
     }
 
     fn get(&self, pair_id: PairId) -> Result<&PairingRecord, StoreError> {
@@ -456,6 +495,63 @@ const UNPROTECTED_COPY_FILE: &str = "pairing_set.blob";
 /// The generic credential that held an unprotected copy of the set.
 #[cfg(windows)]
 const UNPROTECTED_CREDENTIAL_TARGET: &str = "RefineID_RAPP_Pairing_Set";
+
+/// The notice that a pairing an earlier build stored was removed, until a
+/// pairing is stored again. It is empty: its presence is the notice.
+const EARLIER_PAIRING_NOTICE: &str = "earlier-pairing-removed";
+/// What earlier builds, and development deployments of them, left in the
+/// directory that this build neither reads nor writes: a log file of
+/// builds that logged, the lock file of an unreleased build, and agent
+/// copies the pipe client refuses, as only the installed agent under
+/// Program Files serves.
+const EARLIER_BUILD_FILES: &[&str] = &["agent.log", "pairing-set.lock", "bin"];
+
+/// Whether `error` refuses a set a later build wrote: one of a revision
+/// above this build's. A downgrade keeps it, for the later build to read.
+const fn written_by_a_later_build(error: PairingCodecError) -> bool {
+    matches!(error, PairingCodecError::UnsupportedVersion { .. })
+}
+
+/// Removes [`EARLIER_BUILD_FILES`] from `directory`. One that cannot be
+/// removed now is tried again at the next load.
+fn remove_earlier_build_files(directory: &Path) {
+    for name in EARLIER_BUILD_FILES {
+        let path = directory.join(name);
+        let removed = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match removed {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                let kind = error.kind();
+                refineid_dev_errors::report!(Rapp, "earlier build's file not removed", kind);
+            }
+        }
+    }
+}
+
+/// Leaves the notice that an earlier build's pairing was removed. A notice
+/// that cannot be written leaves the user with the plain no-pairing status.
+fn leave_earlier_pairing_notice(directory: &Path) {
+    if let Err(error) = replace_file(directory, EARLIER_PAIRING_NOTICE, &[]) {
+        refineid_dev_errors::report!(Rapp, "pairing notice not written", error);
+    }
+}
+
+/// Removes the notice once a pairing is stored.
+fn remove_earlier_pairing_notice(directory: &Path) {
+    match std::fs::remove_file(directory.join(EARLIER_PAIRING_NOTICE)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            let kind = error.kind();
+            refineid_dev_errors::report!(Rapp, "pairing notice not removed", kind);
+        }
+    }
+}
 
 /// The user's local application data directory for `RefineID`.
 fn profile_directory() -> Result<PathBuf, CredentialStoreError> {
@@ -1049,8 +1145,9 @@ mod tests {
         certificate, certified_record,
     };
     use super::{
-        CARD_SIGHTINGS_DIRECTORY, PAIRING_SET_FILE, ProtectedPairingStore, UNPROTECTED_COPY_FILE,
-        delete_pairing_set_in, input_blob, protect, sighting_file_name, unprotect,
+        CARD_SIGHTINGS_DIRECTORY, EARLIER_BUILD_FILES, EARLIER_PAIRING_NOTICE, PAIRING_SET_FILE,
+        ProtectedPairingStore, UNPROTECTED_COPY_FILE, delete_pairing_set_in, input_blob, protect,
+        sighting_file_name, unprotect,
     };
 
     /// The store in `directory` with today's clock, leaving this user's
@@ -1165,6 +1262,82 @@ mod tests {
                 .any(|window| window == plain.as_slice())
         );
         assert_eq!(unprotect(&protected).expect("unprotect").as_slice(), plain);
+    }
+
+    /// A synthetic stored set in no format any build writes.
+    const NO_KNOWN_FORMAT: &[u8] = b"synthetic set in no known format";
+    /// A synthetic stored set of a revision far above this build's: the
+    /// set's format tag followed by the revision byte `~`.
+    const LATER_REVISION: &[u8] = b"RAPP-pair-set~";
+
+    /// Stores `plain`, protected, as the set in `directory`.
+    fn store_protected(directory: &std::path::Path, plain: &[u8]) {
+        std::fs::write(
+            directory.join(PAIRING_SET_FILE),
+            protect(plain).expect("protect"),
+        )
+        .expect("stored");
+    }
+
+    #[test]
+    fn a_set_this_build_cannot_decode_is_removed_and_the_user_told_to_pair_again() {
+        let directory = TestDirectory::new("undecodable");
+        store_protected(&directory.0, NO_KNOWN_FORMAT);
+        let store = load_from(directory.0.clone()).expect("load");
+        assert!(store.is_empty());
+        assert!(store.earlier_pairing_removed());
+        assert!(!directory.0.join(PAIRING_SET_FILE).exists());
+        assert!(directory.0.join(EARLIER_PAIRING_NOTICE).exists());
+        let reloaded = load_from(directory.0.clone()).expect("reload");
+        assert!(reloaded.earlier_pairing_removed());
+    }
+
+    #[test]
+    fn a_set_a_later_build_wrote_is_kept() {
+        let directory = TestDirectory::new("later");
+        store_protected(&directory.0, LATER_REVISION);
+        assert!(load_from(directory.0.clone()).is_err());
+        assert!(directory.0.join(PAIRING_SET_FILE).exists());
+        assert!(!directory.0.join(EARLIER_PAIRING_NOTICE).exists());
+    }
+
+    #[test]
+    fn storing_a_pairing_answers_the_notice() {
+        let directory = TestDirectory::new("notice");
+        store_protected(&directory.0, NO_KNOWN_FORMAT);
+        let mut store = load_from(directory.0.clone()).expect("load");
+        store
+            .insert(record_created_at(
+                FIRST_PAIR,
+                refineid_rapp_core::clock::unix_time_ms(),
+            ))
+            .expect("insert");
+        assert!(!store.earlier_pairing_removed());
+        assert!(!directory.0.join(EARLIER_PAIRING_NOTICE).exists());
+        assert!(
+            !load_from(directory.0.clone())
+                .expect("reload")
+                .earlier_pairing_removed()
+        );
+    }
+
+    #[test]
+    fn what_earlier_builds_left_goes_and_what_this_build_uses_stays() {
+        let directory = TestDirectory::new("earlier-files");
+        for name in EARLIER_BUILD_FILES {
+            std::fs::write(directory.0.join(name), b"synthetic").expect("written");
+        }
+        let agent_copies = directory.0.join("bin");
+        let _ = std::fs::remove_file(&agent_copies);
+        std::fs::create_dir_all(agent_copies.join("old")).expect("bin");
+        std::fs::write(agent_copies.join("old").join("agent.exe"), b"synthetic").expect("copy");
+        let kept = directory.0.join("trusted-lists");
+        std::fs::create_dir_all(&kept).expect("kept");
+        load_from(directory.0.clone()).expect("load");
+        for name in EARLIER_BUILD_FILES {
+            assert!(!directory.0.join(name).exists(), "{name} is removed");
+        }
+        assert!(kept.exists());
     }
 
     #[test]

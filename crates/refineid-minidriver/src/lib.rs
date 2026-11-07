@@ -88,6 +88,8 @@
 #[cfg(windows)]
 mod card_driver;
 #[cfg(windows)]
+mod card_registrations;
+#[cfg(windows)]
 mod card_roots;
 #[cfg(windows)]
 mod cardmod;

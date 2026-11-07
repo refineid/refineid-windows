@@ -147,6 +147,19 @@ const PAIRING_INCOMPLETE_STATUS: &str = "The pairing did not complete.";
 /// Shown when the store holds no confirmed pairing for the watch to serve.
 const NO_PAIRING_STATUS: &str = "No phone is paired with this device.";
 
+/// Shown instead while the pairing an earlier build stored, in a format
+/// this build does not read, was removed and no phone is paired since.
+const EARLIER_PAIRING_STATUS: &str = "The pairing was made with an earlier RefineID. Pair again.";
+
+/// The line for a store that holds no usable pairing.
+const fn no_pairing_status(store: &ProtectedPairingStore) -> &'static str {
+    if store.earlier_pairing_removed() {
+        EARLIER_PAIRING_STATUS
+    } else {
+        NO_PAIRING_STATUS
+    }
+}
+
 /// The requester engine specialised to the device-only credential-store
 /// pairing store.
 type StreamRequester = Requester<ProtectedPairingStore>;
@@ -593,7 +606,7 @@ fn open_pairing() -> Result<BeginPairingDto, ApiFailure> {
     let pair_id = pairing_store
         .usable_pairing()
         .map(PairingRecord::pair_id)
-        .ok_or_else(|| ApiFailure::new("no_pairing", "No phone is paired with this device."))?;
+        .ok_or_else(|| ApiFailure::new("no_pairing", no_pairing_status(&pairing_store)))?;
     let requester = Requester::new(RequesterConfig::this_computer(), pairing_store);
     let handle_id = register_handle(Shared {
         phase: Phase::Paired { pair_id },
@@ -821,7 +834,7 @@ fn offering_watch(handle_id: u64) {
         };
         let Some(pair_id) = store.usable_pairing().map(PairingRecord::pair_id) else {
             withdraw_offer(&mut offer);
-            set_watch_status(handle_id, NO_PAIRING_STATUS);
+            set_watch_status(handle_id, no_pairing_status(&store));
             return;
         };
         let mut requester = background_requester(store);
@@ -1160,7 +1173,11 @@ impl Drop for WatchMark {
 fn is_watch_status(status: &str) -> bool {
     matches!(
         status,
-        CARD_TO_READER_STATUS | CARD_TO_PHONE_STATUS | CARD_UNCONFIRMED_STATUS | NO_PAIRING_STATUS
+        CARD_TO_READER_STATUS
+            | CARD_TO_PHONE_STATUS
+            | CARD_UNCONFIRMED_STATUS
+            | NO_PAIRING_STATUS
+            | EARLIER_PAIRING_STATUS
     )
 }
 
@@ -1560,7 +1577,7 @@ fn serialize_envelope<T: Serialize>(envelope: &ApiEnvelope<'_, T>) -> String {
 mod tests {
     use super::{
         CARD_TO_PHONE_STATUS, CARD_TO_READER_STATUS, CARD_UNCONFIRMED_STATUS,
-        CODE_NOT_ACCEPTED_STATUS, CONSENT_SHOWN_STATUS, NO_PAIRING_STATUS,
+        CODE_NOT_ACCEPTED_STATUS, CONSENT_SHOWN_STATUS, EARLIER_PAIRING_STATUS, NO_PAIRING_STATUS,
         NONE_IN_PAIRING_MODE_STATUS, PAIRING_INCOMPLETE_STATUS, Phase, REVOKED_STATUS_TAIL,
         authentication_certificate, card_request_status, granted_profiles, is_watch_status,
         no_remote_card, search_failure_phase, state_dto,
@@ -1582,6 +1599,7 @@ mod tests {
         assert!(is_watch_status(CARD_TO_PHONE_STATUS));
         assert!(is_watch_status(CARD_UNCONFIRMED_STATUS));
         assert!(is_watch_status(NO_PAIRING_STATUS));
+        assert!(is_watch_status(EARLIER_PAIRING_STATUS));
         assert!(!is_watch_status(CONSENT_SHOWN_STATUS));
         assert!(!is_watch_status(&format!("Phone{REVOKED_STATUS_TAIL}")));
     }
