@@ -475,20 +475,24 @@ unsafe extern "C" fn c_get_token_info(slot_id: CkSlotId, info: CkTokenInfoPtr) -
 /// Fixed token label for the authentication (PIN1) token.
 ///
 /// This is what NSS puts verbatim in its PIN-prompt dialog ("Enter
-/// password for Basic (PIN 1)") and what keys the `pkcs11:token=`
+/// password for Basic PIN 1") and what keys the `pkcs11:token=`
 /// URI.  The label must name the *purpose / credential*, not the
 /// plastic: the card's own EF.TokenInfo carries "HENKILOKORTTI".
 /// When the qualified-signature (PIN2) slot lands it will carry
-/// "Signature (PIN 2)", and the label pair is what keeps a citizen
+/// "Signature PIN 2", and the label pair is what keeps a citizen
 /// from typing PIN2 into a PIN1 prompt.  The serial still names the
-/// physical card.
+/// physical card. The PIN's name is written as the card documents
+/// name it, "Basic PIN 1", with no parentheses.
 ///
 /// The string matches the Apple `TokenExtension` localisation key:
-///   English  "Basic (PIN 1)"
-///   Finnish  "Perus (PIN 1)"
-///   Swedish  "Bas (PIN 1)"
-const TOKEN_LABEL_IDENTIFY: &str = "Basic (PIN 1)";
-const TOKEN_LABEL_REMOTE: &str = "RefineID Remote (PIN 1)";
+///   English  "Basic PIN 1"
+///   Finnish  "Perus-PIN 1"
+///   Swedish  "Bas-PIN 1"
+const TOKEN_LABEL_IDENTIFY: &str = "Basic PIN 1";
+/// Fixed token label for a card served by a paired phone, which
+/// verifies PIN 1 itself: NSS shows no PIN prompt for it, and the
+/// label tells the citizen which device the prompt will appear on.
+const TOKEN_LABEL_PHONE: &str = "Phone PIN 1";
 
 /// Build the token-info payload. Fixed-width fields are space-padded;
 /// unknown counters use [`CK_UNAVAILABLE_INFORMATION`].
@@ -524,7 +528,7 @@ fn token_info_value(serial: &str, pin1_status: PinStatus, is_remote: bool) -> Ck
         base_flags | user_pin_status_flags(pin1_status)
     };
     let label = if is_remote {
-        padded_field(TOKEN_LABEL_REMOTE)
+        padded_field(TOKEN_LABEL_PHONE)
     } else {
         padded_field(TOKEN_LABEL_IDENTIFY)
     };
