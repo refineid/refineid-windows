@@ -6,12 +6,38 @@ the [README](../README.md).
 
 ## Windows
 
-Set up a Windows 11 development machine with one command from the repository
-root, in a normal (non-elevated) PowerShell:
+Set up a Windows 11 development machine from nothing, with no Git, no Rust and
+no Visual Studio. Run every step at the machine's desktop in a normal
+(non-elevated) PowerShell, with someone there to answer the prompts:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-dev-tools.ps1
-```
+- `winget` refuses to start in an SSH logon (`Access is denied`), because that
+  logon has no desktop session; the script stops with this message there. To
+  drive a machine remotely, run the steps in the logged-on user's session,
+  through a temporary scheduled task with `/IT`.
+- The machine-wide installers each ask for User Account Control consent on the
+  desktop: Git, the GitHub CLI, the Visual Studio Build Tools, .NET, and the
+  Visual Studio Installer. A prompt nobody answers ends as a declined install
+  (`You cancelled the installation`, `winget` exit code `-1978334964`); rerun
+  the step.
+
+1. Install Git, then open a new PowerShell so `PATH` has it:
+
+   ```powershell
+   winget install --id Git.Git --exact --source winget
+   ```
+
+2. Get the repository and enter it:
+
+   ```powershell
+   git clone https://github.com/refineid/refineid-windows.git
+   cd refineid-windows
+   ```
+
+3. Install and update everything else, from the repository root:
+
+   ```powershell
+   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-dev-tools.ps1
+   ```
 
 Visual Studio and the SDKs are always kept at their latest release: the script
 installs what is missing and updates what is already installed, so rerun it
@@ -86,6 +112,15 @@ The requirements it satisfies:
   both `cargo build` and `cargo test` fail at link time (`link.exe` errors
   `LNK2019`/`LNK2001`, or `link.exe` is not found) until the ARM64 tools are
   present.
+
+### ARM64 machines
+
+Windows on ARM64 builds natively. `winget` picks the ARM64 Git installer, the
+host Rust toolchain is `aarch64-pc-windows-msvc`, and `cargo test` runs the
+tests natively. `rust-toolchain.toml` also installs `x86_64-pc-windows-msvc`,
+so the same machine cross-builds the x64 Card Module with the MSVC x64 tools
+(`scripts/build.ps1 -Architecture x64,arm64`). That is a build only: run x64
+behaviour on an x64 machine.
 
 ## Building for the Windows target from macOS or Linux
 

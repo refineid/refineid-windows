@@ -20,7 +20,8 @@
 # through the Python Install Manager, the repository's .NET local tools, and
 # the Git hooks. Rerun it at any time to update. Run it from a
 # normal (non-elevated) PowerShell; winget and the Visual Studio Installer ask
-# for elevation for the machine-wide installers.
+# for elevation for the machine-wide installers, on the desktop, so someone must
+# be there to answer. doc/toolchain.md covers a machine with no Git yet.
 
 [CmdletBinding()]
 param()
@@ -182,6 +183,10 @@ function Find-SignTool {
 }
 
 Update-SessionPath
+
+if ($env:SSH_CONNECTION) {
+    throw 'winget does not start in an SSH logon. Run this at the desktop, or in the logged-on user''s session through a scheduled task with /IT (doc/toolchain.md).'
+}
 
 if (-not (Test-Command winget)) {
     throw 'winget was not found. Install App Installer from the Microsoft Store and rerun.'

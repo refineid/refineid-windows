@@ -104,7 +104,9 @@ Requirements:
   *Desktop development with C++* workload, including the MSVC build tools for
   x64 and ARM64 and the latest Windows 11 SDK.
 
-Install all of them, or update them to their latest releases, with:
+On a machine with none of this, start from [doc/toolchain.md](doc/toolchain.md),
+which gets Git and the repository first. With a checkout, install all of them,
+or update them to their latest releases, at the desktop and not over SSH, with:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-dev-tools.ps1
