@@ -36,8 +36,19 @@
 //! would allow. FINEID S1 v4.2 leaves the PUK's try limit to card
 //! personalization. Setting a new PIN with the PUK is not a PIN attempt,
 //! so the PUK path is gated by the PUK's own counter, whatever the target
-//! PIN's counter reads. Arming a reusable authentication cache is
-//! separate and stricter: it requires a pristine five-attempt state.
+//! PIN's counter reads.
+//!
+//! The preset activation PIN of a card whose PINs ship preset to the
+//! letter's code is presented as the PIN's current value, so a wrong one
+//! spends that PIN's tries. [`check_activation_last_tries`] guards it
+//! like the PUK: refused at two or one tries left and at a counter the
+//! card did not report, sent at zero tries or a blocked PIN, where the
+//! card answers for itself and spends nothing and the code in the
+//! holder's hand may be a PUK. The ordinary PIN 1 and PIN 2 commands --
+//! verify, sign, change -- keep the full floor.
+//!
+//! Arming a reusable authentication cache is separate and stricter: it
+//! requires a pristine five-attempt state.
 
 use core::fmt;
 
@@ -133,6 +144,13 @@ impl PinRetryRisk {
             RETRIES_EXHAUSTED => Some(Self::DefencesFallen),
             _ => None,
         }
+    }
+
+    /// Whether an attempt here would spend one of the last two tries:
+    /// two or one left. Exhausted is not this state: at no tries left
+    /// the card refuses by itself and spends nothing.
+    const fn spends_a_last_try(self) -> bool {
+        matches!(self, Self::CriticalThreatLevel | Self::LockdownImminent)
     }
 
     /// Whether an attempt is served at this state: five, four or three
@@ -311,6 +329,43 @@ pub const fn check_puk_retry_floor(status: PukStatus) -> Result<(), RetryFloorRe
     check_retry_floor(FlooredCredential::Puk, status)
 }
 
+/// The last-tries rule for a preset activation PIN change.
+///
+/// Refuse the CHANGE REFERENCE DATA where it would spend one of the
+/// PIN's last two tries, or where the counter cannot be read and so a
+/// last try might be spent unknowingly. At no tries left or a blocked
+/// PIN the change goes
+/// to the card: it answers for itself and spends nothing, and which code
+/// the holder has in hand (this scheme's activation PIN, or a PUK) is
+/// inferred, never known, so the software does not close a recovery the
+/// card would allow. A PIN reported verified is served: a successful
+/// verification resets the counter to its maximum.
+///
+/// # Errors
+///
+/// [`RetryFloorRefusal::TriesBelowFloor`] at two or one tries left;
+/// [`RetryFloorRefusal::CounterUnreadable`] at a count above five or a
+/// status that carries no counter.
+pub const fn check_activation_last_tries(
+    credential: FlooredCredential,
+    status: PinStatus,
+) -> Result<(), RetryFloorRefusal> {
+    match status {
+        PinStatus::Remaining(remaining) => match PinRetryRisk::from_retries(remaining) {
+            Some(risk) if risk.spends_a_last_try() => Err(RetryFloorRefusal::TriesBelowFloor {
+                credential,
+                remaining,
+            }),
+            Some(_) => Ok(()),
+            None => Err(RetryFloorRefusal::CounterUnreadable { credential }),
+        },
+        PinStatus::Verified | PinStatus::Locked => Ok(()),
+        PinStatus::NoInfo | PinStatus::Other(_) => {
+            Err(RetryFloorRefusal::CounterUnreadable { credential })
+        }
+    }
+}
+
 /// Whether PIN1 may be retained in a reusable authentication cache.
 #[must_use]
 pub const fn pin1_status_permits_reusable_cache(pin1: PinStatus) -> bool {
@@ -329,8 +384,8 @@ mod tests {
     use super::{
         FlooredCredential, PinRetryRisk, PinSlot, PinStatus, RETRIES_BELOW_FLOOR,
         RETRIES_EXHAUSTED, RETRIES_FLOOR, RETRIES_LOCKDOWN_IMMINENT, RETRIES_ONE_SPENT,
-        RETRIES_PRISTINE, RetryFloorRefusal, check_puk_retry_floor, check_retry_floor,
-        pin1_status_permits_reusable_cache,
+        RETRIES_PRISTINE, RetryFloorRefusal, check_activation_last_tries, check_puk_retry_floor,
+        check_retry_floor, pin1_status_permits_reusable_cache,
     };
     use crate::apdu::status_word::PinRetries;
     use crate::auth::PukStatus;
@@ -548,6 +603,46 @@ mod tests {
                     credential: FlooredCredential::Puk
                 })
             );
+        }
+    }
+
+    #[test]
+    fn an_activation_pin_change_is_refused_only_at_the_last_two_tries() {
+        for &credential in PINS {
+            for &count in SERVED.iter().chain(&[RETRIES_EXHAUSTED]) {
+                assert_eq!(
+                    check_activation_last_tries(credential, remaining(count)),
+                    Ok(())
+                );
+            }
+            for status in [PinStatus::Locked, PinStatus::Verified] {
+                assert_eq!(check_activation_last_tries(credential, status), Ok(()));
+            }
+            for &count in REFUSED {
+                assert_eq!(
+                    check_activation_last_tries(credential, remaining(count)),
+                    Err(RetryFloorRefusal::TriesBelowFloor {
+                        credential,
+                        remaining: retries(count),
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_activation_pin_change_is_refused_at_an_unreadable_counter() {
+        for &credential in PINS {
+            for status in [
+                PinStatus::NoInfo,
+                PinStatus::Other(UNMODELED_SW),
+                remaining(ABOVE_LIMIT),
+            ] {
+                assert_eq!(
+                    check_activation_last_tries(credential, status),
+                    Err(RetryFloorRefusal::CounterUnreadable { credential })
+                );
+            }
         }
     }
 
