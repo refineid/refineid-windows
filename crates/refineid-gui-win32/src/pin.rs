@@ -23,10 +23,10 @@ use crate::identity::{StateText, credential_label, pin_kind, puk_kind, puk_label
 /// Combobox entries, in dispatch order. The UI and [`prepare`]
 /// share these indices.
 pub const MODES: [&str; 5] = [
-    "Change PIN 1",
-    "Change PIN 2",
-    "Unblock PIN 1 (PUK)",
-    "Unblock PIN 2 (PUK)",
+    "Change Basic PIN 1",
+    "Change Signature PIN 2",
+    "Unblock Basic PIN 1 (PUK)",
+    "Unblock Signature PIN 2 (PUK)",
     "Activate new card",
 ];
 
@@ -296,14 +296,14 @@ fn prepare_activate(
         1,
         PIN1_FIELDS,
         lengths.pin1(),
-        "The PIN 1 entries do not match; nothing was sent to the card.",
+        "The Basic PIN 1 entries do not match; nothing was sent to the card.",
     )?;
     let pin2 = take_optional_pair(
         &mut fields,
         3,
         PIN2_FIELDS,
         lengths.pin2(),
-        "The PIN 2 entries do not match; nothing was sent to the card.",
+        "The Signature PIN 2 entries do not match; nothing was sent to the card.",
     )?;
     Ok((code, pin1, pin2))
 }
@@ -552,9 +552,9 @@ fn render_activate(report: &ActivateReport) -> String {
             out.push_str("Card already looks activated.\r\n");
         }
     }
-    out.push_str("PIN 1: ");
+    out.push_str("Basic PIN 1: ");
     out.push_str(&activate_line(report.pin1_outcome.as_ref()));
-    out.push_str("\r\nPIN2: ");
+    out.push_str("\r\nSignature PIN 2: ");
     out.push_str(&activate_line(report.pin2_outcome.as_ref()));
     out
 }

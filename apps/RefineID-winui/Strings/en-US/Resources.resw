@@ -307,7 +307,7 @@
     <value>Invalid</value>
   </data>
   <data name="Pin2LengthRule" xml:space="preserve">
-    <value>PIN 2 is {0} to {1} digits.</value>
+    <value>Signature PIN 2 is {0} to {1} digits.</value>
   </data>
   <data name="ReasonTooLong" xml:space="preserve">
     <value>The reason is too long.</value>

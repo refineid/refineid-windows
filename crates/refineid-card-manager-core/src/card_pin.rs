@@ -68,13 +68,13 @@ impl PinManageSlot {
             Self::Pin2 => PinSlot::Pin2,
         }
     }
-    /// User-facing label ("PIN1" / "PIN2") for prompts and report
-    /// strings. `&'static str` from a fixed compile-time set.
+    /// User-facing name ("Basic PIN 1" / "Signature PIN 2") for prompts
+    /// and report strings. `&'static str` from a fixed compile-time set.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Pin1 => "PIN1",
-            Self::Pin2 => "PIN2",
+            Self::Pin1 => "Basic PIN 1",
+            Self::Pin2 => "Signature PIN 2",
         }
     }
 }
@@ -291,7 +291,7 @@ impl fmt::Display for CardPinError {
                     f,
                     "{} looks unactivated (pin_status probe: {probe_desc}); refusing to send \
                      a modify APDU that could land on an unset slot. Run `refineid card activate` \
-                     first to set PIN1 and PIN2.",
+                     first to set Basic PIN 1 and Signature PIN 2.",
                     slot.label()
                 )
             }
@@ -301,9 +301,9 @@ impl fmt::Display for CardPinError {
                 pin2_awaits,
             } => {
                 let awaiting = match (pin1_awaits, pin2_awaits) {
-                    (true, true) => "PIN1 and PIN2",
-                    (true, false) => "PIN1",
-                    (false, true) => "PIN2",
+                    (true, true) => "Basic PIN 1 and Signature PIN 2",
+                    (true, false) => "Basic PIN 1",
+                    (false, true) => "Signature PIN 2",
                     (false, false) => "no PIN",
                 };
                 write!(
@@ -1320,14 +1320,14 @@ impl fmt::Display for ActivateReport {
             ActivatePreflightOutcome::AwaitsActivation { pin1, pin2 } => {
                 writeln!(
                     f,
-                    "preflight: card awaits activation (PIN1: {pin1:?}, PIN2: {pin2:?}); proceeding"
+                    "preflight: card awaits activation (Basic PIN 1: {pin1:?}, Signature PIN 2: {pin2:?}); proceeding"
                 )?;
             }
             ActivatePreflightOutcome::NothingAwaits { pin1, pin2 } => {
                 writeln!(
                     f,
                     "preflight: no PIN awaits activation \
-                     (PIN1: {pin1:?}, PIN2: {pin2:?})"
+                     (Basic PIN 1: {pin1:?}, Signature PIN 2: {pin2:?})"
                 )?;
                 if self.pin1_outcome.is_none() && self.pin2_outcome.is_none() {
                     writeln!(
@@ -1339,17 +1339,29 @@ impl fmt::Display for ActivateReport {
             }
         }
         match self.pin1_outcome {
-            Some(o) => writeln!(f, "PIN1 setup: {}", CardPinHelpers::fmt_unblock(o, "PIN1"))?,
-            None => writeln!(f, "PIN1 setup: not attempted")?,
+            Some(o) => writeln!(
+                f,
+                "{} setup: {}",
+                PinManageSlot::Pin1.label(),
+                CardPinHelpers::fmt_unblock(o, PinManageSlot::Pin1.label())
+            )?,
+            None => writeln!(f, "{} setup: not attempted", PinManageSlot::Pin1.label())?,
         }
         match (self.pin1_outcome, self.pin2_outcome) {
-            (_, Some(o)) => writeln!(f, "PIN2 setup: {}", CardPinHelpers::fmt_unblock(o, "PIN2"))?,
+            (_, Some(o)) => writeln!(
+                f,
+                "{} setup: {}",
+                PinManageSlot::Pin2.label(),
+                CardPinHelpers::fmt_unblock(o, PinManageSlot::Pin2.label())
+            )?,
             (Some(o), None) if !activation_continues_after_pin1(o) => writeln!(
                 f,
-                "PIN2 setup: not attempted (PIN1 setup failed; re-run after fixing \
-                 the activation PIN -- each invocation consumes one card-side try)"
+                "{} setup: not attempted ({} setup failed; re-run after fixing \
+                 the activation PIN -- each invocation consumes one card-side try)",
+                PinManageSlot::Pin2.label(),
+                PinManageSlot::Pin1.label()
             )?,
-            _ => writeln!(f, "PIN2 setup: not attempted")?,
+            _ => writeln!(f, "{} setup: not attempted", PinManageSlot::Pin2.label())?,
         }
         Ok(())
     }

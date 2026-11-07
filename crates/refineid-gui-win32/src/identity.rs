@@ -82,8 +82,8 @@ pub fn format_view(view: &IdentityView) -> String {
     line(&mut out, "Holder", &view.holder);
     line(&mut out, "Card", &view.card);
     line(&mut out, "Activation PIN", &view.activation);
-    line(&mut out, "PIN 1", &view.pin1.text);
-    line(&mut out, "PIN 2", &view.pin2.text);
+    line(&mut out, "Basic PIN 1", &view.pin1.text);
+    line(&mut out, "Signature PIN 2", &view.pin2.text);
     line(&mut out, "PUK", &view.puk.text);
     out
 }

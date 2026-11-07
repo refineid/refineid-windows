@@ -60,8 +60,8 @@ pub struct PreviouslyRejectedPin {
 impl core::fmt::Display for PreviouslyRejectedPin {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let label = match self.slot {
-            PinSlot::Pin1 => "PIN1",
-            PinSlot::Pin2 => "PIN2",
+            PinSlot::Pin1 => "Basic PIN 1",
+            PinSlot::Pin2 => "Signature PIN 2",
         };
         write!(f, "{label} was previously rejected by the card")
     }

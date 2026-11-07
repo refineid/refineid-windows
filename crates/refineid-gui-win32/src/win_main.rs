@@ -2631,11 +2631,11 @@ const IDENTITY_ROW_LABELS: [&str; 8] = [
     "Holder",
     "Card",
     "Activation PIN",
-    "PIN 1",
-    "PIN 2",
+    "Basic PIN 1",
+    "Signature PIN 2",
     "PUK",
 ];
-const PIN_ROW_LABELS: [&str; 5] = ["Holder", "Serial", "PIN 1", "PIN 2", "PUK"];
+const PIN_ROW_LABELS: [&str; 5] = ["Holder", "Serial", "Basic PIN 1", "Signature PIN 2", "PUK"];
 
 /// Add a title + subtitle header. Handles need no later updates.
 #[allow(
