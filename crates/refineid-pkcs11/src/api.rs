@@ -490,9 +490,12 @@ unsafe extern "C" fn c_get_token_info(slot_id: CkSlotId, info: CkTokenInfoPtr) -
 ///   Swedish  "Grund PIN 1"
 const TOKEN_LABEL_IDENTIFY: &str = "Basic PIN 1";
 /// Fixed token label for a card served by a paired phone, which
-/// verifies PIN 1 itself: NSS shows no PIN prompt for it, and the
+/// verifies Basic PIN 1 itself: NSS shows no PIN prompt for it, and the
 /// label tells the citizen which device the prompt will appear on.
-const TOKEN_LABEL_PHONE: &str = "Phone PIN 1";
+/// The maintainer chose the full credential name over a bare "Phone"
+/// (2026-11-07) so the two tokens read alike in a browser's device
+/// list; refineid-core's module carries the same label.
+const TOKEN_LABEL_PHONE: &str = "Phone Basic PIN 1";
 
 /// Build the token-info payload. Fixed-width fields are space-padded;
 /// unknown counters use [`CK_UNAVAILABLE_INFORMATION`].
