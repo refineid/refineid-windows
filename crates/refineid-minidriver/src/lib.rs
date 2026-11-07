@@ -818,7 +818,7 @@ fn card_file_bytes(card: &CardCapabilityModel, file: &CardFile) -> Option<Vec<u8
         CardFile::CardId => Some(synth_cardid(card.auth_cert_der().unwrap_or(&[]))),
         CardFile::CardApps => Some(synth_cardapps()),
         CardFile::CmapFile => Some(synth_cmapfile(card)),
-        CardFile::MsRoots => Some(msroots::active_msroots_pkcs7_der().to_vec()),
+        CardFile::MsRoots => msroots::active_msroots_pkcs7_der().map(<[u8]>::to_vec),
         CardFile::Container(name) => container_file_bytes(card, name),
     }
 }

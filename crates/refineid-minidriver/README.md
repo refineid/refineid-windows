@@ -110,7 +110,8 @@ this by disabling Firefox revocation checking.
   and the logical file system the Base CSP expects.
 - `ffi.rs` -- the Windows FFI declarations.
 - `transport.rs` -- SCard-handle transport with T=0 chaining.
-- `msroots.rs` -- the `msroots` (intermediate/root store) file scaffolding.
+- `msroots.rs` -- the `msroots` file: the CA certificates the card itself
+  carries, and no file for a card that discloses none.
 - `ksp.rs` -- the CNG key storage provider for a paired phone, exported as
   `GetKeyStorageInterface` from the same DLL.
 - `ksp_codec.rs` -- the CNG key blob and signature encodings the provider
