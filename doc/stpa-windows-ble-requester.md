@@ -64,8 +64,16 @@ Downward arrows are control actions; the returns are feedback.
 | Withdraw from the phone when the user quits the agent | Agent, through the RAPP engine | Each open session's end, its `service_withdrawn` close written or its link failed, within the quit bound | Whether a close not written within the bound reached the phone |
 | Expire an idle pairing; record that a session is established | Agent (expiry), RAPP engine in every process that holds a session (session times) | The latest time a session to the pairing was established, kept in the stored record and read against the wall clock; the store's result for each write | A session another process holds, except through the times it records; the phone, which has been out of reach |
 | Read and write records | Pairing store (DPAPI-protected file) | The API's result | Whether a record it reports written is protected |
+| Propagate the root certificates of a card's `msroots` file into the user's `SmartCardRoot` store, part of `CurrentUser\Root` | Certificate Propagation Service (Windows), on the card module's answer | The card module's `msroots` file, or `SCARD_E_FILE_NOT_FOUND` | Who chose the certificates: a card is not a trust authority, and the file carries no purpose to narrow them to |
+| Remove the roots earlier builds had propagated | Installer custom action `RemoveCardRoots`, as `LocalSystem` | Each user's `SmartCardRoot` entries with the cards Windows recorded as propagating them, and each deletion's result | Profiles not loaded while it runs; a card whose authentication certificate already left the Personal store |
 
 ## 3. Unsafe control actions
+
+One hazard is this platform's own: **W-H-1**, the user's trust anchors are not
+the ones their owners chose. A card puts a certification authority among them,
+whose key then vouches for any web server the user's programs reach (L-4), or
+RefineID takes away one the Microsoft root update, an administrator or another
+program placed, and logins and connections that chain to it fail (L-3).
 
 | ID | Controller | Control action | Type | Context | Hazard |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -107,6 +115,9 @@ Downward arrows are control actions; the returns are feedback.
 | W-UCA-36 | Pairing store | Keep a card sighting or a revoked record | D | After its pairing left, or for longer than it bounds an offer or carries a notice: the plain file says which card was here and when, and the record names the phone (L-4). | H-6 |
 | W-UCA-37 | Card module | Ask the Base CSP for its global cache | P | For a holder's certificates: Microsoft documents a global cache keyed by the card and does not state whether it outlives the card or a restart, so the module cannot know what it leaves behind (L-4). | H-6 |
 | W-UCA-38 | GUI | Write a holder's face to the temp directory | P | At all: the file outlives the read, the program and the person (L-4). | H-6 |
+| W-UCA-39 | Card module | Serve the card's root and issuing CA as `msroots` | P | At all: Windows propagates them into `CurrentUser\Root`, trusted for every purpose including TLS server authentication, chosen by whichever card is inserted. | W-H-1 |
+| W-UCA-40 | Installer | Leave a root an earlier build had propagated | N | After the build that stops serving `msroots` is installed: the entry stays until the user signs out, and for good where Group Policy turns root clean-up off. | W-H-1 |
+| W-UCA-41 | Installer | Remove a root | P | When the Microsoft root update, an administrator, another program or another card module put it there, the same bytes included. | W-H-1 |
 
 ## 4. Loss scenarios
 
@@ -173,6 +184,8 @@ requirement; an empty cell records no state.
 | W-R-22 | At every sign-in `refineid-sweep`, started by the machine's `Run` value the installer writes and removes, loads the protected pairing set, which applies W-R-21, checks idle expiry when no agent holds a session, and removes every FINEID entry of a physical card from `CurrentUser\My` not seen for `CERTIFICATE_RETENTION_DAYS`. An entry is FINEID's only by its smart card provider, its Card Module container and DVV's object identifier arc in the certificate together; no other entry is touched. It runs once and exits; no service stays. | W-UCA-35 | | Decision logic and an in-memory store in tests of `refineid-windows-credential-store`. Propagation's writing of real entries and of their properties needs a card and is not yet observed. |
 | W-R-22 | The card module answers `CP_CARD_CACHE_MODE` with session-only, which the minidriver specification (v7.07, Cache Modes) describes as per-process and cleared when the card is removed or reinserted, and designs for read-only cards. The Base CSP and KSP keep no card file in the global cache keyed by the card. | W-UCA-37 | | Not yet run with a card. |
 | W-R-23 | A holder's face photo is held in memory and displayed from there; no file holds it, and the GUI removes at start any `refineid-photo` file left in the temp directory. | W-UCA-38 | | |
+| W-R-24 | The card module serves no `msroots`: `CardReadFile` and `CardGetFileInfo` answer `SCARD_E_FILE_NOT_FOUND` for `mscp\msroots` and `CardEnumFiles` does not list it, as the minidriver specification (v7.07) allows a read-only card and prescribes for a nonexistent file. No card CA reaches a Windows trust store through RefineID; the DVV roots come from the Microsoft Trusted Root Program and the issuing CA from the authentication certificate's Authority Information Access. Unlike Unix, where the PKCS#11 module presents the card's CAs to NSS only while the card is present and with trust records that limit them to TLS client authentication and e-mail, Windows has no record that narrows a propagated root's purposes. | W-UCA-39 | | Host test `mscp_has_no_roots_bundle` in `refineid-minidriver`. Not yet run with a card. |
+| W-R-25 | The driver package's `RemoveCardRoots` custom action runs as `LocalSystem` on install, repair, upgrade and uninstall and, in every loaded user profile, removes from `SmartCardRoot` an entry only when every card Windows recorded as propagating it (`CERT_SMART_CARD_ROOT_INFO_PROP_ID`) carries the `cardid` the card module derives from a FINEID authentication certificate in that user's Personal store. It never opens the user's own Root registry store, a machine store or `AuthRoot`, and a failure never fails the installation. No user process removes these entries: Windows lets only `SYSTEM` change them. | W-UCA-40, W-UCA-41 | | Decision and property parsing in host tests of `refineid-windows-credential-store` (`card_roots`). The property's layout, `cardid` then logon session per card, is Windows' undocumented one as read on two computers, where every recorded `cardid` matched the card module's. Deletion as `LocalSystem` through the registry provider observed on a test computer; denied to the user, elevated or not. The package's action is not yet run. |
 
 Residual, accepted (core STPA section 28): a session whose handshake is
 still in flight when the agent quits closes without a notice, as RAPP
@@ -232,6 +245,16 @@ when it has been:
    the message shown when the link was dropped on purpose (CC-51).
 
 ## 7. Open: what lies outside the store's reach
+
+**Card CAs propagated by earlier builds (W-R-25).** Removal reaches the
+profiles loaded while the package installs. A user who is signed out then
+has nothing propagated in a profile Windows cleaned at sign-out, which it
+does unless the machine policy "Configure root certificate clean-up" is set
+to keep roots; under that policy the entry stays until the package next
+installs while the user is signed in. The login sweep cannot remove one,
+since Windows lets only `SYSTEM` change what propagation wrote. An entry
+whose card's authentication certificate has already left the Personal store
+(W-R-22) cannot be told from another card module's and stays.
 
 **A computer on which no RefineID process runs.** The bounds of W-R-21 are
 applied by a RefineID process of the user. The login sweep (W-R-22) is that

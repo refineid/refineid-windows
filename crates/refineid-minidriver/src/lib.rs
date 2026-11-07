@@ -88,6 +88,8 @@
 #[cfg(windows)]
 mod card_driver;
 #[cfg(windows)]
+mod card_roots;
+#[cfg(windows)]
 mod cardmod;
 #[cfg(windows)]
 mod ffi;
@@ -100,8 +102,6 @@ mod ksp_verify;
 // Pure byte codecs: compiled on the host too so `cargo test` covers them.
 #[cfg(any(windows, test))]
 mod ksp_codec;
-#[cfg(windows)]
-mod msroots;
 #[cfg(all(windows, debug_assertions))]
 mod reported;
 #[cfg(windows)]
@@ -179,6 +179,8 @@ use refineid_lib_core::x509::{
 };
 #[cfg(windows)]
 use refineid_rapp_core::operations::{CardOperationResult, KeyProfile, SignatureAlgorithm};
+#[cfg(windows)]
+use refineid_windows_credential_store::card_certificates::CardId;
 #[cfg(windows)]
 use refineid_windows_credential_store::{ProtectedPairingStore, read_can};
 #[cfg(windows)]
@@ -527,12 +529,6 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
                 return SCARD_F_INTERNAL_ERROR;
             }
         };
-        if let Some(roots) =
-            refineid_lib_core::trust_roots::fetch_and_cache_from_card(&mut transport)
-        {
-            let bundle = roots.to_pkcs7_bundle();
-            msroots::set_root_certificates(bundle);
-        }
         (transport, auth_cert_der, signature_cert_der)
     };
 
@@ -739,7 +735,11 @@ const CARDAPPS_FILE: &str = "cardapps";
 /// `mscp` file: the container map.
 #[cfg(any(windows, test))]
 const CMAPFILE_FILE: &str = "cmapfile";
-/// `mscp` file: the trusted roots bundle.
+/// `mscp` file: the trusted roots bundle, which this card module never has.
+/// Windows propagates a card's `msroots` certificates into the user's Root
+/// store, trusted for every purpose; the DVV roots reach Windows through the
+/// Microsoft Trusted Root Program and the issuing CA through the
+/// authentication certificate's Authority Information Access.
 #[cfg(any(windows, test))]
 const MSROOTS_FILE: &str = "msroots";
 
@@ -758,8 +758,6 @@ enum CardFile {
     CardApps,
     /// `mscp/cmapfile`, the container map.
     CmapFile,
-    /// `mscp/msroots`, the trusted roots bundle.
-    MsRoots,
     /// A certificate file under `mscp`, named by its container.
     Container(String),
 }
@@ -777,11 +775,12 @@ enum NoSuchFile {
 #[cfg(any(windows, test))]
 impl CardFile {
     /// The file `directory` and `file` name. The root holds the three
-    /// card files; `mscp` holds the container map, the roots bundle
-    /// and one certificate file per container, and answers `cardcf`
-    /// too, as some callers ask for it there. Whether a container
-    /// file exists is the card model's to say, so a `Container` is any
-    /// other `mscp` name.
+    /// card files; `mscp` holds the container map and one certificate
+    /// file per container, and answers `cardcf` too, as some callers ask
+    /// for it there. It has no `msroots`, the one Base CSP file a
+    /// read-only card may lack (minidriver specification v7.07,
+    /// "Read-Only Cards"). Whether a container file exists is the card
+    /// model's to say, so a `Container` is any other `mscp` name.
     fn resolve(directory: Option<&str>, file: &str) -> Result<Self, NoSuchFile> {
         match directory {
             ROOT_DIRECTORY => match file {
@@ -792,7 +791,7 @@ impl CardFile {
             },
             Some(MSCP_DIRECTORY) => match file {
                 CMAPFILE_FILE => Ok(Self::CmapFile),
-                MSROOTS_FILE => Ok(Self::MsRoots),
+                MSROOTS_FILE => Err(NoSuchFile::File),
                 CARDCF_FILE => Ok(Self::CardCf),
                 other => Ok(Self::Container(other.to_owned())),
             },
@@ -820,7 +819,6 @@ fn card_file_bytes(card: &CardCapabilityModel, file: &CardFile) -> Option<Vec<u8
         CardFile::CardId => Some(synth_cardid(card.auth_cert_der().unwrap_or(&[]))),
         CardFile::CardApps => Some(synth_cardapps()),
         CardFile::CmapFile => Some(synth_cmapfile(card)),
-        CardFile::MsRoots => msroots::active_msroots_pkcs7_der().map(<[u8]>::to_vec),
         CardFile::Container(name) => container_file_bytes(card, name),
     }
 }
@@ -1394,11 +1392,9 @@ fn synth_cardcf() -> Vec<u8> {
 
 #[cfg(windows)]
 fn synth_cardid(auth_cert: &[u8]) -> Vec<u8> {
-    let mut seeded = Vec::with_capacity(64 + auth_cert.len());
-    seeded.extend_from_slice(b"refineid-card-id-v8-two-container-freshness");
-    seeded.extend_from_slice(auth_cert);
-    let h = Sha256::of(seeded);
-    h.as_bytes()[..16].to_vec()
+    CardId::of_authentication_certificate(auth_cert)
+        .as_bytes()
+        .to_vec()
 }
 
 #[cfg(windows)]
@@ -1655,8 +1651,6 @@ unsafe extern "system" fn CardEnumFiles(
                     v.push(0);
                 }
             }
-            v.extend_from_slice(MSROOTS_FILE.as_bytes());
-            v.push(0);
             v.push(0);
             v
         }
@@ -3473,14 +3467,10 @@ mod tests {
     }
 
     #[test]
-    fn mscp_holds_the_map_the_roots_and_container_files() {
+    fn mscp_holds_the_map_and_container_files() {
         assert_eq!(
             CardFile::resolve(Some("mscp"), "cmapfile"),
             Ok(CardFile::CmapFile)
-        );
-        assert_eq!(
-            CardFile::resolve(Some("mscp"), "msroots"),
-            Ok(CardFile::MsRoots)
         );
         assert_eq!(
             CardFile::resolve(Some("mscp"), "cardcf"),
@@ -3489,6 +3479,17 @@ mod tests {
         assert_eq!(
             CardFile::resolve(Some("mscp"), "kxc00"),
             Ok(CardFile::Container("kxc00".to_owned()))
+        );
+    }
+
+    /// No card CA reaches the user's Root store through this module:
+    /// `msroots` is a file the card does not have, and Windows propagates
+    /// nothing.
+    #[test]
+    fn mscp_has_no_roots_bundle() {
+        assert_eq!(
+            CardFile::resolve(Some("mscp"), "msroots"),
+            Err(NoSuchFile::File)
         );
     }
 

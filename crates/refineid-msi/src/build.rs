@@ -270,6 +270,9 @@ pub enum Schedule<'a> {
         /// The exported function that reverses the action.
         rollback_entry_point: &'a str,
     },
+    /// On install and repair, after the files are in place, with no undo:
+    /// an installation that rolls back leaves what the action did.
+    InstallWithoutUndo,
     /// On uninstall, before the files go.
     Uninstall,
 }
@@ -335,6 +338,16 @@ fn custom_action_rows<'a>(actions: &[CustomAction<'a>]) -> Vec<CustomActionRow<'
                     condition: FIRST_INSTALL_CONDITION,
                     sequence: next_install,
                 });
+                next_install += 1;
+                rows.push(CustomActionRow {
+                    action: action.name.to_owned(),
+                    kind: schema::CUSTOM_ACTION_INSTALLED_DLL_DEFERRED,
+                    entry_point: action.entry_point,
+                    condition: INSTALL_CONDITION,
+                    sequence: next_install,
+                });
+            }
+            Schedule::InstallWithoutUndo => {
                 next_install += 1;
                 rows.push(CustomActionRow {
                     action: action.name.to_owned(),
@@ -1113,6 +1126,25 @@ mod tests {
                     sequence: schema::UNINSTALL_ACTION_SEQUENCE + 1,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn an_install_action_without_undo_records_no_rollback() {
+        let actions = [CustomAction {
+            name: "Clean",
+            entry_point: "DoClean",
+            schedule: Schedule::InstallWithoutUndo,
+        }];
+        assert_eq!(
+            custom_action_rows(&actions),
+            [CustomActionRow {
+                action: "Clean".to_owned(),
+                kind: schema::CUSTOM_ACTION_INSTALLED_DLL_DEFERRED,
+                entry_point: "DoClean",
+                condition: INSTALL_CONDITION,
+                sequence: schema::INSTALL_ACTION_SEQUENCE + 1,
+            }]
         );
     }
 

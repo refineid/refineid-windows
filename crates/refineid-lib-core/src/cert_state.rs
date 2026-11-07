@@ -236,8 +236,7 @@ impl<'a> PathValidatedCert<'a> {
     }
 
     /// Label of the pinned trust anchor that proved the chain
-    /// (e.g. "DVV CA Generation 3 RSA"). Tier 0 `&'static str`
-    /// from a fixed compile-time set in `crate::trust_roots`.
+    /// (e.g. "DVV CA Generation 3 RSA"). Tier 0 `&'static str`.
     #[must_use]
     #[inline]
     pub const fn anchor_label(&self) -> &'static str {

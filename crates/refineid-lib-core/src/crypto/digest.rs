@@ -29,16 +29,15 @@
 //! - **By-construction hex `Display`.** Logs, reports, and the
 //!   `card.*.signer.fingerprint` field all render lowercase hex without
 //!   a per-site `hex::encode`. `Output<D>` has no such `Display`.
-//! - **`const` pin tables.** `trust_roots.rs` builds `const`
-//!   pinned-root / CSCA / ICAO fingerprint tables via `from_bytes`;
-//!   `Array` / `GenericArray` isn't const-constructible from a literal
-//!   array there.
+//! - **`const` construction.** `from_bytes` is a `const fn`, so a
+//!   digest can be a `const`; `Array` / `GenericArray` isn't
+//!   const-constructible from a literal array.
 //!
 //! The bytes themselves are *not* hand-rolled: [`Sha256::of`] /
 //! [`Sha384::of`] delegate to `RustCrypto` `sha2` (and [`Sha1::of`],
 //! [`Md5::of`] to `sha1`, `md-5`), whose one-shot `digest()` returns
 //! the ecosystem `Output<D>` we copy in. The wrapper adds only the
-//! name, the rendering, and the const table -- never a hash
+//! name, the rendering, and the const construction -- never a hash
 //! implementation. Every type comes from a single `digest_newtype!`
 //! definition so the shared surface can't drift. [`Sha1`] and [`Md5`]
 //! exist for the identifiers and lookup keys other software defines

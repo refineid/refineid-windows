@@ -104,14 +104,72 @@ modes verified locally and Edge completed client authentication. The supported
 resolution is a non-revoked authentication certificate/card. Do not work around
 this by disabling Firefox revocation checking.
 
+## No card CA
+
+The Card Module serves no `msroots` file. `CardReadFile` and `CardGetFileInfo`
+answer `SCARD_E_FILE_NOT_FOUND` for `mscp\msroots`, and `CardEnumFiles` does
+not list it. That is what Microsoft's smart card minidriver specification
+(v7.07) prescribes for a card without one: `msroots` is the one Base CSP file a
+read-only card need not have ("All expected Base CSP/KSP files, with the
+exception of the 'msroots' file [...] must exist on the read-only card",
+Developer Guidelines, Read-Only Cards), and "If *pszFileName* specifies a
+nonexistent file, **CardReadFile** should fail with SCARD\_E\_FILE\_NOT\_FOUND"
+(CardReadFile, Remarks).
+
+Why: the Certificate Propagation Service copies whatever `msroots` holds into
+the signed-in user's `SmartCardRoot` store, which is the `.SmartCard` physical
+store of `CurrentUser\Root` (Win32 "System Store Locations"), and Windows
+trusts a certificate there as a root for every purpose, TLS server
+authentication included. The file carries certificates and no properties
+("properties such as CODE\_SIGNING EKU are not propagated", Developer
+Guidelines, Interoperability with msroots), so a card cannot even narrow the
+purposes. A card is not a trust authority, so this module lets it choose no
+anchor. Chains still build without one: the DVV roots are in the Microsoft
+Trusted Root Program, which Windows fetches into `AuthRoot` when a chain needs
+them, and Windows fetches the issuing CA from the Authority Information Access
+of the authentication certificate, `http://proxy.fineid.fi/ca/dvvcqc4ec.crt`
+for the citizen CA `DVV Citizen Certificates - G4E`.
+
+Unix and Firefox differ. The PKCS#11 module presents the card's root
+(`EF.4334`) and issuing CA (`EF.4336`) to NSS only while the card is present,
+each with an NSS trust record that makes it an anchor for TLS client
+authentication and e-mail protection and for nothing else; a web server or a
+signed program chaining to it is no more trusted than before
+([refineid-pkcs11](../refineid-pkcs11/README.md) and refineid-core
+`crates/pkcs11/README.md`, "NSS trust records"). Windows has no such record for
+a propagated root.
+
+### What earlier builds left
+
+Builds that served `msroots` had Windows propagate the card's root and issuing
+CA. The driver package's `RemoveCardRoots` custom action removes them on
+install, repair, upgrade and uninstall (`card_roots.rs`,
+`refineid-windows-credential-store` `card_roots`). It opens only each user's
+`SmartCardRoot` store, never the user's own Root registry store, the machine's
+stores or `AuthRoot`, so a root the Microsoft root update or another program
+added stays, even with the same bytes. Within `SmartCardRoot` an entry goes only
+when every card Windows recorded as having propagated it
+(`CERT_SMART_CARD_ROOT_INFO_PROP_ID`: per card, the card module's `cardid` and
+the logon session) is a card this module identified, by the `cardid` it derives
+from a FINEID authentication certificate in the same user's Personal store.
+
+Windows writes each propagated entry under a registry key that only `SYSTEM`
+may change, so no process of the user can remove one; the custom action runs as
+`LocalSystem`, without impersonation, and reaches the profiles loaded while it
+runs. Microsoft documents a confirmation for no change to `SmartCardRoot`, and a
+removal as `LocalSystem` completes in a session with no desktop, where a dialog
+could not be answered. Unless the machine policy "Configure root certificate
+clean-up" says otherwise, Windows also removes propagated roots when the user
+signs out.
+
 ## Contents
 
 - `cardmod.rs` -- cardmod.h-shaped types, the card capability/container model,
   and the logical file system the Base CSP expects.
 - `ffi.rs` -- the Windows FFI declarations.
 - `transport.rs` -- SCard-handle transport with T=0 chaining.
-- `msroots.rs` -- the `msroots` file: the CA certificates the card itself
-  carries, and no file for a card that discloses none.
+- `card_roots.rs` -- the driver package's custom action that removes the
+  roots earlier builds had Windows propagate.
 - `ksp.rs` -- the CNG key storage provider for a paired phone, exported as
   `GetKeyStorageInterface` from the same DLL.
 - `ksp_codec.rs` -- the CNG key blob and signature encodings the provider
