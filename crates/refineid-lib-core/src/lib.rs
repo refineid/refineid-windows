@@ -16,7 +16,7 @@
 //! agnostic.
 //!
 //! Layered from the card edge upwards. The foundation modules
-//! ([`backend`], [`error`], [`transport`]) define the ports and
+//! ([`backend`], [`transport`]) define the ports and
 //! types every higher layer depends on. The crypto, protocol, and
 //! use-case layers (PACE, secure messaging, eMRTD, the
 //! `Session` verb API) land on top as they are ported.
