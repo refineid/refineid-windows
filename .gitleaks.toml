@@ -1,0 +1,14 @@
+# Copyright 2026 Petri Koistinen. SPDX-License-Identifier: Apache-2.0
+#
+# gitleaks configuration: the default rules, minus the published RAPP
+# test vectors, whose fields are example values of the protocol and
+# hold no secret.
+
+title = "refineid-windows"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "published protocol test vectors"
+paths = ['''^docs/protocol/vectors/.*\.json$''']
