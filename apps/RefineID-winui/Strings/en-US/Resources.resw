@@ -322,6 +322,9 @@
   <data name="DocumentSigned" xml:space="preserve">
     <value>Signed</value>
   </data>
+  <data name="SignedDevelopmentBuild" xml:space="preserve">
+    <value>Signed by a development build, below the level a release build requires</value>
+  </data>
   <data name="SignatureDidNotVerify" xml:space="preserve">
     <value>{0}: the signature did not verify</value>
   </data>

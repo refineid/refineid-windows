@@ -234,8 +234,17 @@ internal sealed partial class DocumentPage : Page
                         report.OutputPath,
                         report.OutputLength,
                         report.LocalVerify
-                    ) + (report.SignerCommonName is string signer ? $"\n{signer}" : string.Empty);
-                if (report.Verified)
+                    )
+                    + (report.SignerCommonName is string signer ? $"\n{signer}" : string.Empty)
+                    + (report.DevelopmentBuild is string below ? $"\n{below}" : string.Empty);
+                if (report.Verified && report.DevelopmentBuild is not null)
+                {
+                    this.ShowStatus(
+                        InfoBarSeverity.Informational,
+                        Strings.Get("SignedDevelopmentBuild")
+                    );
+                }
+                else if (report.Verified)
                 {
                     this.ShowStatus(InfoBarSeverity.Success, Strings.Get("DocumentSigned"));
                 }

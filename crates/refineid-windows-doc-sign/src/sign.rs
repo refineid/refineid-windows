@@ -23,6 +23,7 @@ use refineid_doc_sign::remote::PhoneSignOptions;
 use refineid_doc_sign::service::reader::{ReaderSignError, SignOptions};
 use refineid_doc_sign::service::{
     DEFAULT_TIMESTAMP_AUTHORITY, DocumentRequest, SignErrorKind, SignOutput, SignReport, SignSlot,
+    SigningBuild,
 };
 use refineid_doc_sign::signed_name::PendingSignedName;
 use refineid_doc_sign::x509::DateTime;
@@ -71,6 +72,12 @@ impl core::error::Error for DocumentSignError {}
 /// verification seal in `stamp_language`. `signer_anchors` are what
 /// [`crate::signer_anchors`] found on this computer; core refuses a
 /// long-term request that names none.
+///
+/// The request carries [`SigningBuild::THIS`]: a release build refuses
+/// a signature whose level cannot be reached and writes nothing; a
+/// development build writes the level it reached under a
+/// `-dev-<level>` name and says why in
+/// [`SignReport::below_requested_level`].
 #[must_use]
 pub fn document_request(
     format: Format,
@@ -94,6 +101,7 @@ pub fn document_request(
         signer_anchors,
         timestamp_authorities: vec![DEFAULT_TIMESTAMP_AUTHORITY.to_owned()],
         timestamp_credentials: None,
+        build: SigningBuild::THIS,
     }
 }
 
@@ -266,6 +274,21 @@ mod tests {
             "ASiC-E with XAdES has no archive construction"
         );
         assert!(xades.long_term);
+    }
+
+    #[test]
+    fn the_request_signs_by_this_builds_rule() {
+        let request = document_request(
+            Format::Pades,
+            None,
+            StampLanguage::for_windows_language(FINNISH_FINLAND),
+            SIGNING_TIME,
+            vec![ANCHOR.to_vec()],
+        );
+        #[cfg(debug_assertions)]
+        assert_eq!(request.build, SigningBuild::Development);
+        #[cfg(not(debug_assertions))]
+        assert_eq!(request.build, SigningBuild::Release);
     }
 
     #[test]

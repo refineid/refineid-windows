@@ -68,6 +68,10 @@ internal sealed class DocumentSignReport
 
     [JsonPropertyName("local_verify")]
     public string LocalVerify { get; init; } = string.Empty;
+
+    /// <summary>Set only when a development build saved the document below the level a release build requires: the level reached and why.</summary>
+    [JsonPropertyName("development_build")]
+    public string? DevelopmentBuild { get; init; }
 }
 
 /// <summary>Reader list result from settings FFI.</summary>
