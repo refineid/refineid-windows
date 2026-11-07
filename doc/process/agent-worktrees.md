@@ -53,6 +53,21 @@ resume work or clean up. In particular:
 `scripts/test-agent-housekeeping.sh` checks these verdicts in a throwaway
 repository.
 
+## Build artifacts and disk space
+
+Each worktree that compiles code maintains an independent `target/` directory,
+which across dozens of worktrees can exhaust disk space quickly.
+
+- `Cargo.toml` sets `debug = 1` for the `dev` profile (inherited by `test`).
+  This generates line number tables so panic backtraces (with `RUST_BACKTRACE=1`)
+  and test failures still identify exact source files and line numbers, while
+  omitting heavy type and variable debug information. If full variable inspection
+  in a debugger is ever needed, it can be overridden locally without modifying the
+  repository via `CARGO_PROFILE_DEV_DEBUG=2 cargo build` (or `cargo test`).
+- Inactive or blocked worktrees should have their `target/` directories pruned
+  (`rm -rf target/`) to keep disk space under control. Deleting `target/` loses
+  no work and no git state.
+
 ## Finishing a task
 
 1. Run the quality gates (`cargo fmt --all -- --check`,

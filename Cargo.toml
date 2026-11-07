@@ -117,6 +117,12 @@ pedantic = { level = "warn", priority = -1 }
 suboptimal_flops = { level = "allow", priority = 1 }
 unwrap_used = "deny"
 
+# Bounded debug info: keeps line tables for panic/test backtraces while
+# eliminating heavy type and variable debug info. Inherited by [profile.test].
+# See doc/process/agent-worktrees.md.
+[profile.dev]
+debug = 1
+
 [profile.release]
 opt-level = 3
 lto = "fat"
