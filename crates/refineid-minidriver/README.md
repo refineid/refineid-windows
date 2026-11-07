@@ -207,6 +207,15 @@ or the phone's card does not answer the operation (`card_error`, a failed
 operation and not the card's absence), and `SCARD_F_INTERNAL_ERROR` otherwise,
 the retry floor included.
 
+A qualified signature over the remote arm reaches the phone as `sign_document`.
+A Windows signing call hands the module a hash and no document, so the phone is
+told what this computer knows, in the user's Windows interface language: the
+program, known by its image's `FileDescription` (else its file stem), the
+computer, and that the program did not name the document, for example
+"Microsoft Word on work-laptop asks for a signature (the program did not name
+the document)" (RAPP section 9.3, Windows STPA W-R-20). The RefineID app signs
+documents itself and sends their file names.
+
 ## Public build and development install
 
 From the repository root:

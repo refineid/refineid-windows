@@ -144,7 +144,7 @@ use cardmod::{CardCapabilityModel, CardModel, ContainerDescriptor, Ctx, KeyAlgor
 )]
 use ffi::*;
 #[cfg(windows)]
-use refineid_agent_pipe::identity::{ProcessIdentity, computer_name};
+use refineid_agent_pipe::identity::{calling_program, computer_name, interface_language};
 #[cfg(windows)]
 use refineid_agent_pipe::{RemoteKey, in_process_operation};
 #[cfg(windows)]
@@ -2076,27 +2076,23 @@ unsafe extern "system" fn CardSignData(
         } else {
             RemoteKey::Authentication
         };
-        let image = match ProcessIdentity::current() {
-            Ok(identity) => identity.image,
-            Err(err) => {
-                refineid_dev_errors::report!(CardModule, "remote signature refused", err);
-                return SCARD_F_INTERNAL_ERROR;
-            }
+        let Some(program) = calling_program() else {
+            refineid_dev_errors::report!(
+                CardModule,
+                "remote signature refused",
+                "the calling program has no image name"
+            );
+            return SCARD_E_UNSUPPORTED_FEATURE;
         };
-        let operation = match in_process_operation(
+        let operation = in_process_operation(
             key,
-            &image,
+            &program,
             &computer_name(),
+            interface_language(),
             key_profile,
             algorithm,
             in_bytes.to_vec(),
-        ) {
-            Ok(operation) => operation,
-            Err(refusal) => {
-                refineid_dev_errors::report!(CardModule, "remote signature refused", refusal);
-                return SCARD_E_UNSUPPORTED_FEATURE;
-            }
-        };
+        );
 
         let remote_tx = RemoteCardTransport::new(atr, pair_id);
         let result = match remote_tx.execute_operation(&operation) {

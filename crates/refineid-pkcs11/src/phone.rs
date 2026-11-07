@@ -23,7 +23,7 @@
 
 use core::time::Duration;
 
-use refineid_agent_pipe::identity::{ProcessIdentity, computer_name};
+use refineid_agent_pipe::identity::{calling_program, computer_name, interface_language};
 use refineid_agent_pipe::{RemoteKey, in_process_operation};
 use refineid_pkcs11::remote::{
     RemoteOffer, RemoteSignError, RemoteTokenSource, SessionCertificate,
@@ -124,18 +124,16 @@ fn run_signature(
         .ok()
         .and_then(PairingRecord::serving_record)
         .ok_or(RemoteSignError::Withdrawn)?;
-    let image = ProcessIdentity::current()
-        .map_err(|_| RemoteSignError::Unsupported)?
-        .image;
+    let program = calling_program().ok_or(RemoteSignError::Unsupported)?;
     let operation = in_process_operation(
         RemoteKey::Authentication,
-        &image,
+        &program,
         &computer_name(),
+        interface_language(),
         key_profile(request.key_profile()),
         signature_algorithm(request.algorithm()),
         request.digest().to_vec(),
-    )
-    .map_err(|_| RemoteSignError::Unsupported)?;
+    );
     let transport = dial_session(keys, &[], BROWSE_WINDOW, DialCause::ConsumerRequest)
         .map_err(|_| RemoteSignError::Unreachable)?;
     let mut requester = Requester::new(RequesterConfig::this_computer(), store);

@@ -26,6 +26,9 @@ use std::time::Duration;
 
 use refineid_rapp_core::operations::{CardOperation, KeyProfile, SignatureAlgorithm};
 
+use crate::calling_program::{CallingProgram, InterfaceLanguage, unnamed_document_description};
+
+pub mod calling_program;
 pub mod wire;
 
 #[cfg(windows)]
@@ -171,57 +174,40 @@ pub enum RemoteKey {
     QualifiedSignature,
 }
 
-/// Why a provider inside the calling program asks the phone for nothing.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RemoteRefusal {
-    /// The signature needs a document's name, and a platform signing call
-    /// carries only a hash (RAPP section 9.3, section 11 item 1).
-    UnnamedDocument,
-    /// Windows reported an image path that names no file (W-R-10).
-    UnnamedProgram,
-}
-
-impl core::fmt::Display for RemoteRefusal {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter.write_str(match self {
-            Self::UnnamedDocument => "the signing call names no document",
-            Self::UnnamedProgram => "the calling program has no image name",
-        })
-    }
-}
-
-impl core::error::Error for RemoteRefusal {}
-
-/// The operation a provider running inside the calling program sends for a
-/// hash it was handed (W-R-10, W-R-20).
+/// The operation a provider running inside the calling `program` sends for
+/// a hash it was handed (W-R-10, W-R-20).
 ///
-/// The context carries the image's file name and the computer. No directory
-/// is trusted for a product name, because this process's environment belongs
-/// to the program being named.
-///
-/// # Errors
-/// [`RemoteRefusal::UnnamedDocument`] for the qualified key: `document_name`
-/// is what the holder consents under and RAPP has no form for a document
-/// without one. [`RemoteRefusal::UnnamedProgram`] when `image` names no file.
+/// An authentication's context carries the image's file name and the
+/// computer; no directory is trusted for a product name, because this
+/// process's environment belongs to the program being named. A qualified
+/// signature carries, as its `document_name`, the description RAPP
+/// v26.11.2 section 9.3 prescribes when the program names no document,
+/// in the computer's interface `language`: a platform signing call carries
+/// only a hash.
+#[must_use]
 pub fn in_process_operation(
     key: RemoteKey,
-    image: &Path,
+    program: &CallingProgram,
     computer: &str,
+    language: InterfaceLanguage,
     key_profile: KeyProfile,
     algorithm: SignatureAlgorithm,
     digest: Vec<u8>,
-) -> Result<CardOperation, RemoteRefusal> {
+) -> CardOperation {
     match key {
-        RemoteKey::QualifiedSignature => Err(RemoteRefusal::UnnamedDocument),
-        RemoteKey::Authentication => {
-            let program = program_label_within(image, &[]).ok_or(RemoteRefusal::UnnamedProgram)?;
-            Ok(CardOperation::BrowserAuthenticate {
-                origin: requester_context(&program, computer),
-                key_profile,
-                algorithm,
-                digest,
-            })
-        }
+        RemoteKey::QualifiedSignature => CardOperation::SignDocument {
+            document_name: unnamed_document_description(program, computer, language),
+            contained_files: None,
+            key_profile,
+            algorithm,
+            digest,
+        },
+        RemoteKey::Authentication => CardOperation::BrowserAuthenticate {
+            origin: requester_context(program.file_name(), computer),
+            key_profile,
+            algorithm,
+            digest,
+        },
     }
 }
 
@@ -311,11 +297,14 @@ mod tests {
     const COMPUTER: &str = "EXAMPLE-HOST";
     const DIGEST: &[u8] = b"a digest of thirty-two bytes ...";
 
-    fn in_process(key: RemoteKey, image: &str) -> Result<CardOperation, RemoteRefusal> {
+    fn in_process(key: RemoteKey, image: &str) -> CardOperation {
+        let program = CallingProgram::of_image(Path::new(image), Some("Microsoft Edge"))
+            .expect("the image names a file");
         in_process_operation(
             key,
-            Path::new(image),
+            &program,
             COMPUTER,
+            InterfaceLanguage::English,
             KeyProfile::EcdsaP384,
             SignatureAlgorithm::EcdsaSha256,
             DIGEST.to_vec(),
@@ -324,8 +313,19 @@ mod tests {
 
     fn authentication_context(image: &str) -> String {
         match in_process(RemoteKey::Authentication, image) {
-            Ok(CardOperation::BrowserAuthenticate { origin, .. }) => origin,
+            CardOperation::BrowserAuthenticate { origin, .. } => origin,
             other => panic!("not an authentication: {other:?}"),
+        }
+    }
+
+    fn signed_document_name(image: &str) -> String {
+        match in_process(RemoteKey::QualifiedSignature, image) {
+            CardOperation::SignDocument {
+                document_name,
+                contained_files: None,
+                ..
+            } => document_name,
+            other => panic!("not a single document's signature: {other:?}"),
         }
     }
 
@@ -367,18 +367,10 @@ mod tests {
     }
 
     #[test]
-    fn a_qualified_signature_from_a_signing_call_is_refused() {
+    fn a_qualified_signature_from_a_signing_call_says_no_document_was_named() {
         assert_eq!(
-            in_process(RemoteKey::QualifiedSignature, EDGE_IMAGE),
-            Err(RemoteRefusal::UnnamedDocument)
-        );
-    }
-
-    #[test]
-    fn a_program_with_no_name_is_refused_and_not_described() {
-        assert_eq!(
-            in_process(RemoteKey::Authentication, ""),
-            Err(RemoteRefusal::UnnamedProgram)
+            signed_document_name(EDGE_IMAGE),
+            "Microsoft Edge on EXAMPLE-HOST asks for a signature (the program did not name the document)"
         );
     }
 
@@ -391,8 +383,8 @@ mod tests {
             let context = authentication_context(r"C:\Tools\signer.exe");
             assert_eq!(context, "signer.exe on EXAMPLE-HOST");
             assert_eq!(
-                in_process(RemoteKey::QualifiedSignature, EDGE_IMAGE),
-                Err(RemoteRefusal::UnnamedDocument)
+                signed_document_name(EDGE_IMAGE),
+                "Microsoft Edge on EXAMPLE-HOST asks for a signature (the program did not name the document)"
             );
             return;
         }
