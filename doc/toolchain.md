@@ -10,15 +10,14 @@ Set up a Windows 11 development machine from nothing, with no Git, no Rust and
 no Visual Studio. Run every step at the machine's desktop in a normal
 (non-elevated) PowerShell, with someone there to answer the prompts:
 
-- `winget` refuses to start in an SSH logon (`Access is denied`), because that
-  logon has no desktop session; the script stops with this message there. To
-  drive a machine remotely, run the steps in the logged-on user's session,
-  through a temporary scheduled task with `/IT`.
 - The machine-wide installers each ask for User Account Control consent on the
   desktop: Git, the GitHub CLI, the Visual Studio Build Tools, .NET, and the
   Visual Studio Installer. A prompt nobody answers ends as a declined install
   (`You cancelled the installation`, `winget` exit code `-1978334964`); rerun
   the step.
+- `winget` refuses to start in an SSH logon (`Access is denied`), because that
+  logon has no desktop session, and the script stops with this message there.
+  See [Without anyone at the desktop](#without-anyone-at-the-desktop).
 
 1. Install Git, then open a new PowerShell so `PATH` has it:
 
@@ -61,6 +60,30 @@ Visual Studio Installer for:
 - `core.hooksPath` set to `.githooks`.
 
 Open a new terminal afterwards so the updated `PATH` applies.
+
+### Without anyone at the desktop
+
+With the owner's permission to elevate on that machine, and a user logged on at
+its desktop, run the two parts of the script separately. Each runs in the
+logged-on session through a temporary scheduled task with `/IT`. Only
+`-Part MachineWide` runs elevated (`/RL HIGHEST`), which answers its prompts
+without a person; `-Part User`, the rest, needs no elevation and does not get
+it. Give each task a small `.cmd` that changes to the checkout and writes the
+script's output to a file, since the task has no console to read:
+
+```powershell
+schtasks /Create /TN refineid-setup /TR <cmd> /SC ONCE /ST 23:59 /IT /RL HIGHEST /F
+schtasks /Run /TN refineid-setup
+# once the output file ends, with the task's work done:
+schtasks /Delete /TN refineid-setup /F
+```
+
+Install Git the same way, with the `winget install` of step 1 in the elevated
+task and `--accept-package-agreements --accept-source-agreements
+--disable-interactivity` added. Then run `-Part User` in a task without
+`/RL HIGHEST`. Builds and tests need no desktop session and run over SSH, apart
+from tests of the Windows Credential Manager, which need the desktop session's
+logon.
 
 ### Line endings
 
