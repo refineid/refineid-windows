@@ -486,8 +486,8 @@ unsafe extern "C" fn c_get_token_info(slot_id: CkSlotId, info: CkTokenInfoPtr) -
 ///
 /// The string matches the Apple `TokenExtension` localisation key:
 ///   English  "Basic PIN 1"
-///   Finnish  "Perus-PIN 1"
-///   Swedish  "Bas-PIN 1"
+///   Finnish  "Perustunnusluku 1"
+///   Swedish  "Grund PIN 1"
 const TOKEN_LABEL_IDENTIFY: &str = "Basic PIN 1";
 /// Fixed token label for a card served by a paired phone, which
 /// verifies PIN 1 itself: NSS shows no PIN prompt for it, and the
