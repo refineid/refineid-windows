@@ -95,13 +95,17 @@ its ProductCode, a fresh one or an upgrade, the package removes:
 
 The Card Module is loaded by every process that uses a card or the key
 storage provider (browsers, `lsass`, `certutil`). Windows Installer cannot
-delete a loaded DLL; it moves it aside and deletes it when Windows restarts
-(the standard `PendingFileRenameOperations` mechanism), and installs the new
-file in its place at once. The new module is used by every process started
-after the installation; a process that had the old one loaded keeps it
-until it exits. In that case `msiexec` ends with 3010 (restart required),
-and a full-UI installation asks for a restart. The development installer
-does the same with `MoveFileEx(MOVEFILE_DELAY_UNTIL_REBOOT)` and says so.
+delete a loaded DLL. It moves the old copy to `C:\Config.Msi\<name>.rbf`,
+installs the new file in its place at once, and deletes the moved copy when
+Windows restarts (`PendingFileRenameOperations`, log message 1903). Every
+process started after the installation loads the new module; a process
+that had the old one loaded keeps it until it exits. The installation
+still reports success (exit code 0): nothing of the new build waits for
+the restart. Windows Installer's Restart Manager may also close and
+restart applications in the installing session that hold a file the
+package replaces. The development installer renames a loaded copy beside
+itself and deletes it at restart with
+`MoveFileEx(MOVEFILE_DELAY_UNTIL_REBOOT)`, and says so.
 
 ## Per-user state
 
