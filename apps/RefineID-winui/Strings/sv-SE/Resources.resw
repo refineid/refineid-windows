@@ -303,6 +303,9 @@
   <data name="SignatureValid" xml:space="preserve">
     <value>Giltig</value>
   </data>
+  <data name="SignatureIndeterminate" xml:space="preserve">
+    <value>Ej bekräftad</value>
+  </data>
   <data name="SignatureInvalid" xml:space="preserve">
     <value>Ogiltig</value>
   </data>

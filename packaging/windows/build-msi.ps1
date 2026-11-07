@@ -140,8 +140,8 @@ New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 
 foreach ($arch in $Architecture) {
     $rustTarget = $rustTargets[$arch]
-    Write-Host "Building refineid_minidriver.dll for $rustTarget"
-    & cargo build --manifest-path $manifest --locked --release --package refineid-minidriver --target $rustTarget
+    Write-Host "Building refineid_minidriver.dll and refineid-agent.exe for $rustTarget"
+    & cargo build --manifest-path $manifest --locked --release --package refineid-minidriver --package refineid-agent --target $rustTarget
     if ($LASTEXITCODE -ne 0) {
         throw "cargo build failed for $rustTarget."
     }
@@ -151,10 +151,16 @@ foreach ($arch in $Architecture) {
         throw "Expected the built Card Module at '$dll'."
     }
 
-    # Sign the DLL before packaging so the MSI carries the signed image.
-    # Signing the package afterwards would leave the loaded binary bare.
+    $agent = Join-Path $repositoryRoot "target\$rustTarget\release\refineid-agent.exe"
+    if (-not (Test-Path -LiteralPath $agent)) {
+        throw "Expected the built agent at '$agent'."
+    }
+
+    # Sign the binaries before packaging so the MSI carries the signed images.
+    # Signing the package afterwards would leave the loaded binaries bare.
     if ($signTool) {
         Invoke-Signing $signTool $dll
+        Invoke-Signing $signTool $agent
     }
 
     $msi = Join-Path $OutputDirectory "RefineID.CardDriver-$productVersion-$arch.msi"
@@ -162,6 +168,7 @@ foreach ($arch in $Architecture) {
     & cargo run --manifest-path $manifest --locked --quiet --package refineid-msi -- `
         --architecture $arch `
         --minidriver $dll `
+        --agent $agent `
         --output $msi `
         --version $productVersion
     if ($LASTEXITCODE -ne 0) {

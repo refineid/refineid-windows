@@ -8,7 +8,9 @@
 //! first instance of its name, grants the current user alone, refuses remote
 //! clients, and serves a client only when Windows reports it running as the
 //! same user in the same Windows session. The provider in turn talks only to a
-//! server Windows reports the same way.
+//! server Windows reports the same way, whose image is the installed agent:
+//! a same-user process that creates the pipe first is refused before it
+//! receives anything.
 //!
 //! [`wire`] is the safe message codec and builds on any host. The Windows
 //! system calls, and the only `unsafe` code here, are in the
@@ -32,6 +34,26 @@ pub mod client;
 pub mod identity;
 #[cfg(windows)]
 pub mod server;
+
+/// The agent's directory under Program Files, as the installer lays it out.
+pub const PRODUCT_DIRECTORY_NAME: &str = "RefineID";
+/// The agent's file name, as the installer lays it out.
+pub const AGENT_IMAGE_NAME: &str = "refineid-agent.exe";
+
+/// Whether `image`, the path Windows reports for a process, is `installed`.
+///
+/// Paths are compared component by component, ignoring case and accepting
+/// `\\` and `/` as separators; a path with a `..` component is neither.
+#[must_use]
+pub fn is_same_image(image: &Path, installed: &Path) -> bool {
+    match (
+        path_components(&image.to_string_lossy()),
+        path_components(&installed.to_string_lossy()),
+    ) {
+        (Some(image), Some(installed)) => !installed.is_empty() && image == installed,
+        _ => false,
+    }
+}
 
 /// The pipe name prefix; the user's SID and Windows session complete it,
 /// so each user's agent in each session has its own name.
@@ -58,28 +80,20 @@ pub const SIGNATURE_DEADLINE: Duration = Duration::from_secs(
     REACH_WINDOW.as_secs() + OPERATION_LIFETIME.as_secs() + TRANSFER_MARGIN.as_secs(),
 );
 
-/// The environment variables that name the Program Files directories,
-/// which only administrators can write to on a default Windows install.
-pub const PROGRAM_DIRECTORY_VARIABLES: [&str; 3] =
-    ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"];
-
 /// The label the operation context carries for a program, or `None` when its
 /// image path names no file.
 ///
 /// A product name for the browsers people use when their image lies under
-/// a Program Files directory this process's environment names
-/// ([`PROGRAM_DIRECTORY_VARIABLES`]), otherwise the image's file name.
-/// The context says what asks, not where the request goes, because CNG
-/// does not tell a key storage provider the site. Only a process apart from
-/// the caller reads this: inside the caller the environment is the caller's,
-/// so [`in_process_operation`] trusts no directory.
+/// a Program Files directory Windows reports
+/// ([`identity::program_directories`]), which only administrators can write
+/// to on a default Windows install; otherwise the image's file name, so a
+/// same-user program named `msedge.exe` elsewhere shows as that file and not
+/// as Microsoft Edge. The context says what asks, not where the request
+/// goes, because CNG does not tell a key storage provider the site.
+#[cfg(windows)]
 #[must_use]
 pub fn program_label(image: &Path) -> Option<String> {
-    let roots: Vec<String> = PROGRAM_DIRECTORY_VARIABLES
-        .iter()
-        .filter_map(|variable| std::env::var(variable).ok())
-        .collect();
-    program_label_within(image, &roots)
+    program_label_within(image, &identity::program_directories())
 }
 
 /// The label the operation context carries for a program whose image is
@@ -230,7 +244,7 @@ pub enum PipeError {
     /// Another agent already serves this user (W-R-15).
     AgentRunning,
     /// The process at the other end runs as another user or in another
-    /// session.
+    /// session, or, seen from the provider, is not the installed agent.
     Stranger,
     /// The other end did not answer in time.
     TimedOut,
@@ -313,6 +327,27 @@ mod tests {
             Ok(CardOperation::BrowserAuthenticate { origin, .. }) => origin,
             other => panic!("not an authentication: {other:?}"),
         }
+    }
+
+    #[test]
+    fn only_the_installed_image_is_the_agent() {
+        let installed = Path::new(r"C:\Program Files\RefineID\refineid-agent.exe");
+        assert!(is_same_image(installed, installed));
+        assert!(is_same_image(
+            Path::new(r"c:/program files/REFINEID/Refineid-Agent.EXE"),
+            installed
+        ));
+        for other in [
+            r"C:\Users\someone\AppData\Local\Temp\refineid-agent.exe",
+            r"C:\Program Files\RefineID\other.exe",
+            r"C:\Program Files\RefineID\..\RefineID\refineid-agent.exe",
+            r"C:\Program Files\RefineID",
+            "refineid-agent.exe",
+            "",
+        ] {
+            assert!(!is_same_image(Path::new(other), installed), "{other}");
+        }
+        assert!(!is_same_image(Path::new(""), Path::new("")));
     }
 
     #[test]

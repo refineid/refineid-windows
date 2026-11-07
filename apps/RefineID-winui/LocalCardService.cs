@@ -33,6 +33,10 @@ internal static partial class LocalCardService
     [LibraryImport(Library, EntryPoint = "refineid_settings_present_readers")]
     private static partial nint PresentReadersNative();
 
+    [LibraryImport(Library, EntryPoint = "refineid_settings_card_in_a_reader")]
+    [return: MarshalAs(UnmanagedType.U1)]
+    private static partial bool CardInAReaderNative();
+
     [LibraryImport(Library, EntryPoint = "refineid_settings_detect_local_card_support")]
     private static partial nint DetectLocalCardSupportNative();
 
@@ -129,18 +133,18 @@ internal static partial class LocalCardService
         );
     }
 
-    /// <summary>Signs a document with the qualified signature key of the card in the attached reader, under PIN 2; a PDF carries the verification stamp in the user's interface language.</summary>
+    /// <summary>Signs a document with the card's qualified signature key: the card in the attached reader under the PIN 2 given, or the card on the paired phone when no reader holds one, the phone asking for PIN 2 itself; a PDF carries the verification stamp in the user's interface language.</summary>
     /// <exception cref="NativeRappException">The card or the service refused.</exception>
     /// <exception cref="JsonException">The service reply was malformed.</exception>
     internal static DocumentSignReport SignDocument(
         string path,
         DocumentFormat format,
-        string pin,
+        string? pin,
         string reason
     )
     {
         byte[] pathBytes = Encoding.UTF8.GetBytes(path);
-        byte[] pinBytes = Encoding.UTF8.GetBytes(pin);
+        byte[] pinBytes = pin is null ? [] : Encoding.UTF8.GetBytes(pin);
         byte[] reasonBytes = Encoding.UTF8.GetBytes(reason);
         try
         {
@@ -164,6 +168,9 @@ internal static partial class LocalCardService
             Zero(pinBytes);
         }
     }
+
+    /// <summary>Whether a reader here holds a card, so the document signs under the PIN 2 typed here rather than on the paired phone.</summary>
+    internal static bool CardInAReader() => CardInAReaderNative();
 
     /// <summary>Lists the readers that currently hold a card; empty on failure.</summary>
     internal static IReadOnlyList<string> PresentReaders()

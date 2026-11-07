@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use refineid_agent_pipe::identity::computer_name;
 use refineid_agent_pipe::server::{AgentLock, PipeServer};
-use refineid_agent_pipe::wire::{SignAnswer, SignRequest};
+use refineid_agent_pipe::wire::{AgentRequest, KeyAnswer, SignAnswer, SignRequest};
 use refineid_agent_pipe::{
     OPERATION_LIFETIME, PipeError, REACH_WINDOW, SIGNATURE_DEADLINE, program_label,
     requester_context,
@@ -159,7 +159,13 @@ pub fn run() -> ExitCode {
         };
         let program = program_label(&client.identity().image);
         let answer = match client.request() {
-            Ok(request) => program.map_or_else(
+            Ok(AgentRequest::UsableKey) => {
+                if let Err(error) = client.answer_key(&usable_key()) {
+                    report_pipe!("key answer not delivered", error);
+                }
+                continue;
+            }
+            Ok(AgentRequest::Sign(request)) => program.map_or_else(
                 || {
                     refineid_dev_errors::report!(
                         Agent,
@@ -182,6 +188,28 @@ pub fn run() -> ExitCode {
             report_pipe!("signature answer not delivered", error);
         }
     }
+}
+
+/// What the agent offers the provider: the store's usable pairing, the one
+/// it serves, and that pairing's public certificate. The provider holds no
+/// store and learns nothing else of it (W-R-14).
+fn usable_key() -> KeyAnswer {
+    let store = match ProtectedPairingStore::load() {
+        Ok(store) => store,
+        Err(error) => {
+            refineid_dev_errors::report!(Agent, "pairing store not loaded", error);
+            return KeyAnswer::NoKey;
+        }
+    };
+    store
+        .usable_pairing()
+        .and_then(|record| {
+            Some(KeyAnswer::Key {
+                pair_id: record.pair_id(),
+                certificate: record.authentication_certificate()?.as_der().to_vec(),
+            })
+        })
+        .unwrap_or(KeyAnswer::NoKey)
 }
 
 /// Hands one request to the phone's thread and waits for its answer.

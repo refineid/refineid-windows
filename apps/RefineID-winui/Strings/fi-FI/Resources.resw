@@ -303,6 +303,9 @@
   <data name="SignatureValid" xml:space="preserve">
     <value>Kelvollinen</value>
   </data>
+  <data name="SignatureIndeterminate" xml:space="preserve">
+    <value>Ei varmistettu</value>
+  </data>
   <data name="SignatureInvalid" xml:space="preserve">
     <value>Virheellinen</value>
   </data>

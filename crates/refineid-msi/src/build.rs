@@ -26,6 +26,16 @@ use crate::schema;
 const CABINET_NAME: &str = "payload.cab";
 /// Component holding the Card Module itself.
 const COMPONENT_FILE: &str = "MinidriverDll";
+/// The component holding the per-user agent.
+const COMPONENT_AGENT: &str = "AgentExe";
+/// The Program Files directory of the machine's own architecture.
+const PROGRAM_FILES_DIRECTORY: &str = "ProgramFiles64Folder";
+/// The product's directory under Program Files; only administrators write
+/// there, which is what the key storage provider's image check rests on.
+const PRODUCT_DIRECTORY: &str = "RefineIDFolder";
+/// The product directory's name on disk: the provider's
+/// `refineid_agent_pipe::identity::installed_agent_image` looks here.
+const PRODUCT_DIRECTORY_NAME: &str = "RefineID";
 /// Component holding the card registrations.
 const COMPONENT_REGISTRY: &str = "CardRegistration";
 /// The package's single feature.
@@ -352,6 +362,8 @@ pub struct Package<'a> {
     pub architecture: Architecture,
     /// The Card Module.
     pub file: SystemFile<'a>,
+    /// The per-user agent, installed under Program Files.
+    pub agent: SystemFile<'a>,
     /// Registry values binding the module to supported cards.
     pub registry: &'a [RegistryValue<'a>],
     /// Entry points of the module the installer calls.
@@ -508,17 +520,22 @@ pub fn build(package: &Package<'_>, output: &Path, scratch: &Path) -> Result<(),
             "the package must register at least one card, or nothing binds the module".to_owned(),
         ));
     }
-    let payload = std::fs::metadata(package.file.source)?;
-    let payload_size = i32::try_from(payload.len())
-        .map_err(|_| BuildError::Invalid("the payload exceeds 2 GiB".to_owned()))?;
+    let payload_size = file_size(package.file.source)?;
+    let agent_size = file_size(package.agent.source)?;
 
     let cabinet = cabinet::build(
         scratch,
         CABINET_NAME,
-        &[Member {
-            source: package.file.source,
-            key: package.file.key,
-        }],
+        &[
+            Member {
+                source: package.file.source,
+                key: package.file.key,
+            },
+            Member {
+                source: package.agent.source,
+                key: package.agent.key,
+            },
+        ],
     )?;
 
     let product_code = package
@@ -554,7 +571,7 @@ pub fn build(package: &Package<'_>, output: &Path, scratch: &Path) -> Result<(),
         &upgrade_code,
     )?;
     write_layout(&database, package)?;
-    write_payload(&database, package, &cabinet, payload_size)?;
+    write_payload(&database, package, &cabinet, payload_size, agent_size)?;
     write_registry(&database, package)?;
 
     write_custom_actions(&database, package)?;
@@ -616,7 +633,8 @@ fn write_identity(
 }
 
 /// Writes the directory, component, and feature rows the payload hangs from.
-fn write_layout(database: &Database, package: &Package<'_>) -> Result<(), BuildError> {
+/// The directories the package installs into.
+fn write_directories(database: &Database) -> Result<(), BuildError> {
     let directory_sql =
         "INSERT INTO `Directory` (`Directory`,`Directory_Parent`,`DefaultDir`) VALUES (?,?,?)";
     insert(
@@ -637,8 +655,32 @@ fn write_layout(database: &Database, package: &Package<'_>) -> Result<(), BuildE
             Value::Text("."),
         ],
     )?;
+    insert(
+        database,
+        directory_sql,
+        &[
+            Value::Text(PROGRAM_FILES_DIRECTORY),
+            Value::Text("TARGETDIR"),
+            Value::Text("."),
+        ],
+    )?;
+    insert(
+        database,
+        directory_sql,
+        &[
+            Value::Text(PRODUCT_DIRECTORY),
+            Value::Text(PROGRAM_FILES_DIRECTORY),
+            Value::Text(PRODUCT_DIRECTORY_NAME),
+        ],
+    )?;
+    Ok(())
+}
+
+fn write_layout(database: &Database, package: &Package<'_>) -> Result<(), BuildError> {
+    write_directories(database)?;
 
     let file_component_id = package.upgrade_code.derive(COMPONENT_FILE).to_string();
+    let agent_component_id = package.upgrade_code.derive(COMPONENT_AGENT).to_string();
     let registry_component_id = package.upgrade_code.derive(COMPONENT_REGISTRY).to_string();
     let first_registry_key = registry_identifier(0);
     let component_sql = "INSERT INTO `Component` \
@@ -654,6 +696,18 @@ fn write_layout(database: &Database, package: &Package<'_>) -> Result<(), BuildE
             Value::Integer(schema::COMPONENT_64BIT),
             Value::Text(""),
             Value::Text(package.file.key),
+        ],
+    )?;
+    insert(
+        database,
+        component_sql,
+        &[
+            Value::Text(COMPONENT_AGENT),
+            Value::Text(&agent_component_id),
+            Value::Text(PRODUCT_DIRECTORY),
+            Value::Integer(schema::COMPONENT_64BIT),
+            Value::Text(""),
+            Value::Text(package.agent.key),
         ],
     )?;
     insert(
@@ -685,7 +739,7 @@ fn write_layout(database: &Database, package: &Package<'_>) -> Result<(), BuildE
             Value::Integer(0),
         ],
     )?;
-    for component in [COMPONENT_FILE, COMPONENT_REGISTRY] {
+    for component in [COMPONENT_FILE, COMPONENT_AGENT, COMPONENT_REGISTRY] {
         insert(
             database,
             "INSERT INTO `FeatureComponents` (`Feature_`,`Component_`) VALUES (?,?)",
@@ -695,30 +749,47 @@ fn write_layout(database: &Database, package: &Package<'_>) -> Result<(), BuildE
     Ok(())
 }
 
-/// Writes the file row and embeds the cabinet that carries it.
+/// The Card Module's place in the cabinet.
+const SEQUENCE_MODULE: i32 = 1;
+/// The agent's place in the cabinet, the last.
+const SEQUENCE_AGENT: i32 = 2;
+
+/// The size of the payload file at `path`.
+fn file_size(path: &Path) -> Result<i32, BuildError> {
+    i32::try_from(std::fs::metadata(path)?.len())
+        .map_err(|_| BuildError::Invalid("the payload exceeds 2 GiB".to_owned()))
+}
+
+/// Writes the file rows and embeds the cabinet that carries them.
 fn write_payload(
     database: &Database,
     package: &Package<'_>,
     cabinet: &Path,
     payload_size: i32,
+    agent_size: i32,
 ) -> Result<(), BuildError> {
-    let file_name = format!("{}|{}", short_name(package.file.name), package.file.name);
-    insert(
-        database,
-        "INSERT INTO `File` \
-            (`File`,`Component_`,`FileName`,`FileSize`,`Version`,`Language`,`Attributes`,`Sequence`) \
-            VALUES (?,?,?,?,?,?,?,?)",
-        &[
-            Value::Text(package.file.key),
-            Value::Text(COMPONENT_FILE),
-            Value::Text(&file_name),
-            Value::Integer(payload_size),
-            Value::Text(""),
-            Value::Text(""),
-            Value::Integer(FILE_VITAL),
-            Value::Integer(1),
-        ],
-    )?;
+    for (file, component, size, sequence) in [
+        (&package.file, COMPONENT_FILE, payload_size, SEQUENCE_MODULE),
+        (&package.agent, COMPONENT_AGENT, agent_size, SEQUENCE_AGENT),
+    ] {
+        let file_name = format!("{}|{}", short_name(file.name), file.name);
+        insert(
+            database,
+            "INSERT INTO `File` \
+                (`File`,`Component_`,`FileName`,`FileSize`,`Version`,`Language`,`Attributes`,`Sequence`) \
+                VALUES (?,?,?,?,?,?,?,?)",
+            &[
+                Value::Text(file.key),
+                Value::Text(component),
+                Value::Text(&file_name),
+                Value::Integer(size),
+                Value::Text(""),
+                Value::Text(""),
+                Value::Integer(FILE_VITAL),
+                Value::Integer(sequence),
+            ],
+        )?;
+    }
 
     // A leading '#' names a stream inside the package rather than a file
     // beside it, which is what makes this a single-file installer.
@@ -730,7 +801,7 @@ fn write_payload(
             VALUES (?,?,?,?,?,?)",
         &[
             Value::Integer(1),
-            Value::Integer(1),
+            Value::Integer(SEQUENCE_AGENT),
             Value::Text(""),
             Value::Text(&embedded),
             Value::Text(""),

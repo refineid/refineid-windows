@@ -43,8 +43,9 @@ internal sealed class ContainerVerifyReport
     [JsonPropertyName("container")]
     public string Container { get; init; } = string.Empty;
 
-    [JsonPropertyName("ok")]
-    public bool Ok { get; init; }
+    /// <summary>valid, indeterminate or not_valid; only valid shows as valid.</summary>
+    [JsonPropertyName("verdict")]
+    public string Verdict { get; init; } = string.Empty;
 
     [JsonPropertyName("report")]
     public string Report { get; init; } = string.Empty;

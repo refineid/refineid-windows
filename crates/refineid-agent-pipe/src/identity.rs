@@ -7,11 +7,12 @@ use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree, S_OK};
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::{
     GetLengthSid, GetTokenInformation, IsValidSid, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
+use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::System::SystemInformation::{ComputerNameDnsHostname, GetComputerNameExW};
 use windows_sys::Win32::System::Threading::{
@@ -19,7 +20,12 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 
-use crate::PipeError;
+use windows_sys::Win32::UI::Shell::{
+    FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX64, FOLDERID_ProgramFilesX86, KF_FLAG_DEFAULT,
+    SHGetKnownFolderPath,
+};
+
+use crate::{AGENT_IMAGE_NAME, PRODUCT_DIRECTORY_NAME, PipeError};
 
 /// The longest image path read, in UTF-16 units.
 const IMAGE_PATH_UNITS: usize = 32_768;
@@ -112,6 +118,65 @@ impl ProcessIdentity {
     pub fn same_user_and_session(&self, other: &Self) -> bool {
         self.user == other.user && self.session == other.session
     }
+}
+
+/// Where the installer put the agent.
+///
+/// `RefineID\\refineid-agent.exe` under this architecture's Program Files,
+/// which only administrators can write to. Windows reports that directory,
+/// so nothing in this process's environment can move it. `None` when Windows
+/// cannot report it.
+#[must_use]
+pub fn installed_agent_image() -> Option<PathBuf> {
+    Some(
+        known_folder(&FOLDERID_ProgramFiles)?
+            .join(PRODUCT_DIRECTORY_NAME)
+            .join(AGENT_IMAGE_NAME),
+    )
+}
+
+/// The Program Files directories Windows reports, as text.
+#[must_use]
+pub fn program_directories() -> Vec<String> {
+    [
+        FOLDERID_ProgramFiles,
+        FOLDERID_ProgramFilesX64,
+        FOLDERID_ProgramFilesX86,
+    ]
+    .iter()
+    .filter_map(known_folder)
+    .map(|directory| directory.to_string_lossy().into_owned())
+    .collect()
+}
+
+/// The known folder `id` as Windows reports it, independent of this
+/// process's environment. `None` when Windows cannot report it.
+fn known_folder(id: &windows_sys::core::GUID) -> Option<PathBuf> {
+    let mut path: windows_sys::core::PWSTR = core::ptr::null_mut();
+    // SAFETY: `id` is a live GUID; `path` receives a CoTaskMem string this
+    // function frees, also on failure as the API documents.
+    let status = unsafe {
+        SHGetKnownFolderPath(
+            id,
+            KF_FLAG_DEFAULT.cast_unsigned(),
+            core::ptr::null_mut(),
+            &raw mut path,
+        )
+    };
+    let directory = (status == S_OK && !path.is_null()).then(|| {
+        // SAFETY: on success `path` is a NUL-terminated wide string.
+        let units = unsafe {
+            let mut length = 0;
+            while *path.add(length) != 0 {
+                length += 1;
+            }
+            core::slice::from_raw_parts(path, length)
+        };
+        PathBuf::from(OsString::from_wide(units))
+    });
+    // SAFETY: frees the string once; a null pointer is allowed.
+    unsafe { CoTaskMemFree(path.cast_const().cast()) };
+    directory
 }
 
 /// The size of a SID with no subauthority: revision, count and authority.

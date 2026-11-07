@@ -2,8 +2,9 @@
 //!
 //! The provider sends one request and waits at most the caller's deadline
 //! for the answer. It talks only to a server Windows reports as running as
-//! this user in this Windows session; a pipe served by anyone else counts as
-//! no agent at all. The connection asks for identification-level
+//! this user in this Windows session and whose image is the installed agent;
+//! a pipe served by anyone else counts as no agent at all, and nothing is
+//! written to it. The connection asks for identification-level
 //! impersonation only, so the server can learn who calls and act as no one.
 
 use std::time::{Duration, Instant};
@@ -22,9 +23,9 @@ use windows_sys::Win32::System::Pipes::{
 };
 use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
-use crate::identity::ProcessIdentity;
-use crate::wire::{MAX_MESSAGE, SignAnswer, SignRequest};
-use crate::{PipeError, pipe_name, wide};
+use crate::identity::{ProcessIdentity, installed_agent_image};
+use crate::wire::{AgentRequest, KeyAnswer, MAX_MESSAGE, SignAnswer, SignRequest};
+use crate::{PipeError, is_same_image, pipe_name, wide};
 
 /// How long a provider waits for a busy pipe instance before each retry.
 const BUSY_WAIT_MS: u32 = 1_000;
@@ -33,8 +34,8 @@ const BUSY_WAIT_MS: u32 = 1_000;
 ///
 /// # Errors
 /// [`PipeError::NoAgent`] when no agent serves this user,
-/// [`PipeError::Stranger`] when the pipe's server is not this user in this
-/// session, [`PipeError::TimedOut`] when no answer comes in time, and
+/// [`PipeError::Stranger`] when the pipe's server is not the installed agent
+/// running as this user in this session, [`PipeError::TimedOut`] when no answer comes in time, and
 /// [`PipeError`] for a failed or refused exchange.
 pub fn request_signature(
     request: &SignRequest,
@@ -51,8 +52,31 @@ pub fn request_signature(
     answer
 }
 
+/// Asks the user's agent which key it offers and waits at most `deadline`.
+///
+/// # Errors
+/// As [`request_signature`].
+pub fn request_usable_key(deadline: Duration) -> Result<KeyAnswer, PipeError> {
+    let answer = exchange(&AgentRequest::UsableKey.encode(), deadline)
+        .and_then(|bytes| Ok(KeyAnswer::decode(&bytes)?));
+    match &answer {
+        Ok(_) | Err(PipeError::NoAgent) => {}
+        Err(PipeError::Identity(code) | PipeError::Pipe(code)) => {
+            refineid_dev_errors::report!(AgentPipe, "key request failed", status code);
+        }
+        Err(error) => refineid_dev_errors::report!(AgentPipe, "key request failed", error),
+    }
+    answer
+}
+
 /// [`request_signature`], unreported.
 fn requested_signature(request: &SignRequest, deadline: Duration) -> Result<SignAnswer, PipeError> {
+    let answer = exchange(&request.encode(), deadline)?;
+    Ok(SignAnswer::decode(&answer)?)
+}
+
+/// Sends `message` to the installed agent and returns its one answer.
+fn exchange(message: &[u8], deadline: Duration) -> Result<Vec<u8>, PipeError> {
     let ends = Instant::now() + deadline;
     let identity = ProcessIdentity::current()?;
     let name = wide(&pipe_name(&identity.user.to_sddl()?, identity.session));
@@ -62,7 +86,9 @@ fn requested_signature(request: &SignRequest, deadline: Duration) -> Result<Sign
     if unsafe { GetNamedPipeServerProcessId(pipe.0, &raw mut server_pid) } == 0 {
         return Err(PipeError::last(PipeError::Identity));
     }
-    if !identity.same_user_and_session(&ProcessIdentity::of(server_pid)?) {
+    let server = ProcessIdentity::of(server_pid)?;
+    let installed = installed_agent_image().ok_or(PipeError::Stranger)?;
+    if !identity.same_user_and_session(&server) || !is_same_image(&server.image, &installed) {
         return Err(PipeError::Stranger);
     }
     let mut mode = PIPE_READMODE_MESSAGE;
@@ -79,10 +105,8 @@ fn requested_signature(request: &SignRequest, deadline: Duration) -> Result<Sign
         return Err(PipeError::last(PipeError::Pipe));
     }
     let event = Event::new()?;
-    let message = request.encode();
-    pipe.write(&message, &event, ends)?;
-    let answer = pipe.read(&event, ends)?;
-    Ok(SignAnswer::decode(&answer)?)
+    pipe.write(message, &event, ends)?;
+    pipe.read(&event, ends)
 }
 
 /// Opens the pipe, waiting while its one instance serves another client.

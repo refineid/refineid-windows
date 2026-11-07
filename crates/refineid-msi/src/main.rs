@@ -48,6 +48,9 @@ mod windows_main {
     /// system directory, so this must match the `80000001` value exactly.
     const MODULE_FILE: &str = "refineid_minidriver.dll";
 
+    /// The per-user agent's file name, under `Program Files\RefineID`.
+    const AGENT_FILE: &str = "refineid-agent.exe";
+
     /// The one authored identifier; every other GUID derives from it.
     const UPGRADE_CODE: &str = "{DBD5521A-AA2C-45D1-B79C-8535E2C262A5}";
 
@@ -127,19 +130,21 @@ mod windows_main {
     struct Arguments {
         architecture: Architecture,
         minidriver: PathBuf,
+        agent: PathBuf,
         output: PathBuf,
         version: Version,
     }
 
     fn usage() -> String {
         "usage: refineid-msi --architecture <x64|arm64> --minidriver <path> \
-         --output <path> --version <YY.M.D.HHMM>"
+         --agent <path> --output <path> --version <YY.M.D.HHMM>"
             .to_owned()
     }
 
     fn parse_arguments() -> Result<Arguments, String> {
         let mut architecture = None;
         let mut minidriver = None;
+        let mut agent = None;
         let mut output = None;
         let mut version = None;
         let mut arguments = std::env::args().skip(1);
@@ -158,6 +163,7 @@ mod windows_main {
                     });
                 }
                 "--minidriver" => minidriver = Some(PathBuf::from(value()?)),
+                "--agent" => agent = Some(PathBuf::from(value()?)),
                 "--output" => output = Some(PathBuf::from(value()?)),
                 "--version" => {
                     version = Some(Version::parse(&value()?).map_err(|error| error.to_string())?);
@@ -169,6 +175,7 @@ mod windows_main {
         Ok(Arguments {
             architecture: architecture.ok_or_else(|| format!("--architecture\n{}", usage()))?,
             minidriver: minidriver.ok_or_else(|| format!("--minidriver\n{}", usage()))?,
+            agent: agent.ok_or_else(|| format!("--agent\n{}", usage()))?,
             output: output.ok_or_else(|| format!("--output\n{}", usage()))?,
             version: version.ok_or_else(|| format!("--version\n{}", usage()))?,
         })
@@ -225,6 +232,11 @@ mod windows_main {
                 key: "MinidriverDll",
                 name: MODULE_FILE,
                 source: &arguments.minidriver,
+            },
+            agent: SystemFile {
+                key: "AgentExe",
+                name: AGENT_FILE,
+                source: &arguments.agent,
             },
             registry: &registry,
             custom_actions: CUSTOM_ACTIONS,

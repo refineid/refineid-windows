@@ -1,7 +1,10 @@
-//! The messages on the agent's pipe: one signature request from the key
-//! storage provider, one answer from the agent (Windows STPA W-R-1, W-R-6).
+//! The messages on the agent's pipe: one request from the key storage
+//! provider, one answer from the agent (Windows STPA W-R-1, W-R-6, W-R-14).
 //!
-//! A request names the pairing, the key profile, the signature algorithm
+//! The provider holds no pairing store, so it asks the agent which key is
+//! offered ([`AgentRequest::UsableKey`], answered by a [`KeyAnswer`] holding
+//! the public certificate and nothing else) and for each signature. A
+//! signature request names the pairing, the key profile, the signature algorithm
 //! and the digest; it names neither the site nor the calling program, which
 //! the agent learns from the pipe itself (W-R-10). Every message starts with
 //! [`WIRE_VERSION`] and a kind byte, and decodes only through [`SignRequest::decode`]
@@ -13,8 +16,8 @@ use refineid_rapp_core::operations::{KeyProfile, SignatureAlgorithm, SignatureAl
 
 /// The version byte every message starts with.
 pub const WIRE_VERSION: u8 = 1;
-/// The longest message either side sends or accepts.
-pub const MAX_MESSAGE: usize = 1024;
+/// The longest message either side sends or accepts: room for a certificate.
+pub const MAX_MESSAGE: usize = 8192;
 
 /// The size of a pairing identifier on the wire.
 const PAIR_ID_LEN: usize = refineid_rapp::PAIR_ID_SIZE;
@@ -23,6 +26,7 @@ const PAIR_ID_LEN: usize = refineid_rapp::PAIR_ID_SIZE;
 const MAX_SIGNATURE: usize = 384;
 
 const KIND_SIGN: u8 = 1;
+const KIND_USABLE_KEY: u8 = 2;
 
 const ANSWER_SIGNATURE: u8 = 1;
 const ANSWER_DENIED: u8 = 2;
@@ -32,6 +36,16 @@ const ANSWER_LOST: u8 = 5;
 const ANSWER_NO_PHONE: u8 = 6;
 const ANSWER_BUSY: u8 = 7;
 const ANSWER_FAILED: u8 = 8;
+const ANSWER_KEY: u8 = 9;
+const ANSWER_NO_KEY: u8 = 10;
+
+/// The size of the certificate length on the wire.
+const CERTIFICATE_LENGTH_LEN: usize = 2;
+/// The longest certificate a [`KeyAnswer`] carries.
+const MAX_CERTIFICATE: usize =
+    MAX_MESSAGE - ANSWER_HEADER_LEN - PAIR_ID_LEN - CERTIFICATE_LENGTH_LEN;
+/// The version and kind bytes every answer starts with.
+const ANSWER_HEADER_LEN: usize = 2;
 
 const PROFILE_ECDSA_P256: u8 = 1;
 const PROFILE_ECDSA_P384: u8 = 2;
@@ -66,6 +80,8 @@ pub enum WireError {
     Digest,
     /// The signature is empty or longer than any key signs.
     Signature,
+    /// The certificate is empty or longer than a message holds.
+    Certificate,
     /// The algorithm is not one the key profile signs with.
     Mismatch,
 }
@@ -81,6 +97,7 @@ impl core::fmt::Display for WireError {
             Self::Algorithm => "the signature algorithm is unknown",
             Self::Digest => "the digest length does not match the algorithm",
             Self::Signature => "the signature length is out of range",
+            Self::Certificate => "the certificate length is out of range",
             Self::Mismatch => "the algorithm does not suit the key profile",
         };
         formatter.write_str(what)
@@ -186,6 +203,112 @@ impl SignRequest {
         let digest = reader.take(digest_len)?;
         reader.end()?;
         Self::new(PairId::from_array(pair_id), key_profile, algorithm, digest)
+    }
+}
+
+/// One request the provider sends the agent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AgentRequest {
+    /// One signature.
+    Sign(SignRequest),
+    /// Which key the agent offers now.
+    UsableKey,
+}
+
+impl AgentRequest {
+    /// The request as it crosses the pipe.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::Sign(request) => request.encode(),
+            Self::UsableKey => vec![WIRE_VERSION, KIND_USABLE_KEY],
+        }
+    }
+
+    /// Decodes a request from the pipe.
+    ///
+    /// # Errors
+    /// [`WireError`] naming the first thing that is not as specified.
+    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
+        let mut reader = Reader::new(bytes)?;
+        match reader.byte()? {
+            KIND_SIGN => SignRequest::decode(bytes).map(Self::Sign),
+            KIND_USABLE_KEY => reader.end().map(|()| Self::UsableKey),
+            _ => Err(WireError::Kind),
+        }
+    }
+}
+
+/// The agent's answer to [`AgentRequest::UsableKey`].
+///
+/// A certificate is public: this is everything the provider learns of the
+/// pairing store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KeyAnswer {
+    /// The pairing the agent serves and its authentication certificate.
+    Key {
+        /// The pairing whose key signs.
+        pair_id: PairId,
+        /// The certificate's DER.
+        certificate: Vec<u8>,
+    },
+    /// The agent serves no pairing with a certificate.
+    NoKey,
+}
+
+impl KeyAnswer {
+    /// The answer as it crosses the pipe. A certificate that is empty or
+    /// longer than a message holds is sent as [`KeyAnswer::NoKey`], since the
+    /// receiver would refuse it.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::Key {
+                pair_id,
+                certificate,
+            } if !certificate.is_empty() && certificate.len() <= MAX_CERTIFICATE => {
+                let mut bytes = vec![WIRE_VERSION, ANSWER_KEY];
+                bytes.extend_from_slice(pair_id.as_bytes());
+                // At most `MAX_CERTIFICATE` bytes, as the guard checks.
+                let length = u16::try_from(certificate.len()).unwrap_or(u16::MAX);
+                bytes.extend_from_slice(&length.to_le_bytes());
+                bytes.extend_from_slice(certificate);
+                bytes
+            }
+            Self::Key { .. } | Self::NoKey => vec![WIRE_VERSION, ANSWER_NO_KEY],
+        }
+    }
+
+    /// Decodes an answer from the pipe.
+    ///
+    /// # Errors
+    /// [`WireError`] naming the first thing that is not as specified.
+    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
+        let mut reader = Reader::new(bytes)?;
+        let answer = match reader.byte()? {
+            ANSWER_KEY => {
+                let pair_id: [u8; PAIR_ID_LEN] = reader
+                    .take(PAIR_ID_LEN)?
+                    .try_into()
+                    .map_err(|_| WireError::Length)?;
+                let length_bytes: [u8; CERTIFICATE_LENGTH_LEN] = reader
+                    .take(CERTIFICATE_LENGTH_LEN)?
+                    .try_into()
+                    .map_err(|_| WireError::Length)?;
+                let length = usize::from(u16::from_le_bytes(length_bytes));
+                if length == 0 || length > MAX_CERTIFICATE {
+                    return Err(WireError::Certificate);
+                }
+                Self::Key {
+                    pair_id: PairId::from_array(pair_id),
+                    certificate: reader.take(length)?.to_vec(),
+                }
+            }
+            ANSWER_NO_KEY => Self::NoKey,
+            _ => return Err(WireError::Kind),
+        };
+        reader.end()?;
+        Ok(answer)
     }
 }
 
@@ -391,6 +514,47 @@ mod tests {
             &[0x5A; 48],
         )
         .expect("a 48-byte digest is what ECDSA SHA-384 signs")
+    }
+
+    #[test]
+    fn a_usable_key_request_and_its_answers_round_trip() {
+        let usable = AgentRequest::UsableKey;
+        assert_eq!(AgentRequest::decode(&usable.encode()), Ok(usable));
+        let sign = AgentRequest::Sign(request());
+        assert_eq!(AgentRequest::decode(&sign.encode()), Ok(sign));
+        let key = KeyAnswer::Key {
+            pair_id: pair(),
+            certificate: b"synthetic certificate".to_vec(),
+        };
+        assert_eq!(KeyAnswer::decode(&key.encode()), Ok(key));
+        assert_eq!(
+            KeyAnswer::decode(&KeyAnswer::NoKey.encode()),
+            Ok(KeyAnswer::NoKey)
+        );
+    }
+
+    #[test]
+    fn a_certificate_out_of_range_never_crosses() {
+        for certificate in [Vec::new(), vec![0; MAX_CERTIFICATE + 1]] {
+            let key = KeyAnswer::Key {
+                pair_id: pair(),
+                certificate,
+            };
+            assert_eq!(KeyAnswer::decode(&key.encode()), Ok(KeyAnswer::NoKey));
+        }
+        let full = KeyAnswer::Key {
+            pair_id: pair(),
+            certificate: vec![0; MAX_CERTIFICATE],
+        };
+        assert_eq!(full.encode().len(), MAX_MESSAGE);
+        assert_eq!(KeyAnswer::decode(&full.encode()), Ok(full));
+    }
+
+    #[test]
+    fn a_usable_key_request_with_trailing_bytes_is_refused() {
+        let mut bytes = AgentRequest::UsableKey.encode();
+        bytes.push(KIND_SIGN);
+        assert_eq!(AgentRequest::decode(&bytes), Err(WireError::Length));
     }
 
     #[test]
