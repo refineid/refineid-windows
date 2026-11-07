@@ -112,31 +112,68 @@ RAPP allows Windows to authenticate using a FINEID card held by the holder's pho
 
 ---
 
-## 4. Windows Plug and Play (PnP) Device Branding
+## 4. Windows Plug and Play (PnP) Device Names
 
-### The Problem: "Unknown Smart Card"
-When a smart card is inserted into a reader, the Windows Smart Card Reader Filter Driver
-(`scfilter.sys`) derives a Hardware ID from the historical bytes:
-- Physical FINEID ECC Card: `SCFILTER\CID_8031b865b085051024122460829000`
-- RAPP Remote Card: `SCFILTER\CID_8031b865b085055241505000829000`
-- Legacy S3/S4 Card: `SCFILTER\CID_8031b865b08504021b1200f6829000`
+### "Unknown Smart Card"
+When a card is inserted, the smart card filter driver gives it a device in
+the SmartCard class (`{990A2BD7-E738-46c7-B26F-1CF8FB9F1391}`) whose hardware
+ID is `SCFILTER\CID_` followed by all of the ATR historical bytes in
+hexadecimal (Microsoft, [Discovery Process](https://learn.microsoft.com/windows-hardware/drivers/smartcard/discovery-process)):
 
-Without a registered `.inf` driver package in the Windows Driver Store, Windows PnP
-assigns the generic null driver `scunknown.inf`, rendering the card as
-**"Unknown Smart Card"** with a warning icon in Device Manager.
+| Card | Hardware ID |
+| --- | --- |
+| FINEID S4-1 v3.1 | `SCFILTER\CID_8031b865b08504021b1200f6829000` |
+| FINEID S4-1 v4.0, chip 1.0.0 | `SCFILTER\CID_8031b865b085050011122460829000` |
+| FINEID S4-1 v4.0, chip 2.0.0 | `SCFILTER\CID_8031b865b085051024122460829000` |
+| Organisation card (FINEID S1 v5.0), contact and contactless | `SCFILTER\CID_0031b8640429ecc17394018083` |
 
-### The Solution: PnP Branding via SetupAPI and INF
-1. **Runtime PnP Branding (Immediate & Driver-Free)**:
-   The RefineID service enumerates `SmartCard` devnodes (`{990A2BD7-E738-46C7-B26F-1CF8FB9F1391}`)
-   and applies SetupAPI properties:
-   - `SPDRP_FRIENDLYNAME` (0x0000000C) → `"FINEID Identity Card"`
-   - `SPDRP_DEVICEDESC` (0x00000000) → `"FINEID Identity Card"`
-   Device Manager immediately refreshes, displaying the clean smart-card icon and
-   official device name with healthy status.
-2. **Production Driver Store Package (`refineid.inf`)**:
-   A signed INF package matching `SCFILTER\CID_...` submitted to Microsoft Windows
-   Hardware Compatibility Program (WHQL) allows Windows Update to automatically
-   install and brand the card upon first insertion.
+With no INF naming that ID, Windows installs the inbox `scunknown.inf`, which
+matches the compatible ID `SCFILTER\CID_87D25E32-AC0D-4EF0-B1E0-502C6B7DFB77`
+with a null service and the name "Unknown Smart Card". Microsoft documents
+that pairing a card with its minidriver uses only the ATR and `ATRMask`
+under `Calais\SmartCards` ([Smart Card Plug and Play](https://learn.microsoft.com/windows-hardware/drivers/smartcard/smart-card-plug-and-play),
+Pairing Process; Discovery Process, Winscard Discovery Process), so the
+name has no documented effect on the Base CSP, the smart card KSP,
+certificate propagation or client authentication.
+
+### The INF
+`refineid-msi` derives `refineid_card.inf` from the same card table that
+writes the Calais registrations (`crates/refineid-msi/src/cards.rs`): one
+exact hardware ID per field-observed contact ATR of each registered model
+(`FineidCardModel::contact_atr_byte_sets`), each checked to fall inside its
+registration's mask, decorated `NTamd64.10.0` and `NTarm64.10.0`. An INF
+hardware ID has no wildcard, and the v4.0 historical bytes carry the chip
+revision, so a revision not yet recorded keeps working through the Calais
+mask and shows as "Unknown Smart Card" until a release records it. The only
+identifier Windows offers for a card family is the Windows Smart Card
+Framework card identifier (`GET DATA` tag `7F68` under the SC PnP AID),
+which the card itself must carry. The install sections are those of the
+inbox `msclmd.inf`: `Include=umpass.inf` with all five `UmPass` sections.
+The INF writes no registry, copies no files and has no `DefaultInstall`: the
+MSI stays the one writer of the Calais registrations. The organisation card
+has no registration, so the INF does not name it. A contactless citizen card
+has the same historical bytes as the contact one, so the INF names it too,
+although the MSI's contact-ATR registrations do not bind it.
+
+### Signing
+Windows stages a driver package only with a signed catalog
+([PnP Device Installation Signing Requirements](https://learn.microsoft.com/windows-hardware/drivers/install/pnp-device-installation-signing-requirements--windows-vista-and-later-)):
+
+- On x64, a catalog signed by a trusted code-signing certificate is enough,
+  and ranks with WHQL ([Signature Score](https://learn.microsoft.com/windows-hardware/drivers/install/signature-score--windows-vista-and-later-)).
+- On Arm64, a release-signed catalog must be signed by WHQL (same page).
+  The certified route is a Partner Center submission with an EV
+  certificate; attestation signing is offered for testing only and cannot
+  publish to Windows Update for retail ([Driver Signing Options](https://learn.microsoft.com/windows-hardware/drivers/dashboard/driver-signing-offerings)).
+
+`packaging/windows/build-msi.ps1 -DriverPackage <dir>` embeds a signed
+package; with only `-CertificateThumbprint` it generates the INF, catalogs it
+with `makecat.exe` and signs the catalog. An unsigned build carries no INF.
+The MSI installs the INF and catalog beside the agent, and the Card Module's
+`RefineIdInstallCardDriver` custom action calls `DiInstallDriverW` on them;
+`RefineIdUninstallCardDriver` (`DiUninstallDriverW`) removes the package on
+uninstall and on rollback. A package Windows refuses leaves the installation
+successful and is reported in a development build.
 
 ---
 
@@ -233,6 +270,8 @@ Packaging is implemented natively in Rust via `crates/refineid-msi`:
   registration on uninstall, and rolls it back when an installation fails
   after it.
 - Automatically notifies and restarts `SCardSvr` upon installation.
+- When given a signed driver package, installs `refineid_card.inf` and its
+  catalog beside the agent and adds them to the driver store (section 4).
 
 ---
 

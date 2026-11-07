@@ -40,6 +40,8 @@ const PRODUCT_DIRECTORY: &str = "RefineIDFolder";
 const PRODUCT_DIRECTORY_NAME: &str = "RefineID";
 /// Component holding the card registrations.
 const COMPONENT_REGISTRY: &str = "CardRegistration";
+/// Component holding the Plug and Play driver package, beside the agent.
+const COMPONENT_DRIVER_PACKAGE: &str = "CardDriverPackage";
 /// The package's single feature.
 const FEATURE: &str = "Main";
 /// Standard directory property for the native system directory.
@@ -215,7 +217,7 @@ impl fmt::Display for ProductVersion {
     }
 }
 
-/// A file installed into the native system directory.
+/// A file the package installs.
 #[derive(Debug, Clone, Copy)]
 pub struct SystemFile<'a> {
     /// Identifier used as the `File` key and as the name inside the cabinet.
@@ -224,6 +226,17 @@ pub struct SystemFile<'a> {
     pub name: &'a str,
     /// Path to the built file on disk.
     pub source: &'a Path,
+}
+
+/// The Plug and Play driver package that names the cards in Device
+/// Manager: its INF and the signed catalog the INF names. Both install
+/// beside the agent, where the Card Module's install action finds them.
+#[derive(Debug, Clone, Copy)]
+pub struct DriverPackage<'a> {
+    /// The INF.
+    pub inf: SystemFile<'a>,
+    /// The signed catalog.
+    pub catalog: SystemFile<'a>,
 }
 
 /// The data written to a registry value.
@@ -368,6 +381,9 @@ pub struct Package<'a> {
     pub agent: SystemFile<'a>,
     /// The login sweep, installed beside the agent.
     pub sweep: SystemFile<'a>,
+    /// The driver package, installed beside the agent, when one is
+    /// supplied.
+    pub driver_package: Option<DriverPackage<'a>>,
     /// Registry values binding the module to supported cards.
     pub registry: &'a [RegistryValue<'a>],
     /// Entry points of the module the installer calls.
@@ -524,28 +540,15 @@ pub fn build(package: &Package<'_>, output: &Path, scratch: &Path) -> Result<(),
             "the package must register at least one card, or nothing binds the module".to_owned(),
         ));
     }
-    let payload_size = file_size(package.file.source)?;
-    let agent_size = file_size(package.agent.source)?;
-    let sweep_size = file_size(package.sweep.source)?;
-
-    let cabinet = cabinet::build(
-        scratch,
-        CABINET_NAME,
-        &[
-            Member {
-                source: package.file.source,
-                key: package.file.key,
-            },
-            Member {
-                source: package.agent.source,
-                key: package.agent.key,
-            },
-            Member {
-                source: package.sweep.source,
-                key: package.sweep.key,
-            },
-        ],
-    )?;
+    let payload = payload(package);
+    let members: Vec<Member<'_>> = payload
+        .iter()
+        .map(|entry| Member {
+            source: entry.file.source,
+            key: entry.file.key,
+        })
+        .collect();
+    let cabinet = cabinet::build(scratch, CABINET_NAME, &members)?;
 
     let product_code = package
         .upgrade_code
@@ -580,12 +583,7 @@ pub fn build(package: &Package<'_>, output: &Path, scratch: &Path) -> Result<(),
         &upgrade_code,
     )?;
     write_layout(&database, package)?;
-    write_payload(
-        &database,
-        package,
-        &cabinet,
-        [payload_size, agent_size, sweep_size],
-    )?;
+    write_payload(&database, &payload, &cabinet)?;
     write_registry(&database, package)?;
 
     write_custom_actions(&database, package)?;
@@ -690,65 +688,76 @@ fn write_directories(database: &Database) -> Result<(), BuildError> {
     Ok(())
 }
 
+/// One `Component` row: the component, its directory, its attributes and
+/// its key path.
+struct ComponentRow<'a> {
+    component: &'static str,
+    directory: &'static str,
+    attributes: i32,
+    key_path: &'a str,
+}
+
+/// The package's components, the driver package's when one is supplied.
+fn component_rows<'a>(package: &Package<'a>, first_registry_key: &'a str) -> Vec<ComponentRow<'a>> {
+    let mut rows = vec![
+        ComponentRow {
+            component: COMPONENT_FILE,
+            directory: SYSTEM_DIRECTORY,
+            attributes: schema::COMPONENT_64BIT,
+            key_path: package.file.key,
+        },
+        ComponentRow {
+            component: COMPONENT_AGENT,
+            directory: PRODUCT_DIRECTORY,
+            attributes: schema::COMPONENT_64BIT,
+            key_path: package.agent.key,
+        },
+        ComponentRow {
+            component: COMPONENT_SWEEP,
+            directory: PRODUCT_DIRECTORY,
+            attributes: schema::COMPONENT_64BIT,
+            key_path: package.sweep.key,
+        },
+        ComponentRow {
+            component: COMPONENT_REGISTRY,
+            directory: SYSTEM_DIRECTORY,
+            attributes: schema::COMPONENT_64BIT | schema::COMPONENT_REGISTRY_KEY_PATH,
+            key_path: first_registry_key,
+        },
+    ];
+    if let Some(driver) = package.driver_package {
+        rows.push(ComponentRow {
+            component: COMPONENT_DRIVER_PACKAGE,
+            directory: PRODUCT_DIRECTORY,
+            attributes: schema::COMPONENT_64BIT,
+            key_path: driver.inf.key,
+        });
+    }
+    rows
+}
+
 fn write_layout(database: &Database, package: &Package<'_>) -> Result<(), BuildError> {
     write_directories(database)?;
 
-    let file_component_id = package.upgrade_code.derive(COMPONENT_FILE).to_string();
-    let agent_component_id = package.upgrade_code.derive(COMPONENT_AGENT).to_string();
-    let sweep_component_id = package.upgrade_code.derive(COMPONENT_SWEEP).to_string();
-    let registry_component_id = package.upgrade_code.derive(COMPONENT_REGISTRY).to_string();
     let first_registry_key = registry_identifier(0);
-    let component_sql = "INSERT INTO `Component` \
-        (`Component`,`ComponentId`,`Directory_`,`Attributes`,`Condition`,`KeyPath`) \
-        VALUES (?,?,?,?,?,?)";
-    insert(
-        database,
-        component_sql,
-        &[
-            Value::Text(COMPONENT_FILE),
-            Value::Text(&file_component_id),
-            Value::Text(SYSTEM_DIRECTORY),
-            Value::Integer(schema::COMPONENT_64BIT),
-            Value::Text(""),
-            Value::Text(package.file.key),
-        ],
-    )?;
-    insert(
-        database,
-        component_sql,
-        &[
-            Value::Text(COMPONENT_AGENT),
-            Value::Text(&agent_component_id),
-            Value::Text(PRODUCT_DIRECTORY),
-            Value::Integer(schema::COMPONENT_64BIT),
-            Value::Text(""),
-            Value::Text(package.agent.key),
-        ],
-    )?;
-    insert(
-        database,
-        component_sql,
-        &[
-            Value::Text(COMPONENT_SWEEP),
-            Value::Text(&sweep_component_id),
-            Value::Text(PRODUCT_DIRECTORY),
-            Value::Integer(schema::COMPONENT_64BIT),
-            Value::Text(""),
-            Value::Text(package.sweep.key),
-        ],
-    )?;
-    insert(
-        database,
-        component_sql,
-        &[
-            Value::Text(COMPONENT_REGISTRY),
-            Value::Text(&registry_component_id),
-            Value::Text(SYSTEM_DIRECTORY),
-            Value::Integer(schema::COMPONENT_64BIT | schema::COMPONENT_REGISTRY_KEY_PATH),
-            Value::Text(""),
-            Value::Text(&first_registry_key),
-        ],
-    )?;
+    let rows = component_rows(package, &first_registry_key);
+    for row in &rows {
+        let component_id = package.upgrade_code.derive(row.component).to_string();
+        insert(
+            database,
+            "INSERT INTO `Component` \
+                (`Component`,`ComponentId`,`Directory_`,`Attributes`,`Condition`,`KeyPath`) \
+                VALUES (?,?,?,?,?,?)",
+            &[
+                Value::Text(row.component),
+                Value::Text(&component_id),
+                Value::Text(row.directory),
+                Value::Integer(row.attributes),
+                Value::Text(""),
+                Value::Text(row.key_path),
+            ],
+        )?;
+    }
 
     insert(
         database,
@@ -766,27 +775,49 @@ fn write_layout(database: &Database, package: &Package<'_>) -> Result<(), BuildE
             Value::Integer(0),
         ],
     )?;
-    for component in [
-        COMPONENT_FILE,
-        COMPONENT_AGENT,
-        COMPONENT_SWEEP,
-        COMPONENT_REGISTRY,
-    ] {
+    for row in &rows {
         insert(
             database,
             "INSERT INTO `FeatureComponents` (`Feature_`,`Component_`) VALUES (?,?)",
-            &[Value::Text(FEATURE), Value::Text(component)],
+            &[Value::Text(FEATURE), Value::Text(row.component)],
         )?;
     }
     Ok(())
 }
 
-/// The Card Module's place in the cabinet.
-const SEQUENCE_MODULE: i32 = 1;
-/// The agent's place in the cabinet.
-const SEQUENCE_AGENT: i32 = 2;
-/// The login sweep's place in the cabinet, the last.
-const SEQUENCE_SWEEP: i32 = 3;
+/// One installed file with the component that owns it. Its place in the
+/// cabinet, and its `File` sequence, is its place in the list plus one.
+struct PayloadEntry<'a> {
+    file: SystemFile<'a>,
+    component: &'static str,
+}
+
+/// The package's files in cabinet order.
+fn payload<'a>(package: &Package<'a>) -> Vec<PayloadEntry<'a>> {
+    let mut entries = vec![
+        PayloadEntry {
+            file: package.file,
+            component: COMPONENT_FILE,
+        },
+        PayloadEntry {
+            file: package.agent,
+            component: COMPONENT_AGENT,
+        },
+        PayloadEntry {
+            file: package.sweep,
+            component: COMPONENT_SWEEP,
+        },
+    ];
+    if let Some(driver) = package.driver_package {
+        for file in [driver.inf, driver.catalog] {
+            entries.push(PayloadEntry {
+                file,
+                component: COMPONENT_DRIVER_PACKAGE,
+            });
+        }
+    }
+    entries
+}
 
 /// The size of the payload file at `path`.
 fn file_size(path: &Path) -> Result<i32, BuildError> {
@@ -797,15 +828,17 @@ fn file_size(path: &Path) -> Result<i32, BuildError> {
 /// Writes the file rows and embeds the cabinet that carries them.
 fn write_payload(
     database: &Database,
-    package: &Package<'_>,
+    payload: &[PayloadEntry<'_>],
     cabinet: &Path,
-    [payload_size, agent_size, sweep_size]: [i32; 3],
 ) -> Result<(), BuildError> {
-    for (file, component, size, sequence) in [
-        (&package.file, COMPONENT_FILE, payload_size, SEQUENCE_MODULE),
-        (&package.agent, COMPONENT_AGENT, agent_size, SEQUENCE_AGENT),
-        (&package.sweep, COMPONENT_SWEEP, sweep_size, SEQUENCE_SWEEP),
-    ] {
+    let mut last_sequence = 0;
+    for (index, entry) in payload.iter().enumerate() {
+        let file = &entry.file;
+        let component = entry.component;
+        let size = file_size(file.source)?;
+        let sequence = i32::try_from(index + 1)
+            .map_err(|_| BuildError::Invalid("too many payload files".to_owned()))?;
+        last_sequence = sequence;
         let file_name = format!("{}|{}", short_name(file.name), file.name);
         insert(
             database,
@@ -835,7 +868,7 @@ fn write_payload(
             VALUES (?,?,?,?,?,?)",
         &[
             Value::Integer(1),
-            Value::Integer(SEQUENCE_SWEEP),
+            Value::Integer(last_sequence),
             Value::Text(""),
             Value::Text(&embedded),
             Value::Text(""),

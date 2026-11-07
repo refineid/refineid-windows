@@ -86,6 +86,8 @@
 )]
 
 #[cfg(windows)]
+mod card_driver;
+#[cfg(windows)]
 mod cardmod;
 #[cfg(windows)]
 mod ffi;

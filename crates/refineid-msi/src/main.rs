@@ -14,9 +14,10 @@
 
 //! Builds the `RefineID` Card Driver package.
 //!
-//! The card registrations below are the whole reason the package exists:
-//! Windows reads them to decide which Card Module to load for an inserted
-//! card, so their bytes are the product.
+//! The card registrations in [`refineid_msi::cards`] are the whole reason
+//! the package exists: Windows reads them to decide which Card Module to
+//! load for an inserted card, so their bytes are the product. The INF that
+//! names the cards in Device Manager is derived from them.
 
 #[cfg(not(windows))]
 fn main() {
@@ -34,15 +35,14 @@ fn main() {
 
 #[cfg(windows)]
 mod windows_main {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
+    use refineid_msi::cards::{CALAIS, CARDS};
+    use refineid_msi::inf::{self, DriverVersion};
     use refineid_msi::{
-        Architecture, CustomAction, Guid, Package, RegistryData, RegistryValue, Schedule,
-        SystemFile, Version, build,
+        Architecture, CustomAction, DriverPackage, Guid, Package, RegistryData, RegistryValue,
+        Schedule, SystemFile, Version, build,
     };
-
-    /// Where Windows keeps per-card Smart Card Crypto Provider registrations.
-    const CALAIS: &str = r"SOFTWARE\Microsoft\Cryptography\Calais\SmartCards";
 
     /// The Card Module file name. Windows loads it by bare name from the
     /// system directory, so this must match the `80000001` value exactly.
@@ -81,7 +81,7 @@ mod windows_main {
     /// CNG caches its configuration, so a registry write alone is not seen
     /// until the next boot; these call `BCryptRegisterProvider` and
     /// `BCryptAddContextFunctionProvider` (and their reverse) instead.
-    const CUSTOM_ACTIONS: &[CustomAction<'static>] = &[
+    const KEY_STORAGE_PROVIDER_ACTIONS: &[CustomAction<'static>] = &[
         CustomAction {
             name: "RegisterKeyStorageProvider",
             entry_point: "RefineIdRegisterKeyStorageProvider",
@@ -96,69 +96,64 @@ mod windows_main {
         },
     ];
 
-    /// A card family Windows should bind to this Card Module.
-    struct CardRegistration {
-        /// Registration name, which becomes the Calais subkey.
-        name: &'static str,
-        /// The card's answer to reset.
-        atr: &'static [u8],
-        /// Which answer-to-reset bytes must match. A zero byte is a wildcard.
-        mask: &'static [u8],
-    }
+    /// The entry point that removes the driver package from the driver
+    /// store. It runs on uninstall and as the rollback of the installation.
+    const UNINSTALL_DRIVER_ENTRY_POINT: &str = "RefineIdUninstallCardDriver";
 
-    /// FINEID S4-1 v3.1 answers to reset identically on every card, so the
-    /// mask requires all twenty bytes. The v4.0 family carries card-specific
-    /// data in bytes 13 to 17, which the mask therefore ignores.
-    const CARDS: &[CardRegistration] = &[
-        CardRegistration {
-            name: "FINEID-S4-1-v3.1",
-            atr: &[
-                0x3b, 0x7f, 0x96, 0x00, 0x00, 0x80, 0x31, 0xb8, 0x65, 0xb0, 0x85, 0x04, 0x02, 0x1b,
-                0x12, 0x00, 0xf6, 0x82, 0x90, 0x00,
-            ],
-            mask: &[0xff; 20],
+    /// The module's entry points that add the driver package to the driver
+    /// store and install it on the cards present (`DiInstallDriverW`), and
+    /// remove it (`DiUninstallDriverW`). A package Windows refuses, such as
+    /// one whose catalog signature it does not accept, leaves the
+    /// installation successful: the name in Device Manager is all the
+    /// package changes.
+    const DRIVER_PACKAGE_ACTIONS: &[CustomAction<'static>] = &[
+        CustomAction {
+            name: "InstallCardDriver",
+            entry_point: "RefineIdInstallCardDriver",
+            schedule: Schedule::Install {
+                rollback_entry_point: UNINSTALL_DRIVER_ENTRY_POINT,
+            },
         },
-        CardRegistration {
-            name: "FINEID-S4-1-v4.0",
-            atr: &[
-                0x3b, 0x7f, 0x96, 0x00, 0x00, 0x80, 0x31, 0xb8, 0x65, 0xb0, 0x85, 0x05, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x82, 0x90, 0x00,
-            ],
-            mask: &[
-                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0xff, 0xff, 0xff,
-            ],
-        },
-        CardRegistration {
-            name: "FINEID-RAPP-Remote",
-            atr: &[
-                0x3b, 0x7f, 0x96, 0x00, 0x00, 0x80, 0x31, 0xb8, 0x65, 0xb0, 0x85, 0x05, 0x52, 0x41,
-                0x50, 0x50, 0x00, 0x82, 0x90, 0x00,
-            ],
-            mask: &[0xff; 20],
+        CustomAction {
+            name: "UninstallCardDriver",
+            entry_point: UNINSTALL_DRIVER_ENTRY_POINT,
+            schedule: Schedule::Uninstall,
         },
     ];
+
+    /// What the command line asks for.
+    enum Command {
+        /// Write the driver package's INF and stop.
+        WriteInf { output: PathBuf, version: Version },
+        /// Build the installer package.
+        Package(Arguments),
+    }
 
     struct Arguments {
         architecture: Architecture,
         minidriver: PathBuf,
         agent: PathBuf,
         sweep: PathBuf,
+        driver_package: Option<PathBuf>,
         output: PathBuf,
         version: Version,
     }
 
     fn usage() -> String {
         "usage: refineid-msi --architecture <x64|arm64> --minidriver <path> \
-         --agent <path> --sweep <path> --output <path> --version <YY.M.D.HHMM>"
+         --agent <path> --sweep <path> [--driver-package <directory>] \
+         --output <path> --version <YY.M.D.HHMM>\n       \
+         refineid-msi --write-inf <path> --version <YY.M.D.HHMM>"
             .to_owned()
     }
 
-    fn parse_arguments() -> Result<Arguments, String> {
+    fn parse_arguments() -> Result<Command, String> {
         let mut architecture = None;
         let mut minidriver = None;
         let mut agent = None;
         let mut sweep = None;
+        let mut driver_package = None;
+        let mut write_inf = None;
         let mut output = None;
         let mut version = None;
         let mut arguments = std::env::args().skip(1);
@@ -179,6 +174,8 @@ mod windows_main {
                 "--minidriver" => minidriver = Some(PathBuf::from(value()?)),
                 "--agent" => agent = Some(PathBuf::from(value()?)),
                 "--sweep" => sweep = Some(PathBuf::from(value()?)),
+                "--driver-package" => driver_package = Some(PathBuf::from(value()?)),
+                "--write-inf" => write_inf = Some(PathBuf::from(value()?)),
                 "--output" => output = Some(PathBuf::from(value()?)),
                 "--version" => {
                     version = Some(Version::parse(&value()?).map_err(|error| error.to_string())?);
@@ -187,27 +184,69 @@ mod windows_main {
                 other => return Err(format!("unknown argument '{other}'\n{}", usage())),
             }
         }
-        Ok(Arguments {
+        let version = version.ok_or_else(|| format!("--version\n{}", usage()))?;
+        if let Some(output) = write_inf {
+            return Ok(Command::WriteInf { output, version });
+        }
+        Ok(Command::Package(Arguments {
             architecture: architecture.ok_or_else(|| format!("--architecture\n{}", usage()))?,
             minidriver: minidriver.ok_or_else(|| format!("--minidriver\n{}", usage()))?,
             agent: agent.ok_or_else(|| format!("--agent\n{}", usage()))?,
             sweep: sweep.ok_or_else(|| format!("--sweep\n{}", usage()))?,
+            driver_package,
             output: output.ok_or_else(|| format!("--output\n{}", usage()))?,
-            version: version.ok_or_else(|| format!("--version\n{}", usage()))?,
-        })
+            version,
+        }))
     }
 
-    pub fn run() -> Result<(), String> {
-        let arguments = parse_arguments()?;
-        let version = arguments.version;
-        let upgrade_code = Guid::parse(UPGRADE_CODE).map_err(|error| error.to_string())?;
+    /// The INF's `DriverVer` for a build stamped `version`.
+    fn driver_version(version: Version) -> DriverVersion {
+        DriverVersion {
+            year: version.year,
+            month: version.month,
+            day: version.day,
+            time_of_day: version.time_of_day(),
+        }
+    }
 
-        let keys: Vec<String> = CARDS
-            .iter()
-            .map(|card| format!("{CALAIS}\\{}", card.name))
-            .collect();
+    /// The INF for a build stamped `version`.
+    fn card_inf(version: Version) -> Result<String, String> {
+        inf::card_inf(CARDS, driver_version(version)).map_err(|error| error.to_string())
+    }
+
+    /// Checks that the INF in `directory` is the one these registrations
+    /// produce, so the names in Device Manager cannot drift from the cards
+    /// the package binds. A signing service may stamp its own `DriverVer`,
+    /// so that line is left out of the comparison.
+    fn check_driver_package(directory: &Path, version: Version) -> Result<(), String> {
+        let inf_path = directory.join(inf::INF_FILE);
+        let supplied = std::fs::read_to_string(&inf_path)
+            .map_err(|error| format!("{}: {error}", inf_path.display()))?;
+        let expected = card_inf(version)?;
+        let without_driver_ver = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter(|line| !line.starts_with("DriverVer="))
+                .map(str::to_owned)
+                .collect()
+        };
+        if without_driver_ver(&supplied) != without_driver_ver(&expected) {
+            return Err(format!(
+                "{} is not the INF of these card registrations; regenerate it with --write-inf",
+                inf_path.display()
+            ));
+        }
+        let catalog = directory.join(inf::CATALOG_FILE);
+        if !catalog.is_file() {
+            return Err(format!("{} is missing", catalog.display()));
+        }
+        Ok(())
+    }
+
+    /// The Calais registration of every card, under `keys` in the order of
+    /// [`CARDS`], and the login sweep's Run value.
+    fn registry_values(keys: &[String]) -> Vec<RegistryValue<'_>> {
         let mut registry = Vec::with_capacity(CARDS.len() * 5);
-        for (card, key) in CARDS.iter().zip(&keys) {
+        for (card, key) in CARDS.iter().zip(keys) {
             registry.extend([
                 RegistryValue {
                     key,
@@ -236,12 +275,60 @@ mod windows_main {
                 },
             ]);
         }
-
         registry.push(RegistryValue {
             key: RUN_KEY,
             name: RUN_VALUE,
             data: RegistryData::Text(SWEEP_COMMAND),
         });
+        registry
+    }
+
+    pub fn run() -> Result<(), String> {
+        let arguments = match parse_arguments()? {
+            Command::WriteInf { output, version } => {
+                std::fs::write(&output, card_inf(version)?)
+                    .map_err(|error| format!("{}: {error}", output.display()))?;
+                println!("{}", output.display());
+                return Ok(());
+            }
+            Command::Package(arguments) => arguments,
+        };
+        let version = arguments.version;
+        let upgrade_code = Guid::parse(UPGRADE_CODE).map_err(|error| error.to_string())?;
+
+        let keys: Vec<String> = CARDS
+            .iter()
+            .map(|card| format!("{CALAIS}\\{}", card.name))
+            .collect();
+        let registry = registry_values(&keys);
+
+        if let Some(directory) = &arguments.driver_package {
+            check_driver_package(directory, version)?;
+        }
+        let driver_files = arguments.driver_package.as_ref().map(|directory| {
+            (
+                directory.join(inf::INF_FILE),
+                directory.join(inf::CATALOG_FILE),
+            )
+        });
+        let driver_package = driver_files
+            .as_ref()
+            .map(|(inf_path, catalog_path)| DriverPackage {
+                inf: SystemFile {
+                    key: "CardDriverInf",
+                    name: inf::INF_FILE,
+                    source: inf_path,
+                },
+                catalog: SystemFile {
+                    key: "CardDriverCatalog",
+                    name: inf::CATALOG_FILE,
+                    source: catalog_path,
+                },
+            });
+        let mut custom_actions = KEY_STORAGE_PROVIDER_ACTIONS.to_vec();
+        if driver_package.is_some() {
+            custom_actions.extend_from_slice(DRIVER_PACKAGE_ACTIONS);
+        }
 
         let package = Package {
             product_name: "RefineID Card Driver",
@@ -265,8 +352,9 @@ mod windows_main {
                 name: SWEEP_FILE,
                 source: &arguments.sweep,
             },
+            driver_package,
             registry: &registry,
-            custom_actions: CUSTOM_ACTIONS,
+            custom_actions: &custom_actions,
             // Windows caches the card database, so it must be restarted for a
             // new or removed registration to take effect.
             restart_service: Some("SCardSvr"),
@@ -275,7 +363,7 @@ mod windows_main {
         let scratch = arguments
             .output
             .parent()
-            .unwrap_or_else(|| std::path::Path::new("."))
+            .unwrap_or_else(|| Path::new("."))
             .join("cabinet");
         build(&package, &arguments.output, &scratch).map_err(|error| error.to_string())?;
         let _ = std::fs::remove_dir(&scratch);

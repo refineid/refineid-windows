@@ -15,9 +15,13 @@ workspace = true
 name = "refineid-msi"
 path = "src/main.rs"
 
-# All real code is `#[cfg(windows)]`; the Windows Installer database API
-# exists only there. On other targets the crate is intentionally empty so
-# a cross-platform workspace build stays green.
+# The card registrations and the INF derived from them are portable, so
+# their tests run on any host.
+[dependencies]
+refineid-lib-core.workspace = true
+
+# The package writer is `#[cfg(windows)]`; the Windows Installer database
+# API exists only there.
 [target.'cfg(windows)'.dependencies]
 sha1.workspace = true
 windows-sys.workspace = true
