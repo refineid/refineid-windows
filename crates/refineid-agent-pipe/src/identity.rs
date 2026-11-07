@@ -20,7 +20,10 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 
-use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+use windows_sys::Win32::UI::Shell::{
+    FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX64, FOLDERID_ProgramFilesX86, KF_FLAG_DEFAULT,
+    SHGetKnownFolderPath,
+};
 
 use crate::{AGENT_IMAGE_NAME, PRODUCT_DIRECTORY_NAME, PipeError};
 
@@ -125,12 +128,36 @@ impl ProcessIdentity {
 /// cannot report it.
 #[must_use]
 pub fn installed_agent_image() -> Option<PathBuf> {
+    Some(
+        known_folder(&FOLDERID_ProgramFiles)?
+            .join(PRODUCT_DIRECTORY_NAME)
+            .join(AGENT_IMAGE_NAME),
+    )
+}
+
+/// The Program Files directories Windows reports, as text.
+#[must_use]
+pub fn program_directories() -> Vec<String> {
+    [
+        FOLDERID_ProgramFiles,
+        FOLDERID_ProgramFilesX64,
+        FOLDERID_ProgramFilesX86,
+    ]
+    .iter()
+    .filter_map(known_folder)
+    .map(|directory| directory.to_string_lossy().into_owned())
+    .collect()
+}
+
+/// The known folder `id` as Windows reports it, independent of this
+/// process's environment. `None` when Windows cannot report it.
+fn known_folder(id: &windows_sys::core::GUID) -> Option<PathBuf> {
     let mut path: windows_sys::core::PWSTR = core::ptr::null_mut();
-    // SAFETY: the folder id is a static; `path` receives a CoTaskMem string
-    // this function frees, also on failure as the API documents.
+    // SAFETY: `id` is a live GUID; `path` receives a CoTaskMem string this
+    // function frees, also on failure as the API documents.
     let status = unsafe {
         SHGetKnownFolderPath(
-            &FOLDERID_ProgramFiles,
+            id,
             KF_FLAG_DEFAULT.cast_unsigned(),
             core::ptr::null_mut(),
             &raw mut path,
@@ -149,11 +176,7 @@ pub fn installed_agent_image() -> Option<PathBuf> {
     });
     // SAFETY: frees the string once; a null pointer is allowed.
     unsafe { CoTaskMemFree(path.cast_const().cast()) };
-    Some(
-        directory?
-            .join(PRODUCT_DIRECTORY_NAME)
-            .join(AGENT_IMAGE_NAME),
-    )
+    directory
 }
 
 /// The size of a SID with no subauthority: revision, count and authority.

@@ -80,28 +80,20 @@ pub const SIGNATURE_DEADLINE: Duration = Duration::from_secs(
     REACH_WINDOW.as_secs() + OPERATION_LIFETIME.as_secs() + TRANSFER_MARGIN.as_secs(),
 );
 
-/// The environment variables that name the Program Files directories,
-/// which only administrators can write to on a default Windows install.
-pub const PROGRAM_DIRECTORY_VARIABLES: [&str; 3] =
-    ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"];
-
 /// The label the operation context carries for a program, or `None` when its
 /// image path names no file.
 ///
 /// A product name for the browsers people use when their image lies under
-/// a Program Files directory this process's environment names
-/// ([`PROGRAM_DIRECTORY_VARIABLES`]), otherwise the image's file name.
-/// The context says what asks, not where the request goes, because CNG
-/// does not tell a key storage provider the site. Only a process apart from
-/// the caller reads this: inside the caller the environment is the caller's,
-/// so [`in_process_operation`] trusts no directory.
+/// a Program Files directory Windows reports
+/// ([`identity::program_directories`]), which only administrators can write
+/// to on a default Windows install; otherwise the image's file name, so a
+/// same-user program named `msedge.exe` elsewhere shows as that file and not
+/// as Microsoft Edge. The context says what asks, not where the request
+/// goes, because CNG does not tell a key storage provider the site.
+#[cfg(windows)]
 #[must_use]
 pub fn program_label(image: &Path) -> Option<String> {
-    let roots: Vec<String> = PROGRAM_DIRECTORY_VARIABLES
-        .iter()
-        .filter_map(|variable| std::env::var(variable).ok())
-        .collect();
-    program_label_within(image, &roots)
+    program_label_within(image, &identity::program_directories())
 }
 
 /// The label the operation context carries for a program whose image is
