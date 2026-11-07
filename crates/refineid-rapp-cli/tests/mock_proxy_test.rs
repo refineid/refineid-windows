@@ -118,7 +118,7 @@ fn paired_session(
 
 fn authentication(digest: &[u8]) -> CardOperation {
     CardOperation::BrowserAuthenticate {
-        origin: "https://card.refineid.fi".into(),
+        origin: "mock_proxy_test on TEST-HOST".into(),
         key_profile: KeyProfile::EcdsaP384,
         algorithm: SignatureAlgorithm::EcdsaSha384,
         digest: digest.to_vec(),

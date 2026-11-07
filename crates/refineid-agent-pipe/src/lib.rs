@@ -22,6 +22,8 @@
 use std::path::Path;
 use std::time::Duration;
 
+use refineid_rapp_core::operations::{CardOperation, KeyProfile, SignatureAlgorithm};
+
 pub mod wire;
 
 #[cfg(windows)]
@@ -61,15 +63,18 @@ pub const SIGNATURE_DEADLINE: Duration = Duration::from_secs(
 pub const PROGRAM_DIRECTORY_VARIABLES: [&str; 3] =
     ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"];
 
-/// The label the phone shows for a program.
+/// The label the operation context carries for a program, or `None` when its
+/// image path names no file.
 ///
 /// A product name for the browsers people use when their image lies under
 /// a Program Files directory this process's environment names
 /// ([`PROGRAM_DIRECTORY_VARIABLES`]), otherwise the image's file name.
-/// The phone shows what asks, not where the request goes, because CNG
-/// does not tell a key storage provider the site.
+/// The context says what asks, not where the request goes, because CNG
+/// does not tell a key storage provider the site. Only a process apart from
+/// the caller reads this: inside the caller the environment is the caller's,
+/// so [`in_process_operation`] trusts no directory.
 #[must_use]
-pub fn program_label(image: &Path) -> String {
+pub fn program_label(image: &Path) -> Option<String> {
     let roots: Vec<String> = PROGRAM_DIRECTORY_VARIABLES
         .iter()
         .filter_map(|variable| std::env::var(variable).ok())
@@ -77,8 +82,9 @@ pub fn program_label(image: &Path) -> String {
     program_label_within(image, &roots)
 }
 
-/// The label the phone shows for a program whose image is `image`, where
-/// `trusted_roots` are the directories only administrators can write to.
+/// The label the operation context carries for a program whose image is
+/// `image`, where `trusted_roots` are the directories only administrators can
+/// write to, or `None` when `image` names no file.
 ///
 /// A product name for the browsers people use, only when the image lies
 /// strictly below one of `trusted_roots`; otherwise the image's file name.
@@ -86,7 +92,7 @@ pub fn program_label(image: &Path) -> String {
 /// accepting `\` and `/` as separators; a path with a `..` component is
 /// below no root, and an empty root is ignored.
 #[must_use]
-pub fn program_label_within(image: &Path, trusted_roots: &[String]) -> String {
+pub fn program_label_within(image: &Path, trusted_roots: &[String]) -> Option<String> {
     let image = image.to_string_lossy();
     let file = image
         .rsplit(PATH_SEPARATORS)
@@ -103,9 +109,9 @@ pub fn program_label_within(image: &Path, trusted_roots: &[String]) -> String {
     };
     let trusted = trusted_roots.iter().any(|root| lies_below(&image, root));
     match known {
-        Some(name) if trusted => name.to_owned(),
-        _ if file.is_empty() => "A Windows program".to_owned(),
-        _ => file,
+        Some(name) if trusted => Some(name.to_owned()),
+        _ if file.is_empty() => None,
+        _ => Some(file),
     }
 }
 
@@ -128,14 +134,80 @@ fn lies_below(path: &str, root: &str) -> bool {
     !root.is_empty() && path.len() > root.len() && path.starts_with(&root)
 }
 
-/// What the phone shows as the asking party (W-R-10): the program, and the
-/// computer it runs on, labelled as such.
+/// The asking party as the operation context carries it (W-R-10).
+///
+/// The program and the computer it runs on. RAPP section 9.2 requires this
+/// field and calls it `origin`, but no Requester can know the site, so it never
+/// names one, and the phone does not show it (section 11 item 1).
 #[must_use]
 pub fn requester_context(program: &str, computer: &str) -> String {
     if computer.is_empty() {
         program.to_owned()
     } else {
         format!("{program} on {computer}")
+    }
+}
+
+/// The key a program inside whose process a provider runs asks to use.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RemoteKey {
+    /// The authentication key, behind PIN 1.
+    Authentication,
+    /// The qualified signature key, behind PIN 2.
+    QualifiedSignature,
+}
+
+/// Why a provider inside the calling program asks the phone for nothing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RemoteRefusal {
+    /// The signature needs a document's name, and a platform signing call
+    /// carries only a hash (RAPP section 9.3, section 11 item 1).
+    UnnamedDocument,
+    /// Windows reported an image path that names no file (W-R-10).
+    UnnamedProgram,
+}
+
+impl core::fmt::Display for RemoteRefusal {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(match self {
+            Self::UnnamedDocument => "the signing call names no document",
+            Self::UnnamedProgram => "the calling program has no image name",
+        })
+    }
+}
+
+impl core::error::Error for RemoteRefusal {}
+
+/// The operation a provider running inside the calling program sends for a
+/// hash it was handed (W-R-10, W-R-20).
+///
+/// The context carries the image's file name and the computer. No directory
+/// is trusted for a product name, because this process's environment belongs
+/// to the program being named.
+///
+/// # Errors
+/// [`RemoteRefusal::UnnamedDocument`] for the qualified key: `document_name`
+/// is what the holder consents under and RAPP has no form for a document
+/// without one. [`RemoteRefusal::UnnamedProgram`] when `image` names no file.
+pub fn in_process_operation(
+    key: RemoteKey,
+    image: &Path,
+    computer: &str,
+    key_profile: KeyProfile,
+    algorithm: SignatureAlgorithm,
+    digest: Vec<u8>,
+) -> Result<CardOperation, RemoteRefusal> {
+    match key {
+        RemoteKey::QualifiedSignature => Err(RemoteRefusal::UnnamedDocument),
+        RemoteKey::Authentication => {
+            let program = program_label_within(image, &[]).ok_or(RemoteRefusal::UnnamedProgram)?;
+            Ok(CardOperation::BrowserAuthenticate {
+                origin: requester_context(&program, computer),
+                key_profile,
+                algorithm,
+                digest,
+            })
+        }
     }
 }
 
@@ -218,7 +290,84 @@ mod tests {
     }
 
     fn label(image: &str) -> String {
-        program_label_within(Path::new(image), &roots())
+        program_label_within(Path::new(image), &roots()).expect("the image names a file")
+    }
+
+    const EDGE_IMAGE: &str = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe";
+    const COMPUTER: &str = "EXAMPLE-HOST";
+    const DIGEST: &[u8] = b"a digest of thirty-two bytes ...";
+
+    fn in_process(key: RemoteKey, image: &str) -> Result<CardOperation, RemoteRefusal> {
+        in_process_operation(
+            key,
+            Path::new(image),
+            COMPUTER,
+            KeyProfile::EcdsaP384,
+            SignatureAlgorithm::EcdsaSha256,
+            DIGEST.to_vec(),
+        )
+    }
+
+    fn authentication_context(image: &str) -> String {
+        match in_process(RemoteKey::Authentication, image) {
+            Ok(CardOperation::BrowserAuthenticate { origin, .. }) => origin,
+            other => panic!("not an authentication: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_authentication_names_the_program_and_the_computer_and_no_site() {
+        assert_eq!(
+            authentication_context(r"C:\Tools\signer.exe"),
+            "signer.exe on EXAMPLE-HOST"
+        );
+    }
+
+    #[test]
+    fn inside_the_caller_no_directory_earns_a_product_name() {
+        assert_eq!(
+            authentication_context(EDGE_IMAGE),
+            "msedge.exe on EXAMPLE-HOST"
+        );
+    }
+
+    #[test]
+    fn a_qualified_signature_from_a_signing_call_is_refused() {
+        assert_eq!(
+            in_process(RemoteKey::QualifiedSignature, EDGE_IMAGE),
+            Err(RemoteRefusal::UnnamedDocument)
+        );
+    }
+
+    #[test]
+    fn a_program_with_no_name_is_refused_and_not_described() {
+        assert_eq!(
+            in_process(RemoteKey::Authentication, ""),
+            Err(RemoteRefusal::UnnamedProgram)
+        );
+    }
+
+    #[test]
+    fn the_removed_origin_variables_change_nothing() {
+        const VARIABLES: [&str; 2] = ["REFINEID_RP_ORIGIN", "REFINEID_ORIGIN"];
+        const THIS_TEST: &str = "tests::the_removed_origin_variables_change_nothing";
+        const PLANTED: &str = "https://planted.example";
+        if std::env::var_os(VARIABLES[0]).is_some() {
+            let context = authentication_context(r"C:\Tools\signer.exe");
+            assert_eq!(context, "signer.exe on EXAMPLE-HOST");
+            assert_eq!(
+                in_process(RemoteKey::QualifiedSignature, EDGE_IMAGE),
+                Err(RemoteRefusal::UnnamedDocument)
+            );
+            return;
+        }
+        let mut child =
+            std::process::Command::new(std::env::current_exe().expect("the test binary's path"));
+        child.args(["--exact", THIS_TEST]);
+        for variable in VARIABLES {
+            child.env(variable, PLANTED);
+        }
+        assert!(child.status().expect("the test binary runs").success());
     }
 
     #[test]
@@ -259,8 +408,8 @@ mod tests {
     fn the_root_itself_is_not_below_it() {
         let roots = vec![r"C:\Program Files\msedge.exe".to_owned()];
         assert_eq!(
-            program_label_within(Path::new(r"C:\Program Files\msedge.exe"), &roots),
-            "msedge.exe"
+            program_label_within(Path::new(r"C:\Program Files\msedge.exe"), &roots).as_deref(),
+            Some("msedge.exe")
         );
     }
 
@@ -283,8 +432,9 @@ mod tests {
             program_label_within(
                 Path::new(r"C:\Program Files\Vivaldi\Application\vivaldi.exe"),
                 &slashed
-            ),
-            "Vivaldi"
+            )
+            .as_deref(),
+            Some("Vivaldi")
         );
     }
 
@@ -292,14 +442,14 @@ mod tests {
     fn an_empty_root_trusts_nothing() {
         let roots = vec![String::new()];
         assert_eq!(
-            program_label_within(Path::new(r"C:\Opera\opera.exe"), &roots),
-            "opera.exe"
+            program_label_within(Path::new(r"C:\Opera\opera.exe"), &roots).as_deref(),
+            Some("opera.exe")
         );
     }
 
     #[test]
     fn an_unknown_program_is_its_file_name() {
         assert_eq!(label(r"C:\Program Files\Tool\tool.exe"), "tool.exe");
-        assert_eq!(label(""), "A Windows program");
+        assert_eq!(program_label_within(Path::new(""), &roots()), None);
     }
 }

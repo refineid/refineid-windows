@@ -1312,7 +1312,7 @@ unsafe extern "C" fn c_sign(
         // caller contract.
         unsafe { core::slice::from_raw_parts(data, input_len) }.to_vec()
     };
-    let outcome = crate::token::card_sign(&reader_name, &pin_cache, mechanism, &input, None);
+    let outcome = crate::token::card_sign(&reader_name, &pin_cache, mechanism, &input);
     match outcome {
         Ok(bytes) => {
             // The module lock was dropped across the card round trip,

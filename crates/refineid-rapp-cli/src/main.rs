@@ -492,7 +492,7 @@ fn serve_sessions<S: PairingStore>(
         ];
         if let Some((key_profile, algorithm)) = sign_profile {
             operations.push(CardOperation::BrowserAuthenticate {
-                origin: "rapp-demo.refineid.fi".into(),
+                origin: DEMO_REQUESTER_CONTEXT.into(),
                 key_profile,
                 algorithm,
                 digest: demo_digest(algorithm)?,
@@ -612,6 +612,9 @@ fn confirm_grants(peer: &PeerIntroduction, requested: &[ProfileName]) -> Option<
 }
 
 /// A fresh random digest of the algorithm's registered length.
+/// The asking party the demo's authentication names: this tool, not a site.
+const DEMO_REQUESTER_CONTEXT: &str = "refineid-rapp";
+
 fn demo_digest(algorithm: SignatureAlgorithm) -> Result<Vec<u8>, String> {
     let mut digest = Vec::new();
     while digest.len() < algorithm.digest_length() {

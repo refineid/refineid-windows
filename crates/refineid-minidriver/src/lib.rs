@@ -140,6 +140,10 @@ use cardmod::{CardCapabilityModel, CardModel, ContainerDescriptor, Ctx, KeyAlgor
 )]
 use ffi::*;
 #[cfg(windows)]
+use refineid_agent_pipe::identity::{ProcessIdentity, computer_name};
+#[cfg(windows)]
+use refineid_agent_pipe::{RemoteKey, in_process_operation};
+#[cfg(windows)]
 use refineid_lib_core::auth::{
     AuthError, CardPinLengths, ChangePinOutcome, PIN_MAX_LENGTH, PIN_MIN_LENGTH, PUK_MAX_LENGTH,
     PUK_MIN_LENGTH, PinOps, PinReferenceScheme, PinSlot, PinStatus, UnblockOutcome, VerifyOutcome,
@@ -171,9 +175,7 @@ use refineid_lib_core::x509::{
     EcCurve, OwnedCert, PublicKeyAlgorithm, UnvalidatedCertificate, extract_rsa_public_key,
 };
 #[cfg(windows)]
-use refineid_rapp_core::operations::{
-    CardOperation, CardOperationResult, KeyProfile, SignatureAlgorithm,
-};
+use refineid_rapp_core::operations::{CardOperationResult, KeyProfile, SignatureAlgorithm};
 #[cfg(windows)]
 use refineid_windows_credential_store::{ProtectedPairingStore, read_can};
 #[cfg(windows)]
@@ -2063,26 +2065,30 @@ unsafe extern "system" fn CardSignData(
             }
         };
 
-        let digest = in_bytes.to_vec();
-        let operation = if container.pin_id == PIN_ID_QUALIFIED_SIG {
-            CardOperation::SignDocument {
-                document_name: "Document".to_owned(),
-                contained_files: None,
-                key_profile,
-                algorithm,
-                digest,
-            }
+        let key = if container.pin_id == PIN_ID_QUALIFIED_SIG {
+            RemoteKey::QualifiedSignature
         } else {
-            let origin = std::env::var("REFINEID_RP_ORIGIN")
-                .ok()
-                .or_else(|| std::env::var("REFINEID_ORIGIN").ok())
-                .filter(|s| !s.trim().is_empty() && s.len() <= 512)
-                .unwrap_or_else(|| "https://card.refineid.fi".to_owned());
-            CardOperation::BrowserAuthenticate {
-                origin,
-                key_profile,
-                algorithm,
-                digest,
+            RemoteKey::Authentication
+        };
+        let image = match ProcessIdentity::current() {
+            Ok(identity) => identity.image,
+            Err(err) => {
+                refineid_dev_errors::report!(CardModule, "remote signature refused", err);
+                return SCARD_F_INTERNAL_ERROR;
+            }
+        };
+        let operation = match in_process_operation(
+            key,
+            &image,
+            &computer_name(),
+            key_profile,
+            algorithm,
+            in_bytes.to_vec(),
+        ) {
+            Ok(operation) => operation,
+            Err(refusal) => {
+                refineid_dev_errors::report!(CardModule, "remote signature refused", refusal);
+                return SCARD_E_UNSUPPORTED_FEATURE;
             }
         };
 

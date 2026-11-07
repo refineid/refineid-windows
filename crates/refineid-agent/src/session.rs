@@ -97,7 +97,7 @@ struct Offered {
 /// One signature request on its way from the pipe to the session.
 struct Job {
     request: SignRequest,
-    /// What the phone shows as the asking party (W-R-10).
+    /// The asking party the operation context carries (W-R-10).
     requester: String,
     reply: Sender<SignAnswer>,
 }
@@ -159,23 +159,17 @@ pub fn run() -> ExitCode {
         };
         let program = program_label(&client.identity().image);
         let answer = match client.request() {
-            Ok(request) => {
-                let (reply, answered) = channel();
-                let job = Job {
-                    request,
-                    requester: requester_context(&program, &computer),
-                    reply,
-                };
-                if jobs.send(job).is_err() {
+            Ok(request) => program.map_or_else(
+                || {
+                    refineid_dev_errors::report!(
+                        Agent,
+                        "signature request refused",
+                        "the client's image names no file"
+                    );
                     SignAnswer::Failed
-                } else {
-                    match answered.recv_timeout(SIGNATURE_DEADLINE) {
-                        Ok(answer) => answer,
-                        Err(RecvTimeoutError::Timeout) => SignAnswer::Cancelled,
-                        Err(RecvTimeoutError::Disconnected) => SignAnswer::Failed,
-                    }
-                }
-            }
+                },
+                |program| relay(&jobs, request, requester_context(&program, &computer)),
+            ),
             Err(error) => {
                 report_pipe!("signature request refused", error);
                 SignAnswer::Failed
@@ -187,6 +181,24 @@ pub fn run() -> ExitCode {
         if let Err(error) = client.answer(&answer) {
             report_pipe!("signature answer not delivered", error);
         }
+    }
+}
+
+/// Hands one request to the phone's thread and waits for its answer.
+fn relay(jobs: &Sender<Job>, request: SignRequest, requester: String) -> SignAnswer {
+    let (reply, answered) = channel();
+    let job = Job {
+        request,
+        requester,
+        reply,
+    };
+    if jobs.send(job).is_err() {
+        return SignAnswer::Failed;
+    }
+    match answered.recv_timeout(SIGNATURE_DEADLINE) {
+        Ok(answer) => answer,
+        Err(RecvTimeoutError::Timeout) => SignAnswer::Cancelled,
+        Err(RecvTimeoutError::Disconnected) => SignAnswer::Failed,
     }
 }
 

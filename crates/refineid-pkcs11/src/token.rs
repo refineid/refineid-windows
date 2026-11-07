@@ -74,10 +74,10 @@ use crate::ck::{
     CKA_PUBLIC_EXPONENT, CKA_SENSITIVE, CKA_SERIAL_NUMBER, CKA_SIGN, CKA_SIGN_RECOVER, CKA_SUBJECT,
     CKA_TOKEN, CKA_TRUSTED, CKA_UNWRAP, CKA_VALUE, CKA_VERIFY, CKA_WRAP, CKC_X_509, CKK_EC,
     CKK_RSA, CKO_CERTIFICATE, CKO_NSS_TRUST, CKO_PRIVATE_KEY, CKO_PROFILE, CKO_PUBLIC_KEY,
-    CKP_PUBLIC_CERTIFICATES_TOKEN, CKR_ARGUMENTS_BAD, CKR_DATA_INVALID, CKR_DATA_LEN_RANGE,
-    CKR_DEVICE_ERROR, CKR_OK, CKR_PIN_INCORRECT, CKR_PIN_LOCKED, CKR_SIGNATURE_INVALID,
-    CKR_SIGNATURE_LEN_RANGE, CKR_USER_NOT_LOGGED_IN, CKT_NSS_MUST_VERIFY_TRUST,
-    CKT_NSS_TRUSTED_DELEGATOR, CkAttributeType, CkBbool, CkObjectHandle, CkRv, CkTrust, CkUlong,
+    CKP_PUBLIC_CERTIFICATES_TOKEN, CKR_DATA_INVALID, CKR_DATA_LEN_RANGE, CKR_DEVICE_ERROR, CKR_OK,
+    CKR_PIN_INCORRECT, CKR_PIN_LOCKED, CKR_SIGNATURE_INVALID, CKR_SIGNATURE_LEN_RANGE,
+    CKR_USER_NOT_LOGGED_IN, CKT_NSS_MUST_VERIFY_TRUST, CKT_NSS_TRUSTED_DELEGATOR, CkAttributeType,
+    CkBbool, CkObjectHandle, CkRv, CkTrust, CkUlong,
 };
 use crate::sign::{Mechanism, sign_with_card};
 
@@ -1312,54 +1312,9 @@ pub(super) fn card_sign(
     pin_cache: &Arc<Mutex<PinSafetyCache>>,
     mechanism: Mechanism,
     input: &[u8],
-    origin: Option<&str>,
-) -> Result<Vec<u8>, CkRv> {
-    card_sign_with_origin_source(reader_name, pin_cache, mechanism, input, origin, &|name| {
-        std::env::var(name).ok()
-    })
-}
-
-/// Environment variables that supply the relying-party origin of a remote
-/// signature when the caller passes none, in lookup order.
-const ORIGIN_VARIABLES: [&str; 2] = ["REFINEID_RP_ORIGIN", "REFINEID_ORIGIN"];
-
-/// Longest relying-party origin accepted for a remote signature.
-const MAX_ORIGIN_LENGTH: usize = 512;
-
-/// The relying-party origin for a remote signature: the caller's, else the
-/// first usable value `variable` yields for [`ORIGIN_VARIABLES`].
-fn remote_origin(
-    origin: Option<&str>,
-    variable: &dyn Fn(&str) -> Option<String>,
-) -> Option<String> {
-    let usable = |o: &str| !o.trim().is_empty() && o.len() <= MAX_ORIGIN_LENGTH;
-    origin.filter(|o| usable(o)).map(str::to_owned).or_else(|| {
-        ORIGIN_VARIABLES
-            .iter()
-            .find_map(|name| variable(name))
-            .filter(|o| usable(o))
-    })
-}
-
-/// [`card_sign`] with the origin fallback read through `variable`.
-fn card_sign_with_origin_source(
-    reader_name: &str,
-    pin_cache: &Arc<Mutex<PinSafetyCache>>,
-    mechanism: Mechanism,
-    input: &[u8],
-    origin: Option<&str>,
-    variable: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Vec<u8>, CkRv> {
     if let Some(hex_id) = reader_name.strip_prefix("rapp:") {
-        let Some(effective_origin) = remote_origin(origin, variable) else {
-            refineid_dev_errors::report!(
-                Pkcs11,
-                "remote signature refused",
-                "no relying party origin"
-            );
-            return Err(CKR_ARGUMENTS_BAD);
-        };
-        return remote_card_sign(hex_id, &effective_origin, mechanism, input);
+        return remote_card_sign(hex_id, mechanism, input);
     }
     let backend = PcscBackend;
     let reader = ReaderId::new(reader_name.to_owned());
@@ -1615,25 +1570,12 @@ impl RemoteCardTransport {
     }
 }
 
-fn remote_card_sign(
-    hex_id: &str,
-    origin: &str,
-    mechanism: Mechanism,
-    input: &[u8],
-) -> Result<Vec<u8>, CkRv> {
-    if origin.trim().is_empty() || origin.len() > 512 {
-        refineid_dev_errors::report!(
-            Pkcs11,
-            "remote signature refused",
-            "the relying party origin is invalid"
-        );
-        return Err(CKR_ARGUMENTS_BAD);
-    }
+fn remote_card_sign(hex_id: &str, mechanism: Mechanism, input: &[u8]) -> Result<Vec<u8>, CkRv> {
     #[cfg(windows)]
     {
-        use refineid_rapp_core::operations::{
-            CardOperation, CardOperationResult, KeyProfile, SignatureAlgorithm,
-        };
+        use refineid_agent_pipe::identity::{ProcessIdentity, computer_name};
+        use refineid_agent_pipe::{RemoteKey, in_process_operation};
+        use refineid_rapp_core::operations::{CardOperationResult, KeyProfile, SignatureAlgorithm};
         use refineid_windows_credential_store::ProtectedPairingStore;
         let store = ProtectedPairingStore::load().map_err(|_| CKR_DEVICE_ERROR)?;
         let pair = store
@@ -1695,12 +1637,24 @@ fn remote_card_sign(
             }
         };
 
-        let op = CardOperation::BrowserAuthenticate {
-            origin: origin.into(),
+        let image = ProcessIdentity::current()
+            .map_err(|error| {
+                refineid_dev_errors::report!(Pkcs11, "remote signature refused", error);
+                CKR_DEVICE_ERROR
+            })?
+            .image;
+        let op = in_process_operation(
+            RemoteKey::Authentication,
+            &image,
+            &computer_name(),
             key_profile,
             algorithm,
             digest,
-        };
+        )
+        .map_err(|refusal| {
+            refineid_dev_errors::report!(Pkcs11, "remote signature refused", refusal);
+            CKR_DEVICE_ERROR
+        })?;
 
         let remote_tx = RemoteCardTransport::new(pair.pair_id());
         // The engine reports why the operation failed.
@@ -1720,7 +1674,7 @@ fn remote_card_sign(
     }
     #[cfg(not(windows))]
     {
-        let _ = (hex_id, origin, mechanism, input);
+        let _ = (hex_id, mechanism, input);
         Err(CKR_DEVICE_ERROR)
     }
 }
@@ -2372,62 +2326,5 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
-    }
-
-    #[test]
-    fn the_remote_origin_prefers_the_caller_then_the_variables_in_order() {
-        let variables = |name: &str| match name {
-            "REFINEID_RP_ORIGIN" => Some("https://rp.example".to_owned()),
-            "REFINEID_ORIGIN" => Some("https://other.example".to_owned()),
-            _ => None,
-        };
-        assert_eq!(
-            super::remote_origin(Some("https://caller.example"), &variables).as_deref(),
-            Some("https://caller.example")
-        );
-        assert_eq!(
-            super::remote_origin(Some("  "), &variables).as_deref(),
-            Some("https://rp.example")
-        );
-        let only_second =
-            |name: &str| (name == "REFINEID_ORIGIN").then(|| "https://other.example".to_owned());
-        assert_eq!(
-            super::remote_origin(None, &only_second).as_deref(),
-            Some("https://other.example")
-        );
-        let too_long = |_: &str| Some("x".repeat(super::MAX_ORIGIN_LENGTH + 1));
-        assert_eq!(super::remote_origin(None, &too_long), None);
-    }
-
-    #[test]
-    fn remote_card_sign_missing_origin_fails_closed() {
-        let pin_cache = std::sync::Arc::new(std::sync::Mutex::new(
-            super::PinSafetyCache::new().expect("pin safety cache"),
-        ));
-        let res = super::card_sign_with_origin_source(
-            "rapp:0123456789abcdef",
-            &pin_cache,
-            crate::sign::Mechanism::Ecdsa,
-            &[0u8; 32],
-            None,
-            &|_| None,
-        );
-        assert_eq!(res, Err(crate::ck::CKR_ARGUMENTS_BAD));
-    }
-
-    #[test]
-    fn remote_card_sign_empty_origin_fails_closed() {
-        let pin_cache = std::sync::Arc::new(std::sync::Mutex::new(
-            super::PinSafetyCache::new().expect("pin safety cache"),
-        ));
-        let res = super::card_sign_with_origin_source(
-            "rapp:0123456789abcdef",
-            &pin_cache,
-            crate::sign::Mechanism::Ecdsa,
-            &[0u8; 32],
-            Some("   "),
-            &|_| None,
-        );
-        assert_eq!(res, Err(crate::ck::CKR_ARGUMENTS_BAD));
     }
 }

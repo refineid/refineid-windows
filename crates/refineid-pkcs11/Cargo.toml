@@ -30,3 +30,6 @@ refineid-lib-pcsc.workspace = true
 refineid-rapp-core.workspace = true
 refineid-windows-credential-store.workspace = true
 hex.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+refineid-agent-pipe.workspace = true
