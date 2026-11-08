@@ -291,6 +291,7 @@ pub fn remove_browser_certificates() -> Result<usize, CredentialStoreError> {
 /// The current user's `RefineID` entries in the personal store. A store that
 /// cannot be read holds none here; the next judgement sees them again.
 #[cfg(windows)]
+#[must_use]
 pub fn browser_entries() -> Vec<BrowserEntry> {
     let mut entries = Vec::new();
     let listed = visit_browser_entries(&mut |entry| {
@@ -338,6 +339,7 @@ pub fn remove_browser_entries(stale: &[BrowserEntry]) {
 
 /// Nothing is offered to browsers off Windows.
 #[cfg(not(windows))]
+#[must_use]
 pub const fn browser_entries() -> Vec<BrowserEntry> {
     Vec::new()
 }

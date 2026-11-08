@@ -46,7 +46,8 @@ mod certstore;
 mod pairing;
 
 pub use certstore::{
-    BROWSER_KEY_PREFIX, KEY_STORAGE_PROVIDER, browser_key_name, browser_key_pair_id,
+    BROWSER_KEY_PREFIX, BrowserEntry, KEY_STORAGE_PROVIDER, browser_entries, browser_key_name,
+    browser_key_pair_id,
 };
 #[cfg(windows)]
 pub use certstore::{
