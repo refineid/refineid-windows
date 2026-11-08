@@ -12,37 +12,39 @@
 // implied. See the License for the specific language governing
 // permissions and limitations under the License.
 
-//! A DVV test card's CA certificates in `CurrentUser\CA`, in development
-//! builds only (Windows STPA W-R-26).
+//! The CA certificates of the FINEID cards in readers, in
+//! `CurrentUser\CA` while the card is there (Windows STPA W-R-26).
 //!
 //! The Card Module serves no `msroots` (W-R-24), so Windows finds a card's
-//! root and issuing CA only where its own stores hold them. The production
-//! roots are in the Microsoft Trusted Root Program; DVV's test roots are not,
-//! and a browser that looks for a client certificate's chain in the local
-//! stores alone finds no issuer for a test card's authentication
-//! certificate: Chromium on Windows asks `CertFindChainInStore` for chains
-//! from the cached stores and the URL cache only, and sends the
-//! intermediates of the chain it gets.
+//! issuing CA only where its own stores hold it, or by fetching it from the
+//! authentication certificate's Authority Information Access. A browser that
+//! looks for a client certificate's chain in the local stores alone fetches
+//! nothing: Chromium on Windows asks `CertFindChainInStore` for chains from
+//! the cached stores and the URL cache only, matches the server's CA names
+//! against them, and sends the intermediates of the chain it gets.
 //!
-//! A development build puts the test card's root (`EF.4334`) and issuing CA
-//! (`EF.4336`) in the user's Intermediate Certification Authorities store
-//! while the card is in a reader, and takes them out when it is not. That
-//! store makes nothing a trust anchor: it only lets Windows build the chain,
-//! which still ends at an untrusted root. Each entry also carries
-//! `CERT_ENHKEY_USAGE_PROP_ID` with TLS client authentication alone, so a
-//! chain through it is valid for nothing else. The user's Root store is
-//! never written, so no card makes any root trusted for any purpose.
+//! So the issuing CA (`EF.4336`) of every FINEID card in a reader stands in
+//! the user's Intermediate Certification Authorities store while the card is
+//! there, and leaves when the card does. That store makes nothing a trust
+//! anchor: it is path material, the certificate Windows would otherwise
+//! fetch, and a chain through it is trusted exactly when its root is, which
+//! for a production card is DVV's root from the Microsoft Trusted Root
+//! Program. The entry carries no property of trust or usage of its own, so
+//! the CA's own extensions govern every use, as for a fetched copy. The
+//! user's Root store is never written, so no card makes any root trusted.
 //!
-//! A card's CAs are a test card's only when its root is self-issued and
-//! self-signed, a CA, and named with the word `TEST`; the issuing CA joins
-//! it only when the root signed it and it is a CA named with `TEST` too.
-//! Nothing is shipped to recognise them: no certificate, no fingerprint.
+//! The issuing CA is taken only when the card's root (`EF.4334`) is
+//! self-issued, self-signed and a CA, and the issuing CA is a CA that root
+//! issued and signed. The root itself never enters a store in a release
+//! build. A development build also puts the root of a DVV test card there,
+//! since DVV's test roots are in no root program: one named with the word
+//! `TEST`, valid for TLS client authentication alone through
+//! `CERT_ENHKEY_USAGE_PROP_ID`. Nothing is shipped to recognise a card's CA:
+//! no certificate, no fingerprint.
 //!
 //! An entry is this module's only when it carries [`PRESENTED_MARK`] in its
 //! own property; any other entry, the same certificate added by Windows or
 //! another program included, is neither marked nor touched.
-//!
-//! Release builds do not compile this module.
 
 use refineid_lib_core::x509::{Certificate, OwnedCert, UnvalidatedCertificate};
 use refineid_lib_core::x509::{Name, extract_basic_constraints};
@@ -52,26 +54,62 @@ use refineid_lib_core::x509::{Name, extract_basic_constraints};
 const TEST_WORD: &str = "TEST";
 
 /// What marks an entry as this module's.
-pub const PRESENTED_MARK: &[u8] = b"refineid-test-card-ca";
+pub const PRESENTED_MARK: &[u8] = b"refineid-card-ca";
 
-/// A DVV test card's CA certificates: its root, then its issuing CA when
-/// the card holds one that the root signed.
+/// Whether this build presents a DVV test card's root: development builds
+/// (`debug_assertions`, the switch refineid-core's `SigningBuild` uses) do.
+const PRESENTS_TEST_ROOTS: bool = cfg!(debug_assertions);
+
+/// What a store entry of a card's CA may be used for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Usage {
+    /// Whatever the certificate itself allows: the issuing CA.
+    AsIssued,
+    /// TLS client authentication alone: a DVV test root.
+    ClientAuthentication,
+}
+
+/// One certificate a card in a reader wants in the store, and its usage.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TestCardCas(Vec<Vec<u8>>);
+pub struct CardCa {
+    /// The certificate's DER, as the card holds it.
+    pub der: Vec<u8>,
+    /// What its entry may be used for.
+    pub usage: Usage,
+}
 
-impl TestCardCas {
-    /// The test CAs of a card whose root file holds `root` and whose
-    /// issuing CA file holds `issuing`, if any. `None` when `root` is not a
-    /// test root.
+/// The CA certificates of one FINEID card that stand in the store while it
+/// is in a reader: its issuing CA, and in a development build its root when
+/// that is a DVV test root.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CardCas(Vec<CardCa>);
+
+impl CardCas {
+    /// The CAs of a card whose root file holds `root` and whose issuing CA
+    /// file holds `issuing`, if any; `None` when `root` is no self-signed CA
+    /// or the card has nothing to present.
     #[must_use]
     pub fn from_card(root: &[u8], issuing: Option<&[u8]>) -> Option<Self> {
+        Self::presented(root, issuing, PRESENTS_TEST_ROOTS)
+    }
+
+    /// [`Self::from_card`], with a test root presented when
+    /// `presents_test_roots`.
+    fn presented(root: &[u8], issuing: Option<&[u8]>, presents_test_roots: bool) -> Option<Self> {
         let root = OwnedCert::from_der(UnvalidatedCertificate::new(root.to_vec())).ok()?;
         let root_view = root.view();
         if root_view.subject != root_view.issuer
-            || !is_test_ca(root_view)
+            || !is_ca(root_view)
             || root_view.verify_signed_by(root_view).is_err()
         {
             return None;
+        }
+        let mut certificates = Vec::new();
+        if presents_test_roots && is_test_name(root_view.subject) {
+            certificates.push(CardCa {
+                der: root.as_der().to_vec(),
+                usage: Usage::ClientAuthentication,
+            });
         }
         let issuing = issuing
             .and_then(|der| OwnedCert::from_der(UnvalidatedCertificate::new(der.to_vec())).ok())
@@ -80,27 +118,28 @@ impl TestCardCas {
                 let root_name = root_view.subject;
                 view.issuer == root_name
                     && view.subject != root_name
-                    && is_test_ca(view)
+                    && is_ca(view)
                     && view.verify_signed_by(root_view).is_ok()
             });
-        let mut certificates = vec![root.as_der().to_vec()];
-        certificates.extend(issuing.map(|issuing| issuing.as_der().to_vec()));
-        Some(Self(certificates))
+        certificates.extend(issuing.map(|issuing| CardCa {
+            der: issuing.as_der().to_vec(),
+            usage: Usage::AsIssued,
+        }));
+        (!certificates.is_empty()).then_some(Self(certificates))
     }
 
-    /// The certificates, root first.
+    /// The certificates, a test root first.
     #[must_use]
-    pub fn certificates(&self) -> &[Vec<u8>] {
+    pub fn certificates(&self) -> &[CardCa] {
         &self.0
     }
 }
 
-/// Whether `certificate` is a CA whose name says it is a test CA.
-fn is_test_ca(certificate: Certificate<'_>) -> bool {
+/// Whether `certificate` is a CA.
+fn is_ca(certificate: Certificate<'_>) -> bool {
     certificate
         .extensions
         .is_some_and(|extensions| extract_basic_constraints(extensions).ca)
-        && is_test_name(certificate.subject)
 }
 
 /// Whether `name`'s common name or organization holds [`TEST_WORD`] as a
@@ -120,10 +159,10 @@ fn is_test_name(name: Name<'_>) -> bool {
 /// The certificates that should stand in the store when the cards in
 /// readers hold `present`, each once.
 #[must_use]
-pub fn wanted_certificates(present: &[TestCardCas]) -> Vec<&[u8]> {
-    let mut wanted: Vec<&[u8]> = Vec::new();
-    for certificate in present.iter().flat_map(TestCardCas::certificates) {
-        if !wanted.contains(&certificate.as_slice()) {
+pub fn wanted_certificates(present: &[CardCas]) -> Vec<&CardCa> {
+    let mut wanted: Vec<&CardCa> = Vec::new();
+    for certificate in present.iter().flat_map(CardCas::certificates) {
+        if !wanted.iter().any(|stood| stood.der == certificate.der) {
             wanted.push(certificate);
         }
     }
@@ -131,7 +170,7 @@ pub fn wanted_certificates(present: &[TestCardCas]) -> Vec<&[u8]> {
 }
 
 #[cfg(windows)]
-pub use windows_store::present_test_card_cas;
+pub use windows_store::present_card_cas;
 
 #[cfg(windows)]
 mod windows_store {
@@ -146,7 +185,7 @@ mod windows_store {
         szOID_PKIX_KP_CLIENT_AUTH,
     };
 
-    use super::{PRESENTED_MARK, TestCardCas, wanted_certificates};
+    use super::{CardCas, PRESENTED_MARK, Usage, wanted_certificates};
     use crate::CredentialStoreError;
 
     /// The user's Intermediate Certification Authorities store (Microsoft,
@@ -208,12 +247,12 @@ mod windows_store {
         }
     }
 
-    /// Makes the user's CA store hold the test CAs of the cards in readers,
+    /// Makes the user's CA store hold the CAs of the cards in readers,
     /// `present`, and no other entry of this module's.
     ///
     /// # Errors
     /// A Windows certificate store failure.
-    pub fn present_test_card_cas(present: &[TestCardCas]) -> Result<(), CredentialStoreError> {
+    pub fn present_card_cas(present: &[CardCas]) -> Result<(), CredentialStoreError> {
         let store = IntermediateStore::open()?;
         let wanted = wanted_certificates(present);
         let mut standing: Vec<Vec<u8>> = Vec::new();
@@ -236,7 +275,7 @@ mod windows_store {
                     (*context).cbCertEncoded as usize,
                 )
             };
-            if wanted.contains(&certificate) {
+            if wanted.iter().any(|wanted| wanted.der == certificate) {
                 standing.push(certificate.to_vec());
                 continue;
             }
@@ -252,8 +291,8 @@ mod windows_store {
             }
         }
         for certificate in wanted {
-            if !standing.iter().any(|stood| stood.as_slice() == certificate) {
-                add(&store, certificate)?;
+            if !standing.contains(&certificate.der) {
+                add(&store, &certificate.der, certificate.usage)?;
             }
         }
         Ok(())
@@ -276,10 +315,14 @@ mod windows_store {
         read != 0 && length as usize == PRESENTED_MARK.len() && mark == PRESENTED_MARK
     }
 
-    /// Adds `certificate` to `store`, valid for TLS client authentication
-    /// alone and marked as this module's. A certificate the store already
-    /// holds is someone else's entry and is left as it is.
-    fn add(store: &IntermediateStore, certificate: &[u8]) -> Result<(), CredentialStoreError> {
+    /// Adds `certificate` to `store` for `usage`, marked as this module's. A
+    /// certificate the store already holds is someone else's entry and is
+    /// left as it is.
+    fn add(
+        store: &IntermediateStore,
+        certificate: &[u8],
+        usage: Usage,
+    ) -> Result<(), CredentialStoreError> {
         let length = u32::try_from(certificate.len())
             .map_err(|_| CredentialStoreError::CertificateStore { code: 0 })?;
         let mut added: *mut CERT_CONTEXT = core::ptr::null_mut();
@@ -304,7 +347,11 @@ mod windows_store {
                 Err(CredentialStoreError::CertificateStore { code })
             };
         }
-        let outcome = restrict_and_mark(added);
+        let outcome = match usage {
+            Usage::AsIssued => Ok(()),
+            Usage::ClientAuthentication => restrict(added),
+        }
+        .and_then(|()| mark(added));
         if outcome.is_err() {
             // SAFETY: deleting frees `added`, which the store just returned.
             unsafe { CertDeleteCertificateFromStore(added) };
@@ -316,8 +363,8 @@ mod windows_store {
     }
 
     /// Sets the entry `context` valid for TLS client authentication alone
-    /// (`CERT_ENHKEY_USAGE_PROP_ID`) and marks it.
-    fn restrict_and_mark(context: *const CERT_CONTEXT) -> Result<(), CredentialStoreError> {
+    /// (`CERT_ENHKEY_USAGE_PROP_ID`).
+    fn restrict(context: *const CERT_CONTEXT) -> Result<(), CredentialStoreError> {
         let mut client_authentication = szOID_PKIX_KP_CLIENT_AUTH.cast_mut();
         let usage = CTL_USAGE {
             cUsageIdentifier: 1,
@@ -328,6 +375,11 @@ mod windows_store {
         if unsafe { CertSetEnhancedKeyUsage(context, &raw const usage) } == 0 {
             return Err(last_store_error());
         }
+        Ok(())
+    }
+
+    /// Marks the entry `context` as this module's.
+    fn mark(context: *const CERT_CONTEXT) -> Result<(), CredentialStoreError> {
         let mark = CRYPT_INTEGER_BLOB {
             cbData: MARK_BYTES,
             pbData: PRESENTED_MARK.as_ptr().cast_mut(),
@@ -401,22 +453,74 @@ mod tests {
         )
     }
 
-    #[test]
-    fn a_test_root_and_the_ca_it_signed_are_presented() {
-        let (root, issuing) = pair();
-        let cas = TestCardCas::from_card(&root, Some(&issuing)).expect("a test root");
-        assert_eq!(cas.certificates(), [root, issuing]);
+    const PRODUCTION_ROOT_NAME: &str = "Example Root CA";
+    const PRODUCTION_ISSUING_NAME: &str = "Example Certificates";
+
+    fn production_pair() -> (Vec<u8>, Vec<u8>) {
+        let root_key = key("root");
+        let issuing_key = key("issuing");
+        (
+            ca(
+                PRODUCTION_ROOT_NAME,
+                PRODUCTION_ROOT_NAME,
+                &root_key,
+                &root_key,
+            ),
+            ca(
+                PRODUCTION_ISSUING_NAME,
+                PRODUCTION_ROOT_NAME,
+                &issuing_key,
+                &root_key,
+            ),
+        )
+    }
+
+    fn issuing(der: &[u8]) -> CardCa {
+        CardCa {
+            der: der.to_vec(),
+            usage: Usage::AsIssued,
+        }
+    }
+
+    fn test_root(der: &[u8]) -> CardCa {
+        CardCa {
+            der: der.to_vec(),
+            usage: Usage::ClientAuthentication,
+        }
     }
 
     #[test]
-    fn a_root_alone_is_presented_alone() {
+    fn a_production_card_presents_its_issuing_ca_alone_in_every_build() {
+        let (root, issuing_ca) = production_pair();
+        for presents_test_roots in [false, true] {
+            let cas = CardCas::presented(&root, Some(&issuing_ca), presents_test_roots)
+                .expect("an issuing CA");
+            assert_eq!(cas.certificates(), [issuing(&issuing_ca)]);
+        }
+    }
+
+    #[test]
+    fn a_test_root_joins_its_issuing_ca_in_development_builds_only() {
+        let (root, issuing_ca) = pair();
+        let development = CardCas::presented(&root, Some(&issuing_ca), true).expect("a test card");
+        assert_eq!(
+            development.certificates(),
+            [test_root(&root), issuing(&issuing_ca)]
+        );
+        let release = CardCas::presented(&root, Some(&issuing_ca), false).expect("a test card");
+        assert_eq!(release.certificates(), [issuing(&issuing_ca)]);
+    }
+
+    #[test]
+    fn a_test_root_alone_is_presented_in_development_builds_only() {
         let (root, _) = pair();
-        let cas = TestCardCas::from_card(&root, None).expect("a test root");
-        assert_eq!(cas.certificates(), [root]);
+        let cas = CardCas::presented(&root, None, true).expect("a test root");
+        assert_eq!(cas.certificates(), [test_root(&root)]);
+        assert_eq!(CardCas::presented(&root, None, false), None);
     }
 
     #[test]
-    fn a_root_without_the_word_test_is_not_a_test_root() {
+    fn a_root_without_the_word_test_is_never_presented() {
         let root_key = key("root");
         for name in [
             "Example Root CA",
@@ -424,48 +528,71 @@ mod tests {
             "Example test Root CA",
         ] {
             let root = ca(name, name, &root_key, &root_key);
-            assert_eq!(TestCardCas::from_card(&root, None), None, "{name}");
+            assert_eq!(CardCas::presented(&root, None, true), None, "{name}");
         }
     }
 
     #[test]
-    fn a_root_that_is_not_self_signed_or_not_a_ca_is_refused() {
+    fn a_root_that_is_not_self_signed_or_not_a_ca_presents_nothing() {
         let root_key = key("root");
         let other_key = key("other");
+        let issuing_key = key("issuing");
+        let issuing_ca = ca(ISSUING_NAME, ROOT_NAME, &issuing_key, &root_key);
         let signed_by_another = ca(ROOT_NAME, ROOT_NAME, &root_key, &other_key);
-        assert_eq!(TestCardCas::from_card(&signed_by_another, None), None);
         let issued_by_another = ca(ROOT_NAME, ISSUING_NAME, &root_key, &root_key);
-        assert_eq!(TestCardCas::from_card(&issued_by_another, None), None);
         let not_a_ca = ca_with(ROOT_NAME, ROOT_NAME, &root_key, &root_key, Vec::new());
-        assert_eq!(TestCardCas::from_card(&not_a_ca, None), None);
-        assert_eq!(TestCardCas::from_card(b"not a certificate", None), None);
+        for root in [
+            signed_by_another,
+            issued_by_another,
+            not_a_ca,
+            b"not a certificate".to_vec(),
+        ] {
+            for presents_test_roots in [false, true] {
+                assert_eq!(
+                    CardCas::presented(&root, Some(&issuing_ca), presents_test_roots),
+                    None
+                );
+            }
+        }
     }
 
     #[test]
-    fn an_issuing_ca_the_root_did_not_sign_stays_out() {
-        let (root, _) = pair();
+    fn an_issuing_ca_the_root_did_not_issue_and_sign_stays_out() {
+        let (root, _) = production_pair();
         let issuing_key = key("issuing");
-        let other_key = key("other");
-        let forged = ca(ISSUING_NAME, ROOT_NAME, &issuing_key, &other_key);
-        let production = ca(
-            "Example Certificates",
-            ROOT_NAME,
+        let root_key = key("root");
+        let forged = ca(
+            PRODUCTION_ISSUING_NAME,
+            PRODUCTION_ROOT_NAME,
             &issuing_key,
-            &key("root"),
+            &key("other"),
         );
-        for issuing in [forged, production] {
-            let cas = TestCardCas::from_card(&root, Some(&issuing)).expect("a test root");
-            assert_eq!(cas.certificates(), core::slice::from_ref(&root));
+        let issued_by_another = ca(
+            PRODUCTION_ISSUING_NAME,
+            ISSUING_NAME,
+            &issuing_key,
+            &root_key,
+        );
+        let not_a_ca = ca_with(
+            PRODUCTION_ISSUING_NAME,
+            PRODUCTION_ROOT_NAME,
+            &issuing_key,
+            &root_key,
+            Vec::new(),
+        );
+        for issuing_ca in [forged, issued_by_another, not_a_ca, root.clone()] {
+            assert_eq!(CardCas::presented(&root, Some(&issuing_ca), true), None);
         }
+        assert_eq!(CardCas::presented(&root, None, true), None);
     }
 
     #[test]
     fn two_cards_of_one_root_want_each_certificate_once() {
-        let (root, issuing) = pair();
-        let card = TestCardCas::from_card(&root, Some(&issuing)).expect("a test root");
+        let (root, issuing_ca) = pair();
+        let card = CardCas::presented(&root, Some(&issuing_ca), true).expect("a test card");
         let cards = [card.clone(), card];
         let wanted = wanted_certificates(&cards);
-        assert_eq!(wanted, [root.as_slice(), issuing.as_slice()]);
+        assert_eq!(wanted, [&test_root(&root), &issuing(&issuing_ca)]);
         assert!(wanted_certificates(&[]).is_empty());
     }
 }

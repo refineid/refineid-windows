@@ -139,48 +139,52 @@ signed program chaining to it is no more trusted than before
 `crates/pkcs11/README.md`, "NSS trust records"). Windows has no such record for
 a propagated root.
 
-### DVV test cards in development builds
+### The card's issuing CA in the intermediate store
 
-DVV's test roots are not in the Microsoft Trusted Root Program, so with no
-`msroots` Windows holds neither a test card's root nor its issuing CA. A
-browser then finds no chain for the card's authentication certificate:
-Chromium (Edge, Chrome) selects client certificates with
-`CertFindChainInStore`, `CERT_CHAIN_FIND_BY_ISSUER`, matching the server's
-CA names against every CA of the chain, with
-`CERT_CHAIN_FIND_BY_ISSUER_CACHE_ONLY_FLAG` ("search only the cached system
-stores (Root, My, Ca, Trust) to find issuer certificates") and
-`CERT_CHAIN_FIND_BY_ISSUER_CACHE_ONLY_URL_FLAG` ("Only the URL cache is
+With no `msroots` Windows holds no card's issuing CA until it fetches one,
+and a browser that matches client certificates does not fetch: Chromium
+(Edge, Chrome) selects client certificates with `CertFindChainInStore`,
+`CERT_CHAIN_FIND_BY_ISSUER`, matching the server's CA names against every CA
+of the chain, with `CERT_CHAIN_FIND_BY_ISSUER_CACHE_ONLY_FLAG` ("search only
+the cached system stores (Root, My, Ca, Trust) to find issuer certificates")
+and `CERT_CHAIN_FIND_BY_ISSUER_CACHE_ONLY_URL_FLAG` ("Only the URL cache is
 searched. The Internet is not searched") (Win32 `CertFindChainInStore`;
 Chromium `net/ssl/client_cert_store_win.cc`), and sends the intermediates of
-that chain without asking whether its root is trusted.
+that chain. A server that names the issuing CA among its acceptable CAs then
+sees no matching certificate, and one that needs the intermediate does not
+get it.
 
-A development build (`debug_assertions`, the switch refineid-core's
-`SigningBuild` uses) gives such a card its chain and no trust. After every
-pass of the agent's card watch, it reads each card in a reader without a
-credential; when the card's root (`EF.4334`) is self-issued, self-signed, a CA and named
-with the word `TEST`, it puts the root, and the issuing CA (`EF.4336`) if the
-root signed it and it is a CA named so too, into the user's Intermediate
-Certification Authorities store, `CurrentUser\CA`
-(`refineid-windows-credential-store` `test_card_cas`, Windows STPA W-R-26).
-Nothing shipped recognises a test card: no certificate and no fingerprint.
+So after every pass of the agent's card watch, in every build, the agent
+reads each card in a reader without a credential and, when the card's root
+(`EF.4334`) is self-issued, self-signed and a CA and its issuing CA
+(`EF.4336`) is a CA that root issued and signed, puts the issuing CA into the
+user's Intermediate Certification Authorities store, `CurrentUser\CA`, while
+the card is in the reader (`refineid-windows-credential-store` `card_cas`,
+Windows STPA W-R-26). Nothing shipped recognises a card: no certificate and
+no fingerprint.
 
 - The CA store is one of the stores the chain engine searches for issuers;
-  it makes no certificate a trust anchor. The chain still ends with
-  `CERT_TRUST_IS_UNTRUSTED_ROOT`, so no web server, signed program or
-  document signed under the test root becomes trusted.
-- Each entry also carries `CERT_ENHKEY_USAGE_PROP_ID` set to TLS client
-  authentication alone (`CertSetEnhancedKeyUsage`). A certificate with
-  both an EKU extension and EKU extended properties "is valid only for the
-  uses that are on both lists" (Win32 `CertGetEnhancedKeyUsage`, Remarks),
-  and the chain engine narrows a chain to its elements' usages: a synthetic
-  root carrying that property in a Root
-  store built a valid chain for client authentication and
-  `CERT_TRUST_IS_NOT_VALID_FOR_USAGE` for server authentication on a test
-  computer.
+  it makes no certificate a trust anchor. It holds the certificate Windows
+  would otherwise fetch from the Authority Information Access, and a chain
+  through it is trusted exactly when its root is: for a production card,
+  DVV's root from the Microsoft Trusted Root Program. The entry carries no
+  usage property, so the CA's own extensions govern every use, as for a
+  fetched copy.
+- The root never enters a store in a release build. A development build
+  (`debug_assertions`, the switch refineid-core's `SigningBuild` uses) also
+  puts a DVV test card's root in the CA store, since DVV's test roots are in
+  no root program: one named with the word `TEST`, with
+  `CERT_ENHKEY_USAGE_PROP_ID` set to TLS client authentication alone
+  (`CertSetEnhancedKeyUsage`). A certificate with both an EKU extension and
+  EKU extended properties "is valid only for the uses that are on both
+  lists" (Win32 `CertGetEnhancedKeyUsage`, Remarks), and the chain engine
+  narrows a chain to its elements' usages: a synthetic root carrying that
+  property in a Root store built a valid chain for client authentication
+  and `CERT_TRUST_IS_NOT_VALID_FOR_USAGE` for server authentication on a
+  test computer. The chain still ends with `CERT_TRUST_IS_UNTRUSTED_ROOT`.
 - Each entry is marked with a property of RefineID's own, and the watch
   removes its marked entries of cards no longer in a reader. An entry the
   store already held is left unmarked and is never removed.
-- Release builds compile none of this.
 
 Why not a trust store. The user's own Root store "is protected, and user
 interface dialog boxes remind the user to place only trusted certificates into

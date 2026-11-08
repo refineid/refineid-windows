@@ -31,6 +31,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 #[cfg(windows)]
+mod card_cas;
+#[cfg(windows)]
 mod cards;
 #[cfg(windows)]
 mod console;
@@ -38,8 +40,6 @@ mod console;
 mod offer_gate;
 #[cfg(windows)]
 mod session;
-#[cfg(all(windows, debug_assertions))]
-mod test_card_cas;
 
 #[cfg(windows)]
 fn main() -> std::process::ExitCode {

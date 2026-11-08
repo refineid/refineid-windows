@@ -37,14 +37,13 @@ use refineid_lib_core::can::Can;
 #[cfg(windows)]
 use zeroize::Zeroize as _;
 
+pub mod card_cas;
 pub mod card_certificates;
 #[cfg(any(windows, test))]
 pub mod card_reading;
 pub mod card_roots;
 mod certstore;
 mod pairing;
-#[cfg(debug_assertions)]
-pub mod test_card_cas;
 
 pub use certstore::{
     BROWSER_KEY_PREFIX, KEY_STORAGE_PROVIDER, browser_key_name, browser_key_pair_id,
