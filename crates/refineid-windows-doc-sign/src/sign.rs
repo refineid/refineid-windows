@@ -67,9 +67,9 @@ impl core::error::Error for DocumentSignError {}
 /// The signature the apps ask for.
 ///
 /// Timestamped by the default authority, with validation material, an
-/// archive timestamp for every format that has an archive construction
-/// (all but `ASiC-E` with `XAdES`, which stops at LT), and for a PDF the
-/// verification seal in `stamp_language`. `signer_anchors` are what
+/// archive timestamp for every format (level LTA, the only level a
+/// release build writes), and for a PDF the verification seal in
+/// `stamp_language`. `signer_anchors` are what
 /// [`crate::signer_anchors`] found on this computer; core refuses a
 /// long-term request that names none.
 ///
@@ -96,7 +96,7 @@ pub fn document_request(
                 .then(|| VisibleSignature::verification(stamp_language)),
             ..SignatureMetadata::default()
         },
-        archive: format != Format::AsicEXades,
+        archive: true,
         long_term: true,
         signer_anchors,
         timestamp_authorities: vec![DEFAULT_TIMESTAMP_AUTHORITY.to_owned()],
@@ -269,10 +269,7 @@ mod tests {
             SIGNING_TIME,
             vec![ANCHOR.to_vec()],
         );
-        assert!(
-            !xades.archive,
-            "ASiC-E with XAdES has no archive construction"
-        );
+        assert!(xades.archive, "ASiC-E with XAdES is archived too");
         assert!(xades.long_term);
     }
 
