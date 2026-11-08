@@ -104,7 +104,19 @@ pub struct ProtectedPairingStore {
     /// Whether a pairing stored by an earlier build was removed and no
     /// pairing has been stored since.
     earlier_pairing_removed: bool,
+    /// The protected set's file as it was just before this value last read
+    /// it for [`Self::follow`], or `None` while that is not known.
+    followed: Option<SetStamp>,
 }
+
+/// What the protected set's file looked like at one look: its length and
+/// its modification and creation times, `None` for no file. A write
+/// replaces the file through a rename, which changes them.
+type SetStamp = Option<(
+    u64,
+    Option<std::time::SystemTime>,
+    Option<std::time::SystemTime>,
+)>;
 
 impl ProtectedPairingStore {
     /// Loads this user's stored pairing set, or an empty store when none
@@ -146,6 +158,7 @@ impl ProtectedPairingStore {
     ) -> Result<Self, CredentialStoreError> {
         remove_unprotected_copies(&directory)?;
         remove_earlier_build_files(&directory);
+        let followed = set_stamp(&directory);
         let set = match read_pairing_set(&directory)? {
             Some(blob) => match decode_pairing_records(&blob) {
                 Ok(set) => set,
@@ -173,6 +186,7 @@ impl ProtectedPairingStore {
             clock,
             judges_browser_entries,
             earlier_pairing_removed,
+            followed: Some(followed),
         };
         // Each change is written as it is made; one that could not be
         // written stands in memory and is written here, as is the set
@@ -263,6 +277,27 @@ impl ProtectedPairingStore {
             self.persist_bound();
             self.judge_what_lies_beside();
         }
+        Ok(())
+    }
+
+    /// Brings the card sightings and records held here up to what is
+    /// stored, at the cost of reading the sightings and the set file's
+    /// metadata while the set is unchanged: the protected set is read and
+    /// unprotected again only when its file changed since this value last
+    /// read it, as [`Self::refresh`] does. A reader that asks at every call
+    /// of a host, as the PKCS#11 module does, stays cheap.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::refresh`].
+    pub fn follow(&mut self) -> Result<(), StoreError> {
+        let stamp = set_stamp(&self.directory);
+        if self.followed == Some(stamp) {
+            self.sightings = read_sightings(&self.directory);
+            return Ok(());
+        }
+        self.refresh()?;
+        self.followed = Some(stamp);
         Ok(())
     }
 
@@ -899,6 +934,25 @@ const fn write_pairing_set(_directory: &Path, _blob: &[u8]) -> Result<(), Creden
     Err(CredentialStoreError::UnsupportedPlatform)
 }
 
+/// The protected set's file in `directory` as it looks now.
+#[cfg(windows)]
+fn set_stamp(directory: &Path) -> SetStamp {
+    std::fs::metadata(directory.join(PAIRING_SET_FILE))
+        .ok()
+        .map(|metadata| {
+            (
+                metadata.len(),
+                metadata.modified().ok(),
+                metadata.created().ok(),
+            )
+        })
+}
+
+#[cfg(not(windows))]
+const fn set_stamp(_directory: &Path) -> SetStamp {
+    None
+}
+
 /// Reads and unprotects the serialized pairing set, if one has been stored.
 #[cfg(windows)]
 fn read_pairing_set(directory: &Path) -> Result<Option<Zeroizing<Vec<u8>>>, CredentialStoreError> {
@@ -1482,6 +1536,32 @@ mod tests {
             .expect("sighted");
         forget_pairing(&mut store, PAIR, CREATED_AT_MS).expect("forget");
         assert!(!file.exists(), "a forgotten pairing keeps no sighting");
+    }
+
+    #[test]
+    fn a_follower_sees_what_another_store_wrote_and_reads_an_unchanged_set_once() {
+        let directory = TestDirectory::new("follow");
+        let mut follower = load_at(&directory.0, at_creation);
+        let mut writer = load_at(&directory.0, at_creation);
+        writer.insert(paired_record()).expect("insert");
+        follower.follow().expect("followed");
+        assert!(follower.get(PAIR).is_ok(), "a pairing stored elsewhere");
+        writer
+            .record_card_sighting(PAIR, sighting(CREATED_AT_MS))
+            .expect("sighted");
+        follower.follow().expect("followed");
+        assert!(follower.card_sighting(PAIR).is_some(), "a sighting");
+        // An unchanged set is not read again: one that no longer
+        // unprotects goes unnoticed until its file changes.
+        let stamp = follower.followed;
+        follower.follow().expect("an unchanged set");
+        assert_eq!(follower.followed, stamp);
+        forget_pairing(&mut writer, PAIR, CREATED_AT_MS).expect("forget");
+        follower.follow().expect("followed");
+        assert!(
+            follower.usable_pairing().is_none(),
+            "a pairing forgotten elsewhere"
+        );
     }
 
     #[test]
