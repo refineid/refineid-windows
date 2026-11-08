@@ -34,7 +34,7 @@ use refineid_lib_core::transport::{
     TransportOutcome,
 };
 use refineid_rapp_core::engine::{
-    OperationOutcome, Requester, RequesterConfig, SessionEnd, SessionError,
+    OperationOutcome, Requester, RequesterConfig, Session, SessionEnd, SessionError,
 };
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::message::{CloseReason, ResultError};
@@ -385,12 +385,14 @@ impl RemoteCardTransport {
         };
 
         let outcome = requester.execute(&mut session, operation, OPERATION_LIFETIME_MS);
-        // A session the phone already closed is not closed again (section
-        // 4.6 item 4).
-        requester.disconnect(&mut session, CloseReason::UserDisconnect);
         if session.end() == Some(SessionEnd::PeerClose(CloseReason::PairingRevoked)) {
             return Err(RemoteFailure::Unpaired);
         }
+        // The result goes back now; the close and its echo follow on a
+        // thread of their own. A session the phone already closed is not
+        // closed again (section 4.6 item 4), and a `pairing_revoked` close
+        // that crosses this one still revokes the stored pairing.
+        close_in_background(Closing { requester, session });
         match outcome {
             Ok(OperationOutcome::Completed(result)) => Ok(result),
             Ok(
@@ -410,6 +412,118 @@ impl RemoteCardTransport {
             ))),
         }
     }
+}
+
+/// One remote session to close once its operation's result is handed back.
+struct Closing {
+    requester: Requester<ProtectedPairingStore>,
+    session: Session<TcpFrameTransport>,
+}
+
+impl Closing {
+    /// Closes the session, waiting at most the engine's echo bound.
+    fn close(mut self) {
+        self.requester
+            .disconnect(&mut self.session, CloseReason::UserDisconnect);
+    }
+}
+
+/// A closing session crosses to the thread that closes it.
+const _: () = {
+    const fn sendable<T: Send>() {}
+    sendable::<Closing>();
+};
+
+/// Closes `closing` on a thread of its own, so the caller does not wait for
+/// the phone's echo of the close. The thread holds a reference to this DLL
+/// until it ends, so a host that unloads the Card Module meanwhile does not
+/// unload the code it runs; where no thread can start, the session is closed
+/// here.
+fn close_in_background(closing: Closing) {
+    use windows_sys::Win32::Foundation::{CloseHandle, HMODULE};
+    use windows_sys::Win32::System::LibraryLoader::{
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GetModuleHandleExW,
+    };
+    use windows_sys::Win32::System::Threading::CreateThread;
+
+    let mut module: HMODULE = core::ptr::null_mut();
+    // SAFETY: the address of a function in this module identifies it; the
+    // lookup adds a reference the closing thread releases.
+    let pinned = unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+            (close_in_background as *const ()).cast(),
+            &raw mut module,
+        )
+    };
+    if pinned == 0 || module.is_null() {
+        closing.close();
+        return;
+    }
+    let parameter = Box::into_raw(Box::new(BackgroundClose { closing, module }));
+    // SAFETY: `close_thread` takes ownership of `parameter`, a leaked box of
+    // the type it reclaims; the thread starts at once with the default stack.
+    let thread = unsafe {
+        CreateThread(
+            core::ptr::null(),
+            DEFAULT_STACK_SIZE,
+            Some(close_thread),
+            parameter.cast(),
+            START_AT_ONCE,
+            core::ptr::null_mut(),
+        )
+    };
+    if thread.is_null() {
+        // SAFETY: no thread took `parameter`; it is reclaimed once, here.
+        let work = unsafe { Box::from_raw(parameter) };
+        let BackgroundClose { closing, module } = *work;
+        closing.close();
+        release_module(module);
+        return;
+    }
+    // SAFETY: the handle was just returned and is closed once; the thread
+    // runs on without it.
+    unsafe { CloseHandle(thread) };
+}
+
+/// What the closing thread receives: the session and the reference to this
+/// DLL it releases as it exits.
+struct BackgroundClose {
+    closing: Closing,
+    module: windows_sys::Win32::Foundation::HMODULE,
+}
+
+/// The closing thread: closes the session, then releases its reference to
+/// this DLL and exits, so no code of this DLL runs after the release.
+unsafe extern "system" fn close_thread(parameter: *mut core::ffi::c_void) -> u32 {
+    use windows_sys::Win32::System::LibraryLoader::FreeLibraryAndExitThread;
+
+    // SAFETY: `close_in_background` passed a leaked `BackgroundClose` box
+    // that only this thread reclaims.
+    let work = unsafe { Box::from_raw(parameter.cast::<BackgroundClose>()) };
+    let BackgroundClose { closing, module } = *work;
+    let closed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| closing.close()));
+    if closed.is_err() {
+        refineid_dev_errors::report!(Rapp, "session close failed", "the close panicked");
+    }
+    // SAFETY: `module` is the reference `close_in_background` took for this
+    // thread; the call releases it and ends the thread without returning.
+    unsafe { FreeLibraryAndExitThread(module, CLOSE_THREAD_EXIT) }
+}
+
+/// `CreateThread`'s stack size for the executable's default.
+const DEFAULT_STACK_SIZE: usize = 0;
+/// `CreateThread`'s creation flags for a thread that runs at once.
+const START_AT_ONCE: u32 = 0;
+/// The closing thread's exit code; nothing reads it.
+const CLOSE_THREAD_EXIT: u32 = 0;
+
+/// Releases a reference to this DLL taken for a thread that never started.
+fn release_module(module: windows_sys::Win32::Foundation::HMODULE) {
+    use windows_sys::Win32::Foundation::FreeLibrary;
+
+    // SAFETY: `module` is a reference this DLL took and releases once.
+    unsafe { FreeLibrary(module) };
 }
 
 /// The Card Module transport for one acquired context.

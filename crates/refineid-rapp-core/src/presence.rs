@@ -56,11 +56,18 @@ impl CardSighting {
     /// back of the clock stretches the offer by less than one grace.
     #[must_use]
     pub fn stands_for(&self, certificate: &OwnedCert, now_ms: u64) -> bool {
-        let age = now_ms.saturating_sub(self.at_ms);
-        let ahead = self.at_ms.saturating_sub(now_ms);
         CertificateFingerprint::of_certificate(certificate.as_der()) == self.fingerprint
-            && age < IDENTITY_OFFER_GRACE_MS
-            && ahead < IDENTITY_OFFER_GRACE_MS
+            && !self.lapsed_at(now_ms)
+    }
+
+    /// Whether this sighting can bound no offer at `now_ms`: the grace has
+    /// passed since it was heard, or it lies a grace or more ahead of the
+    /// clock. A store keeps no sighting that lapsed: it would only say which
+    /// card was here.
+    #[must_use]
+    pub const fn lapsed_at(&self, now_ms: u64) -> bool {
+        now_ms.saturating_sub(self.at_ms) >= IDENTITY_OFFER_GRACE_MS
+            || self.at_ms.saturating_sub(now_ms) >= IDENTITY_OFFER_GRACE_MS
     }
 
     /// The wall-clock moment the offer this sighting bounds lapses unless a
@@ -175,6 +182,13 @@ mod tests {
     #[test]
     fn a_clock_set_back_beyond_the_grace_does_not_stretch_the_offer() {
         assert!(!heard().stands_for(&certificate(), HEARD_AT_MS - IDENTITY_OFFER_GRACE_MS));
+    }
+
+    #[test]
+    fn a_sighting_lapses_when_the_grace_has_passed_and_not_before() {
+        assert!(!heard().lapsed_at(HEARD_AT_MS + IDENTITY_OFFER_GRACE_MS - 1));
+        assert!(heard().lapsed_at(HEARD_AT_MS + IDENTITY_OFFER_GRACE_MS));
+        assert!(heard().lapsed_at(HEARD_AT_MS - IDENTITY_OFFER_GRACE_MS));
     }
 
     #[test]

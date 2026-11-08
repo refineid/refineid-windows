@@ -29,17 +29,20 @@
 //! - **By-construction hex `Display`.** Logs, reports, and the
 //!   `card.*.signer.fingerprint` field all render lowercase hex without
 //!   a per-site `hex::encode`. `Output<D>` has no such `Display`.
-//! - **`const` pin tables.** `trust_roots.rs` builds `const`
-//!   pinned-root / CSCA / ICAO fingerprint tables via `from_bytes`;
-//!   `Array` / `GenericArray` isn't const-constructible from a literal
-//!   array there.
+//! - **`const` construction.** `from_bytes` is a `const fn`, so a
+//!   digest can be a `const`; `Array` / `GenericArray` isn't
+//!   const-constructible from a literal array.
 //!
 //! The bytes themselves are *not* hand-rolled: [`Sha256::of`] /
-//! [`Sha384::of`] delegate to `RustCrypto` `sha2`, whose one-shot
-//! `digest()` returns the ecosystem `Output<D>` we copy in. The
-//! wrapper adds only the name, the rendering, and the const table --
-//! never a hash implementation. Both types come from a single
-//! `digest_newtype!` definition so the shared surface can't drift.
+//! [`Sha384::of`] delegate to `RustCrypto` `sha2` (and [`Sha1::of`],
+//! [`Md5::of`] to `sha1`, `md-5`), whose one-shot `digest()` returns
+//! the ecosystem `Output<D>` we copy in. The wrapper adds only the
+//! name, the rendering, and the const construction -- never a hash
+//! implementation. Every type comes from a single `digest_newtype!`
+//! definition so the shared surface can't drift. [`Sha1`] and [`Md5`]
+//! exist for the identifiers and lookup keys other software defines
+//! over them (PKCS#11 `CKA_ID`, NSS trust records); no decision in this
+//! workspace rests on either.
 //!
 //! See refineid-core's [refinement types] for the project's position on
 //! newtyping at trust boundaries. Cert fingerprints drive pin matching
@@ -49,11 +52,12 @@
 
 use core::fmt;
 
-/// Define a fixed-length fingerprint newtype over a `sha2` hasher.
+/// Define a fixed-length fingerprint newtype over a `RustCrypto`
+/// hasher.
 ///
-/// One definition for both [`Sha256`] and [`Sha384`]: the wrapper
-/// (nominal type, hex `Display`, `const` `from_bytes` for pin tables)
-/// is generated, while `of()` delegates to the `RustCrypto` `$hasher`
+/// One definition for every digest type here: the wrapper (nominal
+/// type, hex `Display`, `const` `from_bytes` for pin tables) is
+/// generated, while `of()` delegates to the `RustCrypto` `$hasher`
 /// (its one-shot `digest()` yields the ecosystem `Output<$hasher>`,
 /// which we copy into the `[u8; $len]` backing store). `$len` MUST
 /// equal the hasher's output size; the `copy_from_slice` in `of()`
@@ -66,7 +70,7 @@ macro_rules! digest_newtype {
         pub struct $name([u8; $len]);
 
         impl $name {
-            /// Compute the digest of `input` via `RustCrypto` `sha2`.
+            /// Compute the digest of `input` via the `RustCrypto` hasher.
             #[inline]
             #[must_use]
             pub fn of<B: AsRef<[u8]>>(input: B) -> Self {
@@ -112,6 +116,16 @@ macro_rules! digest_newtype {
             }
         }
     };
+}
+
+digest_newtype! {
+    /// An MD5 digest. Always 16 bytes; `Display` is lowercase hex.
+    ///
+    /// A lookup key only: NSS carries the MD5 of a certificate's DER on
+    /// every trust record it reads or writes (`CKA_NSS_CERT_MD5_HASH`,
+    /// NSS `lib/util/pkcs11n.h`). Nothing here verifies or decides
+    /// anything by it.
+    Md5, md5::Md5, 16
 }
 
 digest_newtype! {
@@ -161,7 +175,14 @@ digest_newtype! {
 
 #[cfg(test)]
 mod tests {
-    use super::{Sha1, Sha224, Sha256, Sha384, Sha512};
+    use super::{Md5, Sha1, Sha224, Sha256, Sha384, Sha512};
+
+    #[test]
+    fn md5_known_vector_abc() {
+        // MD5("abc") per RFC 1321 appendix A.5 test suite.
+        let s = Md5::of(b"abc");
+        assert_eq!(format!("{s}"), "900150983cd24fb0d6963f7d28e17f72");
+    }
 
     #[test]
     fn known_vector_empty_input() {

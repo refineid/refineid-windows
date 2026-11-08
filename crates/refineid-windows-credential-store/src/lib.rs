@@ -24,7 +24,7 @@
     windows,
     expect(
         unsafe_code,
-        reason = "CredReadW, CredWriteW, CredDeleteW, CredFree, CryptProtectData, CryptUnprotectData, LocalFree, and the certificate store calls are the small Windows FFI boundary"
+        reason = "CredReadW, CredWriteW, CredDeleteW, CredFree, CryptProtectData, CryptUnprotectData, LocalFree, and the certificate store, registry, card database and smart card key storage provider calls are the small Windows FFI boundary"
     )
 )]
 
@@ -37,14 +37,22 @@ use refineid_lib_core::can::Can;
 #[cfg(windows)]
 use zeroize::Zeroize as _;
 
+pub mod card_cas;
+pub mod card_certificates;
+#[cfg(any(windows, test))]
+pub mod card_reading;
+pub mod card_roots;
 mod certstore;
 mod pairing;
 
 pub use certstore::{
-    BROWSER_KEY_PREFIX, KEY_STORAGE_PROVIDER, browser_key_name, browser_key_pair_id,
+    BROWSER_KEY_PREFIX, BrowserEntry, KEY_STORAGE_PROVIDER, browser_entries, browser_key_name,
+    browser_key_pair_id,
 };
 #[cfg(windows)]
-pub use certstore::{install_browser_certificate, remove_browser_certificates};
+pub use certstore::{
+    install_browser_certificate, offered_phone_certificate, remove_browser_certificates,
+};
 pub use pairing::{ProtectedPairingStore, delete_pairing_set};
 
 /// Maximum PC/SC ATR size accepted by the shared credential namespace.
@@ -83,6 +91,11 @@ pub enum CredentialStoreError {
     /// Windows rejected a certificate store operation.
     CertificateStore {
         /// `GetLastError` value returned by the failing API.
+        code: u32,
+    },
+    /// Windows rejected a registry operation.
+    Registry {
+        /// The status the failing registry function returned.
         code: u32,
     },
     /// DPAPI refused to protect or unprotect the pairing set.
@@ -137,6 +150,9 @@ impl fmt::Display for CredentialStoreError {
                     formatter,
                     "Windows certificate store failed with code {code}"
                 )
+            }
+            Self::Registry { code } => {
+                write!(formatter, "Windows registry failed with code {code}")
             }
             Self::Protection { code } => {
                 write!(formatter, "DPAPI failed with code {code}")

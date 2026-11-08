@@ -27,7 +27,7 @@ use crate::{AGENT_MUTEX_PREFIX, PipeError, pipe_name, wide};
 /// One pipe instance: clients are served one after another.
 const MAX_INSTANCES: u32 = 1;
 /// Kernel buffer sizes for each direction, one message's worth.
-const BUFFER_BYTES: u32 = 4096;
+const BUFFER_BYTES: u32 = 8192;
 /// How long a client's `WaitNamedPipeW` waits by default, in milliseconds.
 const DEFAULT_WAIT_MS: u32 = 5_000;
 
@@ -241,7 +241,11 @@ impl Client<'_> {
     /// # Errors
     /// [`PipeError::Pipe`] when the write fails.
     pub fn answer(self, answer: &SignAnswer) -> Result<(), PipeError> {
-        let bytes = answer.encode();
+        self.deliver(&answer.encode())
+    }
+
+    /// Writes `bytes` and waits until the client has read them.
+    fn deliver(self, bytes: &[u8]) -> Result<(), PipeError> {
         let mut written = 0u32;
         let length = u32::try_from(bytes.len()).map_err(|_| PipeError::Pipe(0))?;
         // SAFETY: `bytes` holds `length` bytes for a synchronous write.

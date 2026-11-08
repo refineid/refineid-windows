@@ -16,7 +16,7 @@
 //! agnostic.
 //!
 //! Layered from the card edge upwards. The foundation modules
-//! ([`backend`], [`error`], [`transport`]) define the ports and
+//! ([`backend`], [`transport`]) define the ports and
 //! types every higher layer depends on. The crypto, protocol, and
 //! use-case layers (PACE, secure messaging, eMRTD, the
 //! `Session` verb API) land on top as they are ported.
@@ -81,45 +81,33 @@
 #[cfg(test)]
 extern crate alloc;
 
-pub mod aa;
 pub mod activation;
 pub mod apdu;
 pub mod atr;
 pub mod auth;
 pub mod backend;
 pub(crate) mod ber;
-pub mod ca;
 pub mod can;
 pub mod card;
 pub mod card_access;
 pub mod cert_state;
-pub mod cms;
 pub mod country;
-pub mod crl;
 pub mod crypto;
-pub mod emrtd;
-pub mod error;
 pub mod fineid_card;
 pub mod hex;
-pub mod icao_pkd;
 pub mod identity;
 pub mod iso8601;
-pub mod ldif;
-pub mod ocsp;
 pub mod oid;
 pub mod pace;
 pub mod pin;
 pub mod pin_cache;
 pub mod pin_retry_risk;
 pub mod pkcs15;
-pub mod revocation;
 pub mod rng;
 pub mod secure_messaging;
 pub mod sign;
-pub mod signing_session;
 pub mod text;
 pub mod transport;
-pub mod trust_roots;
 pub mod x509;
 
 // Library-facade re-exports of the crate's public surface.
@@ -128,7 +116,6 @@ pub mod x509;
 // is rejected by rustc as a useless lint attribute (the lint
 // fires at module scope, not on the use-item).
 pub use backend::ReaderBackend;
-pub use error::IoError;
 
 /// Crate version surfaced to upper layers (PKCS#11 callers will
 /// reflect this through `C_GetTokenInfo` once the cdylib port

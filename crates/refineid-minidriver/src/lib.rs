@@ -86,6 +86,12 @@
 )]
 
 #[cfg(windows)]
+mod card_driver;
+#[cfg(windows)]
+mod card_registrations;
+#[cfg(windows)]
+mod card_roots;
+#[cfg(windows)]
 mod cardmod;
 #[cfg(windows)]
 mod ffi;
@@ -98,8 +104,6 @@ mod ksp_verify;
 // Pure byte codecs: compiled on the host too so `cargo test` covers them.
 #[cfg(any(windows, test))]
 mod ksp_codec;
-#[cfg(windows)]
-mod msroots;
 #[cfg(all(windows, debug_assertions))]
 mod reported;
 #[cfg(windows)]
@@ -140,6 +144,10 @@ use cardmod::{CardCapabilityModel, CardModel, ContainerDescriptor, Ctx, KeyAlgor
 )]
 use ffi::*;
 #[cfg(windows)]
+use refineid_agent_pipe::identity::{calling_program, computer_name, interface_language};
+#[cfg(windows)]
+use refineid_agent_pipe::{RemoteKey, in_process_operation};
+#[cfg(windows)]
 use refineid_lib_core::auth::{
     AuthError, CardPinLengths, ChangePinOutcome, PIN_MAX_LENGTH, PIN_MIN_LENGTH, PUK_MAX_LENGTH,
     PUK_MIN_LENGTH, PinOps, PinReferenceScheme, PinSlot, PinStatus, UnblockOutcome, VerifyOutcome,
@@ -160,7 +168,8 @@ use refineid_lib_core::pin::PinBytes;
 use refineid_lib_core::pin_cache::PinSafetyCache;
 #[cfg(windows)]
 use refineid_lib_core::pin_retry_risk::{
-    RetryFloorRefusal, check_puk_retry_floor, check_retry_floor, pin1_status_permits_reusable_cache,
+    RetryFloorRefusal, check_puk_retry_floor, check_retry_floor,
+    pin1_status_permits_reusable_cache, reports_no_tries_left,
 };
 #[cfg(windows)]
 use refineid_lib_core::pkcs15::{CertSlot, Pkcs15Ops};
@@ -171,9 +180,9 @@ use refineid_lib_core::x509::{
     EcCurve, OwnedCert, PublicKeyAlgorithm, UnvalidatedCertificate, extract_rsa_public_key,
 };
 #[cfg(windows)]
-use refineid_rapp_core::operations::{
-    CardOperation, CardOperationResult, KeyProfile, SignatureAlgorithm,
-};
+use refineid_rapp_core::operations::{CardOperationResult, KeyProfile, SignatureAlgorithm};
+#[cfg(windows)]
+use refineid_windows_credential_store::card_certificates::CardId;
 #[cfg(windows)]
 use refineid_windows_credential_store::{ProtectedPairingStore, read_can};
 #[cfg(windows)]
@@ -224,14 +233,15 @@ fn live_verify_floor(
 }
 
 /// Apply the retry floor to `slot` before any command that can spend one
-/// of its attempts. A refusal below the floor or at a blocked PIN answers
+/// of its attempts. A refusal below the floor answers
 /// `SCARD_W_CHV_BLOCKED`, which routes the user to the PUK; a counter the
 /// card did not report answers `SCARD_F_INTERNAL_ERROR`, since no PIN was
-/// presented.
+/// presented. At zero tries left or a blocked PIN the command goes out and
+/// the card's answer reports it blocked.
 #[cfg(windows)]
 fn retry_floor_answer(slot: PinSlot, status: PinStatus) -> Result<(), DWORD> {
     check_retry_floor(slot.into(), status).map_err(|refusal| match refusal {
-        RetryFloorRefusal::TriesBelowFloor { .. } | RetryFloorRefusal::Blocked { .. } => {
+        RetryFloorRefusal::TriesBelowFloor { .. } => {
             refineid_dev_errors::report!(
                 CardModule,
                 "PIN not tried",
@@ -263,7 +273,7 @@ fn puk_floor_answer(tx: &mut CardSessionTransport) -> Result<(), DWORD> {
         .map_err(|_error| SCARD_F_INTERNAL_ERROR)?;
     let status = tx.puk_status().map_err(|_error| SCARD_F_INTERNAL_ERROR)?;
     check_puk_retry_floor(status).map_err(|refusal| match refusal {
-        RetryFloorRefusal::TriesBelowFloor { .. } | RetryFloorRefusal::Blocked { .. } => {
+        RetryFloorRefusal::TriesBelowFloor { .. } => {
             refineid_dev_errors::report!(
                 CardModule,
                 "PUK not tried",
@@ -437,8 +447,10 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
         let pair_id = pairing.pair_id();
         // The card is offered on the certificate whose card a session heard
         // present within the grace, and on nothing else (RAPP v26.11.2
-        // section 8.4 items 2 and 3).
-        let Some(auth) = refineid_rapp_core::store::offered_certificate(
+        // section 8.4 items 2 and 3). No store keeps it: the process that
+        // holds the phone's session offers it in the personal store, and it
+        // is read from there.
+        let Some(auth) = refineid_windows_credential_store::offered_phone_certificate(
             &store,
             pair_id,
             refineid_rapp_core::clock::unix_time_ms(),
@@ -450,21 +462,10 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
             );
             return SCARD_E_UNKNOWN_CARD;
         };
-        let sig = pairing.signature_certificate().unwrap_or(auth);
-        let (auth_der, sig_der) = (auth.as_der().to_vec(), sig.as_der().to_vec());
-
-        // Cache root/intermediate CA certificates from pairing record if present
-        if let Some(root) = pairing.root_certificate() {
-            let roots = refineid_lib_core::trust_roots::RootCertificates::new(
-                Some(root.as_der().to_vec()),
-                pairing
-                    .intermediate_certificate()
-                    .map(|certificate| certificate.as_der().to_vec()),
-            );
-            let bundle = roots.to_pkcs7_bundle();
-            msroots::set_root_certificates(bundle);
-            let _ = refineid_lib_core::trust_roots::set_root_certificates(roots);
-        }
+        // The authentication certificate is the only one offered
+        // (refineid-core `doc/security/certificate-custody.md`); it answers
+        // for both containers of the remote card.
+        let (auth_der, sig_der) = (auth.as_der().to_vec(), auth.as_der().to_vec());
 
         let remote_tx = RemoteCardTransport::new(atr, pair_id);
         (CardSessionTransport::remote(remote_tx), auth_der, sig_der)
@@ -532,12 +533,6 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
                 return SCARD_F_INTERNAL_ERROR;
             }
         };
-        if let Some(roots) =
-            refineid_lib_core::trust_roots::fetch_and_cache_from_card(&mut transport)
-        {
-            let bundle = roots.to_pkcs7_bundle();
-            msroots::set_root_certificates(bundle);
-        }
         (transport, auth_cert_der, signature_cert_der)
     };
 
@@ -744,7 +739,11 @@ const CARDAPPS_FILE: &str = "cardapps";
 /// `mscp` file: the container map.
 #[cfg(any(windows, test))]
 const CMAPFILE_FILE: &str = "cmapfile";
-/// `mscp` file: the trusted roots bundle.
+/// `mscp` file: the trusted roots bundle, which this card module never has.
+/// Windows propagates a card's `msroots` certificates into the user's Root
+/// store, trusted for every purpose; the DVV roots reach Windows through the
+/// Microsoft Trusted Root Program and the issuing CA through the
+/// authentication certificate's Authority Information Access.
 #[cfg(any(windows, test))]
 const MSROOTS_FILE: &str = "msroots";
 
@@ -763,8 +762,6 @@ enum CardFile {
     CardApps,
     /// `mscp/cmapfile`, the container map.
     CmapFile,
-    /// `mscp/msroots`, the trusted roots bundle.
-    MsRoots,
     /// A certificate file under `mscp`, named by its container.
     Container(String),
 }
@@ -782,11 +779,12 @@ enum NoSuchFile {
 #[cfg(any(windows, test))]
 impl CardFile {
     /// The file `directory` and `file` name. The root holds the three
-    /// card files; `mscp` holds the container map, the roots bundle
-    /// and one certificate file per container, and answers `cardcf`
-    /// too, as some callers ask for it there. Whether a container
-    /// file exists is the card model's to say, so a `Container` is any
-    /// other `mscp` name.
+    /// card files; `mscp` holds the container map and one certificate
+    /// file per container, and answers `cardcf` too, as some callers ask
+    /// for it there. It has no `msroots`, the one Base CSP file a
+    /// read-only card may lack (minidriver specification v7.07,
+    /// "Read-Only Cards"). Whether a container file exists is the card
+    /// model's to say, so a `Container` is any other `mscp` name.
     fn resolve(directory: Option<&str>, file: &str) -> Result<Self, NoSuchFile> {
         match directory {
             ROOT_DIRECTORY => match file {
@@ -797,7 +795,7 @@ impl CardFile {
             },
             Some(MSCP_DIRECTORY) => match file {
                 CMAPFILE_FILE => Ok(Self::CmapFile),
-                MSROOTS_FILE => Ok(Self::MsRoots),
+                MSROOTS_FILE => Err(NoSuchFile::File),
                 CARDCF_FILE => Ok(Self::CardCf),
                 other => Ok(Self::Container(other.to_owned())),
             },
@@ -825,7 +823,6 @@ fn card_file_bytes(card: &CardCapabilityModel, file: &CardFile) -> Option<Vec<u8
         CardFile::CardId => Some(synth_cardid(card.auth_cert_der().unwrap_or(&[]))),
         CardFile::CardApps => Some(synth_cardapps()),
         CardFile::CmapFile => Some(synth_cmapfile(card)),
-        CardFile::MsRoots => Some(msroots::active_msroots_pkcs7_der().to_vec()),
         CardFile::Container(name) => container_file_bytes(card, name),
     }
 }
@@ -995,8 +992,14 @@ fn reverify_cached_pin(
     let checkout = with_pin_safety(|cache| cache.checkout_pin1(&serial, status))
         .ok()
         .flatten();
+    // A held value is never handed out for a blocked PIN 1; the lock is
+    // reported as the reason, from this reading, with nothing presented.
     let Some(checkout) = checkout else {
-        return Some(SCARD_W_WRONG_CHV);
+        return Some(if reports_no_tries_left(status) {
+            SCARD_W_CHV_BLOCKED
+        } else {
+            SCARD_W_WRONG_CHV
+        });
     };
     let pin = checkout.pin().clone();
     let is_rejected =
@@ -1026,6 +1029,15 @@ fn reverify_cached_pin(
                 "the card rejected it"
             );
             Some(SCARD_W_WRONG_CHV)
+        }
+        Ok(VerifyOutcome::Locked) => {
+            clear_pin_state(pin1_authenticated, pin2_authenticated);
+            refineid_dev_errors::report!(
+                CardModule,
+                "held PIN 1 not verified",
+                "the PIN is blocked"
+            );
+            Some(SCARD_W_CHV_BLOCKED)
         }
         Ok(other) => {
             clear_pin_state(pin1_authenticated, pin2_authenticated);
@@ -1384,11 +1396,9 @@ fn synth_cardcf() -> Vec<u8> {
 
 #[cfg(windows)]
 fn synth_cardid(auth_cert: &[u8]) -> Vec<u8> {
-    let mut seeded = Vec::with_capacity(64 + auth_cert.len());
-    seeded.extend_from_slice(b"refineid-card-id-v8-two-container-freshness");
-    seeded.extend_from_slice(auth_cert);
-    let h = Sha256::of(seeded);
-    h.as_bytes()[..16].to_vec()
+    CardId::of_authentication_certificate(auth_cert)
+        .as_bytes()
+        .to_vec()
 }
 
 #[cfg(windows)]
@@ -1645,8 +1655,6 @@ unsafe extern "system" fn CardEnumFiles(
                     v.push(0);
                 }
             }
-            v.extend_from_slice(MSROOTS_FILE.as_bytes());
-            v.push(0);
             v.push(0);
             v
         }
@@ -1899,8 +1907,8 @@ unsafe extern "system" fn CardAuthenticatePin(
         Ok(admitted) => admitted,
         Err(error) => return error,
     };
-    let is_rejected =
-        with_pin_safety(|cache| cache.is_rejected(&serial, slot, &pin)).unwrap_or(false);
+    let is_rejected = with_pin_safety(|cache| cache.bars_presenting(&serial, slot, &pin, status))
+        .unwrap_or(false);
     if is_rejected {
         return SCARD_W_WRONG_CHV;
     }
@@ -2063,28 +2071,28 @@ unsafe extern "system" fn CardSignData(
             }
         };
 
-        let digest = in_bytes.to_vec();
-        let operation = if container.pin_id == PIN_ID_QUALIFIED_SIG {
-            CardOperation::SignDocument {
-                document_name: "Document".to_owned(),
-                contained_files: None,
-                key_profile,
-                algorithm,
-                digest,
-            }
+        let key = if container.pin_id == PIN_ID_QUALIFIED_SIG {
+            RemoteKey::QualifiedSignature
         } else {
-            let origin = std::env::var("REFINEID_RP_ORIGIN")
-                .ok()
-                .or_else(|| std::env::var("REFINEID_ORIGIN").ok())
-                .filter(|s| !s.trim().is_empty() && s.len() <= 512)
-                .unwrap_or_else(|| "https://card.refineid.fi".to_owned());
-            CardOperation::BrowserAuthenticate {
-                origin,
-                key_profile,
-                algorithm,
-                digest,
-            }
+            RemoteKey::Authentication
         };
+        let Some(program) = calling_program() else {
+            refineid_dev_errors::report!(
+                CardModule,
+                "remote signature refused",
+                "the calling program has no image name"
+            );
+            return SCARD_E_UNSUPPORTED_FEATURE;
+        };
+        let operation = in_process_operation(
+            key,
+            &program,
+            &computer_name(),
+            interface_language(),
+            key_profile,
+            algorithm,
+            in_bytes.to_vec(),
+        );
 
         let remote_tx = RemoteCardTransport::new(atr, pair_id);
         let result = match remote_tx.execute_operation(&operation) {
@@ -2563,8 +2571,11 @@ unsafe extern "system" fn CardGetProperty(
             &["Cache Mode", "CP_CARD_CACHE_MODE", "CardCacheMode"],
         )
     } {
+        // A read-only card, whose certificates name its holder: the Base CSP
+        // and KSP keep its files per process and clear them when the card
+        // leaves, not in the global cache keyed by the card.
         return unsafe {
-            write_dword_out(pbData, cbData, pdwDataLen, CARD_CACHE_MODE_GLOBAL_CACHE)
+            write_dword_out(pbData, cbData, pdwDataLen, CARD_CACHE_MODE_SESSION_ONLY)
         };
     }
 
@@ -2790,11 +2801,13 @@ unsafe extern "system" fn CardChangeAuthenticator(
         Ok(serial) => serial,
         Err(error) => return error,
     };
-    if let Err(error) = live_retry_floor(&mut tx, slot, PinReferenceScheme::Citizen) {
-        return error;
-    }
+    let status = match live_retry_floor(&mut tx, slot, PinReferenceScheme::Citizen) {
+        Ok(status) => status,
+        Err(error) => return error,
+    };
     let is_rejected = with_pin_safety(|cache| {
-        cache.is_rejected(&serial, slot, &current_pin) || cache.is_rejected(&serial, slot, &new_pin)
+        cache.bars_presenting(&serial, slot, &current_pin, status)
+            || cache.bars_presenting(&serial, slot, &new_pin, status)
     })
     .unwrap_or(false);
     if is_rejected {
@@ -2891,8 +2904,8 @@ unsafe extern "system" fn CardAuthenticateEx(
         Ok(admitted) => admitted,
         Err(error) => return error,
     };
-    let is_rejected =
-        with_pin_safety(|cache| cache.is_rejected(&serial, slot, &pin)).unwrap_or(false);
+    let is_rejected = with_pin_safety(|cache| cache.bars_presenting(&serial, slot, &pin, status))
+        .unwrap_or(false);
     if is_rejected {
         return SCARD_W_WRONG_CHV;
     }
@@ -3032,12 +3045,13 @@ unsafe extern "system" fn CardChangeAuthenticatorEx(
         Ok(serial) => serial,
         Err(error) => return error,
     };
-    if let Err(error) = live_retry_floor(&mut tx, target_slot, PinReferenceScheme::Citizen) {
-        return error;
-    }
+    let status = match live_retry_floor(&mut tx, target_slot, PinReferenceScheme::Citizen) {
+        Ok(status) => status,
+        Err(error) => return error,
+    };
     let is_rejected = with_pin_safety(|cache| {
-        cache.is_rejected(&serial, target_slot, &current_pin)
-            || cache.is_rejected(&serial, target_slot, &new_pin)
+        cache.bars_presenting(&serial, target_slot, &current_pin, status)
+            || cache.bars_presenting(&serial, target_slot, &new_pin, status)
     })
     .unwrap_or(false);
     if is_rejected {
@@ -3453,14 +3467,10 @@ mod tests {
     }
 
     #[test]
-    fn mscp_holds_the_map_the_roots_and_container_files() {
+    fn mscp_holds_the_map_and_container_files() {
         assert_eq!(
             CardFile::resolve(Some("mscp"), "cmapfile"),
             Ok(CardFile::CmapFile)
-        );
-        assert_eq!(
-            CardFile::resolve(Some("mscp"), "msroots"),
-            Ok(CardFile::MsRoots)
         );
         assert_eq!(
             CardFile::resolve(Some("mscp"), "cardcf"),
@@ -3469,6 +3479,17 @@ mod tests {
         assert_eq!(
             CardFile::resolve(Some("mscp"), "kxc00"),
             Ok(CardFile::Container("kxc00".to_owned()))
+        );
+    }
+
+    /// No card CA reaches the user's Root store through this module:
+    /// `msroots` is a file the card does not have, and Windows propagates
+    /// nothing.
+    #[test]
+    fn mscp_has_no_roots_bundle() {
+        assert_eq!(
+            CardFile::resolve(Some("mscp"), "msroots"),
+            Err(NoSuchFile::File)
         );
     }
 

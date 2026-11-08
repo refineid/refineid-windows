@@ -38,12 +38,80 @@ internal sealed partial class DocumentPage : Page
     /// <summary>The reason bytes the native service accepts.</summary>
     private const int ReasonMaximumBytes = 256;
 
+    /// <summary>How often the page looks for a card in a reader here.</summary>
+    private static readonly TimeSpan CardPollInterval = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// How many readings in a row must find no card before the PIN box goes:
+    /// a contactless card that drops out of the field for one reading, or one
+    /// reading that fails, keeps what is typed.
+    /// </summary>
+    private const int AbsentReadingsBeforeHiding = 2;
+
+    private readonly DispatcherTimer cardPollTimer;
     private DocumentMode mode;
     private bool busy;
+    private bool polling;
+    private int absentReadings;
 
     public DocumentPage()
     {
         this.InitializeComponent();
+        this.cardPollTimer = new DispatcherTimer { Interval = CardPollInterval };
+        this.cardPollTimer.Tick += (s, e) => this.PollCard();
+        this.Loaded += this.OnLoaded;
+        this.Unloaded += this.OnUnloaded;
+    }
+
+    private void OnLoaded(object sender, RoutedEventArgs args)
+    {
+        this.PollCard();
+        this.cardPollTimer.Start();
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs args) => this.cardPollTimer.Stop();
+
+    /// <summary>
+    /// The PIN box shows while a reader here holds a card; without one the
+    /// paired phone signs and takes PIN 2 on its own screen.
+    /// </summary>
+    private async void PollCard()
+    {
+        if (this.busy || this.polling)
+        {
+            return;
+        }
+
+        this.polling = true;
+        try
+        {
+            bool cardHere = await Task.Run(LocalCardService.CardInAReader).ConfigureAwait(true);
+            this.absentReadings = cardHere ? 0 : this.absentReadings + 1;
+            if (cardHere || this.absentReadings >= AbsentReadingsBeforeHiding)
+            {
+                this.ShowPinBox(cardHere);
+            }
+        }
+        catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException)
+        {
+#if DEBUG
+            DevErrorLog.Report("card service not loaded", error);
+#endif
+        }
+        finally
+        {
+            this.polling = false;
+        }
+    }
+
+    private void ShowPinBox(bool cardHere)
+    {
+        if (!cardHere)
+        {
+            this.PinBox.Password = string.Empty;
+        }
+
+        this.PinBox.Visibility = cardHere ? Visibility.Visible : Visibility.Collapsed;
     }
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
@@ -114,10 +182,13 @@ internal sealed partial class DocumentPage : Page
                     )
                     .ConfigureAwait(true);
                 this.ResultText.Text = report.Report;
-                this.ShowStatus(
-                    report.Ok ? InfoBarSeverity.Success : InfoBarSeverity.Error,
-                    Strings.Get(report.Ok ? "SignatureValid" : "SignatureInvalid")
-                );
+                (InfoBarSeverity severity, string text) = report.Verdict switch
+                {
+                    "valid" => (InfoBarSeverity.Success, "SignatureValid"),
+                    "indeterminate" => (InfoBarSeverity.Informational, "SignatureIndeterminate"),
+                    _ => (InfoBarSeverity.Error, "SignatureInvalid"),
+                };
+                this.ShowStatus(severity, Strings.Get(text));
             })
             .ConfigureAwait(true);
     }
@@ -131,18 +202,8 @@ internal sealed partial class DocumentPage : Page
 
         DocumentFormat format =
             this.FormatBox.SelectedIndex == 1 ? DocumentFormat.AsicE : DocumentFormat.Pades;
-        string pin = this.PinBox.Password;
         string reason = this.ReasonBox.Text;
         this.ClearOutcome();
-        if (!IsPin(pin))
-        {
-            this.ShowStatus(
-                InfoBarSeverity.Warning,
-                Strings.Format("Pin2LengthRule", PinMinimumLength, PinMaximumLength)
-            );
-            return;
-        }
-
         if (Encoding.UTF8.GetByteCount(reason) > ReasonMaximumBytes)
         {
             this.ShowStatus(InfoBarSeverity.Warning, Strings.Get("ReasonTooLong"));
@@ -151,6 +212,21 @@ internal sealed partial class DocumentPage : Page
 
         await this.RunAsync(async () =>
             {
+                // A card in a reader attached to this computer signs under the
+                // PIN typed here; without one the paired phone signs and asks
+                // for PIN 2 on its own screen, and no PIN is read here.
+                bool cardHere = await Task.Run(LocalCardService.CardInAReader).ConfigureAwait(true);
+                this.ShowPinBox(cardHere);
+                string? pin = cardHere ? this.PinBox.Password : null;
+                if (pin is not null && !IsPin(pin))
+                {
+                    this.ShowStatus(
+                        InfoBarSeverity.Warning,
+                        Strings.Format("Pin2LengthRule", PinMinimumLength, PinMaximumLength)
+                    );
+                    return;
+                }
+
                 DocumentSignReport report;
                 try
                 {
@@ -170,8 +246,17 @@ internal sealed partial class DocumentPage : Page
                         report.OutputPath,
                         report.OutputLength,
                         report.LocalVerify
-                    ) + (report.SignerCommonName is string signer ? $"\n{signer}" : string.Empty);
-                if (report.Verified)
+                    )
+                    + (report.SignerCommonName is string signer ? $"\n{signer}" : string.Empty)
+                    + (report.DevelopmentBuild is string below ? $"\n{below}" : string.Empty);
+                if (report.Verified && report.DevelopmentBuild is not null)
+                {
+                    this.ShowStatus(
+                        InfoBarSeverity.Informational,
+                        Strings.Get("SignedDevelopmentBuild")
+                    );
+                }
+                else if (report.Verified)
                 {
                     this.ShowStatus(InfoBarSeverity.Success, Strings.Get("DocumentSigned"));
                 }

@@ -23,10 +23,10 @@ use crate::identity::{StateText, credential_label, pin_kind, puk_kind, puk_label
 /// Combobox entries, in dispatch order. The UI and [`prepare`]
 /// share these indices.
 pub const MODES: [&str; 5] = [
-    "Change PIN 1",
-    "Change PIN 2",
-    "Unblock PIN 1 (PUK)",
-    "Unblock PIN 2 (PUK)",
+    "Change Basic PIN 1",
+    "Change Signature PIN 2",
+    "Unblock Basic PIN 1 (PUK)",
+    "Unblock Signature PIN 2 (PUK)",
     "Activate new card",
 ];
 
@@ -40,42 +40,48 @@ struct PinFields {
 }
 
 const PIN1_FIELDS: PinFields = PinFields {
-    current: "Current PIN 1",
-    new: "New basic PIN 1",
-    repeat: "Repeat PIN 1",
+    current: "Current Basic PIN 1",
+    new: "New Basic PIN 1",
+    repeat: "Basic PIN 1 again",
 };
 
 const PIN2_FIELDS: PinFields = PinFields {
-    current: "Current PIN 2",
-    new: "New signature PIN 2",
-    repeat: "Repeat PIN 2",
+    current: "Current Signature PIN 2",
+    new: "New Signature PIN 2",
+    repeat: "Signature PIN 2 again",
 };
 
 /// Field labels per mode, top to bottom. An empty label hides
 /// that row.
 pub const FIELDS: [[&str; 5]; 5] = [
     [
-        "Current PIN 1:",
-        "New basic PIN 1:",
-        "Repeat PIN 1:",
+        "Current Basic PIN 1:",
+        "New Basic PIN 1:",
+        "Basic PIN 1 again:",
         "",
         "",
     ],
     [
-        "Current PIN 2:",
-        "New signature PIN 2:",
-        "Repeat PIN 2:",
+        "Current Signature PIN 2:",
+        "New Signature PIN 2:",
+        "Signature PIN 2 again:",
         "",
         "",
     ],
-    ["PUK:", "New basic PIN 1:", "Repeat PIN 1:", "", ""],
-    ["PUK:", "New signature PIN 2:", "Repeat PIN 2:", "", ""],
+    ["PUK:", "New Basic PIN 1:", "Basic PIN 1 again:", "", ""],
+    [
+        "PUK:",
+        "New Signature PIN 2:",
+        "Signature PIN 2 again:",
+        "",
+        "",
+    ],
     [
         "Activation PIN:",
-        "New basic PIN 1:",
-        "Repeat PIN 1:",
-        "New signature PIN 2:",
-        "Repeat PIN 2:",
+        "New Basic PIN 1:",
+        "Basic PIN 1 again:",
+        "New Signature PIN 2:",
+        "Signature PIN 2 again:",
     ],
 ];
 
@@ -290,14 +296,14 @@ fn prepare_activate(
         1,
         PIN1_FIELDS,
         lengths.pin1(),
-        "The PIN 1 entries do not match; nothing was sent to the card.",
+        "The Basic PIN 1 entries do not match; nothing was sent to the card.",
     )?;
     let pin2 = take_optional_pair(
         &mut fields,
         3,
         PIN2_FIELDS,
         lengths.pin2(),
-        "The PIN 2 entries do not match; nothing was sent to the card.",
+        "The Signature PIN 2 entries do not match; nothing was sent to the card.",
     )?;
     Ok((code, pin1, pin2))
 }
@@ -476,16 +482,10 @@ fn render_change(report: &ChangePinReport) -> String {
         ),
         ChangePinOutcome::WrongCurrentPin { retries_left } => {
             let left = retries_left.get();
-            if left == 0 {
-                format!(
-                    "Wrong current {pin}; no tries left. {pin} is now locked; use the Unblock operation with the PUK."
-                )
-            } else {
-                format!("Wrong current {pin}; {left} tries left. Nothing was changed.")
-            }
+            format!("Wrong current {pin}; {left} tries left. Nothing was changed.")
         }
         ChangePinOutcome::Locked => {
-            format!("{pin} is locked. Use the Unblock operation with the PUK to set a new one.")
+            format!("{pin} is blocked. Use the Unblock operation with the PUK to set a new one.")
         }
         ChangePinOutcome::LengthError => {
             format!("{pin} change refused: length error (host bug, please report).")
@@ -546,9 +546,9 @@ fn render_activate(report: &ActivateReport) -> String {
             out.push_str("Card already looks activated.\r\n");
         }
     }
-    out.push_str("PIN 1: ");
+    out.push_str("Basic PIN 1: ");
     out.push_str(&activate_line(report.pin1_outcome.as_ref()));
-    out.push_str("\r\nPIN2: ");
+    out.push_str("\r\nSignature PIN 2: ");
     out.push_str(&activate_line(report.pin2_outcome.as_ref()));
     out
 }

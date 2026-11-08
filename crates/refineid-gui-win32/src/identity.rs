@@ -2,13 +2,14 @@
 //! Identity screen backend: one-shot snapshot reads, rendered for display.
 //! Read-only; the photo path runs PACE with the operator-supplied CAN.
 use refineid_card_manager_core::service::{self, CardSnapshot};
+use refineid_emrtd::{CardFaceImage, EmrtdOps as _, ImageFormat};
 use refineid_lib_core::auth::{PinStatus, PukStatus};
-use refineid_lib_core::backend::{ReaderAccessCap, ReaderBackend as _};
-use refineid_lib_core::can::{Can, CanError};
-use refineid_lib_core::emrtd::{self, EmrtdError};
-use refineid_lib_core::pkcs15::FineidReaderPicker as _;
-use refineid_lib_pcsc::{PcscBackend, PcscError};
-use std::path::PathBuf;
+use refineid_pace::{Can, CanError, SmTransport, UnvalidatedCan, read_card_access, run_pace};
+use refineid_pcsc::{
+    PcscBackend, ReaderAccessCap, ReaderBackend as _, ReaderBackendOps as _, ReaderFilter,
+};
+use refineid_pkcs15::fs::Pkcs15Ops as _;
+use std::path::Path;
 use zeroize::Zeroize;
 
 use crate::pin::flatten;
@@ -82,8 +83,8 @@ pub fn format_view(view: &IdentityView) -> String {
     line(&mut out, "Holder", &view.holder);
     line(&mut out, "Card", &view.card);
     line(&mut out, "Activation PIN", &view.activation);
-    line(&mut out, "PIN 1", &view.pin1.text);
-    line(&mut out, "PIN 2", &view.pin2.text);
+    line(&mut out, "Basic PIN 1", &view.pin1.text);
+    line(&mut out, "Signature PIN 2", &view.pin2.text);
     line(&mut out, "PUK", &view.puk.text);
     out
 }
@@ -156,7 +157,9 @@ pub const fn puk_kind(status: Option<&PukStatus>) -> StateKind {
 pub fn parse_can(mut buffer: Vec<u8>) -> Result<Can, String> {
     let result = std::str::from_utf8(&buffer)
         .map_err(|_| String::from("CAN must contain digits only."))
-        .and_then(|text| Can::new(text).map_err(can_error));
+        .and_then(|text| {
+            Can::reconstruct(UnvalidatedCan::from_owned_text(text.to_owned())).map_err(can_error)
+        });
     buffer.zeroize();
     result
 }
@@ -166,7 +169,6 @@ fn can_error(error: CanError) -> String {
         CanError::Empty => String::from("CAN is empty (6 digits)."),
         CanError::WrongLength => String::from("CAN must be exactly 6 digits."),
         CanError::NonDigit => String::from("CAN must contain digits only."),
-        CanError::AllZeros => String::from("CAN is not an issued card access number."),
     }
 }
 
@@ -181,76 +183,74 @@ pub fn read_identity_and_photo(reader: &str, can: Can) -> Result<String, String>
     Ok(format!("{identity}\r\nPhoto: {photo}"))
 }
 
-/// Photo outcome: a report line plus, for JPEG faces, the saved
-/// file the GUI displays.
+/// Photo outcome: a report line plus, for JPEG faces, the bytes the
+/// GUI displays. The face stays in memory: no file holds it.
 pub struct PhotoOutcome {
-    /// One-line report (`saved ...`).
+    /// One-line report (`read ...`).
     pub report: String,
-    /// Saved JPEG path for in-window display. `None` for
-    /// JPEG2000 (no OS decoder) and when no face was found.
-    pub display_jpeg: Option<PathBuf>,
+    /// The JPEG for in-window display. `None` for JPEG2000 (no OS
+    /// decoder) and when no face was found.
+    pub display_jpeg: Option<Vec<u8>>,
+}
+
+/// The files in the per-user temp directory that hold a holder's face if
+/// they exist: `RefineID` writes none, and removes any it finds at start.
+const PHOTO_LEFTOVER_FILES: [&str; 2] = ["refineid-photo.jpg", "refineid-photo.jp2"];
+
+/// Removes every face photo left in `directory`. One that cannot be removed
+/// is tried again at the next start.
+pub fn remove_photo_leftovers(directory: &Path) {
+    for file in PHOTO_LEFTOVER_FILES {
+        let _ = std::fs::remove_file(directory.join(file));
+    }
 }
 
 fn read_photo(reader: &str, can: Can) -> Result<String, String> {
     Ok(read_photo_saved(reader, can)?.report)
 }
 
-/// Run PACE with the CAN, read DG2, and save the facial image to
-/// the per-user temp dir.
+/// Run PACE with the CAN and read DG2 into memory.
 pub fn read_photo_saved(reader: &str, can: Can) -> Result<PhotoOutcome, String> {
-    let filter = service::reader_filter(reader.to_owned());
     let backend = PcscBackend;
-    let pick = backend
-        .pick_fineid_reader(Some(&filter))
-        .map_err(|error| flatten(&error.to_string(), 300))?;
-    // A freshly opened transport sits at MF level, which is the
-    // PACE precondition (`run_pace_with_can` docs).
-    let transport = backend
-        .open_exclusive(&pick.reader_id, ReaderAccessCap::Read)
-        .map_err(|error| flatten(&error.to_string(), 300))?;
-    let data = emrtd::read_personal_data(transport, can).map_err(|error| emrtd_error(&error))?;
-    match data.face.as_ref() {
-        Some(image) => {
-            let (format, bytes) = match image {
-                emrtd::DocumentImage::Jpeg(bytes) => ("JPEG", bytes),
-                emrtd::DocumentImage::Jpeg2000(bytes) => ("JPEG2000", bytes),
-            };
-            let path = std::env::temp_dir().join(format!("refineid-photo.{}", image.extension()));
-            std::fs::write(&path, bytes)
-                .map_err(|error| format!("could not save photo: {error}"))?;
-            let report = format!(
-                "saved {} bytes ({format}) to {}",
-                bytes.len(),
-                path.display()
-            );
-            let display_jpeg = match image {
-                emrtd::DocumentImage::Jpeg(_) => Some(path),
-                emrtd::DocumentImage::Jpeg2000(_) => None,
-            };
-            Ok(PhotoOutcome {
-                report,
-                display_jpeg,
-            })
-        }
-        None => Ok(PhotoOutcome {
-            report: format!(
-                "DG2 read ({} raw bytes) but no recognised JPEG/JPEG2000 image.",
-                data.dg2_der.len()
-            ),
-            display_jpeg: None,
-        }),
-    }
+    let failed = |error: &dyn core::fmt::Display| flatten(&error.to_string(), 300);
+    let picked = backend
+        .pick_single_reader(Some(ReaderFilter::new(reader)))
+        .map_err(|error| failed(&error))?;
+    let mut transport = backend
+        .open_exclusive(&picked, ReaderAccessCap::Read)
+        .map_err(|error| failed(&error))?;
+    // PACE's MSE:Set AT is accepted only in MF context, and EF.CardAccess,
+    // which names its domain parameter, is read from there.
+    transport.select_mf().map_err(|error| failed(&error))?;
+    let card_access = read_card_access(&mut transport).map_err(|error| failed(&error))?;
+    let session = run_pace(&mut transport, &card_access, &can).map_err(|error| failed(&error))?;
+    drop(can);
+    let mut channel = SmTransport::new(transport, session);
+    channel
+        .select_emrtd_application()
+        .map_err(|error| flatten(&error.to_string(), 400))?;
+    let face = channel
+        .read_face_image()
+        .map_err(|error| flatten(&error.to_string(), 400))?;
+    Ok(photo_outcome(face.as_ref()))
 }
 
-fn emrtd_error(error: &EmrtdError<PcscError>) -> String {
-    match error {
-        EmrtdError::BadCan => {
-            String::from("Wrong CAN. The CAN is the 6-digit number on the card front.")
-        }
-        EmrtdError::CardReset => {
-            String::from("Card reset during the read; reinsert the card and retry.")
-        }
-        other => flatten(&other.to_string(), 400),
+/// What the screen shows of the card's face image.
+fn photo_outcome(face: Option<&CardFaceImage>) -> PhotoOutcome {
+    let Some(face) = face else {
+        return PhotoOutcome {
+            report: String::from("DG2 read but no recognised JPEG/JPEG2000 image."),
+            display_jpeg: None,
+        };
+    };
+    let bytes = face.image_bytes();
+    let format = match face.format() {
+        ImageFormat::Jpeg => "JPEG",
+        ImageFormat::Jpeg2000 => "JPEG2000",
+    };
+    PhotoOutcome {
+        report: format!("read {} bytes ({format})", bytes.len()),
+        display_jpeg: (face.format() == ImageFormat::Jpeg).then(|| bytes.to_vec()),
     }
 }
 
@@ -267,7 +267,7 @@ pub fn credential_label(status: Option<&PinStatus>, changed: Option<bool>) -> St
         Some(PinStatus::Verified) => String::from("verified"),
         Some(PinStatus::Remaining(retries)) => format!("ready ({} tries left)", retries.get()),
         Some(PinStatus::NoInfo) => String::from("no information"),
-        Some(PinStatus::Locked) => String::from("locked"),
+        Some(PinStatus::Locked) => String::from("blocked"),
         Some(PinStatus::Other(word)) => format!("other (0x{word:04X})"),
     };
     match changed {
@@ -282,7 +282,7 @@ pub fn puk_label(status: Option<&PukStatus>) -> String {
         None => String::from("unknown"),
         Some(PukStatus::Remaining(retries)) => format!("ready ({} tries left)", retries.get()),
         Some(PukStatus::NoInfo) => String::from("no information"),
-        Some(PukStatus::Locked) => String::from("locked"),
+        Some(PukStatus::Locked) => String::from("blocked"),
         Some(PukStatus::Invalidated) => String::from("invalidated"),
         Some(PukStatus::Other(word)) => format!("other (0x{word:04X})"),
     }
@@ -294,4 +294,32 @@ pub fn short_error(error: &impl core::fmt::Debug) -> String {
     let mut text = format!("{error:?}").replace(['\r', '\n'], " ");
     text.truncate(200);
     text.trim().to_owned()
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test scaffolding is constructed to be infallible"
+)]
+mod tests {
+    use super::{PHOTO_LEFTOVER_FILES, remove_photo_leftovers};
+
+    #[test]
+    fn a_start_removes_every_face_photo_left_and_nothing_else() {
+        let directory =
+            std::env::temp_dir().join(format!("refineid-photo-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        for file in PHOTO_LEFTOVER_FILES {
+            std::fs::write(directory.join(file), b"a face").unwrap();
+        }
+        let other = directory.join("other.jpg");
+        std::fs::write(&other, b"not ours").unwrap();
+        remove_photo_leftovers(&directory);
+        for file in PHOTO_LEFTOVER_FILES {
+            assert!(!directory.join(file).exists());
+        }
+        assert!(other.exists());
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
 }

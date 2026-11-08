@@ -37,6 +37,11 @@ without any local card driver:
   warnings; not acceptable for a public distribution.
 - Signed with no WHQL attestation path required for the minidriver itself —
   because it is not a kernel driver.
+- The Plug and Play INF that names the cards in Device Manager is a driver
+  package and needs a signed catalog: a trusted code-signing signature on
+  x64, a Microsoft (WHQL) signature on Arm64. Without one, the cards work
+  and show as "Unknown Smart Card"
+  ([browser-architecture-and-rapp.md](browser-architecture-and-rapp.md), section 4).
 
 ### Driver installer channels
 
@@ -106,7 +111,7 @@ Foundation or Trusted Signing) is not yet chosen.
 | --- | --- | --- |
 | Store MSIX | Microsoft code-signing cert (Store signing) | Store account license and standard app check; runtime deps OK |
 | Dev MSIX | self-signed `CN=RefineID` with code-signing EKU in Trusted People | one UAC trust import of the .cer |
-| Driver installer (pkg.refineid.fi) | OV/EV code-signing cert | UAC elevation only (user-mode minidriver); WHQL/attestation only if a kernel driver appears |
+| Driver installer (pkg.refineid.fi) | OV/EV code-signing cert | UAC elevation (user-mode minidriver); the card-naming INF needs a signed catalog, WHQL on Arm64 |
 | Card PIN / key usage (RAPP path) | DRES-validated FINEID certificates | No local driver needed; all private operations stay in the Android phone's secure path |
 
 ## What changes for users

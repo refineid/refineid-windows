@@ -1371,26 +1371,6 @@ impl<'a> SpkiDer<'a> {
     pub fn ec_public_key_point(&self) -> Option<Sec1UncompressedPoint> {
         Sec1UncompressedPoint::from_bytes(self.subject_public_key.to_vec()).ok()
     }
-
-    /// The `subjectPublicKey` BIT STRING contents -- the raw
-    /// public-key material with the leading "unused bits" octet
-    /// stripped, captured at construction. The leaf bytes feed a
-    /// hash (RFC 6960 `issuerKeyHash = SHA-1(subjectPublicKey)`) or
-    /// a SEC1 point decode; they are reached only through this typed
-    /// SPKI, never by handing a bare `&[u8]` to a free function.
-    ///
-    /// Total: a constructed `SpkiDer` already validated its envelope,
-    /// so there is no re-parse and no `Option`.
-    ///
-    /// Crate-internal: the raw key material is reached only through
-    /// typed operations ([`Self::ec_public_key_point`],
-    /// [`crate::ocsp::IssuerKeyHash::from_subject_public_key`]) so
-    /// no external caller names a bare `&[u8]` of a public key.
-    #[must_use]
-    #[inline]
-    pub(crate) const fn subject_public_key_bits(&self) -> &'a [u8] {
-        self.subject_public_key
-    }
 }
 
 /// Boundary parser: build [`SpkiDer`] from raw

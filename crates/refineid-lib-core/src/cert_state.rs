@@ -236,8 +236,7 @@ impl<'a> PathValidatedCert<'a> {
     }
 
     /// Label of the pinned trust anchor that proved the chain
-    /// (e.g. "DVV CA Generation 3 RSA"). Tier 0 `&'static str`
-    /// from a fixed compile-time set in `crate::trust_roots`.
+    /// (e.g. "DVV CA Generation 3 RSA"). Tier 0 `&'static str`.
     #[must_use]
     #[inline]
     pub const fn anchor_label(&self) -> &'static str {
@@ -255,7 +254,7 @@ impl<'a> PathValidatedCert<'a> {
     /// Promote to [`RevocationCheckedCert`] with an
     /// already-decided revocation verdict. Callers are
     /// expected to have run an actual CRL or OCSP check
-    /// (`crate::crl` / `crate::ocsp`) and decide the
+    /// and decide the
     /// `RevocationStatus` based on that, against
     /// `validation_time` (S2 §2 distinguishes signing time
     /// vs revocation time -- the validation must use a

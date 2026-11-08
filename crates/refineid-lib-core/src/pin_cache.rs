@@ -38,7 +38,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::auth::{PinSlot, PinStatus};
 use crate::identity::TokenSerial;
 use crate::pin::PinBytes;
-use crate::pin_retry_risk::pin1_status_permits_reusable_cache;
+use crate::pin_retry_risk::{pin1_status_permits_reusable_cache, reports_no_tries_left};
 
 /// How long a PIN 1 entry is held.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -60,8 +60,8 @@ pub struct PreviouslyRejectedPin {
 impl core::fmt::Display for PreviouslyRejectedPin {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let label = match self.slot {
-            PinSlot::Pin1 => "PIN1",
-            PinSlot::Pin2 => "PIN2",
+            PinSlot::Pin1 => "Basic PIN 1",
+            PinSlot::Pin2 => "Signature PIN 2",
         };
         write!(f, "{label} was previously rejected by the card")
     }
@@ -228,6 +228,21 @@ impl PinSafetyCache {
             .any(|known| bool::from(known.0.ct_eq(&candidate.0)))
     }
 
+    /// Whether `pin` stays unsent at the live `status`: the card rejected
+    /// it before and a presentation could spend a try. At zero tries left
+    /// or a blocked PIN it spends nothing, so the command goes out and the
+    /// card's answer reaches the holder.
+    #[must_use]
+    pub fn bars_presenting(
+        &self,
+        serial: &TokenSerial,
+        slot: PinSlot,
+        pin: &PinBytes,
+        status: PinStatus,
+    ) -> bool {
+        !reports_no_tries_left(status) && self.is_rejected(serial, slot, pin)
+    }
+
     /// Record a card-side wrong-PIN response for the rest of this process.
     /// Also destroys the held PIN 1, because the card's authentication state
     /// is now known to have changed.
@@ -333,6 +348,8 @@ mod tests {
 
     /// The retry count of a FINEID PIN no one has mistyped.
     const PRISTINE_RETRIES: u8 = 5;
+    /// The retry count of a FINEID PIN with nothing left to spend.
+    const NO_TRIES: u8 = 0;
 
     fn pin<const N: usize>(digits: &[u8; N]) -> PinBytes {
         PinBytes::try_from(*digits).expect("valid test PIN")
@@ -420,6 +437,18 @@ mod tests {
         cache.record_rejected(&card, PinSlot::Pin1, &rejected);
         cache.clear_positive();
         assert!(cache.is_rejected(&card, PinSlot::Pin1, &rejected));
+    }
+
+    #[test]
+    fn a_rejected_pin_stays_unsent_until_the_card_has_nothing_left_to_spend() {
+        let mut cache = cache();
+        let card = serial("CARD-A-FULL-SERIAL");
+        let rejected = pin(b"135790");
+        cache.record_rejected(&card, PinSlot::Pin1, &rejected);
+        assert!(cache.bars_presenting(&card, PinSlot::Pin1, &rejected, pristine()));
+        assert!(!cache.bars_presenting(&card, PinSlot::Pin1, &rejected, PinStatus::Locked));
+        assert!(!cache.bars_presenting(&card, PinSlot::Pin1, &rejected, remaining(NO_TRIES)));
+        assert!(!cache.bars_presenting(&card, PinSlot::Pin1, &pin(b"246802"), pristine()));
     }
 
     #[test]

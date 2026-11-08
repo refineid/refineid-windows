@@ -303,31 +303,6 @@ impl core::fmt::Display for CountryError {
 impl core::error::Error for CountryError {}
 
 impl IcaoCountry {
-    /// Parse `s` (already filler-stripped) as an ICAO MRZ
-    /// country code. Accepts 1-3 ASCII letters; uppercases at
-    /// construction.
-    ///
-    /// # Errors
-    /// Empty, wrong length, or any non-ASCII-letter byte.
-    pub(crate) fn new(s: &str) -> Result<Self, CountryError> {
-        let bytes = s.as_bytes();
-        if bytes.is_empty() {
-            return Err(CountryError::Empty);
-        }
-        if bytes.len() > 3 {
-            return Err(CountryError::WrongLength {
-                expected: "1-3 ASCII letters",
-                got: bytes.len(),
-            });
-        }
-        for (i, &b) in bytes.iter().enumerate() {
-            if !b.is_ascii_alphabetic() {
-                return Err(CountryError::NotAsciiLetter { at: i, byte: b });
-            }
-        }
-        Ok(Self(s.to_ascii_uppercase()))
-    }
-
     /// String view, guaranteed uppercase ASCII letters.
     #[inline]
     #[must_use]
@@ -417,68 +392,7 @@ impl core::fmt::Display for IsoAlpha2 {
 #[cfg(test)]
 mod tests {
 
-    use super::{CountryError, IcaoCountry, IsoAlpha2};
-
-    fn icao(s: &str) -> IcaoCountry {
-        IcaoCountry::new(s).expect("test fixture is a valid ICAO code")
-    }
-    fn iso(s: &str) -> IsoAlpha2 {
-        IsoAlpha2::new(s).expect("test fixture is a valid alpha-2 code")
-    }
-
-    #[test]
-    fn finland_round_trip() {
-        assert_eq!(icao("FIN").to_iso_alpha2(), Some(iso("FI")));
-        assert_eq!(iso("FI").to_icao(), Some(icao("FIN")));
-    }
-
-    #[test]
-    fn case_insensitive_construction() {
-        assert_eq!(
-            IcaoCountry::new("fin")
-                .expect("lowercase ICAO code is accepted")
-                .as_str(),
-            "FIN"
-        );
-        assert_eq!(
-            IsoAlpha2::new("fi")
-                .expect("lowercase alpha-2 code is accepted")
-                .as_str(),
-            "FI"
-        );
-    }
-
-    #[test]
-    fn unknown_returns_none() {
-        assert_eq!(icao("XYZ").to_iso_alpha2(), None);
-        assert_eq!(iso("XY").to_icao(), None);
-    }
-
-    #[test]
-    fn three_letter_drop_exceptions() {
-        assert_eq!(icao("CHE").to_iso_alpha2(), Some(iso("CH")));
-        assert_eq!(icao("DEU").to_iso_alpha2(), Some(iso("DE")));
-        assert_eq!(icao("NLD").to_iso_alpha2(), Some(iso("NL")));
-        assert_eq!(icao("GBR").to_iso_alpha2(), Some(iso("GB")));
-        assert_eq!(icao("ESP").to_iso_alpha2(), Some(iso("ES")));
-        assert_eq!(icao("SWE").to_iso_alpha2(), Some(iso("SE")));
-    }
-
-    #[test]
-    fn icao_rejects_too_long() {
-        assert!(matches!(
-            IcaoCountry::new("ABCD"),
-            Err(CountryError::WrongLength { got: 4, .. })
-        ));
-    }
-
-    #[test]
-    fn icao_rejects_digits() {
-        assert!(matches!(
-            IcaoCountry::new("F1N"),
-            Err(CountryError::NotAsciiLetter { at: 1, .. })
-        ));
-    }
+    use super::{CountryError, IsoAlpha2};
 
     #[test]
     fn iso_requires_exactly_two() {
@@ -498,11 +412,5 @@ mod tests {
             IsoAlpha2::new("F1"),
             Err(CountryError::NotAsciiLetter { at: 1, .. })
         ));
-    }
-
-    #[test]
-    fn icao_uppercases() {
-        let c = IcaoCountry::new("FiN").expect("mixed-case ICAO code is accepted");
-        assert_eq!(c.as_str(), "FIN");
     }
 }

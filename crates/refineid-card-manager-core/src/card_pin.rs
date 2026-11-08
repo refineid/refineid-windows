@@ -40,7 +40,7 @@ use refineid_lib_core::backend::{
 use refineid_lib_core::fineid_card::{CardClassificationError, FineidCardModel};
 use refineid_lib_core::pin::{ActivationCode, PinBytes, PinRoleError, Puk};
 use refineid_lib_core::pin_retry_risk::{
-    RetryFloorRefusal, check_activation_last_tries, check_puk_retry_floor, check_retry_floor,
+    RetryFloorRefusal, check_puk_retry_floor, check_retry_floor,
 };
 use refineid_lib_core::pkcs15::{CertSlot, FineidReaderPick};
 use refineid_lib_core::pkcs15::{FineidReaderPicker as _, Pkcs15Ops as _};
@@ -68,13 +68,13 @@ impl PinManageSlot {
             Self::Pin2 => PinSlot::Pin2,
         }
     }
-    /// User-facing label ("PIN1" / "PIN2") for prompts and report
-    /// strings. `&'static str` from a fixed compile-time set.
+    /// User-facing name ("Basic PIN 1" / "Signature PIN 2") for prompts
+    /// and report strings. `&'static str` from a fixed compile-time set.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Pin1 => "PIN1",
-            Self::Pin2 => "PIN2",
+            Self::Pin1 => "Basic PIN 1",
+            Self::Pin2 => "Signature PIN 2",
         }
     }
 }
@@ -240,9 +240,9 @@ pub enum CardPinError {
         /// itself failed to return a status word.
         probe: Option<PinStatus>,
     },
-    /// The retry floor refused a command that would spend a PIN attempt:
-    /// the card reports two, one or no tries left, the PIN blocked, or no
-    /// readable counter. Nothing was sent.
+    /// The retry floor refused a command that would spend an attempt: the
+    /// card reports two or one tries left, or no readable counter. Nothing
+    /// was sent.
     RetryFloor(RetryFloorRefusal),
     /// `card activate` only: the new PINs entered are not exactly the
     /// PINs that await activation. Nothing was sent.
@@ -291,7 +291,7 @@ impl fmt::Display for CardPinError {
                     f,
                     "{} looks unactivated (pin_status probe: {probe_desc}); refusing to send \
                      a modify APDU that could land on an unset slot. Run `refineid card activate` \
-                     first to set PIN1 and PIN2.",
+                     first to set Basic PIN 1 and Signature PIN 2.",
                     slot.label()
                 )
             }
@@ -301,9 +301,9 @@ impl fmt::Display for CardPinError {
                 pin2_awaits,
             } => {
                 let awaiting = match (pin1_awaits, pin2_awaits) {
-                    (true, true) => "PIN1 and PIN2",
-                    (true, false) => "PIN1",
-                    (false, true) => "PIN2",
+                    (true, true) => "Basic PIN 1 and Signature PIN 2",
+                    (true, false) => "Basic PIN 1",
+                    (false, true) => "Signature PIN 2",
                     (false, false) => "no PIN",
                 };
                 write!(
@@ -1095,11 +1095,11 @@ fn activate_slot_setup<T: refineid_lib_core::transport::CardTransport>(
     match activation_code {
         ActivationCode::Seven(_) => {
             // The activation PIN is the slot's current PIN: a wrong one
-            // spends that slot's tries, so its last two are guarded.
+            // spends that slot's tries, so its counter is the floor's.
             let status = transport
                 .pin_status_with_scheme(lengths.numbering(), slot)
                 .map_err(auth_to_card_pin)?;
-            check_activation_last_tries(slot.into(), status).map_err(CardPinError::RetryFloor)?;
+            check_retry_floor(slot.into(), status).map_err(CardPinError::RetryFloor)?;
             transport
                 .change_pin(lengths, slot, activation_code.to_pin_bytes(), new_pin)
                 .map(change_to_unblock)
@@ -1320,14 +1320,14 @@ impl fmt::Display for ActivateReport {
             ActivatePreflightOutcome::AwaitsActivation { pin1, pin2 } => {
                 writeln!(
                     f,
-                    "preflight: card awaits activation (PIN1: {pin1:?}, PIN2: {pin2:?}); proceeding"
+                    "preflight: card awaits activation (Basic PIN 1: {pin1:?}, Signature PIN 2: {pin2:?}); proceeding"
                 )?;
             }
             ActivatePreflightOutcome::NothingAwaits { pin1, pin2 } => {
                 writeln!(
                     f,
                     "preflight: no PIN awaits activation \
-                     (PIN1: {pin1:?}, PIN2: {pin2:?})"
+                     (Basic PIN 1: {pin1:?}, Signature PIN 2: {pin2:?})"
                 )?;
                 if self.pin1_outcome.is_none() && self.pin2_outcome.is_none() {
                     writeln!(
@@ -1339,17 +1339,29 @@ impl fmt::Display for ActivateReport {
             }
         }
         match self.pin1_outcome {
-            Some(o) => writeln!(f, "PIN1 setup: {}", CardPinHelpers::fmt_unblock(o, "PIN1"))?,
-            None => writeln!(f, "PIN1 setup: not attempted")?,
+            Some(o) => writeln!(
+                f,
+                "{} setup: {}",
+                PinManageSlot::Pin1.label(),
+                CardPinHelpers::fmt_unblock(o, PinManageSlot::Pin1.label())
+            )?,
+            None => writeln!(f, "{} setup: not attempted", PinManageSlot::Pin1.label())?,
         }
         match (self.pin1_outcome, self.pin2_outcome) {
-            (_, Some(o)) => writeln!(f, "PIN2 setup: {}", CardPinHelpers::fmt_unblock(o, "PIN2"))?,
+            (_, Some(o)) => writeln!(
+                f,
+                "{} setup: {}",
+                PinManageSlot::Pin2.label(),
+                CardPinHelpers::fmt_unblock(o, PinManageSlot::Pin2.label())
+            )?,
             (Some(o), None) if !activation_continues_after_pin1(o) => writeln!(
                 f,
-                "PIN2 setup: not attempted (PIN1 setup failed; re-run after fixing \
-                 the activation PIN -- each invocation consumes one card-side try)"
+                "{} setup: not attempted ({} setup failed; re-run after fixing \
+                 the activation PIN -- each invocation consumes one card-side try)",
+                PinManageSlot::Pin2.label(),
+                PinManageSlot::Pin1.label()
             )?,
-            _ => writeln!(f, "PIN2 setup: not attempted")?,
+            _ => writeln!(f, "{} setup: not attempted", PinManageSlot::Pin2.label())?,
         }
         Ok(())
     }
@@ -1653,7 +1665,8 @@ mod activate_tests {
     #[test]
     fn preset_pin_activation_at_zero_tries_reaches_the_card() -> TestResult {
         // The card answers for itself and spends nothing; the code may
-        // be a PUK the card still accepts. Here it answers `63C0`.
+        // be a PUK the card still accepts. Here it answers `63C0`, the
+        // PIN blocked.
         let mut transport = FixedStatusTransport::new(tries(NO_TRIES)?);
         let outcome = setup(
             &mut transport,
@@ -1661,10 +1674,7 @@ mod activate_tests {
             ActivationScheme::PresetActivationPin,
         )?;
         check_true(
-            matches!(
-                outcome,
-                Ok(UnblockOutcome::WrongPuk { retries_left }) if retries_left.get() == NO_TRIES
-            ),
+            matches!(outcome, Ok(UnblockOutcome::PukLocked)),
             "the card's own answer is reported",
         )?;
         check_true(

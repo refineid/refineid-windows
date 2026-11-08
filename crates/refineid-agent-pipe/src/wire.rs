@@ -1,7 +1,9 @@
-//! The messages on the agent's pipe: one signature request from the key
-//! storage provider, one answer from the agent (Windows STPA W-R-1, W-R-6).
+//! The messages on the agent's pipe: one request from the key storage
+//! provider, one answer from the agent (Windows STPA W-R-1, W-R-6, W-R-14).
 //!
-//! A request names the pairing, the key profile, the signature algorithm
+//! The provider holds no pairing store and asks the agent for each
+//! signature, nothing else: the key it opens and its public half come from
+//! the user's personal certificate store. A signature request names the pairing, the key profile, the signature algorithm
 //! and the digest; it names neither the site nor the calling program, which
 //! the agent learns from the pipe itself (W-R-10). Every message starts with
 //! [`WIRE_VERSION`] and a kind byte, and decodes only through [`SignRequest::decode`]
@@ -14,7 +16,7 @@ use refineid_rapp_core::operations::{KeyProfile, SignatureAlgorithm, SignatureAl
 /// The version byte every message starts with.
 pub const WIRE_VERSION: u8 = 1;
 /// The longest message either side sends or accepts.
-pub const MAX_MESSAGE: usize = 1024;
+pub const MAX_MESSAGE: usize = 8192;
 
 /// The size of a pairing identifier on the wire.
 const PAIR_ID_LEN: usize = refineid_rapp::PAIR_ID_SIZE;
@@ -391,6 +393,13 @@ mod tests {
             &[0x5A; 48],
         )
         .expect("a 48-byte digest is what ECDSA SHA-384 signs")
+    }
+
+    #[test]
+    fn a_request_of_another_kind_is_refused() {
+        let mut bytes = request().encode();
+        bytes[1] = KIND_SIGN + 1;
+        assert_eq!(SignRequest::decode(&bytes), Err(WireError::Kind));
     }
 
     #[test]

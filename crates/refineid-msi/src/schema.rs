@@ -83,6 +83,20 @@ pub const TABLES: &[&str] = &[
         `Value` CHAR(0) LOCALIZABLE, \
         `Component_` CHAR(72) NOT NULL \
         PRIMARY KEY `Registry`)",
+    "CREATE TABLE `RemoveRegistry` (\
+        `RemoveRegistry` CHAR(72) NOT NULL, \
+        `Root` SHORT NOT NULL, \
+        `Key` CHAR(255) NOT NULL LOCALIZABLE, \
+        `Name` CHAR(255) LOCALIZABLE, \
+        `Component_` CHAR(72) NOT NULL \
+        PRIMARY KEY `RemoveRegistry`)",
+    "CREATE TABLE `RemoveFile` (\
+        `FileKey` CHAR(72) NOT NULL, \
+        `Component_` CHAR(72) NOT NULL, \
+        `FileName` CHAR(255) LOCALIZABLE, \
+        `DirProperty` CHAR(72) NOT NULL, \
+        `InstallMode` SHORT NOT NULL \
+        PRIMARY KEY `FileKey`)",
     "CREATE TABLE `ServiceControl` (\
         `ServiceControl` CHAR(72) NOT NULL, \
         `Name` CHAR(255) NOT NULL LOCALIZABLE, \
@@ -131,12 +145,15 @@ pub type SequencedAction = (&'static str, Option<&'static str>, i32);
 
 /// Actions run for install, repair, and uninstall.
 ///
-/// `RemoveExistingProducts` sits immediately after `InstallInitialize`, so an
-/// upgrade fully removes the previous package before laying down the new one.
-/// For a single system DLL that ordering is the least surprising.
+/// `FindRelatedProducts` runs before `LaunchConditions`: the downgrade guard
+/// is a launch condition on the property it sets, and a condition read
+/// before the property is set never holds. `RemoveExistingProducts` sits
+/// immediately after `InstallInitialize`, so an upgrade fully removes the
+/// previous package before laying down the new one. For a system DLL that
+/// ordering is the least surprising.
 pub const INSTALL_EXECUTE_SEQUENCE: &[SequencedAction] = &[
+    ("FindRelatedProducts", None, 25),
     ("LaunchConditions", None, 100),
-    ("FindRelatedProducts", None, 200),
     ("CostInitialize", None, 800),
     ("FileCost", None, 900),
     ("CostFinalize", None, 1000),
@@ -164,8 +181,8 @@ pub const INSTALL_EXECUTE_SEQUENCE: &[SequencedAction] = &[
 /// The package authors no dialogs, so a full-UI invocation falls back to the
 /// basic progress display rather than showing a wizard.
 pub const INSTALL_UI_SEQUENCE: &[SequencedAction] = &[
+    ("FindRelatedProducts", None, 25),
     ("LaunchConditions", None, 100),
-    ("FindRelatedProducts", None, 200),
     ("CostInitialize", None, 800),
     ("FileCost", None, 900),
     ("CostFinalize", None, 1000),
@@ -197,6 +214,19 @@ pub const ADVT_EXECUTE_SEQUENCE: &[SequencedAction] = &[
 
 /// `HKEY_LOCAL_MACHINE` in the `Registry` table's `Root` column.
 pub const REGISTRY_ROOT_LOCAL_MACHINE: i32 = 2;
+
+/// The `Name` of a `Registry` row with no value that deletes its key, with
+/// every value and subkey, when the component is uninstalled; and of a
+/// `RemoveRegistry` row that deletes its key the same way when the
+/// component is installed.
+pub const REGISTRY_WHOLE_KEY: &str = "-";
+
+/// `msidbRemoveFileInstallModeOnInstall`: a `RemoveFile` row acts when its
+/// component is installed.
+pub const REMOVE_FILE_ON_INSTALL: i32 = 1;
+/// `msidbRemoveFileInstallModeOnRemove`: a `RemoveFile` row acts when its
+/// component is removed.
+pub const REMOVE_FILE_ON_REMOVE: i32 = 2;
 
 /// `msidbCustomActionTypeDll`: the action calls a DLL entry point.
 pub const CUSTOM_ACTION_TYPE_DLL: i32 = 0x0001;

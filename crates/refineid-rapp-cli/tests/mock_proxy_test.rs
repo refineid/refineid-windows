@@ -40,6 +40,8 @@ const HOLDER_ENTROPY: &[u8; CPACE_SCALAR_ENTROPY_BYTES] =
     b"synthetic requester cpace scalar entropy holding the one attempt";
 /// Tries a card has left when only the issuer's software may spend them.
 const BELOW_THE_FLOOR: u8 = MINIMUM_REMAINING_ATTEMPTS - 1;
+/// The attempts of a PIN the card reports out of tries.
+const NO_ATTEMPTS: u8 = 0;
 
 /// Binds the mock custodian on a free loopback port and returns its endpoint.
 fn start_custodian(
@@ -118,7 +120,7 @@ fn paired_session(
 
 fn authentication(digest: &[u8]) -> CardOperation {
     CardOperation::BrowserAuthenticate {
-        origin: "https://card.refineid.fi".into(),
+        origin: "mock_proxy_test on TEST-HOST".into(),
         key_profile: KeyProfile::EcdsaP384,
         algorithm: SignatureAlgorithm::EcdsaSha384,
         digest: digest.to_vec(),
@@ -270,6 +272,29 @@ fn test_mock_proxy_pairing_and_card_operations() {
 
     requester.disconnect(&mut session, CloseReason::UserDisconnect);
 
+    proxy_handle
+        .join()
+        .expect("proxy thread finished")
+        .expect("mock proxy failed");
+}
+
+#[test]
+fn a_blocked_pin_answers_retry_floor_on_the_wire() {
+    let (endpoint, proxy_handle) = start_custodian(MockProxyOptions {
+        pin1_attempts: NO_ATTEMPTS,
+        ..options()
+    });
+    let mut requester = requester();
+    let (_pair_id, mut session) = paired_session(&mut requester, &endpoint);
+    let outcome = requester
+        .execute(
+            &mut session,
+            &authentication(&Sha384::digest(LOGIN_CHALLENGE)),
+            OPERATION_EXPIRY_MS,
+        )
+        .expect("execute browser_authenticate");
+    assert_eq!(outcome, OperationOutcome::Rejected(ResultError::RetryFloor));
+    requester.disconnect(&mut session, CloseReason::UserDisconnect);
     proxy_handle
         .join()
         .expect("proxy thread finished")
