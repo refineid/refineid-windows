@@ -18,7 +18,8 @@ use refineid_rapp_ble::gatt::BleLink;
 use refineid_rapp_ble::reach::{ReachError, reach_revocation_notice, reach_session};
 use refineid_rapp_core::clock::unix_time_ms;
 use refineid_rapp_core::engine::{
-    OperationOutcome, Requester, RequesterConfig, Session, SessionError, Withdrawal,
+    OperationOutcome, Requester, RequesterConfig, Session, SessionError, TRANSPORT_LABEL_BLUETOOTH,
+    Withdrawal, stored_peer_label,
 };
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::message::{
@@ -582,8 +583,15 @@ fn after_failed_search(
         }
         Some(waiting) => {
             // Every request that arrived during the search waited for it.
+            let peer = stored_peer_label(pairing.requester.store(), pairing.pair_id);
             for job in core::iter::once(waiting.job).chain(inbox.try_iter()) {
-                refineid_dev_errors::report!(Agent, "no phone for a signature request", error);
+                refineid_dev_errors::report!(
+                    Agent,
+                    "no phone for a signature request",
+                    error,
+                    peer.as_str(),
+                    TRANSPORT_LABEL_BLUETOOTH
+                );
                 job.answer(SignAnswer::NoPhone);
             }
         }

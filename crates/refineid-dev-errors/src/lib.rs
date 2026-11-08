@@ -34,8 +34,11 @@
 //! A cause is a name and nothing else: the case of an error value with
 //! every payload that is not itself a case dropped, a fixed text, or a
 //! Windows status by its name. A report never carries a PIN, CAN or PUK,
-//! their length or digits, a name, certificate content, a serial number,
-//! a device name or a pairing identifier.
+//! their length or digits, a holder name, certificate content, a serial
+//! number or a pairing identifier. A failed session's report names the
+//! paired device's display label and its transport after the cause (a
+//! device label such as a host or phone model name, never the holder);
+//! a record that cannot be read is named `unknown pairing`.
 //!
 //! A release build compiles none of this: [`report!`] expands to nothing,
 //! so no sink, Event Log import or message text reaches the binary. A
@@ -77,9 +80,15 @@ pub use status::StatusCode;
 /// - a variable holding an error value, written as the case it is
 ///   ([`Cause::case`]).
 ///
+/// A failed session also names its peer and transport: the error variable
+/// followed by the peer's display label and the session's transport label,
+/// written as `cause, peer, transport`
+/// ([`Cause::case_with_peer`]).
+///
 /// ```ignore
 /// refineid_dev_errors::report!(Rapp, "phone session not opened", error);
 /// refineid_dev_errors::report!(Reader, "card transmit failed", status rc);
+/// refineid_dev_errors::report!(Rapp, "phone session closed", end, peer, transport);
 /// ```
 ///
 /// In a release build a variable cause is only borrowed, so it stays used,
@@ -115,6 +124,13 @@ macro_rules! report {
             &$crate::Cause::case(&$cause),
         )
     };
+    ($component:ident, $event:expr, $cause:ident, $peer:expr, $transport:expr) => {
+        $crate::record(
+            $crate::Component::$component,
+            $event,
+            &$crate::Cause::case_with_peer(&$cause, $peer, $transport),
+        )
+    };
 }
 
 /// Reports a failure in a development build; expands to nothing in a
@@ -129,5 +145,10 @@ macro_rules! report {
     ($component:ident, $event:expr, name $name:expr) => {{}};
     ($component:ident, $event:expr, $cause:ident) => {{
         let _ = &$cause;
+    }};
+    ($component:ident, $event:expr, $cause:ident, $peer:expr, $transport:expr) => {{
+        let _ = &$cause;
+        let _ = $peer;
+        let _ = $transport;
     }};
 }

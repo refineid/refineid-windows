@@ -25,7 +25,9 @@
   `DevErrorLog.Report` to the Windows Event Log (Application log, source
   `RefineID`), and the app's Log window shows it as it arrives. A report
   names the event and its cause: an error case, a fixed text or a
-  spec-named status, never a value it carries. Release, Store and
+  spec-named status, never a value it carries, except a failed
+  session's report, which also names the paired device's
+  display label and its transport. Release, Store and
   production builds contain no logging code: no sink, no Event Log call,
   and no stderr, debugger or file log.
 - Safe Rust owns protocol, parsing, and secret handling. Keep `unsafe` inside

@@ -18,9 +18,12 @@ use core::fmt::Debug;
 
 use crate::status::StatusCode;
 
-/// The cause of a reported failure: a fixed text, the case of an error
-/// value, or a Windows status by its name. Nothing a value carries
-/// passes, so no secret, count or label can reach the log through it.
+/// The cause of a reported failure.
+///
+/// A fixed text, the case of an error value, or a Windows status by its
+/// name. Nothing a value carries passes, except the paired device's
+/// display label and transport label through [`Cause::case_with_peer`],
+/// so no secret, count or holder name can reach the log through it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cause(String);
 
@@ -49,11 +52,44 @@ impl Cause {
         Self(crate::status::describe(code.bits()))
     }
 
+    /// The case `value` is, naming the paired device and the transport
+    /// with it: `Case, peer, transport`. The peer is the paired device's
+    /// display label (a device label such as a host or phone model name,
+    /// never the card holder's name); a record that cannot be read is
+    /// named `unknown pairing`. The label is shortened to the peer-label
+    /// limit so the transport label after it survives the entry's bound.
+    #[must_use]
+    pub fn case_with_peer<T: Debug + ?Sized>(value: &T, peer: &str, transport: &str) -> Self {
+        Self(format!(
+            "{}, {}, {transport}",
+            Self::case(value).as_str(),
+            shorten_peer(peer)
+        ))
+    }
+
     /// The cause as written in an entry.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// The longest peer label a failure report keeps, in characters, so the
+/// transport label after it survives the entry's bound.
+const PEER_LABEL_CHARACTERS: usize = 64;
+
+/// `peer` shortened to [`PEER_LABEL_CHARACTERS`] characters, at a
+/// character boundary.
+fn shorten_peer(peer: &str) -> &str {
+    if peer.chars().count() <= PEER_LABEL_CHARACTERS {
+        return peer;
+    }
+    let end = peer
+        .char_indices()
+        .map(|(index, _)| index)
+        .nth(PEER_LABEL_CHARACTERS)
+        .unwrap_or(peer.len());
+    &peer[..end]
 }
 
 /// `described` reduced to its case names, or `None` when it is no case.
@@ -198,5 +234,31 @@ mod tests {
     fn a_borrowed_error_is_named_as_the_error() {
         let error = &Outer::Transport(Inner::Closed);
         assert_eq!(Cause::case(&error).as_str(), "Transport(Closed)");
+    }
+
+    #[test]
+    fn a_session_case_names_the_peer_and_transport() {
+        assert_eq!(
+            Cause::case_with_peer(&Outer::Transport(Inner::Closed), "pk-phone", "Bluetooth")
+                .as_str(),
+            "Transport(Closed), pk-phone, Bluetooth"
+        );
+    }
+
+    #[test]
+    fn a_session_case_drops_the_value_but_keeps_the_peer() {
+        assert_eq!(
+            Cause::case_with_peer(&Outer::Code(SECRET_COUNT), "pk-phone", "network").as_str(),
+            "Code, pk-phone, network"
+        );
+    }
+
+    #[test]
+    fn a_long_peer_label_is_shortened_at_a_character_boundary() {
+        const OVERLONG_BY: usize = 10;
+        let long = "ä".repeat(super::PEER_LABEL_CHARACTERS + OVERLONG_BY);
+        let cause = Cause::case_with_peer(&Outer::Unit, &long, "Bluetooth");
+        let shortened = "ä".repeat(super::PEER_LABEL_CHARACTERS);
+        assert_eq!(cause.as_str(), format!("Unit, {shortened}, Bluetooth"));
     }
 }

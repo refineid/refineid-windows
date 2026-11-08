@@ -73,6 +73,45 @@ const SESSION_SILENCE_LIMIT: Duration =
 const SESSION_RECORD_INTERVAL_MS: u64 =
     refineid_rapp::PAIRING_IDLE_EXPIRY_MS / refineid_rapp::PAIRING_IDLE_EXPIRY_DAYS;
 
+/// The transport label a failed session's log line carries for the
+/// Bluetooth link.
+pub const TRANSPORT_LABEL_BLUETOOTH: &str = "Bluetooth";
+
+/// The transport label a failed session's log line carries for the
+/// stream (TCP) transport.
+pub const TRANSPORT_LABEL_NETWORK: &str = "network";
+
+/// The peer a failed session's log line names when its pair record
+/// cannot be read.
+pub const UNKNOWN_PAIRING: &str = "unknown pairing";
+
+/// The transport label a failed session's log line carries.
+///
+/// [`TRANSPORT_LABEL_BLUETOOTH`] for the BLE profile,
+/// [`TRANSPORT_LABEL_NETWORK`] for the stream profile. Only the BLE link
+/// and the stream transport implement [`FrameTransport`] on this
+/// platform.
+#[must_use]
+pub fn transport_label(profile: &str) -> &'static str {
+    if profile == refineid_rapp::BLE_PROFILE {
+        TRANSPORT_LABEL_BLUETOOTH
+    } else {
+        TRANSPORT_LABEL_NETWORK
+    }
+}
+
+/// The peer label a failed session's log line carries for `pair_id`.
+///
+/// The pair record's display name (RAPP v26.11.2 section 4.3 items 3
+/// and 4, refreshed every session), or [`UNKNOWN_PAIRING`] when the
+/// record cannot be read.
+pub fn stored_peer_label<Store: PairingStore>(store: &Store, pair_id: PairId) -> String {
+    store.get(pair_id).map_or_else(
+        |_| UNKNOWN_PAIRING.to_owned(),
+        |record| record.peer_display_name().as_str().to_owned(),
+    )
+}
+
 use crate::clock::continuous_ms;
 use crate::ids::{Challenge, OperationId, PairId, RandomIdExt, SessionId};
 use crate::message::{CardPresence, CardStatusMessage, CloseReason, ResultError, ResultStatus};
@@ -521,6 +560,11 @@ pub struct Session<Transport: FrameTransport> {
     pair_id: PairId,
     session_id: SessionId,
     granted_profiles: Vec<ProfileName>,
+    /// The peer's display label as `session.ready` sent it (RAPP v26.11.2
+    /// section 4.3 items 3 and 4); failure logs carry it.
+    peer: DisplayName,
+    /// The transport label failure logs carry for this session.
+    transport_label: &'static str,
     end: Option<SessionEnd>,
     card: Option<CardStatusMessage>,
     /// When, on the continuous clock, this session last recorded the card
@@ -551,6 +595,20 @@ impl<Transport: FrameTransport> Session<Transport> {
         self.pair_id
     }
 
+    /// The peer's display label as `session.ready` sent it: the name a
+    /// failed session's log line carries.
+    #[must_use]
+    pub fn peer_label(&self) -> &str {
+        self.peer.as_str()
+    }
+
+    /// The transport label a failed session's log line carries for this
+    /// session.
+    #[must_use]
+    pub const fn transport_label(&self) -> &'static str {
+        self.transport_label
+    }
+
     /// How the session ended, once it has.
     #[must_use]
     pub const fn end(&self) -> Option<SessionEnd> {
@@ -559,10 +617,17 @@ impl<Transport: FrameTransport> Session<Transport> {
 
     /// Closes the session locally and records how it ended. The live
     /// operation, if any, is over with it. Development builds report every
-    /// end but a deliberate local close.
+    /// end but a deliberate local close, naming the peer and the
+    /// transport.
     fn finish(&mut self, end: SessionEnd) {
         if end != SessionEnd::LocalClose {
-            refineid_dev_errors::report!(Rapp, "phone session closed", end);
+            refineid_dev_errors::report!(
+                Rapp,
+                "phone session closed",
+                end,
+                self.peer.as_str(),
+                self.transport_label
+            );
         }
         self.runtime.close_session();
         self.operations.session_closed();
@@ -1247,9 +1312,17 @@ impl<Store: PairingStore> Requester<Store> {
         pair_id: PairId,
         transport: Transport,
     ) -> Result<Session<Transport>, SessionError> {
+        let peer = stored_peer_label(&self.store, pair_id);
+        let transport_label = transport_label(transport.profile());
         self.open_session(pair_id, transport).inspect_err(|error| {
             if *error != SessionError::Withdrawn {
-                refineid_dev_errors::report!(Rapp, "phone session not opened", error);
+                refineid_dev_errors::report!(
+                    Rapp,
+                    "phone session not opened",
+                    error,
+                    peer.as_str(),
+                    transport_label
+                );
             }
         })
     }
@@ -1333,6 +1406,7 @@ impl<Store: PairingStore> Requester<Store> {
             .into_established()
             .map_err(|_| SessionError::EngineFault)?;
         crate::view::session_opened(pair_id);
+        let transport_label = transport_label(transport.profile());
         let mut session = Session {
             transport,
             runtime: EstablishedSessionRuntime::new(endpoint, current_time_ms()),
@@ -1340,6 +1414,8 @@ impl<Store: PairingStore> Requester<Store> {
             pair_id,
             session_id,
             granted_profiles,
+            peer: custodian_name,
+            transport_label,
             end: None,
             card: None,
             sighted_at_ms: None,
@@ -1415,13 +1491,21 @@ impl<Store: PairingStore> Requester<Store> {
         now_ms: u64,
         transport: Transport,
     ) -> Result<(), SessionError> {
+        let peer = stored_peer_label(&self.store, pair_id);
+        let transport_label = transport_label(transport.profile());
         self.revocation_notice(pair_id, now_ms, transport)
             .inspect_err(|error| {
                 if !matches!(
                     error,
                     SessionError::Withdrawn | SessionError::Unacknowledged
                 ) {
-                    refineid_dev_errors::report!(Rapp, "revocation notice not delivered", error);
+                    refineid_dev_errors::report!(
+                        Rapp,
+                        "revocation notice not delivered",
+                        error,
+                        peer.as_str(),
+                        transport_label
+                    );
                 }
             })
     }
@@ -1623,9 +1707,21 @@ impl<Store: PairingStore> Requester<Store> {
         match &outcome {
             Ok(OperationOutcome::Completed(_)) => {}
             Ok(ended) => {
-                refineid_dev_errors::report!(Rapp, "operation ended without a result", ended);
+                refineid_dev_errors::report!(
+                    Rapp,
+                    "operation ended without a result",
+                    ended,
+                    session.peer_label(),
+                    session.transport_label()
+                );
             }
-            Err(error) => refineid_dev_errors::report!(Rapp, "operation not admitted", error),
+            Err(error) => refineid_dev_errors::report!(
+                Rapp,
+                "operation not admitted",
+                error,
+                session.peer_label(),
+                session.transport_label()
+            ),
         }
         outcome
     }
