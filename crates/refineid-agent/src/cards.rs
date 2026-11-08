@@ -34,7 +34,10 @@ const READING_INTERVAL: Duration = Duration::from_millis(500);
 pub fn watch() {
     let mut readers = PcscReaders;
     loop {
-        match pass(&mut readers) {
+        let judged = pass(&mut readers);
+        #[cfg(debug_assertions)]
+        crate::test_card_cas::present();
+        match judged {
             Some(Pass::Judged { readers: seen, .. }) => wait_for_change(&seen),
             Some(Pass::Deferred {
                 readers: Some(seen),

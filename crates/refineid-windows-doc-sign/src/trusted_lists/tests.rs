@@ -105,6 +105,10 @@ const LATER: u8 = 22;
 const NEXT_UPDATE: u8 = 25;
 /// A day after the next update.
 const OVERDUE: u8 = 27;
+/// The day after the next update, a day before [`OVERDUE`].
+const JUST_OVERDUE: u8 = 26;
+/// Hours in a day.
+const HOURS_PER_DAY: u32 = 24;
 /// Day every certificate ends.
 const ENDS: u8 = 28;
 /// The year of a fetch long before the fixture month.
@@ -602,6 +606,52 @@ fn an_overdue_cache_is_used_stale_when_the_fetch_fails() -> TestResult {
         "the stale anchors count",
     )?;
     check(&cache.load().len(), &STORED_FILES, "the cache is kept")
+}
+
+#[test]
+fn a_list_still_overdue_after_a_fetch_is_not_fetched_again_for_a_day() -> TestResult {
+    let world = World::new();
+    let dir = TempDir::new("trusted-lists-retry")?;
+    let cache = ListCache::at(dir.path().to_path_buf());
+    cache.store(&world.serve(day(JUST_OVERDUE))?.1)?;
+    let calls = Cell::new(NOT_FETCHED);
+    for now in [JUST_OVERDUE, OVERDUE] {
+        let run = run_anchors(
+            Some(&cache),
+            day(now),
+            Refresh::WhenDue,
+            &world.signers()?,
+            offline(&calls),
+        );
+        check(
+            &run.source,
+            &AnchorSource::Lists {
+                fetched_at: day(JUST_OVERDUE),
+                stale: true,
+            },
+            "the overdue lists are used, said stale",
+        )?;
+    }
+    check(
+        &calls.get(),
+        &NOT_FETCHED,
+        "no fetch within a day of the last",
+    )
+}
+
+#[test]
+fn a_late_or_unread_list_is_fetched_again_once_a_day_passed() -> TestResult {
+    let hour = RETRY_AFTER / HOURS_PER_DAY;
+    check_true(!refresh_due(true, RETRY_AFTER), "not at a day")?;
+    check_true(refresh_due(true, RETRY_AFTER + hour), "after a day")?;
+    check_true(
+        !refresh_due(false, RETRY_AFTER + hour),
+        "lists in date wait",
+    )?;
+    check_true(
+        refresh_due(false, REFRESH_AFTER + hour),
+        "an old cache is fetched",
+    )
 }
 
 #[test]

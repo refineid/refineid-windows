@@ -139,6 +139,60 @@ signed program chaining to it is no more trusted than before
 `crates/pkcs11/README.md`, "NSS trust records"). Windows has no such record for
 a propagated root.
 
+### DVV test cards in development builds
+
+DVV's test roots are not in the Microsoft Trusted Root Program, so with no
+`msroots` Windows holds neither a test card's root nor its issuing CA. A
+browser then finds no chain for the card's authentication certificate:
+Chromium (Edge, Chrome) selects client certificates with
+`CertFindChainInStore`, `CERT_CHAIN_FIND_BY_ISSUER`, matching the server's
+CA names against every CA of the chain, with
+`CERT_CHAIN_FIND_BY_ISSUER_CACHE_ONLY_FLAG` ("search only the cached system
+stores (Root, My, Ca, Trust) to find issuer certificates") and
+`CERT_CHAIN_FIND_BY_ISSUER_CACHE_ONLY_URL_FLAG` ("Only the URL cache is
+searched. The Internet is not searched") (Win32 `CertFindChainInStore`;
+Chromium `net/ssl/client_cert_store_win.cc`), and sends the intermediates of
+that chain without asking whether its root is trusted.
+
+A development build (`debug_assertions`, the switch refineid-core's
+`SigningBuild` uses) gives such a card its chain and no trust. After every
+pass of the agent's card watch, it reads each card in a reader without a
+credential; when the card's root (`EF.4334`) is self-issued, self-signed, a CA and named
+with the word `TEST`, it puts the root, and the issuing CA (`EF.4336`) if the
+root signed it and it is a CA named so too, into the user's Intermediate
+Certification Authorities store, `CurrentUser\CA`
+(`refineid-windows-credential-store` `test_card_cas`, Windows STPA W-R-26).
+Nothing shipped recognises a test card: no certificate and no fingerprint.
+
+- The CA store is one of the stores the chain engine searches for issuers;
+  it makes no certificate a trust anchor. The chain still ends with
+  `CERT_TRUST_IS_UNTRUSTED_ROOT`, so no web server, signed program or
+  document signed under the test root becomes trusted.
+- Each entry also carries `CERT_ENHKEY_USAGE_PROP_ID` set to TLS client
+  authentication alone (`CertSetEnhancedKeyUsage`). A certificate with
+  both an EKU extension and EKU extended properties "is valid only for the
+  uses that are on both lists" (Win32 `CertGetEnhancedKeyUsage`, Remarks),
+  and the chain engine narrows a chain to its elements' usages: a synthetic
+  root carrying that property in a Root
+  store built a valid chain for client authentication and
+  `CERT_TRUST_IS_NOT_VALID_FOR_USAGE` for server authentication on a test
+  computer.
+- Each entry is marked with a property of RefineID's own, and the watch
+  removes its marked entries of cards no longer in a reader. An entry the
+  store already held is left unmarked and is never removed.
+- Release builds compile none of this.
+
+Why not a trust store. The user's own Root store "is protected, and user
+interface dialog boxes remind the user to place only trusted certificates into
+that store" (Win32 "Managing Certificates with Certificate Stores"), so every
+addition and removal would ask the user; its `.SmartCard` physical store, which
+`msroots` fills, refuses a user process's write (access denied, observed on
+a test computer) and keeps no properties; the machine's Root store needs an
+administrator. An exclusive chain engine (`CERT_CHAIN_ENGINE_CONFIG`
+`hExclusiveRoot`) serves only the callers that create it, never a browser or
+Schannel. A server verifies a client certificate's chain against its own
+anchors, so the client needs the chain, not trust in it.
+
 ### What earlier builds left
 
 Builds that served `msroots` had Windows propagate the card's root and issuing
@@ -206,6 +260,15 @@ its phone (an absent phone reads as no card in the reader),
 or the phone's card does not answer the operation (`card_error`, a failed
 operation and not the card's absence), and `SCARD_F_INTERNAL_ERROR` otherwise,
 the retry floor included.
+
+A qualified signature over the remote arm reaches the phone as `sign_document`.
+A Windows signing call hands the module a hash and no document, so the phone is
+told what this computer knows, in the user's Windows interface language: the
+program, known by its image's `FileDescription` (else its file stem), the
+computer, and that the program did not name the document, for example
+"Microsoft Word on work-laptop asks for a signature (the program did not name
+the document)" (RAPP section 9.3, Windows STPA W-R-20). The RefineID app signs
+documents itself and sends their file names.
 
 ## Public build and development install
 

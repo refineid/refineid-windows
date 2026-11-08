@@ -28,9 +28,10 @@
 //!
 //! On each run the cached lists are read back, every signature
 //! verified again, and used as they are while none is due: the lists
-//! are fetched afresh when there is no cache, a cached list no longer
-//! reads, one is past its `NextUpdate`, the cache is older than
-//! [`REFRESH_AFTER`], or the caller asks ([`Refresh::Now`]). A national
+//! are fetched afresh when there is no cache, the cache is older than
+//! [`REFRESH_AFTER`], or the caller asks ([`Refresh::Now`]), and, once
+//! the last fetch is older than [`RETRY_AFTER`], when a cached list no
+//! longer reads or one is past its `NextUpdate`. A national
 //! list that fails in a refresh keeps its last cached copy; a list of
 //! the lists that fails leaves every cached list in use and the report
 //! says how old they are. With no list at all there is no anchor, and
@@ -65,6 +66,16 @@ const REFRESH_AFTER_DAYS: u64 = 30;
 /// often monthly; a month-old cache therefore misses a withdrawal the
 /// list's own schedule would announce only later.
 pub const REFRESH_AFTER: Duration = Duration::from_secs(REFRESH_AFTER_DAYS * SECONDS_PER_DAY);
+/// How long after a fetch a run fetches again only because a list is past
+/// its `NextUpdate` or did not read.
+///
+/// A fetch takes the list of the lists and every national list, one after
+/// another. A list whose operator publishes late stays past its
+/// `NextUpdate` after a fetch, and one that does not read stays unread, so
+/// fetching again at once would bring the same lists back and make every
+/// signature and verification wait for all of them; a day later the
+/// operator has likely published.
+pub const RETRY_AFTER: Duration = Duration::from_secs(SECONDS_PER_DAY);
 
 /// The variable naming the user's local application data.
 const LOCAL_APP_DATA: &str = "LOCALAPPDATA";
@@ -96,8 +107,9 @@ const RECORD_END: &[u8] = b"\n\n";
 /// When a run fetches the lists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refresh {
-    /// When the cache is missing, unreadable, past a list's
-    /// `NextUpdate` or older than [`REFRESH_AFTER`].
+    /// When the cache is missing or older than [`REFRESH_AFTER`], or
+    /// holds a list that is past its `NextUpdate` or does not read and
+    /// was fetched more than [`RETRY_AFTER`] ago.
     WhenDue,
     /// Before judging anything, whatever the cache holds.
     Now,
@@ -222,9 +234,10 @@ impl ListCache {
 ///
 /// The lists in `cache` are read under `signers`, every signature
 /// verified again, and used as they are unless a fetch is due:
-/// `refresh` is [`Refresh::Now`], there are no lists, one no longer
-/// reads, one is past its `NextUpdate`, or the cache is older than
-/// [`REFRESH_AFTER`]. A due fetch reads the lists again with `get` and
+/// `refresh` is [`Refresh::Now`], there are no lists, the cache is
+/// older than [`REFRESH_AFTER`], or one list no longer reads or is past
+/// its `NextUpdate` and the last fetch is older than [`RETRY_AFTER`]. A
+/// due fetch reads the lists again with `get` and
 /// the cache takes the result; a list of the lists that does not
 /// arrive or read leaves the cached lists in use. Under
 /// [`Refresh::CacheOnly`] nothing is fetched and `get` is never
@@ -253,11 +266,10 @@ pub fn run_anchors(
     let due = |lists: &TrustedLists| match refresh {
         Refresh::Now => true,
         Refresh::CacheOnly => false,
-        Refresh::WhenDue => {
-            lists.is_stale(now)
-                || age(lists.fetched_at(), now) > REFRESH_AFTER
-                || read_count(lists) != records.len()
-        }
+        Refresh::WhenDue => refresh_due(
+            lists.is_stale(now) || read_count(lists) != records.len(),
+            age(lists.fetched_at(), now),
+        ),
     };
     let lists = match cached {
         Some(lists) if !due(&lists) => Ok(lists),
@@ -311,6 +323,13 @@ pub fn certificate_issuing_ders(anchors: &TrustAnchors, now: DateTime) -> Vec<Ve
         .filter(|anchor| anchors.is_anchor(anchor.certificate().view(), anchor.role(), now))
         .map(|anchor| anchor.certificate().as_der().to_vec())
         .collect()
+}
+
+/// Whether cached lists fetched `age` ago are fetched again: when they are
+/// older than [`REFRESH_AFTER`], or when one is past its `NextUpdate` or did
+/// not read (`lacking`) and the last fetch is older than [`RETRY_AFTER`].
+fn refresh_due(lacking: bool, age: Duration) -> bool {
+    age > REFRESH_AFTER || (lacking && age > RETRY_AFTER)
 }
 
 /// How long ago `then` was at `now`; nothing when `then` is later.
