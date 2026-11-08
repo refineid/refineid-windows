@@ -17,15 +17,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
+use crate::backlog::{BacklogRoute, BacklogSightings};
 use crate::engine::{
     PairingCandidateSource, PairingConnection, Requester, SESSION_RECEIVE_TICK,
     read_bootstrap_answer,
 };
 use crate::ids::PairId;
-use crate::store::{PairingRecord, PairingStore, expire_revocation_notices};
+use crate::store::{PairingRecord, PairingStore, expire_revocation_notices, revoke_pairing};
 use crate::transport::{FrameTransport, TcpFrameTransport, TransportError};
 use crate::view;
-use refineid_rapp::REVOCATION_ATTEMPT_BOUND_MS;
 use refineid_rapp::{
     DiscoveryKey, DiscoveryRecord, InstanceName, PairRecord, RoutingKey, SessionRouting,
     TransportProfile, WithdrawalKey, WithdrawnRecord, discovery_epoch, withdrawal_counter,
@@ -408,9 +408,6 @@ pub enum DialCause {
     /// The requester keeps its session to the custodian: it dials when the
     /// custodian appears and within the redial window.
     Holding,
-    /// A revoking pairing's one bounded attempt (section 4.6 item 6), which
-    /// runs whatever the view says.
-    RevocationAttempt,
 }
 
 /// Dials the custodian serving the stored `pairing` with a session preamble,
@@ -425,9 +422,7 @@ pub enum DialCause {
 /// (section 4.5 item 6). A withdrawn custodian is not dialed until it
 /// appears again; otherwise the view admits the dial when the custodian
 /// appeared, for a local consumer's request, or within the redial window.
-/// A dial that reaches no service counts as failed in the view. A revoking
-/// pairing's attempt dials any service that may be the custodian's, past
-/// the view (section 4.6 item 6).
+/// A dial that reaches no service counts as failed in the view.
 ///
 /// The connection receives with [`SESSION_RECEIVE_TICK`] as its deadline,
 /// the liveness tick of the requester engine.
@@ -477,13 +472,6 @@ fn dialled_session(
     let pair_id = pairing.pair_id();
     let unix_seconds = crate::clock::unix_time_seconds();
     let found = session_candidates(browse_stream_services(browse_window), pairing, unix_seconds);
-    if cause == DialCause::RevocationAttempt {
-        return found
-            .services
-            .iter()
-            .find_map(|service| attempt(&service.endpoints))
-            .ok_or(StreamError::Unreachable);
-    }
     let appeared = view::look(
         pair_id,
         found
@@ -510,68 +498,237 @@ fn dialled_session(
     Err(StreamError::Unreachable)
 }
 
-/// Makes the one bounded attempt of every pairing forgotten on `requester`
-/// (RAPP v26.11.2 section 4.6 item 6).
+/// Delivers the `pairing_revoked` close of every forgotten pairing whose
+/// custodian appears in one `browse_window` browse: the requester's
+/// revocation backlog (RAPP v26.11.2 section 4.6 item 6).
 ///
-/// Within 10 seconds of the forget the phone is looked for, a `browse_window` browse at a time, until one
-/// connection to it opens; the `pairing_revoked` close goes as the
-/// session's first and only message, and the keys go once the phone echoes
-/// it or the bound passes. Returns once every bound has passed, with every
-/// key left destroyed untold, so no revoking pairing outlives its bound.
-pub fn attempt_revocations<Store: PairingStore>(
+/// Pairings whose notice expired go untold first. For each pairing that
+/// still owes its notice, only a `mode=session` record carrying its
+/// discovery hint counts as an appearance; then at most one connection
+/// opens, to the instance whose hint matched, carrying the close as its
+/// first message. The keys and the record go only on the custodian's echo;
+/// anything else keeps the pairing in the backlog for its next appearance.
+/// A custodian that does not appear is never dialed: no dial runs on a
+/// timer. The backlog runs whether remote use is on, off or suspended,
+/// alongside the active pairing, and offers no identity and starts no
+/// operation.
+///
+/// `sightings` is the process's appearance memory, kept across rounds: a
+/// phone that stays listed is an appearance only once, and only a completed
+/// round that misses it marks it absent. Sightings of pairings that owe no
+/// notice anymore are dropped.
+pub fn deliver_backlog_notices<Store: PairingStore>(
     requester: &mut Requester<Store>,
     browse_window: Duration,
+    sightings: &mut BacklogSightings,
 ) {
-    let now_ms = crate::clock::unix_time_ms();
-    // The bound runs on the monotonic clock from here; the wall clock only
-    // says how much of it the forget left.
-    let started = Instant::now();
-    let owed: Vec<(PairId, Instant)> = requester
+    expire_revocation_notices(requester.store_mut(), crate::clock::unix_time_ms());
+    for pair_id in requester.store().pair_ids() {
+        if notice_resolved(requester, pair_id) {
+            sightings.remove_pairing(pair_id);
+        }
+    }
+    let owed: Vec<PairId> = requester
         .store()
         .pair_ids()
         .into_iter()
-        .filter_map(|pair_id| {
-            let record = requester.store().get(pair_id).ok()?;
-            let forgotten_at_ms = record
-                .pair_record()
-                .filter(|_| record.owes_revocation_notice())?
-                .forgotten_at_ms()?;
-            let spent_ms = now_ms.checked_sub(forgotten_at_ms)?;
-            let left_ms = REVOCATION_ATTEMPT_BOUND_MS.checked_sub(spent_ms)?;
-            Some((pair_id, started + Duration::from_millis(left_ms)))
+        .filter(|pair_id| {
+            requester
+                .store()
+                .get(*pair_id)
+                .is_ok_and(PairingRecord::owes_revocation_notice)
         })
         .collect();
-    let mut last_end = started;
-    for (pair_id, ends_at) in owed {
-        last_end = last_end.max(ends_at);
-        while Instant::now() < ends_at {
-            let transport = requester
-                .store()
-                .get(pair_id)
-                .ok()
-                .and_then(PairingRecord::pair_record)
-                .and_then(|keys| {
-                    dial_session(keys, &[], browse_window, DialCause::RevocationAttempt).ok()
-                });
-            if let Some(transport) = transport {
-                // The engine reports a notice it could not deliver.
-                let _ = requester.deliver_revocation_notice(pair_id, transport);
-                break;
-            }
+    if owed.is_empty() {
+        return;
+    }
+    let services = browse_stream_services(browse_window);
+    let unix_seconds = crate::clock::unix_time_seconds();
+    let now_continuous_ms = crate::clock::continuous_ms();
+    let now_wall_ms = crate::clock::unix_time_ms();
+    for pair_id in owed {
+        deliver_backlog_notice(
+            requester,
+            pair_id,
+            BacklogRound {
+                services: &services,
+                unix_seconds,
+                now_continuous_ms,
+                now_wall_ms,
+                sightings,
+            },
+        );
+    }
+}
+
+/// Tries one forgotten pairing's notice against the browsed `services`:
+/// when one names the pairing and thereby appears for it, at most one
+/// connection opens to the instance whose hint matched, carrying the
+/// `pairing_revoked` close as its first message. Returns whether the
+/// custodian appeared. Without an appearance nothing is dialed.
+/// One round of the revocation backlog over the stream transport: the
+/// custodians one browse found, when the round ran on each clock, and the
+/// process's appearance memory, kept across rounds.
+struct BacklogRound<'a> {
+    /// The custodians the round's browse found.
+    services: &'a [StreamService],
+    /// The discovery epoch the hints are matched in, in seconds.
+    unix_seconds: u64,
+    /// When the round ran, in continuous-clock milliseconds.
+    now_continuous_ms: u64,
+    /// When the round ran, in wall-clock milliseconds since the Unix epoch.
+    now_wall_ms: u64,
+    /// The process's appearance memory.
+    sightings: &'a mut BacklogSightings,
+}
+
+/// Tries one forgotten pairing's notice against the browsed `services`:
+/// when one names the pairing and thereby appears for it, at most one
+/// connection opens to the instance whose hint matched, carrying the
+/// `pairing_revoked` close as its first message. Returns whether the
+/// custodian appeared. Without an appearance nothing is dialed.
+fn deliver_backlog_notice<Store: PairingStore>(
+    requester: &mut Requester<Store>,
+    pair_id: PairId,
+    round: BacklogRound<'_>,
+) -> bool {
+    deliver_backlog_notice_with(requester, pair_id, round, &mut |endpoints, key| {
+        dial(
+            endpoints,
+            STREAM_CANDIDATE_ID,
+            SESSION_RECEIVE_TICK,
+            DialPurpose::Session(key),
+        )
+        .ok()
+    })
+}
+
+/// [`deliver_backlog_notice`], with the connection opened by `connect`.
+fn deliver_backlog_notice_with<Store, Transport, Connect>(
+    requester: &mut Requester<Store>,
+    pair_id: PairId,
+    mut round: BacklogRound<'_>,
+    connect: &mut Connect,
+) -> bool
+where
+    Store: PairingStore,
+    Transport: FrameTransport,
+    Connect: FnMut(&[String], &RoutingKey) -> Option<Transport>,
+{
+    let Some((key, endpoints)) = backlog_dial_plan(requester, pair_id, &mut round) else {
+        return false;
+    };
+    if let Some(transport) = connect(&endpoints, &key) {
+        // The engine reports a notice it could not deliver.
+        let _ = requester.deliver_revocation_notice(pair_id, round.now_wall_ms, transport);
+        revoke_if_notice_expired(requester, pair_id, round.now_wall_ms, round.sightings);
+    }
+    if notice_resolved(requester, pair_id) {
+        round.sightings.remove_pairing(pair_id);
+    }
+    true
+}
+
+/// Whether `pair_id` owes no revocation notice anymore: gone, revoked, or
+/// serving again. Its sightings are dropped with it.
+fn notice_resolved<Store: PairingStore>(requester: &Requester<Store>, pair_id: PairId) -> bool {
+    !requester
+        .store()
+        .get(pair_id)
+        .is_ok_and(PairingRecord::owes_revocation_notice)
+}
+
+/// The backlog's dial for one forgotten pairing in this browse: the routing
+/// key and the endpoints of the instance whose appearance this is.
+///
+/// Re-reads the record: a pairing gone or no longer forgotten is not
+/// dialed, and one past its notice expiry is revoked untold instead.
+/// Otherwise the hint-matched instances are the phone's sightings on the
+/// stream route: the first appearance dials, at most one connection for
+/// it, and a phone that stays in sight dials nothing until it has been
+/// absent and reappears.
+fn backlog_dial_plan<Store: PairingStore>(
+    requester: &mut Requester<Store>,
+    pair_id: PairId,
+    round: &mut BacklogRound<'_>,
+) -> Option<(RoutingKey, Vec<String>)> {
+    if revoke_if_notice_expired(requester, pair_id, round.now_wall_ms, round.sightings) {
+        return None;
+    }
+    // The key and the hint-matched endpoints are copied out first, so the
+    // delivery below can hold the store mutably.
+    let (key, named): (RoutingKey, Vec<(String, Vec<String>)>) = {
+        let Ok(record) = requester.store().get(pair_id) else {
+            return None;
+        };
+        if !record.owes_revocation_notice() {
+            return None;
+        }
+        let keys = record.pair_record()?;
+        let found = session_candidates(round.services.to_vec(), keys, round.unix_seconds);
+        let named = found
+            .services
+            .iter()
+            .filter(|service| service.names_pairing(keys, round.unix_seconds))
+            .map(|service| (service.instance.clone(), service.endpoints.clone()))
+            .collect();
+        let Ok(key) = RoutingKey::derive(keys) else {
+            return None;
+        };
+        (key, named)
+    };
+    // The round completed: every remembered sighting of this pairing that
+    // it did not list is now observed absent. Every listed sighting is in
+    // sight again; only an appearance dials, at most one connection for it.
+    let dialable: Vec<&(String, Vec<String>)> = named
+        .iter()
+        .filter(|(_, endpoints)| !endpoints.is_empty())
+        .collect();
+    let listed: Vec<&str> = dialable
+        .iter()
+        .map(|(instance, _)| instance.as_str())
+        .collect();
+    round.sightings.round_completed(
+        pair_id,
+        BacklogRoute::Stream,
+        &listed,
+        round.now_continuous_ms,
+    );
+    let mut dial: Option<Vec<String>> = None;
+    for (instance, endpoints) in dialable {
+        if round.sightings.appearance(
+            pair_id,
+            BacklogRoute::Stream,
+            instance,
+            round.now_continuous_ms,
+        ) && dial.is_none()
+        {
+            dial = Some(endpoints.clone());
         }
     }
-    // A pairing whose phone echoed has lost its keys already; only one whose
-    // attempt failed is waited out to its bound.
-    let unanswered = requester.store().pair_ids().into_iter().any(|pair_id| {
-        requester
-            .store()
-            .get(pair_id)
-            .is_ok_and(PairingRecord::owes_revocation_notice)
+    Some((key, dial?))
+}
+
+/// Revokes `pair_id` untold when its `pairing_revoked` close is owed no
+/// longer at `now_wall_ms` (RAPP v26.11.2 section 4.6 item 3), and reports
+/// whether it did. Anything still owed, and anything no longer stored, is
+/// left alone.
+fn revoke_if_notice_expired<Store: PairingStore>(
+    requester: &mut Requester<Store>,
+    pair_id: PairId,
+    now_wall_ms: u64,
+    sightings: &mut BacklogSightings,
+) -> bool {
+    let expired = requester.store().get(pair_id).is_ok_and(|record| {
+        record
+            .pair_record()
+            .is_some_and(|keys| keys.revocation_notice_expired(now_wall_ms))
     });
-    if unanswered {
-        std::thread::sleep(last_end.saturating_duration_since(Instant::now()));
+    if expired {
+        let _ = revoke_pairing(requester.store_mut(), pair_id, false, now_wall_ms);
+        sightings.remove_pairing(pair_id);
     }
-    expire_revocation_notices(requester.store_mut(), crate::clock::unix_time_ms());
+    expired
 }
 
 /// How long one TCP connect may take before the next endpoint is tried.
@@ -1204,7 +1361,9 @@ mod tests {
         DialPurpose, DiscoveryMode, MdnsRecords, StreamAccept, StreamError, StreamListener,
         StreamService, browse_interfaces_among, dial, parse_mdns_response,
     };
+    use crate::backlog::BacklogSightings;
     use crate::ids::{GrantsHash, PairId};
+    use crate::store::PairingStore;
     use crate::transport::FrameTransport;
     use refineid_rapp::noise::x25519_public_key;
     use refineid_rapp::{
@@ -1370,6 +1529,377 @@ mod tests {
         let found = super::session_candidates(vec![record], &requester(), now);
         assert!(found.withdrawn);
         assert!(found.services.is_empty());
+    }
+
+    /// A forgotten pairing of its own for the backlog tests. Each test keeps
+    /// its own appearance memory, so tests share nothing. Its keys are the
+    /// corpus keys, so the corpus discovery hint names it.
+    fn backlog_pair_record(tag: u8) -> PairRecord {
+        PairRecord::new(
+            PairId::from_array([tag; 16]),
+            EndpointRole::Requester,
+            REQUESTER_PRIVATE,
+            x25519_public_key(&REQUESTER_PRIVATE),
+            x25519_public_key(&CUSTODIAN_PRIVATE),
+            GrantsHash::from_array([0x55; 32]),
+            vec![ProfileName::parse(crate::profiles::PROFILE_AUTHENTICATION).unwrap()],
+            refineid_rapp::DisplayName::parse("Phone".to_owned()).unwrap(),
+            0,
+        )
+        .unwrap()
+    }
+
+    /// The custodian side's record of the backlog fixture: the same pair
+    /// with the roles mirrored, as the phone that hears the close holds it.
+    fn backlog_proxy_record(tag: u8) -> PairRecord {
+        PairRecord::new(
+            PairId::from_array([tag; 16]),
+            EndpointRole::Proxy,
+            CUSTODIAN_PRIVATE,
+            x25519_public_key(&CUSTODIAN_PRIVATE),
+            x25519_public_key(&REQUESTER_PRIVATE),
+            GrantsHash::from_array([0x55; 32]),
+            vec![ProfileName::parse(crate::profiles::PROFILE_AUTHENTICATION).unwrap()],
+            refineid_rapp::DisplayName::parse("Phone".to_owned()).unwrap(),
+            0,
+        )
+        .unwrap()
+    }
+
+    /// A requester holding `keys` forgotten: the revocation backlog of one.
+    /// A session is recorded for the pairing now, so the notice is owed and
+    /// not expired.
+    fn backlog_requester(
+        keys: PairRecord,
+    ) -> crate::engine::Requester<crate::store::MemoryPairingStore> {
+        let pair_id = keys.pair_id();
+        let mut store = crate::store::MemoryPairingStore::new();
+        store
+            .insert(crate::store::PairingRecord::new(keys, "iOS".to_owned()))
+            .unwrap();
+        store
+            .sweep(pair_id, crate::clock::unix_time_ms(), true)
+            .unwrap();
+        let mut requester = crate::engine::Requester::new(
+            crate::engine::RequesterConfig {
+                display_name: refineid_rapp::DisplayName::parse(
+                    "Windows - EXAMPLE-HOST".to_owned(),
+                )
+                .unwrap(),
+                platform: "Windows".to_owned(),
+            },
+            store,
+        );
+        requester.forget_pairing(pair_id).unwrap();
+        requester
+    }
+
+    /// The pairing's own hint at a fixed epoch, as its custodian would
+    /// announce it.
+    fn backlog_hint(tag: u8) -> String {
+        use refineid_rapp::DiscoveryKey;
+        hex(&DiscoveryKey::derive(&backlog_pair_record(tag))
+            .unwrap()
+            .hint(HINT_EPOCH))
+    }
+
+    /// The hint epoch the backlog fixtures announce in, in seconds.
+    fn backlog_epoch_seconds() -> u64 {
+        HINT_EPOCH * DISCOVERY_HINT_EPOCH_SECONDS
+    }
+
+    /// One backlog round of the tests: the `services` a browse found at
+    /// `now_ms` on the continuous clock, matched in the hint epoch, with
+    /// the test's appearance memory.
+    fn round<'a>(
+        services: &'a [StreamService],
+        now_ms: u64,
+        wall_ms: u64,
+        sightings: &'a mut BacklogSightings,
+    ) -> super::BacklogRound<'a> {
+        super::BacklogRound {
+            services,
+            unix_seconds: backlog_epoch_seconds(),
+            now_continuous_ms: now_ms,
+            now_wall_ms: wall_ms,
+            sightings,
+        }
+    }
+
+    /// A moment on the continuous clock; sightings of these tests start
+    /// here.
+    const SIGHTED_MS: u64 = 10_000_000;
+    /// The loss hold: thirty seconds of absence ends a sighting.
+    const LOSS_HOLD_MS: u64 = 30_000;
+    /// One day in milliseconds.
+    const DAY_MS: u64 = 86_400_000;
+    /// Days after the latest session the expired-notice test counts: past
+    /// the pairing's thirty-day idle expiry.
+    const PAST_EXPIRY_DAYS: u64 = 31;
+    /// The `session.ready` nonce the scripted custodian sends.
+    const READY_NONCE: [u8; 32] = [0x41; 32];
+
+    /// The scripted custodian side of a revocation delivery over `transport`:
+    /// the handshake as responder, then the requester's close received and
+    /// echoed. Returns the close's reason.
+    fn echo_revocation_close(
+        mut transport: super::super::transport::MemoryTransport,
+        proxy_keys: &PairRecord,
+    ) -> refineid_rapp::CloseReason {
+        use refineid_rapp::{BinaryFrame, SessionHandshake, TransportProfile};
+        let mut handshake =
+            SessionHandshake::begin_proxy(proxy_keys, TransportProfile::Stream).unwrap();
+        let first = BinaryFrame::reconstruct(transport.receive_frame().unwrap()).unwrap();
+        handshake.read_message(&first).unwrap();
+        let second = handshake.write_message().unwrap();
+        transport.send_frame(second.as_bytes()).unwrap();
+        let mut authentication = handshake.into_authentication().unwrap();
+        let ready = authentication
+            .send_ready(
+                READY_NONCE,
+                &refineid_rapp::DisplayName::parse("Phone".to_owned()).unwrap(),
+            )
+            .unwrap();
+        transport.send_frame(ready.as_bytes()).unwrap();
+        let mut endpoint = authentication.into_established().unwrap();
+        loop {
+            let bytes = transport.receive_frame().unwrap();
+            let frame = BinaryFrame::reconstruct(bytes).unwrap();
+            if let refineid_rapp::ReceiveOutcome::PeerClosed { reason, echo } = endpoint
+                .receive(&frame, crate::clock::unix_time_ms())
+                .unwrap()
+            {
+                transport.send_frame(echo.unwrap().as_bytes()).unwrap();
+                return reason;
+            }
+        }
+    }
+
+    #[test]
+    fn a_backlog_notice_dials_only_on_appearance() {
+        use crate::store::PairingRecord;
+
+        let keys = backlog_pair_record(0x39);
+        let pair_id = keys.pair_id();
+        let mut requester = backlog_requester(keys);
+        let mut sightings = BacklogSightings::new();
+        let hint = backlog_hint(0x39);
+        let wall_ms = crate::clock::unix_time_ms();
+        let services = [session("backlog-instance", Some(hint.as_str()))];
+        let dials = core::cell::Cell::new(0);
+        let mut refused = |_endpoints: &[String], _key: &RoutingKey| {
+            dials.set(dials.get() + 1);
+            None::<super::super::transport::MemoryTransport>
+        };
+        // Nothing in sight dials nothing; the notice stays owed.
+        assert!(!super::deliver_backlog_notice_with(
+            &mut requester,
+            pair_id,
+            round(&[], SIGHTED_MS, wall_ms, &mut sightings),
+            &mut refused,
+        ));
+        assert_eq!(dials.get(), 0);
+        assert!(
+            requester
+                .store()
+                .get(pair_id)
+                .is_ok_and(PairingRecord::owes_revocation_notice)
+        );
+        // The custodian appears: a session record carrying the pairing's
+        // hint under a fresh instance. The connection fails to open here;
+        // the appearance alone is what is tried.
+        assert!(super::deliver_backlog_notice_with(
+            &mut requester,
+            pair_id,
+            round(&services, SIGHTED_MS, wall_ms, &mut sightings),
+            &mut refused,
+        ));
+        assert_eq!(dials.get(), 1);
+        assert!(
+            requester
+                .store()
+                .get(pair_id)
+                .is_ok_and(PairingRecord::owes_revocation_notice)
+        );
+        // Still listed across a round a minute later is no new appearance:
+        // elapsed time alone is never absence, so nothing dials again.
+        assert!(!super::deliver_backlog_notice_with(
+            &mut requester,
+            pair_id,
+            round(&services, SIGHTED_MS + 60_000, wall_ms, &mut sightings),
+            &mut refused,
+        ));
+        assert_eq!(dials.get(), 1);
+        assert!(
+            requester
+                .store()
+                .get(pair_id)
+                .is_ok_and(PairingRecord::owes_revocation_notice)
+        );
+    }
+
+    #[test]
+    fn a_backlog_notice_dials_again_only_after_observed_absence_for_the_loss_hold() {
+        use crate::store::PairingRecord;
+
+        let keys = backlog_pair_record(0x3A);
+        let pair_id = keys.pair_id();
+        let mut requester = backlog_requester(keys);
+        let mut sightings = BacklogSightings::new();
+        let hint = backlog_hint(0x3A);
+        let wall_ms = crate::clock::unix_time_ms();
+        let services = [session("backlog-instance", Some(hint.as_str()))];
+        let dials = core::cell::Cell::new(0);
+        let mut refused = |_endpoints: &[String], _key: &RoutingKey| {
+            dials.set(dials.get() + 1);
+            None::<super::super::transport::MemoryTransport>
+        };
+        assert!(super::deliver_backlog_notice_with(
+            &mut requester,
+            pair_id,
+            round(&services, SIGHTED_MS, wall_ms, &mut sightings),
+            &mut refused,
+        ));
+        assert_eq!(dials.get(), 1);
+        // Still listed is no new appearance: nothing dials again.
+        assert!(!super::deliver_backlog_notice_with(
+            &mut requester,
+            pair_id,
+            round(&services, SIGHTED_MS + 1, wall_ms, &mut sightings),
+            &mut refused,
+        ));
+        assert_eq!(dials.get(), 1);
+        // One completed round misses the phone: its absence starts here.
+        assert!(!super::deliver_backlog_notice_with(
+            &mut requester,
+            pair_id,
+            round(&[], SIGHTED_MS + 2, wall_ms, &mut sightings),
+            &mut refused,
+        ));
+        assert_eq!(dials.get(), 1);
+        // Back 10 seconds after the missed round, within the hold: no new
+        // appearance.
+        assert!(!super::deliver_backlog_notice_with(
+            &mut requester,
+            pair_id,
+            round(&services, SIGHTED_MS + 2 + 10_000, wall_ms, &mut sightings),
+            &mut refused,
+        ));
+        assert_eq!(dials.get(), 1);
+        // Missed again, and back 31 seconds after that absence: an
+        // appearance, dialed again.
+        assert!(!super::deliver_backlog_notice_with(
+            &mut requester,
+            pair_id,
+            round(&[], SIGHTED_MS + 3 + 10_000, wall_ms, &mut sightings),
+            &mut refused,
+        ));
+        assert_eq!(dials.get(), 1);
+        assert!(super::deliver_backlog_notice_with(
+            &mut requester,
+            pair_id,
+            round(
+                &services,
+                SIGHTED_MS + 3 + 10_000 + LOSS_HOLD_MS + 1_000,
+                wall_ms,
+                &mut sightings
+            ),
+            &mut refused,
+        ));
+        assert_eq!(dials.get(), 2);
+        assert!(
+            requester
+                .store()
+                .get(pair_id)
+                .is_ok_and(PairingRecord::owes_revocation_notice)
+        );
+    }
+
+    #[test]
+    fn an_expired_backlog_notice_is_revoked_untold_without_a_dial() {
+        use crate::store::PairingState;
+
+        // The pairing's latest session is past its idle expiry: thirty days
+        // after that session, counted from the session and not the forget.
+        let pair_id = backlog_pair_record(0x3B).pair_id();
+        let wall_ms = crate::clock::unix_time_ms();
+        let session_ms = wall_ms - PAST_EXPIRY_DAYS * DAY_MS;
+        let mut store = crate::store::MemoryPairingStore::new();
+        store
+            .insert(crate::store::PairingRecord::new(
+                backlog_pair_record(0x3B),
+                "iOS".to_owned(),
+            ))
+            .unwrap();
+        store.sweep(pair_id, session_ms, true).unwrap();
+        let mut requester = crate::engine::Requester::new(
+            crate::engine::RequesterConfig {
+                display_name: refineid_rapp::DisplayName::parse(
+                    "Windows - EXAMPLE-HOST".to_owned(),
+                )
+                .unwrap(),
+                platform: "Windows".to_owned(),
+            },
+            store,
+        );
+        requester.forget_pairing(pair_id).unwrap();
+        let hint = backlog_hint(0x3B);
+        let services = [session("backlog-instance", Some(hint.as_str()))];
+        let dials = core::cell::Cell::new(0);
+        let mut refused = |_endpoints: &[String], _key: &RoutingKey| {
+            dials.set(dials.get() + 1);
+            None::<super::super::transport::MemoryTransport>
+        };
+        // The appearance dials nothing; the pairing goes untold.
+        let mut sightings = BacklogSightings::new();
+        assert!(!super::deliver_backlog_notice_with(
+            &mut requester,
+            pair_id,
+            round(&services, SIGHTED_MS, wall_ms, &mut sightings),
+            &mut refused,
+        ));
+        assert_eq!(dials.get(), 0);
+        let record = requester.store().get(pair_id).unwrap();
+        assert_eq!(record.state(), PairingState::Revoked { by_peer: false });
+        assert!(record.pair_record().is_none());
+        assert!(!record.owes_revocation_notice());
+    }
+
+    #[test]
+    fn a_backlog_dial_carries_the_close_and_destroys_the_pairing_on_the_echo() {
+        use crate::store::PairingState;
+        use crate::transport::MemoryTransport;
+
+        let keys = backlog_pair_record(0x3C);
+        let pair_id = keys.pair_id();
+        let mut requester = backlog_requester(keys);
+        let hint = backlog_hint(0x3C);
+        let wall_ms = crate::clock::unix_time_ms();
+        let services = [session("backlog-instance", Some(hint.as_str()))];
+        let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+        let proxy_keys = backlog_proxy_record(0x3C);
+        let proxy = std::thread::spawn(move || echo_revocation_close(proxy_transport, &proxy_keys));
+        let mut transport = Some(requester_transport);
+        let mut dials = 0;
+        let mut connect = |_endpoints: &[String], _key: &RoutingKey| {
+            dials += 1;
+            transport.take()
+        };
+        let mut sightings = BacklogSightings::new();
+        assert!(super::deliver_backlog_notice_with(
+            &mut requester,
+            pair_id,
+            round(&services, SIGHTED_MS, wall_ms, &mut sightings),
+            &mut connect,
+        ));
+        assert_eq!(dials, 1);
+        assert_eq!(
+            proxy.join().unwrap(),
+            refineid_rapp::CloseReason::PairingRevoked
+        );
+        let record = requester.store().get(pair_id).unwrap();
+        assert_eq!(record.state(), PairingState::Revoked { by_peer: false });
+        assert!(record.pair_record().is_none());
     }
 
     #[test]

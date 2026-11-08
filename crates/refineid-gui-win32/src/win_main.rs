@@ -59,7 +59,7 @@ use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::limits::OFFER_TTL_MS;
 use refineid_rapp_core::offer::normalize_pairing_code;
 use refineid_rapp_core::store::{PairingRecord, PairingState, PairingStore as _, forget_pairing};
-use refineid_rapp_core::stream::{PairingServices, attempt_revocations};
+use refineid_rapp_core::stream::{PairingServices, deliver_backlog_notices};
 use refineid_windows_credential_store::ProtectedPairingStore;
 use refineid_windows_doc_sign::phone::{SigningSource, current_source};
 use refineid_windows_doc_sign::sign::{DocumentSignRequest, sign};
@@ -74,7 +74,7 @@ const REFRESH_MS: u32 = 2000;
 const ATR_POLL_MS: u128 = 30_000;
 /// One DNS-SD browse round of the pairing search.
 const PAIRING_BROWSE_WINDOW: Duration = Duration::from_millis(600);
-/// How long one browse of a revocation attempt listens for the phone.
+/// How long one browse of a revocation backlog round listens for the phone.
 const FORGET_BROWSE_WINDOW: Duration = Duration::from_millis(1_500);
 /// How long a pairing connection waits for each message from the phone.
 const PAIRING_RECEIVE_DEADLINE: Duration = Duration::from_secs(10);
@@ -2357,7 +2357,7 @@ fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<S
         Ok((pair_id, _)) => {
             let summary = paired_summary(&requester, pair_id);
             // This computer holds one pairing: the new one replaces any held
-            // before, which is forgotten with one bounded attempt (RAPP
+            // before, which is forgotten into the revocation backlog (RAPP
             // v26.11.2 section 4.6 item 6).
             let replaced: Vec<PairId> = requester
                 .store()
@@ -2377,10 +2377,13 @@ fn run_pair_browse(main_raw: usize, code: &str, cancel: &AtomicBool) -> Result<S
     }
 }
 
-/// Makes the bounded attempt of every pairing forgotten on `requester`,
-/// then removes what is left of `forgotten`.
+/// Delivers the `pairing_revoked` close of every pairing forgotten on
+/// `requester` whose phone appears in one browse, then removes what the
+/// echo resolved of `forgotten`: the rest stays in the revocation backlog.
+/// A removed pairing keeps no sightings either.
 fn tell_and_clear(mut requester: Requester<ProtectedPairingStore>, forgotten: &[PairId]) {
-    attempt_revocations(&mut requester, FORGET_BROWSE_WINDOW);
+    let mut sightings = refineid_rapp_core::backlog::shared();
+    deliver_backlog_notices(&mut requester, FORGET_BROWSE_WINDOW, &mut sightings);
     for pair_id in forgotten {
         let revoked = requester
             .store()
@@ -2388,6 +2391,7 @@ fn tell_and_clear(mut requester: Requester<ProtectedPairingStore>, forgotten: &[
             .is_ok_and(|record| matches!(record.state(), PairingState::Revoked { .. }));
         if revoked {
             let _ = requester.forget_pairing(*pair_id);
+            sightings.remove_pairing(*pair_id);
         }
     }
 }
@@ -2500,9 +2504,9 @@ fn refresh_remote_devices() {
 }
 
 /// Forget the selected pairing, then refresh (RAPP v26.11.2 section 4.6
-/// item 6): it serves nothing from now on and keeps its keys only for one
-/// attempt of at most 10 seconds to tell its phone. One already revoked is
-/// removed.
+/// item 6): it serves nothing from now on and keeps its keys for the
+/// `pairing_revoked` close alone, in the revocation backlog. One already
+/// revoked is removed.
 fn remove_remote_device() {
     let target = STATE.with(|cell| cell.borrow().as_ref().map(|state| state.remote_devices));
     let Some(list) = target else {
@@ -2542,8 +2546,8 @@ fn remove_remote_device() {
         Ok(()) => {
             refresh_remote_devices();
             set_remote_status(status);
-            // One bounded attempt tells the phone (RAPP v26.11.2 section 4.6
-            // item 6).
+            // One backlog round tells the phone when it appears (RAPP
+            // v26.11.2 section 4.6 item 6).
             std::thread::spawn(move || {
                 tell_and_clear(
                     Requester::new(RequesterConfig::this_computer(), store),

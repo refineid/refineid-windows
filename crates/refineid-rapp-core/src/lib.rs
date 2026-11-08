@@ -8,6 +8,7 @@
 //! Protocol primitives, Noise cryptography, and canonical framing are provided
 //! by `refineid_rapp`.
 
+pub mod backlog;
 pub mod clock;
 pub mod engine;
 pub mod ids;

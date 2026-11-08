@@ -44,8 +44,8 @@ const SEARCH_PAUSE: Duration = Duration::from_secs(5);
 const STORE_PAUSE: Duration = Duration::from_secs(10);
 /// How long a failed pipe waits before it is served again.
 const PIPE_PAUSE: Duration = Duration::from_secs(1);
-/// How long the agent looks for the phone of a forgotten pairing to give
-/// it the `pairing_revoked` close, each time it looks for its phone.
+/// How long one backlog pass looks for the phone of each forgotten pairing
+/// to give it the `pairing_revoked` close.
 const NOTICE_REACH_WINDOW: Duration = Duration::from_secs(5);
 /// How often an open session reads the pairing store again, so a pairing
 /// the user forgot meanwhile is closed with its `pairing_revoked` close.
@@ -256,7 +256,9 @@ fn requester_over(store: ProtectedPairingStore, withdrawal: &Withdrawal) -> Agen
     Requester::new(RequesterConfig::this_computer(), store).following(withdrawal.clone())
 }
 
-fn load_pairing(withdrawal: &Withdrawal, offered: &mut Offer) -> Option<Pairing> {
+/// Loads the pairing store over a fresh requester and expires what is due;
+/// `None` when the store cannot be read.
+fn load_requester(withdrawal: &Withdrawal, offered: &mut Offer) -> Option<AgentRequester> {
     let store = match ProtectedPairingStore::load() {
         Ok(store) => store,
         Err(error) => {
@@ -266,16 +268,27 @@ fn load_pairing(withdrawal: &Withdrawal, offered: &mut Offer) -> Option<Pairing>
     };
     let mut requester = requester_over(store, withdrawal);
     check_idle_expiry(&mut requester, None, offered);
-    deliver_revocation_notices(&mut requester);
-    let record = requester.store().usable_pairing()?;
-    let pair_id = record.pair_id();
-    let key = RoutingKey::derive(record.pair_record()?).ok()?;
+    Some(requester)
+}
+
+/// The usable pairing's identifier and routing key, with the requester it
+/// was read from. Runs no discovery: the caller runs the revocation
+/// backlog alongside the active pairing's own, in every phase, on the
+/// requester that comes back.
+fn load_pairing(
+    requester: AgentRequester,
+    offered: &mut Offer,
+) -> (AgentRequester, Option<(PairId, RoutingKey)>) {
+    let usable = requester.store().usable_pairing().and_then(|record| {
+        let pair_id = record.pair_id();
+        let key = RoutingKey::derive(record.pair_record()?).ok()?;
+        Some((pair_id, key))
+    });
+    let Some((pair_id, key)) = usable else {
+        return (requester, None);
+    };
     sync_offer(&requester, pair_id, offered);
-    Some(Pairing {
-        requester,
-        pair_id,
-        key,
-    })
+    (requester, Some((pair_id, key)))
 }
 
 /// Checks every stored pairing for idle expiry (RAPP v26.11.2 section 4.6
@@ -298,30 +311,40 @@ fn check_idle_expiry(requester: &mut AgentRequester, held: Option<PairId>, offer
     }
 }
 
-/// Gives the phone of each pairing the user forgot while it was out of
-/// reach its `pairing_revoked` close, as the first message of a session
-/// (RAPP v26.11.2 section 4.6 items 2 and 6). A forgotten pairing keeps its
-/// keys for at most 10 seconds after the forget; once they are gone it is
-/// told nothing more.
+/// Gives the phone of each forgotten pairing its `pairing_revoked` close:
+/// one pass of the requester's revocation backlog over Bluetooth (RAPP
+/// v26.11.2 section 4.6 item 6). Only an appearance dials: an advertiser
+/// first seen, or seen again after absence for the loss hold. At most one
+/// connection opens per appearance, carrying the close as its first
+/// message. The keys and the record go only on the phone's echo; anything
+/// else keeps the pairing until its next appearance, and a phone that never
+/// appears again leaves it to its idle expiry, 30 days after its last
+/// established session. A forgotten pairing that outlived that expiry is
+/// revoked untold instead.
 fn deliver_revocation_notices(requester: &mut AgentRequester) {
-    let now_ms = unix_time_ms();
-    expire_revocation_notices(requester.store_mut(), now_ms);
-    let owed: Vec<(PairId, RoutingKey, Duration)> = requester
+    expire_revocation_notices(requester.store_mut(), unix_time_ms());
+    let owed: Vec<(PairId, RoutingKey)> = requester
         .store()
         .forgotten_pairings()
         .filter_map(|record| {
-            let keys = record.pair_record()?;
-            let key = RoutingKey::derive(keys).ok()?;
-            let ends_at_ms = keys
-                .forgotten_at_ms()?
-                .saturating_add(refineid_rapp::REVOCATION_ATTEMPT_BOUND_MS);
-            let left = Duration::from_millis(ends_at_ms.saturating_sub(now_ms));
-            Some((record.pair_id(), key, left.min(NOTICE_REACH_WINDOW)))
+            let key = RoutingKey::derive(record.pair_record()?).ok()?;
+            Some((record.pair_id(), key))
         })
         .collect();
-    for (pair_id, key, window) in owed {
+    // The process's appearance memory goes to every pass, so a phone that
+    // stays in sight across passes spaced further apart than the loss hold
+    // still dials only once.
+    let mut sightings = refineid_rapp_core::backlog::shared();
+    for (pair_id, key) in owed {
         // The scan and the session report their own failures.
-        let _ = reach_revocation_notice(requester, pair_id, &key, window, |_| {});
+        let _ = reach_revocation_notice(
+            requester,
+            pair_id,
+            &key,
+            NOTICE_REACH_WINDOW,
+            &mut sightings,
+            |_| {},
+        );
     }
 }
 
@@ -420,11 +443,7 @@ fn serve_phone(inbox: &Receiver<Job>, withdrawal: &Withdrawal) {
     withdraw_certificates(&mut offered);
     let mut pending: Option<Waiting> = None;
     while !withdrawal.is_raised() {
-        let Some(mut pairing) = load_pairing(withdrawal, &mut offered) else {
-            // W-R-8: no usable pairing, so nothing stays offered.
-            if offered.is_offered() || offered.learned.is_some() {
-                withdraw_certificates(&mut offered);
-            }
+        let Some(requester) = load_requester(withdrawal, &mut offered) else {
             if let Some(waiting) = pending.take() {
                 waiting.job.answer(SignAnswer::Failed);
             }
@@ -434,6 +453,29 @@ fn serve_phone(inbox: &Receiver<Job>, withdrawal: &Withdrawal) {
                 Err(RecvTimeoutError::Disconnected) => return,
             }
             continue;
+        };
+        let (mut requester, usable) = load_pairing(requester, &mut offered);
+        let Some((pair_id, key)) = usable else {
+            // W-R-8: no usable pairing, so nothing stays offered. The
+            // revocation backlog is the only remote activity.
+            if offered.is_offered() || offered.learned.is_some() {
+                withdraw_certificates(&mut offered);
+            }
+            if let Some(waiting) = pending.take() {
+                waiting.job.answer(SignAnswer::Failed);
+            }
+            deliver_revocation_notices(&mut requester);
+            match inbox.recv_timeout(STORE_PAUSE) {
+                Ok(job) => job.answer(SignAnswer::Failed),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+            continue;
+        };
+        let mut pairing = Pairing {
+            requester,
+            pair_id,
+            key,
         };
         // A waiting request searches for what is left of its window; no
         // search outlasts the standing offer, which is judged again after.
@@ -461,6 +503,10 @@ fn serve_phone(inbox: &Receiver<Job>, withdrawal: &Withdrawal) {
             Ok(session) => session,
             Err(_) if pairing.requester.withdrawn() => break,
             Err(error) => {
+                // The active pairing's phone is not in reach: the backlog
+                // runs its discovery alongside, without touching the active
+                // pairing.
+                deliver_revocation_notices(&mut pairing.requester);
                 match after_failed_search(&error, &pairing, &mut offered, &mut pending, inbox) {
                     AfterSearch::Again => continue,
                     AfterSearch::Stop => return,
@@ -640,6 +686,9 @@ fn hold_session(
         if store_checked.elapsed() >= STORE_CHECK_INTERVAL {
             store_checked = Instant::now();
             close_if_forgotten(pairing, session, offered);
+            // While the active session stands, the backlog still tells a
+            // forgotten phone that appears; the active session is untouched.
+            deliver_revocation_notices(&mut pairing.requester);
         }
         if idle_checked.elapsed() >= IDLE_CHECK_INTERVAL && session.end().is_none() {
             idle_checked = Instant::now();
@@ -651,9 +700,10 @@ fn hold_session(
 }
 
 /// Closes the session when its pairing no longer serves: one the user
-/// forgot gets the `pairing_revoked` close now and loses its keys (RAPP
-/// v26.11.2 section 4.6 item 1); one already revoked or removed is closed.
-/// A store that cannot be read changes nothing.
+/// forgot gets the `pairing_revoked` close now and loses its keys on the
+/// phone's echo, else stays forgotten in the revocation backlog (RAPP
+/// v26.11.2 section 4.6 items 1 and 6); one already revoked or removed is
+/// closed. A store that cannot be read changes nothing.
 fn close_if_forgotten(pairing: &mut Pairing, session: &mut Session<BleLink>, offered: &mut Offer) {
     if pairing.requester.store_mut().refresh().is_err() {
         return;

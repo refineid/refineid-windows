@@ -44,7 +44,7 @@ use refineid_rapp_core::store::{
 };
 use refineid_rapp_core::stream::{
     DialCause, DialPurpose, PairingAddress, PairingServices, STREAM_CANDIDATE_ID, StreamError,
-    attempt_revocations, dial, dial_session,
+    deliver_backlog_notices, dial, dial_session,
 };
 use refineid_rapp_core::transport::TcpFrameTransport;
 use refineid_windows_credential_store::ProtectedPairingStore;
@@ -59,7 +59,7 @@ const PAIRING_WINDOW: Duration = Duration::from_millis(refineid_rapp::OFFER_TTL_
 /// One DNS-SD browse round.
 const BROWSE_WINDOW: Duration = Duration::from_secs(3);
 
-/// How long one browse of a revocation attempt listens for the phone.
+/// How long one browse of a revocation backlog round listens for the phone.
 const FORGET_BROWSE_WINDOW: Duration = Duration::from_millis(1_500);
 
 /// Pause between session dial rounds that found no custodian.
@@ -293,10 +293,12 @@ fn forget_replaced_pairings_and_tell<S: PairingStore>(requester: &mut Requester<
         );
     }
     flush_now();
-    // One bounded attempt tells each replaced phone (RAPP v26.11.2
-    // section 4.6 item 6), the same the settings app makes.
-    attempt_revocations(requester, FORGET_BROWSE_WINDOW);
-    clear_revoked_pairings(requester, &replaced);
+    // One backlog round tells each replaced phone whose phone appears
+    // (RAPP v26.11.2 section 4.6 item 6), the same the settings app makes.
+    // The CLI runs once, so a local appearance memory is enough.
+    let mut sightings = refineid_rapp_core::backlog::BacklogSightings::new();
+    deliver_backlog_notices(requester, FORGET_BROWSE_WINDOW, &mut sightings);
+    clear_revoked_pairings(requester, &replaced, &mut sightings);
 }
 
 /// Forgets every stored pairing but the fresh one: this computer holds
@@ -317,9 +319,14 @@ fn forget_replaced_pairings<S: PairingStore>(
     replaced
 }
 
-/// Removes what is left of `forgotten` once its phones were told, or its
-/// attempt passed: a pairing the attempt revoked is removed.
-fn clear_revoked_pairings<S: PairingStore>(requester: &mut Requester<S>, forgotten: &[PairId]) {
+/// Removes what is left of `forgotten` once its phones were told: a
+/// pairing the backlog round revoked is removed, the rest stays forgotten.
+/// A removed pairing keeps no sightings either.
+fn clear_revoked_pairings<S: PairingStore>(
+    requester: &mut Requester<S>,
+    forgotten: &[PairId],
+    sightings: &mut refineid_rapp_core::backlog::BacklogSightings,
+) {
     for pair_id in forgotten {
         let revoked = requester
             .store()
@@ -327,6 +334,7 @@ fn clear_revoked_pairings<S: PairingStore>(requester: &mut Requester<S>, forgott
             .is_ok_and(|record| matches!(record.state(), PairingState::Revoked { .. }));
         if revoked {
             let _ = requester.forget_pairing(*pair_id);
+            sightings.remove_pairing(*pair_id);
         }
     }
 }
@@ -913,11 +921,12 @@ mod tests {
     }
 
     #[test]
-    fn clearing_removes_only_what_the_attempt_revoked() {
+    fn clearing_removes_only_what_the_backlog_round_revoked() {
         let mut requester = requester(true);
         revoke_pairing(requester.store_mut(), FIRST_PAIR, false, CREATED_AT_MS)
             .expect("revoke held");
-        clear_revoked_pairings(&mut requester, &[FIRST_PAIR, SECOND_PAIR]);
+        let mut sightings = refineid_rapp_core::backlog::BacklogSightings::new();
+        clear_revoked_pairings(&mut requester, &[FIRST_PAIR, SECOND_PAIR], &mut sightings);
         assert!(requester.store().get(FIRST_PAIR).is_err());
         assert!(requester.store().get(SECOND_PAIR).is_ok());
     }

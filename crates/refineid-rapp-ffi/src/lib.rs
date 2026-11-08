@@ -69,7 +69,7 @@ use refineid_rapp_core::offer::normalize_pairing_code;
 use refineid_rapp_core::operations::{CardOperation, CardOperationResult, CertificateKind};
 use refineid_rapp_core::store::{PairingRecord, PairingState, PairingStore, offer_stands};
 use refineid_rapp_core::stream::{
-    DialCause, PairingServices, StreamError, attempt_revocations, dial_session,
+    DialCause, PairingServices, StreamError, deliver_backlog_notices, dial_session,
 };
 use refineid_rapp_core::transport::TcpFrameTransport;
 use refineid_windows_credential_store::{ProtectedPairingStore, delete_pairing_set};
@@ -110,7 +110,7 @@ const WATCH_TICK_MS: u64 = 1_000;
 /// pairing forgotten meanwhile is closed with its `pairing_revoked` close.
 const STORE_CHECK_INTERVAL_MS: u64 = 10_000;
 
-/// How long one browse of a revocation attempt listens for the phone.
+/// How long one browse of a revocation backlog round listens for the phone.
 const FORGET_BROWSE_WINDOW_MS: u64 = 1_500;
 
 /// Shown while the phone's PIN prompt is on screen.
@@ -303,11 +303,12 @@ pub unsafe extern "C" fn refineid_rapp_string_free(json: *mut c_char) {
 /// This is the holder's local forget action: turning remote use off, which
 /// forgets the pairing this computer holds. Each pairing serves nothing from
 /// now on; on a thread of its own, its phone is told with the
-/// `pairing_revoked` close as the first message of one short session, in
-/// one attempt bounded to 10 seconds, and the keys are destroyed and the
-/// record cleared once the phone echoes the close or the bound passes. A
-/// phone the attempt does not reach forgets this computer by its own idle
-/// expiry. Forgetting an empty store succeeds, so the action is idempotent.
+/// `pairing_revoked` close as the first message of a session each time the
+/// phone appears for the pairing, and the keys are destroyed and the record
+/// cleared once the phone echoes the close. A phone that never appears
+/// again leaves the pairing to its idle expiry, 30 days after its last
+/// established session, and forgets this computer by its own idle expiry.
+/// Forgetting an empty store succeeds, so the action is idempotent.
 #[unsafe(no_mangle)]
 pub extern "C" fn refineid_rapp_forget_pairings() -> *mut c_char {
     reply_json(|| {
@@ -340,8 +341,9 @@ fn forget_every_pairing() -> Result<(), ApiFailure> {
     Ok(())
 }
 
-/// Clears what is left of the pairings whose phones were told, or whose
-/// attempt passed, and deletes the stored set once nothing is left.
+/// Clears what is left of the pairings whose phones were told, and
+/// deletes the stored set once nothing is left. A cleared pairing keeps no
+/// sightings either.
 fn clear_revoked(requester: &mut StreamRequester) {
     for pair_id in requester.store().pair_ids() {
         let revoked = requester
@@ -350,6 +352,7 @@ fn clear_revoked(requester: &mut StreamRequester) {
             .is_ok_and(|record| matches!(record.state(), PairingState::Revoked { .. }));
         if revoked {
             let _ = requester.forget_pairing(pair_id);
+            refineid_rapp_core::backlog::shared().remove_pairing(pair_id);
         }
     }
     if requester.store().pair_ids().is_empty() {
@@ -357,12 +360,30 @@ fn clear_revoked(requester: &mut StreamRequester) {
     }
 }
 
-/// Makes the one bounded attempt of every pairing forgotten here (section
-/// 4.6 item 6), over the stream transport.
+/// One round of the revocation backlog over the stream transport, on a
+/// freshly loaded store, so phones forgotten meanwhile are told without
+/// disturbing the handle's own pairing and session (section 4.6 item 6).
+/// Only an appearance dials, at most once per appearance: the process's
+/// appearance memory is passed in, so a phone that stays in sight across
+/// rounds spaced further apart than the loss hold still dials only once.
+fn run_backlog_round() {
+    if let Ok(store) = ProtectedPairingStore::load() {
+        deliver_backlog_notices(
+            &mut background_requester(store),
+            std::time::Duration::from_millis(FORGET_BROWSE_WINDOW_MS),
+            &mut refineid_rapp_core::backlog::shared(),
+        );
+    }
+}
+
+/// Delivers the `pairing_revoked` close of every pairing forgotten here
+/// whose phone appears in one browse (section 4.6 item 6), over the stream
+/// transport: one round of the revocation backlog.
 fn tell_forgotten_phones(requester: &mut StreamRequester) {
-    attempt_revocations(
+    deliver_backlog_notices(
         requester,
         std::time::Duration::from_millis(FORGET_BROWSE_WINDOW_MS),
+        &mut refineid_rapp_core::backlog::shared(),
     );
 }
 
@@ -850,10 +871,16 @@ fn offering_watch(handle_id: u64) {
                 // 4.5 item 6).
                 requester.store_mut().drop_card_sighting(pair_id);
                 sync_offer(&requester, pair_id, &mut offer);
+                // The active pairing's phone is not in reach: the backlog
+                // runs its discovery alongside, without touching it.
+                run_backlog_round();
                 wait_watching(handle_id, retry_pause_ms(&requester, pair_id, &offer));
                 continue;
             }
             Err(_) => {
+                // The active pairing's phone is not in reach: the backlog
+                // runs its discovery alongside, without touching it.
+                run_backlog_round();
                 wait_watching(handle_id, retry_pause_ms(&requester, pair_id, &offer));
                 continue;
             }
@@ -1037,6 +1064,9 @@ fn hold_offering_session(
         if store_checked.elapsed() >= std::time::Duration::from_millis(STORE_CHECK_INTERVAL_MS) {
             store_checked = std::time::Instant::now();
             close_if_forgotten(requester, session);
+            // While the offering session stands, the backlog still tells a
+            // forgotten phone that appears; the session is untouched.
+            run_backlog_round();
         }
         sync_offer(requester, pair_id, offer);
     }
@@ -1082,9 +1112,10 @@ fn learns_confirmed_certificate(
 }
 
 /// Closes the session when its pairing no longer serves: one the user
-/// forgot gets the `pairing_revoked` close now and loses its keys (RAPP
-/// v26.11.2 section 4.6 item 1); one already revoked or removed is closed.
-/// A store that cannot be read changes nothing.
+/// forgot gets the `pairing_revoked` close now and loses its keys on the
+/// phone's echo, else stays forgotten in the revocation backlog (RAPP
+/// v26.11.2 section 4.6 items 1 and 6); one already revoked or removed is
+/// closed. A store that cannot be read changes nothing.
 fn close_if_forgotten(requester: &mut StreamRequester, session: &mut Session<TcpFrameTransport>) {
     if requester.store_mut().refresh().is_err() {
         return;
