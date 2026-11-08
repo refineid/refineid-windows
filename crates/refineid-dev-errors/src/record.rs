@@ -250,6 +250,8 @@ mod tests {
 
     const FIRST: &str = "phone session closed: TransportLoss";
     const SECOND: &str = "Bluetooth scan failed: RadioUnavailable";
+    const PEER: &str = "pk-phone";
+    const TRANSPORT: &str = "Bluetooth";
     const MOMENT: Duration = Duration::from_secs(1);
 
     fn entry(message: &str, occurrences: u32) -> Entry {
@@ -265,6 +267,19 @@ mod tests {
         let mut last = None;
         let written = observe(&mut last, Component::Rapp, FIRST.to_owned(), Instant::now());
         assert_eq!(written, vec![entry(FIRST, 1)]);
+    }
+
+    #[test]
+    fn a_failed_session_line_carries_the_peer_and_transport() {
+        #[derive(Debug)]
+        enum End {
+            TransportLoss,
+        }
+        let cause = crate::Cause::case_with_peer(&End::TransportLoss, PEER, TRANSPORT);
+        assert_eq!(
+            super::message("phone session closed", &cause),
+            "phone session closed: TransportLoss, pk-phone, Bluetooth"
+        );
     }
 
     #[test]

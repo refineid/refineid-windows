@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use crate::backlog::{BacklogRoute, BacklogSightings};
 use crate::engine::{
     PairingCandidateSource, PairingConnection, Requester, SESSION_RECEIVE_TICK,
-    read_bootstrap_answer,
+    TRANSPORT_LABEL_NETWORK, read_bootstrap_answer,
 };
 use crate::ids::PairId;
 use crate::store::{PairingRecord, PairingStore, expire_revocation_notices, revoke_pairing};
@@ -441,7 +441,13 @@ pub fn dial_session(
 ) -> Result<TcpFrameTransport, StreamError> {
     dialled_session(pairing, preferred, browse_window, cause).inspect_err(|error| {
         if !matches!(error, StreamError::NotDue) {
-            refineid_dev_errors::report!(Rapp, "phone not dialled", error);
+            refineid_dev_errors::report!(
+                Rapp,
+                "phone not dialled",
+                error,
+                pairing.peer_display_name().as_str(),
+                TRANSPORT_LABEL_NETWORK
+            );
         }
     })
 }
