@@ -12,19 +12,19 @@
 // implied. See the License for the specific language governing
 // permissions and limitations under the License.
 
-//! A development build's presentation of DVV test cards' CA certificates
-//! (Windows STPA W-R-26): after every pass of the card watch, the user's
-//! CA store holds the test CAs of the cards in readers and none of a card
-//! that left (`refineid-windows-credential-store` `test_card_cas`).
-//! Release builds do not compile this module.
+//! The presentation of the FINEID cards' CA certificates (Windows STPA
+//! W-R-26): after every pass of the card watch, the user's CA store holds
+//! the issuing CA of each card in a reader, and in a development build a
+//! DVV test card's root, and none of a card that left
+//! (`refineid-windows-credential-store` `card_cas`).
 
 use refineid_pcsc::{PcscBackend, ReaderAccessCap, ReaderBackend as _};
 use refineid_pkcs15::UnvalidatedCertificate;
 use refineid_pkcs15::fs::{CertSlot, Pkcs15Ops as _};
-use refineid_windows_credential_store::test_card_cas::{TestCardCas, present_test_card_cas};
+use refineid_windows_credential_store::card_cas::{CardCas, present_card_cas};
 
 /// Reads the root and issuing CA of every card in a reader, without a
-/// credential, and presents those of the test cards.
+/// credential, and presents what each card offers.
 pub fn present() {
     let backend = PcscBackend;
     let mut present = Vec::new();
@@ -40,13 +40,13 @@ pub fn present() {
                 continue;
             };
             let issuing = card.read_certificate(CertSlot::IssuingCaEcc).ok();
-            present.extend(TestCardCas::from_card(
+            present.extend(CardCas::from_card(
                 root.as_bytes(),
                 issuing.as_ref().map(UnvalidatedCertificate::as_bytes),
             ));
         }
     }
-    if let Err(error) = present_test_card_cas(&present) {
-        refineid_dev_errors::report!(Agent, "test card CAs not presented", error);
+    if let Err(error) = present_card_cas(&present) {
+        refineid_dev_errors::report!(Agent, "card CAs not presented", error);
     }
 }

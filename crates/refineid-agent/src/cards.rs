@@ -3,7 +3,9 @@
 //! this computer. At the agent's start and whenever a card arrives or leaves,
 //! it removes every FINEID entry whose card is not in a reader. It touches no
 //! card that the Card Module does not serve, and reads the ones it serves
-//! silently through the Smart Card Key Storage Provider.
+//! silently through the Smart Card Key Storage Provider. After every pass
+//! it brings the user's CA store in line with the cards in readers
+//! (W-R-26, `card_cas`).
 
 use std::ffi::CString;
 use std::thread::sleep;
@@ -35,8 +37,7 @@ pub fn watch() {
     let mut readers = PcscReaders;
     loop {
         let judged = pass(&mut readers);
-        #[cfg(debug_assertions)]
-        crate::test_card_cas::present();
+        crate::card_cas::present();
         match judged {
             Some(Pass::Judged { readers: seen, .. }) => wait_for_change(&seen),
             Some(Pass::Deferred {

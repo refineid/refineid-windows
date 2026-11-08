@@ -24,8 +24,9 @@
 //!
 //! The provider is read-only and holds no secret. It opens keys that the
 //! `RefineID` app placed in the user's certificate store (`rapp:<pair id>`),
-//! reports their public half from the certificate the agent answers with,
-//! and signs through the agent. The pairing store, with its keys, stays in
+//! reports their public half from the certificate of that store entry, and
+//! asks the agent only to sign, so opening a key never waits for the agent,
+//! which is busy for as long as a phone approval takes. The pairing store, with its keys, stays in
 //! the agent and never loads in the browser or Schannel process that opens
 //! a key (Windows STPA W-R-14). Everything else in the function table
 //! returns `NTE_NOT_SUPPORTED`.
@@ -43,10 +44,9 @@ use core::mem::size_of;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
 
-use refineid_agent_pipe::client::{request_signature, request_usable_key};
-use refineid_agent_pipe::wire::{KeyAnswer, SignAnswer, SignRequest};
+use refineid_agent_pipe::client::request_signature;
+use refineid_agent_pipe::wire::{SignAnswer, SignRequest};
 use refineid_agent_pipe::{PipeError, SIGNATURE_DEADLINE};
 use refineid_lib_core::x509::{
     EcCurve, OwnedCert, PublicKeyAlgorithm, UnvalidatedCertificate, extract_rsa_public_key,
@@ -54,7 +54,7 @@ use refineid_lib_core::x509::{
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::operations::{KeyProfile, SignatureAlgorithm};
 use refineid_windows_credential_store::{
-    KEY_STORAGE_PROVIDER, browser_key_name, browser_key_pair_id,
+    BrowserEntry, KEY_STORAGE_PROVIDER, browser_entries, browser_key_pair_id,
 };
 use windows_sys::Win32::Foundation::{
     HANDLE, NTE_BAD_FLAGS, NTE_BAD_KEYSET, NTE_BAD_SIGNATURE, NTE_BUFFER_TOO_SMALL,
@@ -142,41 +142,30 @@ fn key_kind(certificate: &OwnedCert) -> Option<KeyKind> {
     }
 }
 
-/// How long the provider waits for the agent to say which key it offers.
-const KEY_QUERY_DEADLINE: Duration = Duration::from_secs(2);
-
-/// The last key the agent answered with: a public certificate. The agent
-/// serves one client at a time and is busy for as long as a signature takes,
-/// so a query that times out is answered from here.
-static LAST_KEY: Mutex<Option<(PairId, Vec<u8>)>> = Mutex::new(None);
-
-/// The key of a pairing and its certificate's DER.
-fn key_from_answer(pair_id: PairId, certificate: &[u8]) -> Option<OpenKey> {
-    let certificate =
-        OwnedCert::from_der(UnvalidatedCertificate::new(certificate.to_vec())).ok()?;
+/// The key of a personal store entry bound to this provider: the pairing its
+/// key name names and the entry's certificate. `None` for an entry whose name
+/// names no pairing or whose certificate holds no key this provider signs
+/// with.
+fn key_from_entry(entry: BrowserEntry) -> Option<OpenKey> {
+    let pair_id = browser_key_pair_id(&entry.name)?;
+    let certificate = OwnedCert::from_der(UnvalidatedCertificate::new(entry.certificate)).ok()?;
     let kind = key_kind(&certificate)?;
     Some(OpenKey {
-        name: browser_key_name(pair_id),
+        name: entry.name,
         pair_id,
         certificate,
         kind,
     })
 }
 
-/// The key the agent offers, the one it serves. With no agent there is none.
+/// The keys this provider serves: one per entry of the user's personal store
+/// bound to it. The process that holds a phone's session writes the entry
+/// while the phone is present and removes it when it is not, so the store is
+/// the one answer to which keys are usable, and no question to the agent.
 fn usable_keys() -> Vec<OpenKey> {
-    let mut last = LAST_KEY.lock().unwrap_or_else(PoisonError::into_inner);
-    match request_usable_key(KEY_QUERY_DEADLINE) {
-        Ok(KeyAnswer::Key {
-            pair_id,
-            certificate,
-        }) => *last = Some((pair_id, certificate)),
-        Ok(KeyAnswer::NoKey) | Err(PipeError::NoAgent | PipeError::Stranger) => *last = None,
-        Err(_) => {}
-    }
-    last.as_ref()
-        .and_then(|(pair_id, certificate)| key_from_answer(*pair_id, certificate))
+    browser_entries()
         .into_iter()
+        .filter_map(key_from_entry)
         .collect()
 }
 
@@ -314,7 +303,7 @@ unsafe extern "system" fn OpenKey(
         refineid_dev_errors::report!(
             KeyStorageProvider,
             "OpenKey failed",
-            "no usable pairing with a cached certificate"
+            "no personal store entry offers this key"
         );
         return NTE_BAD_KEYSET;
     };

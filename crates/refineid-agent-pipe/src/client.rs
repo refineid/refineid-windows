@@ -24,7 +24,7 @@ use windows_sys::Win32::System::Pipes::{
 use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
 use crate::identity::{ProcessIdentity, installed_agent_image};
-use crate::wire::{AgentRequest, KeyAnswer, MAX_MESSAGE, SignAnswer, SignRequest};
+use crate::wire::{MAX_MESSAGE, SignAnswer, SignRequest};
 use crate::{PipeError, is_same_image, pipe_name, wide};
 
 /// How long a provider waits for a busy pipe instance before each retry.
@@ -48,23 +48,6 @@ pub fn request_signature(
             refineid_dev_errors::report!(AgentPipe, "signature request failed", status code);
         }
         Err(error) => refineid_dev_errors::report!(AgentPipe, "signature request failed", error),
-    }
-    answer
-}
-
-/// Asks the user's agent which key it offers and waits at most `deadline`.
-///
-/// # Errors
-/// As [`request_signature`].
-pub fn request_usable_key(deadline: Duration) -> Result<KeyAnswer, PipeError> {
-    let answer = exchange(&AgentRequest::UsableKey.encode(), deadline)
-        .and_then(|bytes| Ok(KeyAnswer::decode(&bytes)?));
-    match &answer {
-        Ok(_) | Err(PipeError::NoAgent) => {}
-        Err(PipeError::Identity(code) | PipeError::Pipe(code)) => {
-            refineid_dev_errors::report!(AgentPipe, "key request failed", status code);
-        }
-        Err(error) => refineid_dev_errors::report!(AgentPipe, "key request failed", error),
     }
     answer
 }

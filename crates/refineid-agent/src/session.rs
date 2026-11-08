@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use refineid_agent_pipe::identity::computer_name;
 use refineid_agent_pipe::server::{AgentLock, PipeServer};
-use refineid_agent_pipe::wire::{AgentRequest, KeyAnswer, SignAnswer, SignRequest};
+use refineid_agent_pipe::wire::{SignAnswer, SignRequest};
 use refineid_agent_pipe::{
     OPERATION_LIFETIME, PipeError, REACH_WINDOW, SIGNATURE_DEADLINE, program_label,
     requester_context,
@@ -30,8 +30,7 @@ use refineid_rapp_core::store::{
 };
 use refineid_rapp_core::stream::DialCause;
 use refineid_windows_credential_store::{
-    ProtectedPairingStore, install_browser_certificate, offered_phone_certificate,
-    remove_browser_certificates,
+    ProtectedPairingStore, install_browser_certificate, remove_browser_certificates,
 };
 
 use crate::offer_gate::OfferGate;
@@ -187,13 +186,7 @@ pub fn run() -> ExitCode {
         };
         let program = program_label(&client.identity().image);
         let answer = match client.request() {
-            Ok(AgentRequest::UsableKey) => {
-                if let Err(error) = client.answer_key(&usable_key()) {
-                    report_pipe!("key answer not delivered", error);
-                }
-                continue;
-            }
-            Ok(AgentRequest::Sign(request)) => program.map_or_else(
+            Ok(request) => program.map_or_else(
                 || {
                     refineid_dev_errors::report!(
                         Agent,
@@ -216,32 +209,6 @@ pub fn run() -> ExitCode {
             report_pipe!("signature answer not delivered", error);
         }
     }
-}
-
-/// What the agent offers the provider: the store's usable pairing, the one
-/// it serves, and the public certificate its phone is offered on now, as
-/// the personal store holds it while the offer stands, whichever process
-/// holds the phone's session. The provider holds no store and learns
-/// nothing else of it (W-R-14).
-fn usable_key() -> KeyAnswer {
-    let store = match ProtectedPairingStore::load() {
-        Ok(store) => store,
-        Err(error) => {
-            refineid_dev_errors::report!(Agent, "pairing store not loaded", error);
-            return KeyAnswer::NoKey;
-        }
-    };
-    store
-        .usable_pairing()
-        .and_then(|record| {
-            let pair_id = record.pair_id();
-            let certificate = offered_phone_certificate(&store, pair_id, unix_time_ms())?;
-            Some(KeyAnswer::Key {
-                pair_id,
-                certificate: certificate.as_der().to_vec(),
-            })
-        })
-        .unwrap_or(KeyAnswer::NoKey)
 }
 
 /// Hands one request to the phone's thread and waits for its answer.

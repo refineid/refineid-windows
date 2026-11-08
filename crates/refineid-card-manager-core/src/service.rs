@@ -194,12 +194,9 @@ fn inspected(reader_filter: Option<&ReaderFilter>) -> Result<CardSnapshot, CardP
         .select_pkcs15_application()
         .map_err(|error| CardPinError::Pkcs15Select(format!("{error}")))?;
     crate::card_pin::re_verify_session(&mut transport, &context.bound_serial)?;
-    let lengths = transport
-        .read_card_pin_lengths()
-        .map_err(|error| CardPinError::Transport(format!("PIN lengths read: {error}")))?;
-
     let numbering = context.numbering;
     let scheme = context.scheme;
+    let lengths = lengths_or_fineid_bounds(transport.read_card_pin_lengths(), numbering);
     let pin1 = transport
         .pin_status_with_scheme(numbering, PinSlot::Pin1)
         .ok();
@@ -237,6 +234,19 @@ fn inspected(reader_filter: Option<&ReaderFilter>) -> Result<CardSnapshot, CardP
         puk,
         pin1_changed,
         pin2_changed,
+    })
+}
+
+/// The lengths `read` gave, or the FINEID bounds of `numbering` when the
+/// read failed: the Card page still shows what did read, and PIN entry
+/// takes the bounds, as for a card that lists none.
+fn lengths_or_fineid_bounds<E: core::fmt::Debug + core::fmt::Display>(
+    read: Result<CardPinLengths, E>,
+    numbering: PinReferenceScheme,
+) -> CardPinLengths {
+    read.unwrap_or_else(|error| {
+        refineid_dev_errors::report!(CardService, "PIN lengths not read", error);
+        CardPinLengths::not_listed(numbering)
     })
 }
 
@@ -458,9 +468,29 @@ pub fn reader_filter(reader: String) -> ReaderFilter {
 
 #[cfg(test)]
 mod tests {
+    use refineid_lib_core::auth::{CardPinLengths, PinReferenceScheme};
     use refineid_lib_core::identity::TokenSerial;
 
-    use super::ensure_serial;
+    use super::{ensure_serial, lengths_or_fineid_bounds};
+
+    #[test]
+    fn lengths_that_do_not_read_take_the_fineid_bounds() {
+        for numbering in [
+            PinReferenceScheme::Citizen,
+            PinReferenceScheme::Organizational,
+        ] {
+            let failed: Result<CardPinLengths, &str> = Err("synthetic transport failure");
+            assert_eq!(
+                lengths_or_fineid_bounds(failed, numbering),
+                CardPinLengths::not_listed(numbering)
+            );
+            let read: Result<CardPinLengths, &str> = Ok(CardPinLengths::not_listed(numbering));
+            assert_eq!(
+                lengths_or_fineid_bounds(read, numbering),
+                CardPinLengths::not_listed(numbering)
+            );
+        }
+    }
 
     #[test]
     fn serial_match_is_accepted() {

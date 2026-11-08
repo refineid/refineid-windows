@@ -31,12 +31,25 @@
 //! kept in the memory of the process that holds it. A record the phone
 //! revoked keeps the phone's name for
 //! [`REVOCATION_NOTICE_DAYS`](refineid_rapp_core::store::REVOCATION_NOTICE_DAYS).
-//! Every load and every change judges the set by the store's clock and
-//! writes what is left. A reader beside the owner does this too, since it
-//! may be the only program running; a write it cannot make is tried again
-//! by the next one. The same judgement removes each entry this user's
-//! personal certificate store holds for a pairing whose phone no session
-//! heard within the grace, and every card sighting that bounds no offer.
+//! Every load and every change judges the set by the store's clock, and
+//! writes what is left when the judgement changed it. A reader beside the
+//! owner does this too, since it may be the only program running; a write
+//! it cannot make is tried again by the next one.
+//!
+//! One stamp of the set's file (its length and times, which every write's
+//! rename changes) decides what a look at the store costs. Housekeeping,
+//! what lies beside the set, is done when the file differs from the one
+//! this process last kept house at: at its first load, after every change,
+//! and once after another process changed the set, never at every load or
+//! [`ProtectedPairingStore::follow`] of an unchanged set, since a process
+//! loads the store for each operation. It deletes the unprotected copies
+//! and what earlier builds left, removes each entry this user's personal
+//! certificate store holds for a pairing whose phone no session heard
+//! within the grace, and each card sighting file that bounds no offer.
+//! Between housekeepings a look holds no such sighting in memory either. A
+//! store value reads and decrypts the set again only when its file changed
+//! since it last read it, and the personal store is listed before the set
+//! is read, so one decryption serves the read and its judgement.
 //!
 //! The keys stay in `Zeroizing` buffers, are wiped from every intermediate
 //! buffer, and are never logged. The store deletes, unread, every
@@ -68,6 +81,7 @@
 //! runs when that is later.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::persistence::{
@@ -81,7 +95,9 @@ use refineid_rapp_core::store::{
 use zeroize::Zeroizing;
 
 use crate::CredentialStoreError;
-use crate::certstore::{browser_entries, remove_browser_entries, stale_browser_entries};
+use crate::certstore::{
+    BrowserEntry, browser_entries, remove_browser_entries, stale_browser_entries,
+};
 
 /// The wall clock the store judges its bounds by: milliseconds since the
 /// Unix epoch.
@@ -156,9 +172,17 @@ impl ProtectedPairingStore {
         clock: Clock,
         judges_browser_entries: bool,
     ) -> Result<Self, CredentialStoreError> {
-        remove_unprotected_copies(&directory)?;
-        remove_earlier_build_files(&directory);
         let followed = set_stamp(&directory);
+        let housekeeping = housekeeping_due(&directory, followed);
+        if housekeeping {
+            remove_unprotected_copies(&directory)?;
+            remove_earlier_build_files(&directory);
+        }
+        // Listed before the set is read: the program that offers a
+        // certificate writes its record before it installs the entry, so an
+        // entry listed here has its record in the set read next.
+        let entries = (housekeeping && judges_browser_entries).then(browser_entries);
+        let mut set_removed = false;
         let set = match read_pairing_set(&directory)? {
             Some(blob) => match decode_pairing_records(&blob) {
                 Ok(set) => set,
@@ -169,6 +193,7 @@ impl ProtectedPairingStore {
                     refineid_dev_errors::report!(Rapp, "stored pairing set removed", error);
                     delete_pairing_set_in(&directory)?;
                     leave_earlier_pairing_notice(&directory);
+                    set_removed = true;
                     PairingSet::default()
                 }
             },
@@ -195,12 +220,19 @@ impl ProtectedPairingStore {
         let now_ms = clock();
         let expired = expire_revocation_notices(&mut store, now_ms);
         let bounded = drop_outlived_revocations(&mut store.records, now_ms);
-        if !removed.is_empty() || !expired.is_empty() || set.refused > 0 {
+        let rewritten = !removed.is_empty() || !expired.is_empty() || set.refused > 0;
+        if rewritten {
             store.persist()?;
         } else if bounded {
             store.persist_bound();
         }
-        store.judge_what_lies_beside();
+        if housekeeping {
+            store.judge_beside(entries);
+        } else if rewritten || bounded || set_removed {
+            store.judge_what_lies_beside();
+        } else {
+            store.hold_bounding_sightings();
+        }
         Ok(store)
     }
 
@@ -294,10 +326,20 @@ impl ProtectedPairingStore {
         let stamp = set_stamp(&self.directory);
         if self.followed == Some(stamp) {
             self.sightings = read_sightings(&self.directory);
+            self.hold_bounding_sightings();
             return Ok(());
         }
-        self.refresh()?;
-        self.followed = Some(stamp);
+        let housekeeping = housekeeping_due(&self.directory, stamp);
+        let entries = (housekeeping && self.judges_browser_entries).then(browser_entries);
+        let bounded = self.reread()?;
+        if bounded {
+            self.persist_bound();
+        }
+        if housekeeping || bounded {
+            self.judge_beside(entries);
+        } else {
+            self.hold_bounding_sightings();
+        }
         Ok(())
     }
 
@@ -306,6 +348,7 @@ impl ProtectedPairingStore {
     /// whether that bound removed anything.
     fn reread(&mut self) -> Result<bool, StoreError> {
         self.sightings = read_sightings(&self.directory);
+        let stamp = set_stamp(&self.directory);
         match read_pairing_set(&self.directory) {
             Ok(Some(blob)) => {
                 self.records = decode_pairing_records(&blob)
@@ -315,13 +358,14 @@ impl ProtectedPairingStore {
             Ok(None) => self.records.clear(),
             Err(_error) => return Err(StoreError::Unreadable),
         }
+        self.followed = Some(stamp);
         Ok(drop_outlived_revocations(&mut self.records, (self.clock)()))
     }
 
     /// Writes the set after the notice's bound changed it. A refused write
     /// is tried again by the next judgement; a program that only reads may
     /// have no right to write.
-    fn persist_bound(&self) {
+    fn persist_bound(&mut self) {
         if let Err(error) = self.persist() {
             refineid_dev_errors::report!(Rapp, "outlived notice not written", error);
         }
@@ -335,21 +379,40 @@ impl ProtectedPairingStore {
     /// program that offers a certificate writes its record before it installs
     /// the entry, so an entry listed here has its record in what is read next.
     fn judge_what_lies_beside(&mut self) {
+        self.judge_beside(None);
+    }
+
+    /// [`Self::judge_what_lies_beside`], with the personal store's entries
+    /// `listed` before the records held here were read, or listed here and
+    /// the set read again after when `None`.
+    fn judge_beside(&mut self, listed: Option<Vec<BrowserEntry>>) {
+        self.judge_beside_unrecorded(listed);
+        housekeeping_done(&self.directory);
+    }
+
+    /// [`Self::judge_beside`], without recording that this process kept
+    /// house.
+    fn judge_beside_unrecorded(&mut self, listed: Option<Vec<BrowserEntry>>) {
         let now_ms = (self.clock)();
         let records = &self.records;
         keep_sightings(&self.directory, now_ms, &|pair_id, sighting| {
-            !sighting.lapsed_at(now_ms)
-                && records
-                    .iter()
-                    .any(|record| record.pair_id() == pair_id && record.serves())
+            bounds_an_offer(records, now_ms, pair_id, sighting)
         });
         self.sightings = read_sightings(&self.directory);
         remove_stopped_writes(&self.directory, now_ms);
         if !self.judges_browser_entries {
             return;
         }
-        let entries = browser_entries();
-        if entries.is_empty() || self.reread().is_err() {
+        let entries = if let Some(entries) = listed {
+            entries
+        } else {
+            let entries = browser_entries();
+            if entries.is_empty() || self.reread().is_err() {
+                return;
+            }
+            entries
+        };
+        if entries.is_empty() {
             return;
         }
         let records: Vec<&PairingRecord> = self.records.iter().collect();
@@ -366,11 +429,22 @@ impl ProtectedPairingStore {
         }
     }
 
+    /// Holds only the card sightings that bound an offer, as a judgement
+    /// would leave them, without touching their files.
+    fn hold_bounding_sightings(&mut self) {
+        let now_ms = (self.clock)();
+        let records = &self.records;
+        self.sightings
+            .retain(|(pair_id, sighting)| bounds_an_offer(records, now_ms, *pair_id, *sighting));
+    }
+
     /// Writes the current record set through to the protected file.
-    fn persist(&self) -> Result<(), CredentialStoreError> {
+    fn persist(&mut self) -> Result<(), CredentialStoreError> {
         let blob = encode_pairing_records(self.records.iter())
             .map_err(|_error| CredentialStoreError::PairingNotEncodable)?;
-        write_pairing_set(&self.directory, &blob)
+        write_pairing_set(&self.directory, &blob)?;
+        self.followed = Some(set_stamp(&self.directory));
+        Ok(())
     }
 
     /// Re-reads the stored set, applies `change`, and writes it.
@@ -506,6 +580,8 @@ impl PairingStore for ProtectedPairingStore {
                 .map_err(|_error| StoreError::WriteRefused)?;
             write_pairing_set(directory, &blob).map_err(|_error| StoreError::WriteRefused)
         })?;
+        // A write left the set as held here, so following it reads nothing.
+        self.followed = Some(set_stamp(&self.directory));
         if outcome == SweepOutcome::Expired {
             drop_outlived_revocations(&mut self.records, now_ms);
             self.judge_what_lies_beside();
@@ -549,6 +625,55 @@ const EARLIER_PAIRING_NOTICE: &str = "earlier-pairing-removed";
 /// copies the pipe client refuses, as only the installed agent under
 /// Program Files serves.
 const EARLIER_BUILD_FILES: &[&str] = &["agent.log", "pairing-set.lock", "bin"];
+
+/// Each profile directory this process kept house in, with the stamp its
+/// set's file had when it last did.
+static HOUSEKEPT: Mutex<Vec<(PathBuf, SetStamp)>> = Mutex::new(Vec::new());
+
+/// Whether a look at `directory`, whose set's file has `stamp`, keeps
+/// house: this process never kept house there, or the set changed since.
+fn housekeeping_due(directory: &Path, stamp: SetStamp) -> bool {
+    !HOUSEKEPT
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .any(|(kept, at)| kept == directory && *at == stamp)
+}
+
+/// Records that this process kept house in `directory` at its set's file
+/// as it is now.
+fn housekeeping_done(directory: &Path) {
+    let stamp = set_stamp(directory);
+    let mut kept = HOUSEKEPT.lock().unwrap_or_else(PoisonError::into_inner);
+    match kept.iter_mut().find(|(kept, _)| kept == directory) {
+        Some((_, at)) => *at = stamp,
+        None => kept.push((directory.to_path_buf(), stamp)),
+    }
+}
+
+/// Forgets that this process kept house in `directory`, as a new process
+/// would.
+#[cfg(all(test, windows))]
+fn forget_housekeeping(directory: &Path) {
+    HOUSEKEPT
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .retain(|(kept, _)| kept != directory);
+}
+
+/// Whether `sighting` of `pair_id` bounds an offer at `now_ms`: it has not
+/// lapsed and its pairing among `records` serves.
+fn bounds_an_offer(
+    records: &[PairingRecord],
+    now_ms: u64,
+    pair_id: PairId,
+    sighting: CardSighting,
+) -> bool {
+    !sighting.lapsed_at(now_ms)
+        && records
+            .iter()
+            .any(|record| record.pair_id() == pair_id && record.serves())
+}
 
 /// Whether `error` refuses a set a later build wrote: one of a revision
 /// above this build's. A downgrade keeps it, for the later build to read.
@@ -1200,20 +1325,30 @@ mod tests {
     };
     use super::{
         CARD_SIGHTINGS_DIRECTORY, EARLIER_BUILD_FILES, EARLIER_PAIRING_NOTICE, PAIRING_SET_FILE,
-        ProtectedPairingStore, UNPROTECTED_COPY_FILE, delete_pairing_set_in, input_blob, protect,
-        sighting_file_name, unprotect,
+        ProtectedPairingStore, UNPROTECTED_COPY_FILE, delete_pairing_set_in, forget_housekeeping,
+        input_blob, protect, sighting_file_name, unprotect,
     };
 
-    /// The store in `directory` with today's clock, leaving this user's
-    /// personal certificate store alone.
+    /// The store in `directory` with today's clock, as a process that just
+    /// started loads it, leaving this user's personal certificate store
+    /// alone.
     fn load_from(
         directory: std::path::PathBuf,
     ) -> Result<ProtectedPairingStore, crate::CredentialStoreError> {
+        forget_housekeeping(&directory);
         ProtectedPairingStore::load_with(directory, refineid_rapp_core::clock::unix_time_ms, false)
     }
 
-    /// The store in `directory`, its clock reading `clock`.
+    /// The store in `directory`, its clock reading `clock`, as a process
+    /// that just started loads it.
     fn load_at(directory: &std::path::Path, clock: super::Clock) -> ProtectedPairingStore {
+        forget_housekeeping(directory);
+        reload_at(directory, clock)
+    }
+
+    /// The store in `directory`, its clock reading `clock`, loaded again by
+    /// a process that loaded it before.
+    fn reload_at(directory: &std::path::Path, clock: super::Clock) -> ProtectedPairingStore {
         ProtectedPairingStore::load_with(directory.to_path_buf(), clock, false).expect("load")
     }
 
@@ -1609,6 +1744,51 @@ mod tests {
             store.sweep(FIRST_PAIR, IDLE_EXPIRED_AT_MS, false),
             Ok(SweepOutcome::Expired)
         );
+    }
+
+    #[test]
+    fn a_process_keeps_house_at_its_first_load_alone() {
+        let directory = TestDirectory::new("housekeeping");
+        let copy = directory.0.join(UNPROTECTED_COPY_FILE);
+        let mut store = load_at(&directory.0, at_creation);
+        store.insert(paired_record()).expect("insert");
+        std::fs::write(&copy, b"plaintext set").expect("copy");
+        let reloaded = reload_at(&directory.0, at_creation);
+        assert_eq!(reloaded.len(), 1);
+        assert!(copy.exists(), "a later load keeps no house");
+        load_at(&directory.0, at_creation);
+        assert!(!copy.exists(), "the next process keeps house");
+    }
+
+    #[test]
+    fn a_lapsed_sighting_is_not_held_between_housekeepings() {
+        let directory = TestDirectory::new("held-sightings");
+        let file = directory
+            .0
+            .join(CARD_SIGHTINGS_DIRECTORY)
+            .join(sighting_file_name(PAIR));
+        let mut store = load_at(&directory.0, at_creation);
+        store.insert(paired_record()).expect("insert");
+        store
+            .record_card_sighting(PAIR, sighting(CREATED_AT_MS))
+            .expect("sighted");
+        assert!(
+            reload_at(&directory.0, at_creation)
+                .card_sighting(PAIR)
+                .is_some()
+        );
+        assert!(
+            reload_at(&directory.0, at_day_6)
+                .card_sighting(PAIR)
+                .is_none()
+        );
+        assert!(file.exists(), "a later load removes no file");
+        assert!(
+            load_at(&directory.0, at_day_6)
+                .card_sighting(PAIR)
+                .is_none()
+        );
+        assert!(!file.exists(), "the next process removes it");
     }
 
     #[test]

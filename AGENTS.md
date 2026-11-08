@@ -219,7 +219,11 @@ record for RAPP and its applications.
   are shipped either.
 - The Windows Card Module serves no `msroots` file: Windows would put a
   card's CAs in the user's Root store, trusted for every purpose
-  (`crates/refineid-minidriver/README.md`, "No card CA").
+  (`crates/refineid-minidriver/README.md`, "No card CA"). The agent puts
+  the issuing CA of each FINEID card in a reader into `CurrentUser\CA`,
+  path material that grants no trust, while the card is present; no root
+  enters a store in a release build (same README, "The card's issuing CA
+  in the intermediate store").
 - No pinning or other trust policy is added without the owner's decision.
 - Describe what the code does and cite the source; ask the owner before
   changing trust behavior.
