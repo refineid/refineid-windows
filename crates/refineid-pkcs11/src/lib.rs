@@ -18,6 +18,8 @@
 
 #[cfg(windows)]
 mod phone;
+#[cfg(any(windows, test))]
+mod wake;
 
 use refineid_pkcs11::ck::{CkFunctionListPtrPtr, CkRv};
 
@@ -38,7 +40,7 @@ pub unsafe extern "system" fn C_GetFunctionList(list: CkFunctionListPtrPtr) -> C
     // source, so the refusal carries nothing.
     #[cfg(windows)]
     {
-        let _ = refineid_pkcs11::remote::install_remote_source(Box::new(phone::PhoneSource));
+        let _ = refineid_pkcs11::remote::install_remote_source(Box::new(phone::PhoneSource::new()));
     }
     // SAFETY: `list` validity is the caller's PKCS#11 contract; the core
     // entry point null-checks it before writing.

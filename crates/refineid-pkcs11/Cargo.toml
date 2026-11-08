@@ -22,5 +22,6 @@ refineid-remote.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 refineid-agent-pipe.workspace = true
+refineid-lib-core.workspace = true
 refineid-rapp-core.workspace = true
 refineid-windows-credential-store.workspace = true
