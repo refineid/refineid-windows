@@ -27,8 +27,8 @@ const PATH_SEPARATORS: [char; 2] = ['\\', '/'];
 /// The separator of a file's extension.
 const EXTENSION_SEPARATOR: char = '.';
 /// The most bytes of a program's display name a description carries; a
-/// longer name is cut at a character boundary and ends with
-/// [`ELLIPSIS`].
+/// longer name is cut at a character boundary and ends with an
+/// ellipsis.
 pub const PROGRAM_NAME_BYTES: usize = 64;
 /// The most bytes of the computer's name a description carries. A DNS host
 /// name label has at most 63 octets (RFC 1035 section 2.3.4).
