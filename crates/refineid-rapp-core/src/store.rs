@@ -12,10 +12,11 @@
 //! with its keys.
 //!
 //! A record its user forgot while no session was open keeps its keys for
-//! the `pairing_revoked` close alone, for one bounded attempt: it serves
-//! nothing, the attempt sends that close as the first message of a session,
-//! and the keys are destroyed once its echo arrives or 10 seconds after the
-//! forget (section 4.6 items 2 and 6). A pairing the phone revoked keeps no
+//! the `pairing_revoked` close alone, in the revocation backlog: it serves
+//! nothing, the backlog sends that close as the first message of a session
+//! each time the phone appears for the pairing, and the keys go only once
+//! its echo arrives, or untold when the pairing's idle expiry would have
+//! passed (section 4.6 items 2, 3 and 6). A pairing the phone revoked keeps no
 //! keys and no certificate; it stays, with the phone's name, only so the user
 //! is told (section 4.7), until the user forgets it or
 //! [`REVOCATION_NOTICE_DAYS`] pass. A pairing this computer revoked or
@@ -534,7 +535,7 @@ pub fn revoke_pairing<S: PairingStore + ?Sized>(
 /// 4.6 item 6).
 ///
 /// A confirmed pairing keeps its keys for the `pairing_revoked` close of
-/// one bounded attempt and serves nothing from `now_ms` on. A pairing the peer never confirmed is
+/// the revocation backlog and serves nothing from `now_ms` on. A pairing the peer never confirmed is
 /// removed with its keys and nobody is told. A revoked record is cleared,
 /// and one already forgotten stays as it is.
 ///
@@ -576,12 +577,13 @@ pub fn remove_unconfirmed<S: PairingStore + ?Sized>(store: &mut S) -> Vec<PairId
     unconfirmed
 }
 
-/// Revokes, untold, every forgotten pairing whose bounded attempt has
-/// passed at `now_ms`.
+/// Revokes, untold, every forgotten pairing whose `pairing_revoked` close
+/// is owed no longer at `now_ms`.
 ///
-/// Its `pairing_revoked` close was not acknowledged within 10 seconds of
-/// the forget, or the clock was set back past it (RAPP v26.11.2 section
-/// 4.6 item 6). Returns the revoked pair identifiers.
+/// A forgotten pairing outlives its phone's absence until the pairing's idle
+/// expiry would have passed: 30 days after its latest established session,
+/// counted from that session and not from the forget (RAPP v26.11.2 section
+/// 4.6 items 3 and 6). Returns the revoked pair identifiers.
 pub fn expire_revocation_notices<S: PairingStore + ?Sized>(
     store: &mut S,
     now_ms: u64,
@@ -850,14 +852,17 @@ mod tests {
     use crate::ids::PairId;
     use crate::presence::CardSighting;
     use refineid_rapp::{
-        CertificateFingerprint, IDENTITY_OFFER_GRACE_MS, PAIRING_IDLE_EXPIRY_MS,
-        REVOCATION_ATTEMPT_BOUND_MS, RecordStoreError, SweepOutcome,
+        CertificateFingerprint, IDENTITY_OFFER_GRACE_MS, PAIRING_IDLE_EXPIRY_MS, RecordStoreError,
+        SweepOutcome,
     };
 
     /// The wall-clock time the user forgets a pairing in these tests.
     const FORGOTTEN_AT_MS: u64 = 1_800_000_000_000;
     /// The last moment before a notice window closes.
     const JUST_BEFORE_MS: u64 = 1;
+    /// The wall-clock time of the forgotten pairing's latest established
+    /// session: the day before the forget.
+    const SESSION_AT_MS: u64 = FORGOTTEN_AT_MS - DAY_MS;
 
     #[test]
     fn an_unconfirmed_record_is_removed_at_load_and_serves_nothing() {
@@ -920,20 +925,44 @@ mod tests {
     }
 
     #[test]
-    fn an_undelivered_notice_expires_after_the_bounded_attempt() {
+    fn an_undelivered_notice_expires_at_the_pairings_idle_expiry() {
         let mut store = MemoryPairingStore::new();
         store.insert(record(FIRST_PAIR)).unwrap();
+        store.sweep(FIRST_PAIR, SESSION_AT_MS, true).unwrap();
         forget_pairing(&mut store, FIRST_PAIR, FORGOTTEN_AT_MS).unwrap();
-        let window_end = FORGOTTEN_AT_MS + REVOCATION_ATTEMPT_BOUND_MS;
-        assert!(expire_revocation_notices(&mut store, window_end - JUST_BEFORE_MS).is_empty());
+        // Thirty days after the latest session, not after the forget.
+        let expiry_ms = SESSION_AT_MS + PAIRING_IDLE_EXPIRY_MS;
+        assert!(expiry_ms > FORGOTTEN_AT_MS + DAY_MS);
+        assert!(expire_revocation_notices(&mut store, FORGOTTEN_AT_MS + DAY_MS).is_empty());
+        assert!(expire_revocation_notices(&mut store, expiry_ms - JUST_BEFORE_MS).is_empty());
+        assert!(store.get(FIRST_PAIR).unwrap().owes_revocation_notice());
         assert_eq!(
-            expire_revocation_notices(&mut store, window_end),
+            expire_revocation_notices(&mut store, expiry_ms),
             vec![FIRST_PAIR]
         );
         assert_eq!(
             store.get(FIRST_PAIR).unwrap().state(),
             PairingState::Revoked { by_peer: false }
         );
+    }
+
+    #[test]
+    fn a_forgotten_pairing_offers_no_identity_and_serves_nothing() {
+        let mut store = MemoryPairingStore::new();
+        store.insert(record(FIRST_PAIR)).unwrap();
+        store.sweep(FIRST_PAIR, SESSION_AT_MS, true).unwrap();
+        forget_pairing(&mut store, FIRST_PAIR, FORGOTTEN_AT_MS).unwrap();
+        let forgotten = store.get(FIRST_PAIR).unwrap();
+        assert_eq!(forgotten.state(), PairingState::Forgotten);
+        assert!(!forgotten.serves());
+        assert!(forgotten.serving_record().is_none());
+        assert!(forgotten.owes_revocation_notice());
+        assert!(!offer_stands(
+            &store,
+            FIRST_PAIR,
+            &certificate(),
+            FORGOTTEN_AT_MS
+        ));
     }
 
     #[test]

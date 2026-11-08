@@ -98,11 +98,6 @@ use refineid_rapp::{
 /// with a session open (RAPP v26.11.2 section 7.1 item 7).
 const CLOSE_ECHO_WAIT: Duration = Duration::from_millis(refineid_rapp::QUIT_WITHDRAWAL_BOUND_MS);
 
-/// How long a forgotten pairing keeps its keys for its one revocation
-/// attempt (RAPP v26.11.2 section 4.6 item 6).
-const REVOCATION_ATTEMPT_BOUND: Duration =
-    Duration::from_millis(refineid_rapp::REVOCATION_ATTEMPT_BOUND_MS);
-
 /// What this computer says about itself in `pairing.hello` and
 /// `session.hello` (RAPP v26.11.2 section 4.3 item 3). Labels, not
 /// identities.
@@ -373,11 +368,14 @@ pub enum SessionError {
     UnknownPairing,
     /// The pairing is revoked; its keys are gone.
     NotPaired,
-    /// The user forgot the pairing: it serves nothing, and its one bounded
-    /// attempt carries only the `pairing_revoked` close (section 4.6 item 6).
+    /// The user forgot the pairing: it serves nothing, and the revocation
+    /// backlog carries only its `pairing_revoked` close (section 4.6 item 6).
     Forgotten,
     /// The pairing owes no revocation notice: it was not forgotten here.
     NotForgotten,
+    /// The `pairing_revoked` close was sent but the phone never echoed it;
+    /// the pairing stays in the revocation backlog (section 4.6 item 6).
+    Unacknowledged,
     /// The peer never confirmed that it stored the pairing; the record
     /// opens no session (section 4.3 item 4).
     StorageUnconfirmed,
@@ -413,6 +411,7 @@ impl core::fmt::Display for SessionError {
             Self::NotPaired => f.write_str("the pairing is revoked"),
             Self::Forgotten => f.write_str("the pairing was forgotten on this computer"),
             Self::NotForgotten => f.write_str("the pairing owes no revocation notice"),
+            Self::Unacknowledged => f.write_str("the phone did not answer the revocation close"),
             Self::StorageUnconfirmed => f.write_str("the phone did not confirm the pairing"),
             Self::HandshakeFailed => f.write_str("handshake failed"),
             Self::Transport(e) => write!(f, "transport error: {e:?}"),
@@ -590,28 +589,25 @@ impl<Transport: FrameTransport> Session<Transport> {
 
     /// Waits until `deadline` for the peer's echo of the close this
     /// session sent (section 7.1 item 7), ignoring every other message.
-    /// Returns the reason of a close that crossed this one, to be acted on;
-    /// `None` for the echo itself, for no answer within the wait, and for a
-    /// link that failed.
-    fn await_close_echo(&mut self, deadline: Instant) -> Option<CloseReason> {
+    fn await_close_echo(&mut self, deadline: Instant) -> EchoOutcome {
         while Instant::now() < deadline {
             let bytes = match self.transport.receive_frame() {
                 Ok(bytes) => bytes,
                 Err(TransportError::TimedOut) => continue,
-                Err(_) => return None,
+                Err(_) => return EchoOutcome::unanswered(),
             };
             let Ok(frame) = BinaryFrame::reconstruct(bytes) else {
-                return None;
+                return EchoOutcome::unanswered();
             };
             match self.runtime.receive(&frame, current_time_ms()) {
                 Ok(RuntimeReceive::CloseAcknowledged { reason, crossing }) => {
-                    return crossing.then_some(reason);
+                    return EchoOutcome::acknowledged(crossing.then_some(reason));
                 }
                 Ok(RuntimeReceive::IgnoredWhileClosing) => {}
-                Ok(_) | Err(_) => return None,
+                Ok(_) | Err(_) => return EchoOutcome::unanswered(),
             }
         }
-        None
+        EchoOutcome::unanswered()
     }
 
     /// Sends one sealed frame; a transport that fails ends the session.
@@ -1377,6 +1373,7 @@ impl<Store: PairingStore> Requester<Store> {
             && transport.send_frame(notice.as_bytes()).is_ok()
             && let Some(crossing) =
                 await_handshake_echo(authentication, transport, Instant::now() + CLOSE_ECHO_WAIT)
+                    .crossing
         {
             self.apply_peer_close(pair_id, crossing);
             crate::view::session_ended(
@@ -1399,23 +1396,31 @@ impl<Store: PairingStore> Requester<Store> {
     /// `"session"` routing preamble: the `Noise_KK` handshake, then the close
     /// as the session's first and only message, then the wait for the
     /// phone's echo of it (RAPP v26.11.2 section 4.6 items 2 and 6, section
-    /// 7.1 item 7). The keys are destroyed once the echo arrives or the
-    /// attempt's 10 seconds since the forget pass, whichever comes first; no
-    /// card session starts. A pairing whose attempt has passed is not told:
-    /// its keys go untold. After the engine withdrew, nothing is sent.
+    /// 7.1 item 7). The keys and the record go only once the echo arrives;
+    /// a close the phone did not echo keeps the pairing in the revocation
+    /// backlog for its next appearance (item 6). A pairing whose notice
+    /// expired at `now_ms` sends nothing: the caller revokes it untold
+    /// (item 3). No card session starts. After the engine withdrew, nothing
+    /// is sent.
     ///
     /// # Errors
-    /// [`SessionError::NotForgotten`] when the pairing owes no notice,
+    /// [`SessionError::NotForgotten`] when the pairing owes no notice, or
+    /// owes it no longer at `now_ms`, [`SessionError::Unacknowledged`] when
+    /// the close went out but its echo never arrived,
     /// [`SessionError::Withdrawn`] after the engine withdrew, and the
     /// handshake and transport errors of [`Self::connect`].
     pub fn deliver_revocation_notice<Transport: FrameTransport>(
         &mut self,
         pair_id: PairId,
+        now_ms: u64,
         transport: Transport,
     ) -> Result<(), SessionError> {
-        self.revocation_notice(pair_id, transport)
+        self.revocation_notice(pair_id, now_ms, transport)
             .inspect_err(|error| {
-                if *error != SessionError::Withdrawn {
+                if !matches!(
+                    error,
+                    SessionError::Withdrawn | SessionError::Unacknowledged
+                ) {
                     refineid_dev_errors::report!(Rapp, "revocation notice not delivered", error);
                 }
             })
@@ -1425,12 +1430,12 @@ impl<Store: PairingStore> Requester<Store> {
     fn revocation_notice<Transport: FrameTransport>(
         &mut self,
         pair_id: PairId,
+        now_ms: u64,
         mut transport: Transport,
     ) -> Result<(), SessionError> {
         if self.withdrawn() {
             return Err(SessionError::Withdrawn);
         }
-        let now_ms = crate::clock::unix_time_ms();
         expire_revocation_notices(&mut self.store, now_ms);
         let record = self
             .store
@@ -1440,11 +1445,13 @@ impl<Store: PairingStore> Requester<Store> {
             .pair_record()
             .filter(|_| record.owes_revocation_notice())
             .ok_or(SessionError::NotForgotten)?;
-        let spent = Duration::from_millis(
-            keys.forgotten_at_ms()
-                .map_or(0, |forgotten_ms| now_ms.saturating_sub(forgotten_ms)),
-        );
-        let deadline = Instant::now() + REVOCATION_ATTEMPT_BOUND.saturating_sub(spent);
+        if keys.revocation_notice_expired(now_ms) {
+            // An appearance before the sweep ran sends no close with an
+            // expired key: the expiry above revokes it, unless the store
+            // refused, and the refusal below revokes nothing, so the caller
+            // revokes it untold.
+            return Err(SessionError::NotForgotten);
+        }
         let mut authentication = Self::authenticate(keys, &mut transport)?;
         let notice = authentication
             .send_revocation_notice()
@@ -1452,22 +1459,27 @@ impl<Store: PairingStore> Requester<Store> {
         transport
             .send_frame(notice.as_bytes())
             .map_err(SessionError::Transport)?;
-        // The echo, or a close that crossed this one, ends the wait; the
-        // keys go either way once it ends.
-        let _ = await_handshake_echo(&mut authentication, &mut transport, deadline);
-        revoke_pairing(
-            &mut self.store,
-            pair_id,
-            false,
-            crate::clock::unix_time_ms(),
-        )
-        .map_err(SessionError::Store)
+        // The echo, or a close that crossed this one, ends the wait within
+        // the second section 7.1 item 7 allows; the keys go only on the
+        // echo, so a close sent without one stays in the backlog.
+        let echo = await_handshake_echo(
+            &mut authentication,
+            &mut transport,
+            Instant::now() + CLOSE_ECHO_WAIT,
+        );
+        if let Some(crossing) = echo.crossing {
+            self.apply_peer_close(pair_id, crossing);
+        }
+        if !echo.acknowledged {
+            return Err(SessionError::Unacknowledged);
+        }
+        revoke_pairing(&mut self.store, pair_id, false, now_ms).map_err(SessionError::Store)
     }
 
     /// The user forgets a pairing that has no open session here (RAPP
     /// v26.11.2 section 4.6 item 6): it serves nothing from now on and keeps
-    /// its keys only for the `pairing_revoked` close of one bounded attempt
-    /// ([`Self::deliver_revocation_notice`]). One
+    /// its keys only for the `pairing_revoked` close of the revocation
+    /// backlog ([`Self::deliver_revocation_notice`]). One
     /// the peer never confirmed, and a revoked one, are removed.
     ///
     /// # Errors
@@ -1484,10 +1496,10 @@ impl<Store: PairingStore> Requester<Store> {
 
     /// The user forgets the pairing of an open session (RAPP v26.11.2
     /// section 4.6 items 1 and 6): the `pairing_revoked` close goes out at
-    /// once, the requester waits at most 1 second for the phone's echo of
-    /// it (section 7.1 item 7), and the keys are destroyed. A close that
-    /// cannot be sent leaves the pairing forgotten, for one bounded attempt
-    /// to carry the close.
+    /// once and the requester waits at most 1 second for the phone's echo of
+    /// it (section 7.1 item 7). The keys go on the echo; a close that cannot
+    /// be sent, or one the phone did not echo, leaves the pairing forgotten
+    /// in the revocation backlog.
     ///
     /// # Errors
     /// [`SessionError::Store`] when the change is refused.
@@ -1500,16 +1512,17 @@ impl<Store: PairingStore> Requester<Store> {
                 .runtime
                 .close_with_reason(CloseReason::PairingRevoked)
                 .is_ok_and(|notice| session.transport.send_frame(notice.as_bytes()).is_ok());
-        if delivered {
-            // A crossing close ends the wait; the pairing is forgotten
-            // whatever the phone said.
-            let _ = session.await_close_echo(Instant::now() + CLOSE_ECHO_WAIT);
-        }
+        // A crossing close ends the wait; the pairing is forgotten
+        // whatever the phone said.
+        let acknowledged = delivered
+            && session
+                .await_close_echo(Instant::now() + CLOSE_ECHO_WAIT)
+                .acknowledged;
         if session.end.is_none() {
             session.finish(SessionEnd::LocalClose);
         }
-        crate::view::pairing_left(session.pair_id);
-        if delivered {
+        if acknowledged {
+            crate::view::pairing_left(session.pair_id);
             revoke_pairing(
                 &mut self.store,
                 session.pair_id,
@@ -1551,7 +1564,9 @@ impl<Store: PairingStore> Requester<Store> {
         if session.end.is_none() {
             let crossing = match session.runtime.close_with_reason(reason) {
                 Ok(notice) if session.transport.send_frame(notice.as_bytes()).is_ok() => {
-                    session.await_close_echo(Instant::now() + CLOSE_ECHO_WAIT)
+                    session
+                        .await_close_echo(Instant::now() + CLOSE_ECHO_WAIT)
+                        .crossing
                 }
                 Ok(_) | Err(_) => None,
             };
@@ -1912,7 +1927,9 @@ impl<Store: PairingStore> Requester<Store> {
     ) -> Event {
         if let Some(notice) = notice
             && session.transport.send_frame(notice.as_bytes()).is_ok()
-            && let Some(crossing) = session.await_close_echo(Instant::now() + CLOSE_ECHO_WAIT)
+            && let Some(crossing) = session
+                .await_close_echo(Instant::now() + CLOSE_ECHO_WAIT)
+                .crossing
         {
             // A close that crossed the notice is the phone's own end of the
             // session, treated as received.
@@ -1990,32 +2007,63 @@ fn dispatch<Transport: FrameTransport>(
     })
 }
 
+/// What waiting for a close's echo found (RAPP v26.11.2 section 7.1 item
+/// 7): whether the echo arrived, and a close that crossed this endpoint's,
+/// to be acted on.
+#[derive(Clone, Copy, Debug)]
+struct EchoOutcome {
+    /// Whether the echo, or a close that crossed this endpoint's, arrived
+    /// within the wait.
+    acknowledged: bool,
+    /// A close that crossed this endpoint's, to be acted on; `None` for the
+    /// echo itself and for no answer.
+    crossing: Option<CloseReason>,
+}
+
+impl EchoOutcome {
+    /// The wait ended with no answer and no crossing close.
+    const fn unanswered() -> Self {
+        Self {
+            acknowledged: false,
+            crossing: None,
+        }
+    }
+
+    /// The echo, or a crossing close, arrived.
+    const fn acknowledged(crossing: Option<CloseReason>) -> Self {
+        Self {
+            acknowledged: true,
+            crossing,
+        }
+    }
+}
+
 /// Waits until `deadline` for the phone's echo of the close this endpoint
 /// sent in place of `session.ready` or `session.hello` (RAPP v26.11.2
-/// section 7.1 item 7), ignoring every other message. Returns the reason
-/// of a close that crossed this one, to be acted on; `None` for the echo
-/// itself, for no answer within the wait, and for a link that failed.
+/// section 7.1 item 7), ignoring every other message.
 fn await_handshake_echo<Transport: FrameTransport>(
     authentication: &mut SessionAuthentication,
     transport: &mut Transport,
     deadline: Instant,
-) -> Option<CloseReason> {
+) -> EchoOutcome {
     while Instant::now() < deadline {
         let bytes = match transport.receive_frame() {
             Ok(bytes) => bytes,
             Err(TransportError::TimedOut) => continue,
-            Err(_) => return None,
+            Err(_) => return EchoOutcome::unanswered(),
         };
-        let frame = BinaryFrame::reconstruct(bytes).ok()?;
+        let Ok(frame) = BinaryFrame::reconstruct(bytes) else {
+            return EchoOutcome::unanswered();
+        };
         match authentication.receive_close_echo(&frame, current_time_ms()) {
             Ok(CloseEcho::Acknowledged { reason, crossing }) => {
-                return crossing.then_some(reason);
+                return EchoOutcome::acknowledged(crossing.then_some(reason));
             }
             Ok(CloseEcho::Ignored) => {}
-            Ok(CloseEcho::Closed) | Err(_) => return None,
+            Ok(CloseEcho::Closed) | Err(_) => return EchoOutcome::unanswered(),
         }
     }
-    None
+    EchoOutcome::unanswered()
 }
 
 /// Receives one handshake frame, waiting through the transport's receive
