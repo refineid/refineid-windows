@@ -104,19 +104,144 @@ modes verified locally and Edge completed client authentication. The supported
 resolution is a non-revoked authentication certificate/card. Do not work around
 this by disabling Firefox revocation checking.
 
+## No card CA
+
+The Card Module serves no `msroots` file. `CardReadFile` and `CardGetFileInfo`
+answer `SCARD_E_FILE_NOT_FOUND` for `mscp\msroots`, and `CardEnumFiles` does
+not list it. That is what Microsoft's smart card minidriver specification
+(v7.07) prescribes for a card without one: `msroots` is the one Base CSP file a
+read-only card need not have ("All expected Base CSP/KSP files, with the
+exception of the 'msroots' file [...] must exist on the read-only card",
+Developer Guidelines, Read-Only Cards), and "If *pszFileName* specifies a
+nonexistent file, **CardReadFile** should fail with SCARD\_E\_FILE\_NOT\_FOUND"
+(CardReadFile, Remarks).
+
+Why: the Certificate Propagation Service copies whatever `msroots` holds into
+the signed-in user's `SmartCardRoot` store, which is the `.SmartCard` physical
+store of `CurrentUser\Root` (Win32 "System Store Locations"), and Windows
+trusts a certificate there as a root for every purpose, TLS server
+authentication included. The file carries certificates and no properties
+("properties such as CODE\_SIGNING EKU are not propagated", Developer
+Guidelines, Interoperability with msroots), so a card cannot even narrow the
+purposes. A card is not a trust authority, so this module lets it choose no
+anchor. Chains still build without one: the DVV roots are in the Microsoft
+Trusted Root Program, which Windows fetches into `AuthRoot` when a chain needs
+them, and Windows fetches the issuing CA from the Authority Information Access
+of the authentication certificate, `http://proxy.fineid.fi/ca/dvvcqc4ec.crt`
+for the citizen CA `DVV Citizen Certificates - G4E`.
+
+Unix and Firefox differ. The PKCS#11 module presents the card's root
+(`EF.4334`) and issuing CA (`EF.4336`) to NSS only while the card is present,
+each with an NSS trust record that makes it an anchor for TLS client
+authentication and e-mail protection and for nothing else; a web server or a
+signed program chaining to it is no more trusted than before
+([refineid-pkcs11](../refineid-pkcs11/README.md) and refineid-core
+`crates/pkcs11/README.md`, "NSS trust records"). Windows has no such record for
+a propagated root.
+
+### The card's issuing CA in the intermediate store
+
+With no `msroots` Windows holds no card's issuing CA until it fetches one,
+and a browser that matches client certificates does not fetch: Chromium
+(Edge, Chrome) selects client certificates with `CertFindChainInStore`,
+`CERT_CHAIN_FIND_BY_ISSUER`, matching the server's CA names against every CA
+of the chain, with `CERT_CHAIN_FIND_BY_ISSUER_CACHE_ONLY_FLAG` ("search only
+the cached system stores (Root, My, Ca, Trust) to find issuer certificates")
+and `CERT_CHAIN_FIND_BY_ISSUER_CACHE_ONLY_URL_FLAG` ("Only the URL cache is
+searched. The Internet is not searched") (Win32 `CertFindChainInStore`;
+Chromium `net/ssl/client_cert_store_win.cc`), and sends the intermediates of
+that chain. A server that names the issuing CA among its acceptable CAs then
+sees no matching certificate, and one that needs the intermediate does not
+get it.
+
+So after every pass of the agent's card watch, in every build, the agent
+reads each card in a reader without a credential and, when the card's root
+(`EF.4334`) is self-issued, self-signed and a CA and its issuing CA
+(`EF.4336`) is a CA that root issued and signed, puts the issuing CA into the
+user's Intermediate Certification Authorities store, `CurrentUser\CA`, while
+the card is in the reader (`refineid-windows-credential-store` `card_cas`,
+Windows STPA W-R-26). Nothing shipped recognises a card: no certificate and
+no fingerprint.
+
+- The CA store is one of the stores the chain engine searches for issuers;
+  it makes no certificate a trust anchor. It holds the certificate Windows
+  would otherwise fetch from the Authority Information Access, and a chain
+  through it is trusted exactly when its root is: for a production card,
+  DVV's root from the Microsoft Trusted Root Program. The entry carries no
+  usage property, so the CA's own extensions govern every use, as for a
+  fetched copy.
+- The root never enters a store in a release build. A development build
+  (`debug_assertions`, the switch refineid-core's `SigningBuild` uses) also
+  puts a DVV test card's root in the CA store, since DVV's test roots are in
+  no root program: one named with the word `TEST`, with
+  `CERT_ENHKEY_USAGE_PROP_ID` set to TLS client authentication alone
+  (`CertSetEnhancedKeyUsage`). A certificate with both an EKU extension and
+  EKU extended properties "is valid only for the uses that are on both
+  lists" (Win32 `CertGetEnhancedKeyUsage`, Remarks), and the chain engine
+  narrows a chain to its elements' usages: a synthetic root carrying that
+  property in a Root store built a valid chain for client authentication
+  and `CERT_TRUST_IS_NOT_VALID_FOR_USAGE` for server authentication on a
+  test computer. The chain still ends with `CERT_TRUST_IS_UNTRUSTED_ROOT`.
+- Each entry is marked with a property of RefineID's own, and the watch
+  removes its marked entries of cards no longer in a reader. An entry the
+  store already held is left unmarked and is never removed.
+
+Why not a trust store. The user's own Root store "is protected, and user
+interface dialog boxes remind the user to place only trusted certificates into
+that store" (Win32 "Managing Certificates with Certificate Stores"), so every
+addition and removal would ask the user; its `.SmartCard` physical store, which
+`msroots` fills, refuses a user process's write (access denied, observed on
+a test computer) and keeps no properties; the machine's Root store needs an
+administrator. An exclusive chain engine (`CERT_CHAIN_ENGINE_CONFIG`
+`hExclusiveRoot`) serves only the callers that create it, never a browser or
+Schannel. A server verifies a client certificate's chain against its own
+anchors, so the client needs the chain, not trust in it.
+
+### What earlier builds left
+
+Builds that served `msroots` had Windows propagate the card's root and issuing
+CA. The driver package's `RemoveCardRoots` custom action removes them on
+install, repair, upgrade and uninstall (`card_roots.rs`,
+`refineid-windows-credential-store` `card_roots`). It opens only each user's
+`SmartCardRoot` store, never the user's own Root registry store, the machine's
+stores or `AuthRoot`, so a root the Microsoft root update or another program
+added stays, even with the same bytes. Within `SmartCardRoot` an entry goes only
+when every card Windows recorded as having propagated it
+(`CERT_SMART_CARD_ROOT_INFO_PROP_ID`: per card, the card module's `cardid` and
+the logon session) is a card this module identified, by the `cardid` it derives
+from a FINEID authentication certificate in the same user's Personal store.
+The agent removes a card's certificates from the Personal store when
+the card leaves its reader (`refineid-windows-credential-store`
+`card_certificates`), so a root is found this way only while its card's
+authentication certificate is still there.
+
+Windows writes each propagated entry under a registry key that only `SYSTEM`
+may change, so no process of the user can remove one; the custom action runs as
+`LocalSystem`, without impersonation, and reaches the profiles loaded while it
+runs. Microsoft documents a confirmation for no change to `SmartCardRoot`, and a
+removal as `LocalSystem` completes in a session with no desktop, where a dialog
+could not be answered. Unless the machine policy "Configure root certificate
+clean-up" says otherwise, Windows also removes propagated roots when the user
+signs out.
+
 ## Contents
 
 - `cardmod.rs` -- cardmod.h-shaped types, the card capability/container model,
   and the logical file system the Base CSP expects.
 - `ffi.rs` -- the Windows FFI declarations.
 - `transport.rs` -- SCard-handle transport with T=0 chaining.
-- `msroots.rs` -- the `msroots` (intermediate/root store) file scaffolding.
+- `card_roots.rs` -- the driver package's custom action that removes the
+  roots earlier builds had Windows propagate.
 - `ksp.rs` -- the CNG key storage provider for a paired phone, exported as
   `GetKeyStorageInterface` from the same DLL.
 - `ksp_codec.rs` -- the CNG key blob and signature encodings the provider
   hands out, tested on the host.
 - `ksp_register.rs` -- registers the provider with CNG through the BCrypt
   registration API; entry points for the driver MSI and for `rundll32`.
+- `card_registrations.rs` -- removes every `Calais\SmartCards` registration
+  that names this module, whoever wrote it; the driver MSI calls it on a
+  first installation, before it writes its own, and on uninstall
+  (`doc/installer-upgrade.md`).
 
 ## Paired phone for browsers
 
@@ -139,6 +264,15 @@ its phone (an absent phone reads as no card in the reader),
 or the phone's card does not answer the operation (`card_error`, a failed
 operation and not the card's absence), and `SCARD_F_INTERNAL_ERROR` otherwise,
 the retry floor included.
+
+A qualified signature over the remote arm reaches the phone as `sign_document`.
+A Windows signing call hands the module a hash and no document, so the phone is
+told what this computer knows, in the user's Windows interface language: the
+program, known by its image's `FileDescription` (else its file stem), the
+computer, and that the program did not name the document, for example
+"Microsoft Word on work-laptop asks for a signature (the program did not name
+the document)" (RAPP section 9.3, Windows STPA W-R-20). The RefineID app signs
+documents itself and sends their file names.
 
 ## Public build and development install
 

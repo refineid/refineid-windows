@@ -4,7 +4,6 @@
 
 use crate::{card, identity, pin, version};
 use std::cell::RefCell;
-use std::os::windows::ffi::OsStrExt as _;
 use std::sync::Mutex;
 use zeroize::Zeroize;
 
@@ -17,7 +16,7 @@ use windows::Win32::Graphics::Gdi::{
     HDC, HFONT, HGDIOBJ, ReleaseDC, SelectObject, SetBkColor, SetTextColor,
 };
 use windows::Win32::Graphics::GdiPlus::{
-    GdipCreateBitmapFromFile, GdipCreateFromHDC, GdipDeleteGraphics, GdipDisposeImage,
+    GdipCreateBitmapFromStream, GdipCreateFromHDC, GdipDeleteGraphics, GdipDisposeImage,
     GdipDrawImageRectI, GdipGetImageDimension, GdipGraphicsClear, GdiplusShutdown, GdiplusStartup,
     GdiplusStartupInput, GpBitmap, GpGraphics, GpImage,
 };
@@ -31,6 +30,7 @@ use windows::Win32::UI::Controls::{
     TAB_CONTROL_ITEM_STATE, TCIF_TEXT, TCITEMW, TCM_ADJUSTRECT, TCM_GETCURSEL, TCM_INSERTITEMW,
     TCM_SETCURSEL, TCN_SELCHANGE,
 };
+use windows::Win32::UI::Shell::SHCreateMemStream;
 use windows::Win32::UI::WindowsAndMessaging::{
     BN_CLICKED, BS_PUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBN_SELCHANGE,
     CBS_DROPDOWNLIST, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
@@ -48,17 +48,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR, w};
 
-use refineid_doc_sign::asic_verify::verify_document;
-use refineid_doc_sign::cades::SigningTime;
 use refineid_doc_sign::document::Format;
-use refineid_doc_sign::pades::{SignatureMetadata, StampLanguage, VisibleSignature};
-use refineid_doc_sign::service::{
-    DEFAULT_TIMESTAMP_AUTHORITY, DocumentRequest, SignOptions, SignReport, sign_qualified,
-};
+use refineid_doc_sign::identity::CommonName;
+use refineid_doc_sign::pades::StampLanguage;
+use refineid_doc_sign::pin::PinBytes;
+use refineid_doc_sign::service::SignReport;
 use refineid_lib_core::auth::{CardPinLengths, PinReferenceScheme};
-use refineid_lib_core::identity::CommonName;
-use refineid_lib_core::pin::PinBytes;
-use refineid_lib_pcsc::PcscBackend;
 use refineid_rapp_core::engine::{PairingError, PairingSearchError, Requester, RequesterConfig};
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::limits::OFFER_TTL_MS;
@@ -66,6 +61,9 @@ use refineid_rapp_core::offer::normalize_pairing_code;
 use refineid_rapp_core::store::{PairingRecord, PairingState, PairingStore as _, forget_pairing};
 use refineid_rapp_core::stream::{PairingServices, attempt_revocations};
 use refineid_windows_credential_store::ProtectedPairingStore;
+use refineid_windows_doc_sign::phone::{SigningSource, current_source};
+use refineid_windows_doc_sign::sign::{DocumentSignRequest, sign};
+use refineid_windows_doc_sign::verify::{render, verify_file};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -241,12 +239,8 @@ static INBOX: Mutex<Option<InboxItem>> = Mutex::new(None);
 fn probe_ui() {
     match create_main_window() {
         Ok(window) => {
-            // Exercise the photo pipeline too when a saved JPEG is
-            // around (a `--smoke` with the test CAN leaves one).
-            let photo = std::env::temp_dir().join("refineid-photo.jpg");
-            let bitmap = photo.is_file() && load_photo_bitmap(&photo);
             let _ = unsafe { DestroyWindow(window) };
-            println!("UI-PROBE-OK bitmap={bitmap}");
+            println!("UI-PROBE-OK");
         }
         Err(error) => println!("UI-PROBE-FAIL\n{error}"),
     }
@@ -290,6 +284,7 @@ fn create_main_window() -> windows::core::Result<HWND> {
 }
 
 pub fn run() {
+    identity::remove_photo_leftovers(&std::env::temp_dir());
     if std::env::args().any(|arg| arg == "--smoke") {
         smoke();
         return;
@@ -1043,7 +1038,7 @@ fn on_create(main: HWND) -> windows::core::Result<()> {
     doc_label(
         pages[3],
         instance,
-        "Signing PIN (PIN 2)",
+        "Signature PIN 2",
         16,
         132,
         120,
@@ -1811,8 +1806,8 @@ fn show_photo_result(outcome: &identity::PhotoOutcome) {
     let Some(caption) = caption else {
         return;
     };
-    if let Some(path) = outcome.display_jpeg.as_ref() {
-        if load_photo_bitmap(path) {
+    if let Some(jpeg) = outcome.display_jpeg.as_ref() {
+        if load_photo_bitmap(jpeg) {
             set_tint(caption, GRAY);
             set_text(caption, "Card photo");
         } else {
@@ -1825,7 +1820,7 @@ fn show_photo_result(outcome: &identity::PhotoOutcome) {
     }
 }
 
-/// Load a JPEG into the photo well, scaled to fit 150x190 on a
+/// Load a JPEG held in memory into the photo well, scaled to fit 150x190 on a
 /// white ground. Any failure leaves the previous bitmap and
 /// reports `false`. Main thread only.
 #[allow(
@@ -1833,23 +1828,19 @@ fn show_photo_result(outcome: &identity::PhotoOutcome) {
     clippy::cast_possible_truncation,
     reason = "photo-well geometry: dimensions are small positive pixel counts, exactly representable in f32, and the float-to-int scale factors saturate rather than wrap"
 )]
-fn load_photo_bitmap(path: &Path) -> bool {
+fn load_photo_bitmap(jpeg: &[u8]) -> bool {
     const W: i32 = 150;
     const H: i32 = 190;
     let target = STATE.with(|cell| cell.borrow().as_ref().map(|state| state.photo));
     let Some(well) = target else {
         return false;
     };
-    let wide: Vec<u16> = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
     unsafe {
+        let Some(stream) = SHCreateMemStream(Some(jpeg)) else {
+            return false;
+        };
         let mut bitmap: *mut GpBitmap = std::ptr::null_mut();
-        if GdipCreateBitmapFromFile(PCWSTR(wide.as_ptr()), &raw mut bitmap).0 != 0
-            || bitmap.is_null()
-        {
+        if GdipCreateBitmapFromStream(&stream, &raw mut bitmap).0 != 0 || bitmap.is_null() {
             return false;
         }
         let image = bitmap.cast::<GpImage>();
@@ -2165,10 +2156,12 @@ fn set_verify_result(text: &str) {
 }
 
 /// Gather the Document page and sign on a worker thread; the
-/// refresh timer picks the outcome up from `INBOX`. The PIN is
-/// read into a zeroizing buffer on the main thread and moved
-/// into the worker; it never touches the result text. Baseline
-/// level only: no TSA, no long-term material yet.
+/// refresh timer picks the outcome up from `INBOX`. A card in a
+/// reader attached to this computer signs under the PIN typed on
+/// the page, read into a zeroizing buffer on the main thread and
+/// moved into the worker; without one the paired phone signs and
+/// asks for PIN 2 on its own screen. No PIN touches the result
+/// text.
 fn start_doc_sign() {
     let snapshot = STATE.with(|cell| {
         cell.borrow().as_ref().map(|state| {
@@ -2202,52 +2195,31 @@ fn start_doc_sign() {
         set_doc_result("PDF signing needs a .pdf file. Pick an ASiC-E container for other files.");
         return;
     }
-    let pin = match PinBytes::new(edit_secret(pin_edit)) {
-        Ok(pin) => pin,
-        Err(error) => {
-            set_doc_result(&format!("PIN rejected: {error}"));
-            return;
+    let source = current_source();
+    let pin = match source {
+        SigningSource::Reader => match PinBytes::new(edit_secret(pin_edit)) {
+            Ok(pin) => Some(pin),
+            Err(error) => {
+                set_doc_result(&format!("PIN rejected: {error}"));
+                return;
+            }
+        },
+        SigningSource::Phone(_) => {
+            set_text(pin_edit, "");
+            None
         }
     };
     let reason = get_text(reason_edit);
-    let metadata = SignatureMetadata {
-        reason: if reason.trim().is_empty() {
-            None
-        } else {
-            Some(reason)
-        },
-        location: None,
-        contact: None,
-        name: None,
-        signing_time: None,
-        visible_signature: (format == Format::Pades)
-            .then(|| VisibleSignature::verification(user_interface_language())),
-    };
-    let output = derive_output(&input, format);
-    let request = DocumentRequest {
-        format,
-        additional_inputs: Vec::new(),
-        signing_time: SigningTime::now(),
-        metadata,
-        expected_serial: None,
-        archive: true,
-        long_term: true,
-        timestamp_authorities: vec![DEFAULT_TIMESTAMP_AUTHORITY.to_owned()],
-        timestamp_credentials: None,
-    };
-    let options = SignOptions {
+    let request = DocumentSignRequest {
         input,
-        output,
-        pin,
-        save_cert: None,
-        reader_filter: None,
-        can: None,
-        document: Some(request),
+        format,
+        reason: (!reason.trim().is_empty()).then_some(reason),
+        stamp_language: user_interface_language(),
     };
     set_doc_result("Signing…");
     set_card_busy(true);
     std::thread::spawn(move || {
-        let text = match sign_qualified(PcscBackend, options) {
+        let text = match sign(source, request, pin) {
             Ok(report) => render_sign_report(&report),
             Err(error) => format!("Signing failed:\r\n{error}"),
         };
@@ -2258,8 +2230,9 @@ fn start_doc_sign() {
 }
 
 /// Verify a signed container on a worker thread; the refresh
-/// timer picks the outcome up from `INBOX`. Verify is offline:
-/// no card, no PIN, no network.
+/// timer picks the outcome up from `INBOX`. Verify needs no card
+/// and no PIN; the network is asked only about a signer's
+/// revocation the file does not answer.
 fn start_doc_verify() {
     let snapshot = STATE.with(|cell| {
         cell.borrow()
@@ -2280,8 +2253,12 @@ fn start_doc_verify() {
     set_verify_result("Verifying…");
     set_card_busy(true);
     std::thread::spawn(move || {
-        let text = match verify_document(Path::new(&path)) {
-            Ok(report) => report.render(),
+        let file = Path::new(&path);
+        let name = file
+            .file_name()
+            .map_or_else(|| path.clone(), |name| name.to_string_lossy().into_owned());
+        let text = match verify_file(file, refineid_doc_sign::now_date_time()) {
+            Ok(report) => render(&name, &report).replace('\n', "\r\n"),
             Err(error) => format!("Verify failed:\r\n{error}"),
         };
         if let Ok(mut inbox) = INBOX.lock() {
@@ -2585,30 +2562,17 @@ fn render_sign_report(report: &SignReport) -> String {
         .cert_subject_cn
         .as_ref()
         .map_or("unknown signer", CommonName::as_str);
-    format!(
+    let summary = format!(
         "Signed:\r\n{}\r\n{} bytes · qualified signature · local verify: {}\r\nSigner: {signer}",
         report.signature_path.display(),
         report.output_len,
         report.local_verify,
         signer = signer,
-    )
-}
-
-/// Output next to the input: `-signed.pdf` for PDF signatures,
-/// `.asice` appended for containers.
-fn derive_output(input: &Path, format: Format) -> PathBuf {
-    if format == Format::Pades {
-        let stem = input
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("document");
-        input.with_file_name(format!("{stem}-signed.pdf"))
-    } else {
-        let name = input
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("document");
-        input.with_file_name(format!("{name}.asice"))
+    );
+    // A development build's document below the release level says so.
+    match &report.below_requested_level {
+        Some(below) => format!("{summary}\r\n{below}"),
+        None => summary,
     }
 }
 
@@ -2631,11 +2595,11 @@ const IDENTITY_ROW_LABELS: [&str; 8] = [
     "Holder",
     "Card",
     "Activation PIN",
-    "PIN 1",
-    "PIN 2",
+    "Basic PIN 1",
+    "Signature PIN 2",
     "PUK",
 ];
-const PIN_ROW_LABELS: [&str; 5] = ["Holder", "Serial", "PIN 1", "PIN 2", "PUK"];
+const PIN_ROW_LABELS: [&str; 5] = ["Holder", "Serial", "Basic PIN 1", "Signature PIN 2", "PUK"];
 
 /// Add a title + subtitle header. Handles need no later updates.
 #[allow(

@@ -7,11 +7,16 @@ use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree, S_OK};
+use windows_sys::Win32::Globalization::GetUserDefaultUILanguage;
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::{
     GetLengthSid, GetTokenInformation, IsValidSid, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
+use windows_sys::Win32::Storage::FileSystem::{
+    GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
+};
+use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::System::SystemInformation::{ComputerNameDnsHostname, GetComputerNameExW};
 use windows_sys::Win32::System::Threading::{
@@ -19,7 +24,13 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 
-use crate::PipeError;
+use windows_sys::Win32::UI::Shell::{
+    FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX64, FOLDERID_ProgramFilesX86, KF_FLAG_DEFAULT,
+    SHGetKnownFolderPath,
+};
+
+use crate::calling_program::{CallingProgram, InterfaceLanguage};
+use crate::{AGENT_IMAGE_NAME, PRODUCT_DIRECTORY_NAME, PipeError};
 
 /// The longest image path read, in UTF-16 units.
 const IMAGE_PATH_UNITS: usize = 32_768;
@@ -112,6 +123,65 @@ impl ProcessIdentity {
     pub fn same_user_and_session(&self, other: &Self) -> bool {
         self.user == other.user && self.session == other.session
     }
+}
+
+/// Where the installer put the agent.
+///
+/// `RefineID\\refineid-agent.exe` under this architecture's Program Files,
+/// which only administrators can write to. Windows reports that directory,
+/// so nothing in this process's environment can move it. `None` when Windows
+/// cannot report it.
+#[must_use]
+pub fn installed_agent_image() -> Option<PathBuf> {
+    Some(
+        known_folder(&FOLDERID_ProgramFiles)?
+            .join(PRODUCT_DIRECTORY_NAME)
+            .join(AGENT_IMAGE_NAME),
+    )
+}
+
+/// The Program Files directories Windows reports, as text.
+#[must_use]
+pub fn program_directories() -> Vec<String> {
+    [
+        FOLDERID_ProgramFiles,
+        FOLDERID_ProgramFilesX64,
+        FOLDERID_ProgramFilesX86,
+    ]
+    .iter()
+    .filter_map(known_folder)
+    .map(|directory| directory.to_string_lossy().into_owned())
+    .collect()
+}
+
+/// The known folder `id` as Windows reports it, independent of this
+/// process's environment. `None` when Windows cannot report it.
+fn known_folder(id: &windows_sys::core::GUID) -> Option<PathBuf> {
+    let mut path: windows_sys::core::PWSTR = core::ptr::null_mut();
+    // SAFETY: `id` is a live GUID; `path` receives a CoTaskMem string this
+    // function frees, also on failure as the API documents.
+    let status = unsafe {
+        SHGetKnownFolderPath(
+            id,
+            KF_FLAG_DEFAULT.cast_unsigned(),
+            core::ptr::null_mut(),
+            &raw mut path,
+        )
+    };
+    let directory = (status == S_OK && !path.is_null()).then(|| {
+        // SAFETY: on success `path` is a NUL-terminated wide string.
+        let units = unsafe {
+            let mut length = 0;
+            while *path.add(length) != 0 {
+                length += 1;
+            }
+            core::slice::from_raw_parts(path, length)
+        };
+        PathBuf::from(OsString::from_wide(units))
+    });
+    // SAFETY: frees the string once; a null pointer is allowed.
+    unsafe { CoTaskMemFree(path.cast_const().cast()) };
+    directory
 }
 
 /// The size of a SID with no subauthority: revision, count and authority.
@@ -223,4 +293,104 @@ fn image_of(process: &Handle) -> Result<PathBuf, PipeError> {
     }
     path.truncate(length as usize);
     Ok(PathBuf::from(OsString::from_wide(&path)))
+}
+
+/// The program this process runs: its image as Windows reports it, known by
+/// the `FileDescription` of that image's version resource. `None` when
+/// Windows cannot report the image or its path names no file.
+#[must_use]
+pub fn calling_program() -> Option<CallingProgram> {
+    let image = ProcessIdentity::current().ok()?.image;
+    let description = file_description(&image);
+    CallingProgram::of_image(&image, description.as_deref())
+}
+
+/// The language this user's Windows interface is shown in.
+#[must_use]
+pub fn interface_language() -> InterfaceLanguage {
+    // SAFETY: the call takes no arguments and returns a language identifier.
+    InterfaceLanguage::for_windows_language(unsafe { GetUserDefaultUILanguage() })
+}
+
+/// The version resource's list of the languages and code pages it holds
+/// strings in (Microsoft, `VerQueryValueW`, "\VarFileInfo\Translation").
+const VERSION_TRANSLATIONS: &str = r"\VarFileInfo\Translation";
+/// The bytes of one entry of [`VERSION_TRANSLATIONS`]: a language and a
+/// code page, two bytes each.
+const TRANSLATION_BYTES: usize = 4;
+
+/// The `FileDescription` string of `image`'s version resource, in its first
+/// listed language. `None` when the image has no version resource or no
+/// such string.
+fn file_description(image: &std::path::Path) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let path: Vec<u16> = image.as_os_str().encode_wide().chain([0]).collect();
+    let mut ignored = 0u32;
+    // SAFETY: `path` is NUL-terminated; `ignored` receives a value the API
+    // documents as unused.
+    let size = unsafe { GetFileVersionInfoSizeW(path.as_ptr(), &raw mut ignored) };
+    if size == 0 {
+        return None;
+    }
+    let mut resource = vec![0u8; size as usize];
+    // SAFETY: `resource` holds `size` bytes, the size Windows reported.
+    if unsafe { GetFileVersionInfoW(path.as_ptr(), 0, size, resource.as_mut_ptr().cast()) } == 0 {
+        return None;
+    }
+    let translation = version_value(&resource, VERSION_TRANSLATIONS, ValueLength::Bytes)?;
+    let [language_low, language_high, code_page_low, code_page_high] =
+        *translation.first_chunk::<TRANSLATION_BYTES>()?;
+    let language = u16::from_le_bytes([language_low, language_high]);
+    let code_page = u16::from_le_bytes([code_page_low, code_page_high]);
+    let name = format!(r"\StringFileInfo\{language:04x}{code_page:04x}\FileDescription");
+    let text = version_value(&resource, &name, ValueLength::Utf16Units)?;
+    let (units, _odd) = text.as_chunks::<UTF16_UNIT_BYTES>();
+    let units: Vec<u16> = units
+        .iter()
+        .map(|unit| u16::from_le_bytes(*unit))
+        .take_while(|unit| *unit != 0)
+        .collect();
+    String::from_utf16(&units).ok()
+}
+
+/// The bytes of one UTF-16 unit.
+const UTF16_UNIT_BYTES: usize = 2;
+
+/// What `VerQueryValueW` counts a value's length in (Microsoft,
+/// `VerQueryValueW`, `puLen`): characters for a string, bytes for the
+/// translation array.
+#[derive(Clone, Copy)]
+enum ValueLength {
+    Bytes,
+    Utf16Units,
+}
+
+/// The bytes of the value `name` in the version resource `resource`, whose
+/// length Windows counts in `unit`. `None` when the resource has no such
+/// value or Windows points outside it.
+fn version_value<'a>(resource: &'a [u8], name: &str, unit: ValueLength) -> Option<&'a [u8]> {
+    let name: Vec<u16> = name.encode_utf16().chain([0]).collect();
+    let mut value: *mut core::ffi::c_void = core::ptr::null_mut();
+    let mut length = 0u32;
+    // SAFETY: `resource` is a version resource GetFileVersionInfoW filled;
+    // `name` is NUL-terminated; Windows points `value` into `resource`.
+    if unsafe {
+        VerQueryValueW(
+            resource.as_ptr().cast(),
+            name.as_ptr(),
+            &raw mut value,
+            &raw mut length,
+        )
+    } == 0
+        || value.is_null()
+    {
+        return None;
+    }
+    let start = (value as usize).checked_sub(resource.as_ptr() as usize)?;
+    let bytes = match unit {
+        ValueLength::Bytes => length as usize,
+        ValueLength::Utf16Units => (length as usize).checked_mul(UTF16_UNIT_BYTES)?,
+    };
+    resource.get(start..start.checked_add(bytes)?)
 }

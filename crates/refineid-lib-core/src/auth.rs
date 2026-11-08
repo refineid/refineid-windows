@@ -216,8 +216,8 @@ pub enum PinStatus {
     /// SELECT or RESET clears the session.
     Verified,
     /// `SW = 0x63CX` -- PIN not currently verified, `X` retries
-    /// left before lockout. `X = 0` means *the next* VERIFY
-    /// failure will lock the card.
+    /// left before lockout. `X = 0` means no tries are left: the
+    /// card answers a presentation itself and spends nothing.
     Remaining(PinRetries),
     /// `SW = 0x6300` -- "verification failed, no retries
     /// information". Some cards return this when retries=0 or
@@ -295,8 +295,9 @@ pub enum VerifyOutcome {
         /// (PIN counter nibble from SW `63Cx`).
         retries_left: PinRetries,
     },
-    /// `SW = 0x6983` / `0x6984` -- authentication method blocked.
-    /// The card won't accept any VERIFY until a PUK unblock.
+    /// `SW = 0x6983` / `0x6984` -- authentication method blocked, or
+    /// `SW = 0x63C0`, no tries left. The card won't accept any VERIFY
+    /// until a PUK unblock.
     Locked,
     /// Anything else -- surfaced as opaque SW for the caller to map.
     Other(u16),
@@ -1007,7 +1008,8 @@ pub enum ChangePinOutcome {
         retries_left: PinRetries,
     },
     /// `SW = 0x6983` / `0x6984` -- card is blocked or PIN usage
-    /// counter exhausted; PUK-driven unblock is the only recovery.
+    /// counter exhausted, or `SW = 0x63C0`, no tries left; PUK-driven
+    /// unblock is the only recovery.
     Locked,
     /// `SW = 0x6700` -- Lc / data-field length didn't match the
     /// card's stored-length expectation. Indicates a host bug.
@@ -1091,6 +1093,10 @@ pub const fn classify_puk_status_sw(sw: StatusWord) -> PukStatus {
     }
 }
 
+/// The count in a `63Cx` answer that says no tries are left: the PIN is
+/// blocked, and its command reached the card and spent nothing.
+const NO_TRIES_LEFT: u8 = 0;
+
 /// Decode the CHANGE REFERENCE DATA response status word.
 #[must_use]
 pub const fn classify_change_pin_sw(sw: StatusWord) -> ChangePinOutcome {
@@ -1100,6 +1106,9 @@ pub const fn classify_change_pin_sw(sw: StatusWord) -> ChangePinOutcome {
     )]
     match sw {
         StatusWord::Success => ChangePinOutcome::Ok,
+        StatusWord::PinIncorrect { retries } if retries.get() == NO_TRIES_LEFT => {
+            ChangePinOutcome::Locked
+        }
         StatusWord::PinIncorrect { retries } => ChangePinOutcome::WrongCurrentPin {
             retries_left: retries,
         },
@@ -1143,6 +1152,9 @@ pub const fn classify_verify_sw(sw: StatusWord) -> VerifyOutcome {
     )]
     match sw {
         StatusWord::Success => VerifyOutcome::Ok,
+        StatusWord::PinIncorrect { retries } if retries.get() == NO_TRIES_LEFT => {
+            VerifyOutcome::Locked
+        }
         StatusWord::PinIncorrect { retries } => VerifyOutcome::WrongPin {
             retries_left: retries,
         },
@@ -1334,11 +1346,6 @@ mod tests {
             classify_verify_sw(StatusWord::from_u16(0x9000)),
             VerifyOutcome::Ok
         );
-        let zero = PinRetries::from_nibble(0).expect("nibble");
-        assert_eq!(
-            classify_verify_sw(StatusWord::from_u16(0x63C0)),
-            VerifyOutcome::WrongPin { retries_left: zero }
-        );
     }
 
     #[test]
@@ -1475,6 +1482,15 @@ mod tests {
             classify_change_pin_sw(StatusWord::from_u16(0x6A82)),
             ChangePinOutcome::Other(0x6A82)
         );
+    }
+
+    #[test]
+    fn an_answer_of_no_tries_left_reads_as_blocked() {
+        let no_tries = StatusWord::PinIncorrect {
+            retries: PinRetries::from_nibble(NO_TRIES_LEFT).expect("fits a nibble"),
+        };
+        assert_eq!(classify_verify_sw(no_tries), VerifyOutcome::Locked);
+        assert_eq!(classify_change_pin_sw(no_tries), ChangePinOutcome::Locked);
     }
 
     #[test]

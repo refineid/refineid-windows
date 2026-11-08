@@ -20,10 +20,21 @@
 # through the Python Install Manager, the repository's .NET local tools, and
 # the Git hooks. Rerun it at any time to update. Run it from a
 # normal (non-elevated) PowerShell; winget and the Visual Studio Installer ask
-# for elevation for the machine-wide installers.
+# for elevation for the machine-wide installers, on the desktop, so someone must
+# be there to answer. doc/toolchain.md covers a machine with no Git yet.
+
+#
+# -Part splits the run where elevation splits it. MachineWide is Git, the GitHub
+# CLI, Visual Studio and .NET, the installers that need elevation; User is
+# everything else and needs none. Unattended, run MachineWide from an elevated
+# process, which answers the prompts without a person, and User from a normal
+# one (doc/toolchain.md).
 
 [CmdletBinding()]
-param()
+param(
+    [ValidateSet('All', 'MachineWide', 'User')]
+    [string]$Part = 'All'
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -183,49 +194,57 @@ function Find-SignTool {
 
 Update-SessionPath
 
+if ($env:SSH_CONNECTION) {
+    throw 'winget does not start in an SSH logon. Run this at the desktop, or in the logged-on user''s session through a scheduled task with /IT, as doc/toolchain.md describes.'
+}
+
 if (-not (Test-Command winget)) {
     throw 'winget was not found. Install App Installer from the Microsoft Store and rerun.'
 }
 
-Sync-WingetPackage 'Git.Git' (Test-Command git)
-Sync-WingetPackage 'GitHub.cli' (Test-Command gh)
-Sync-VisualStudio
+if ($Part -ne 'User') {
+    Sync-WingetPackage 'Git.Git' (Test-Command git)
+    Sync-WingetPackage 'GitHub.cli' (Test-Command gh)
+    Sync-VisualStudio
 
-if (Test-Command rustup) {
-    Write-Host 'Updating rustup to the latest release...'
-    Invoke-Checked 'rustup self update' { rustup self update }
-} else {
-    Sync-WingetPackage 'Rustlang.Rustup' $false
+    Sync-WingetPackage "Microsoft.DotNet.SDK.$dotnetSdkMajor" (Test-DotnetSdk)
+    if (-not (Test-DotnetSdk)) {
+        throw ".NET $dotnetSdkMajor SDK is still missing after installation."
+    }
 }
 
-Sync-WingetPackage "Microsoft.DotNet.SDK.$dotnetSdkMajor" (Test-DotnetSdk)
-if (-not (Test-DotnetSdk)) {
-    throw ".NET $dotnetSdkMajor SDK is still missing after installation."
-}
+if ($Part -ne 'MachineWide') {
+    if (Test-Command rustup) {
+        Write-Host 'Updating rustup to the latest release...'
+        Invoke-Checked 'rustup self update' { rustup self update }
+    } else {
+        Sync-WingetPackage 'Rustlang.Rustup' $false
+    }
 
-# The Python Install Manager provides the python3 command that
-# scripts/test-browser-edge.py and the refineid-core gate scripts call; tag 3
-# selects the latest stable Python 3 release.
-Sync-WingetPackage 'Python.PythonInstallManager' (Test-Command pymanager)
-Write-Host 'Installing or updating the latest Python 3...'
-Invoke-Checked 'pymanager install' { pymanager install --update --yes 3 }
-Invoke-Checked 'python3 --version' { python3 --version }
+    # The Python Install Manager provides the python3 command that
+    # scripts/test-browser-edge.py and the refineid-core gate scripts call; tag 3
+    # selects the latest stable Python 3 release.
+    Sync-WingetPackage 'Python.PythonInstallManager' (Test-Command pymanager)
+    Write-Host 'Installing or updating the latest Python 3...'
+    Invoke-Checked 'pymanager install' { pymanager install --update --yes 3 }
+    Invoke-Checked 'python3 --version' { python3 --version }
 
-Push-Location $repositoryRoot
-try {
-    # With no toolchain name, rustup installs the channel, components, and
-    # targets rust-toolchain.toml names.
-    Write-Host 'Installing the stable Rust toolchain named by rust-toolchain.toml...'
-    Invoke-Checked 'rustup toolchain install' { rustup toolchain install }
-    Invoke-Checked 'rustc --version' { rustc --version }
+    Push-Location $repositoryRoot
+    try {
+        # With no toolchain name, rustup installs the channel, components, and
+        # targets rust-toolchain.toml names.
+        Write-Host 'Installing the stable Rust toolchain named by rust-toolchain.toml...'
+        Invoke-Checked 'rustup toolchain install' { rustup toolchain install }
+        Invoke-Checked 'rustc --version' { rustc --version }
 
-    Write-Host 'Restoring .NET local tools...'
-    Invoke-Checked 'dotnet tool restore' { dotnet tool restore }
+        Write-Host 'Restoring .NET local tools...'
+        Invoke-Checked 'dotnet tool restore' { dotnet tool restore }
 
-    Invoke-Checked 'git config core.hooksPath' { git config core.hooksPath .githooks }
-    Write-Host 'Git hooks: core.hooksPath set to .githooks.'
-} finally {
-    Pop-Location
+        Invoke-Checked 'git config core.hooksPath' { git config core.hooksPath .githooks }
+        Write-Host 'Git hooks: core.hooksPath set to .githooks.'
+    } finally {
+        Pop-Location
+    }
 }
 
 if (Find-SignTool) {

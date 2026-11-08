@@ -12,12 +12,18 @@ publish = false
 workspace = true
 
 [dependencies]
+refineid-dev-errors.workspace = true
 refineid-lib-core.workspace = true
 refineid-rapp-core.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+refineid-doc-sign = { workspace = true, features = ["testkit"] }
 refineid-rapp.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Security_Cryptography"] }
+windows-sys = { workspace = true, features = [
+    "Win32_Security_Credentials",
+    "Win32_Security_Cryptography",
+    "Win32_System_Registry",
+] }

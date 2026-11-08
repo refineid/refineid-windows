@@ -632,7 +632,7 @@ internal sealed partial class CardPage : Page
 
     /// <summary>
     /// Names the new-PIN field and its repeat after the PIN the slot box
-    /// holds: "New basic PIN 1" and "Repeat PIN 1", or the PIN 2 pair.
+    /// holds: "New Basic PIN 1" and "Basic PIN 1 again", or the PIN 2 pair.
     /// </summary>
     private static void LabelPinFields(ComboBox slotBox, PasswordBox newBox, PasswordBox repeatBox)
     {

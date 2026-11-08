@@ -22,10 +22,14 @@
 //! name refers to and asks the phone for a `BrowserAuthenticate` signature
 //! over RAPP, the same operation the Card Module's remote arm uses.
 //!
-//! The provider is read-only. It opens keys that the `RefineID` app placed in
-//! the user's certificate store (`rapp:<pair id>`), reports their public
-//! half from the cached certificate, and signs. Everything else in the
-//! function table returns `NTE_NOT_SUPPORTED`.
+//! The provider is read-only and holds no secret. It opens keys that the
+//! `RefineID` app placed in the user's certificate store (`rapp:<pair id>`),
+//! reports their public half from the certificate of that store entry, and
+//! asks the agent only to sign, so opening a key never waits for the agent,
+//! which is busy for as long as a phone approval takes. The pairing store, with its keys, stays in
+//! the agent and never loads in the browser or Schannel process that opens
+//! a key (Windows STPA W-R-14). Everything else in the function table
+//! returns `NTE_NOT_SUPPORTED`.
 //!
 //! Buffers handed to the caller (`EnumKeys`, `EnumAlgorithms`) come from the
 //! process heap so that either this module's `FreeBuffer` or a plain
@@ -44,12 +48,13 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use refineid_agent_pipe::client::request_signature;
 use refineid_agent_pipe::wire::{SignAnswer, SignRequest};
 use refineid_agent_pipe::{PipeError, SIGNATURE_DEADLINE};
-use refineid_lib_core::x509::{EcCurve, OwnedCert, PublicKeyAlgorithm, extract_rsa_public_key};
+use refineid_lib_core::x509::{
+    EcCurve, OwnedCert, PublicKeyAlgorithm, UnvalidatedCertificate, extract_rsa_public_key,
+};
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::operations::{KeyProfile, SignatureAlgorithm};
-use refineid_rapp_core::store::PairingRecord;
 use refineid_windows_credential_store::{
-    KEY_STORAGE_PROVIDER, ProtectedPairingStore, browser_key_name, browser_key_pair_id,
+    BrowserEntry, KEY_STORAGE_PROVIDER, browser_entries, browser_key_pair_id,
 };
 use windows_sys::Win32::Foundation::{
     HANDLE, NTE_BAD_FLAGS, NTE_BAD_KEYSET, NTE_BAD_SIGNATURE, NTE_BUFFER_TOO_SMALL,
@@ -137,36 +142,31 @@ fn key_kind(certificate: &OwnedCert) -> Option<KeyKind> {
     }
 }
 
-/// The key of a pairing that serves (confirmed by both sides, neither
-/// revoked nor forgotten), like the store's own usable pairing.
-fn key_from_record(record: &PairingRecord) -> Option<OpenKey> {
-    if !record.serves() {
-        return None;
-    }
-    let certificate = record.authentication_certificate()?.clone();
+/// The key of a personal store entry bound to this provider: the pairing its
+/// key name names and the entry's certificate. `None` for an entry whose name
+/// names no pairing or whose certificate holds no key this provider signs
+/// with.
+fn key_from_entry(entry: BrowserEntry) -> Option<OpenKey> {
+    let pair_id = browser_key_pair_id(&entry.name)?;
+    let certificate = OwnedCert::from_der(UnvalidatedCertificate::new(entry.certificate)).ok()?;
     let kind = key_kind(&certificate)?;
     Some(OpenKey {
-        name: browser_key_name(record.pair_id()),
-        pair_id: record.pair_id(),
+        name: entry.name,
+        pair_id,
         certificate,
         kind,
     })
 }
 
-/// The key of the store's usable pairing, the one the agent serves; an
-/// older pairing the agent would refuse is not offered.
+/// The keys this provider serves: one per entry of the user's personal store
+/// bound to it. The process that holds a phone's session writes the entry
+/// while the phone is present and removes it when it is not, so the store is
+/// the one answer to which keys are usable, and no question to the agent.
 fn usable_keys() -> Vec<OpenKey> {
-    match ProtectedPairingStore::load() {
-        Ok(store) => store
-            .usable_pairing()
-            .and_then(key_from_record)
-            .into_iter()
-            .collect(),
-        Err(error) => {
-            refineid_dev_errors::report!(KeyStorageProvider, "pairing store not loaded", error);
-            Vec::new()
-        }
-    }
+    browser_entries()
+        .into_iter()
+        .filter_map(key_from_entry)
+        .collect()
 }
 
 /// The CNG public key blob for the opened key.
@@ -303,7 +303,7 @@ unsafe extern "system" fn OpenKey(
         refineid_dev_errors::report!(
             KeyStorageProvider,
             "OpenKey failed",
-            "no usable pairing with a cached certificate"
+            "no personal store entry offers this key"
         );
         return NTE_BAD_KEYSET;
     };

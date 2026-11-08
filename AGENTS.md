@@ -209,9 +209,21 @@ record for RAPP and its applications.
 
 ## Certificates and trust
 
-- Certificates come from the card, which carries its own, or, for external
-  ones (EU eIDAS), from trusted lists at runtime. No certificates or
-  fingerprints are shipped in the software.
+- The only certificates shipped in any RefineID software are the EU
+  Official Journal's list-signing certificates in the
+  document-verification code; every other anchor comes from the card
+  when present or from the trusted lists at runtime. The PKCS#11
+  module reads the card's root from EF.4334 and its issuing CA from
+  EF.4336 and presents them, with NSS trust records, while the card
+  is present (`crates/refineid-pkcs11/README.md`). No fingerprints
+  are shipped either.
+- The Windows Card Module serves no `msroots` file: Windows would put a
+  card's CAs in the user's Root store, trusted for every purpose
+  (`crates/refineid-minidriver/README.md`, "No card CA"). The agent puts
+  the issuing CA of each FINEID card in a reader into `CurrentUser\CA`,
+  path material that grants no trust, while the card is present; no root
+  enters a store in a release build (same README, "The card's issuing CA
+  in the intermediate store").
 - No pinning or other trust policy is added without the owner's decision.
 - Describe what the code does and cite the source; ask the owner before
   changing trust behavior.

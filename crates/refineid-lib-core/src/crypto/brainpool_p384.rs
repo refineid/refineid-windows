@@ -47,7 +47,7 @@
 //! plausible arithmetic bug without externally sourced test
 //! vectors.
 //!
-//! Consumed by [`crate::pace`] and [`crate::ca`].
+//! Consumed by [`crate::pace`].
 
 use crypto_bigint::{U384, const_monty_params, modular::ConstMontyForm};
 use subtle::ConstantTimeEq;

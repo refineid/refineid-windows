@@ -21,9 +21,8 @@
 //! no cryptographic operation on this host can be trusted, so the only
 //! correct response is to abort.
 //!
-//! Domain nonce / key types ([`crate::ocsp::OcspNonce`], the PACE / AA / CA
-//! ephemeral draws) build on [`fill`] / [`array()`] rather than calling
-//! `getrandom` directly. Public review treats any direct `getrandom` call
+//! Domain nonce / key types (the PACE / AA / CA ephemeral draws) build
+//! on [`fill`] / [`array()`] rather than calling `getrandom` directly. Public review treats any direct `getrandom` call
 //! outside this module as a fail-closed boundary violation, so a new call
 //! site cannot reintroduce a "draw, swallow the error, continue" path --
 //! the mistake this seam exists to make unrepresentable.

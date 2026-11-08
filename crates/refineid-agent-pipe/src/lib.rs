@@ -8,7 +8,9 @@
 //! first instance of its name, grants the current user alone, refuses remote
 //! clients, and serves a client only when Windows reports it running as the
 //! same user in the same Windows session. The provider in turn talks only to a
-//! server Windows reports the same way.
+//! server Windows reports the same way, whose image is the installed agent:
+//! a same-user process that creates the pipe first is refused before it
+//! receives anything.
 //!
 //! [`wire`] is the safe message codec and builds on any host. The Windows
 //! system calls, and the only `unsafe` code here, are in the
@@ -22,6 +24,11 @@
 use std::path::Path;
 use std::time::Duration;
 
+use refineid_rapp_core::operations::{CardOperation, KeyProfile, SignatureAlgorithm};
+
+use crate::calling_program::{CallingProgram, InterfaceLanguage, unnamed_document_description};
+
+pub mod calling_program;
 pub mod wire;
 
 #[cfg(windows)]
@@ -30,6 +37,26 @@ pub mod client;
 pub mod identity;
 #[cfg(windows)]
 pub mod server;
+
+/// The agent's directory under Program Files, as the installer lays it out.
+pub const PRODUCT_DIRECTORY_NAME: &str = "RefineID";
+/// The agent's file name, as the installer lays it out.
+pub const AGENT_IMAGE_NAME: &str = "refineid-agent.exe";
+
+/// Whether `image`, the path Windows reports for a process, is `installed`.
+///
+/// Paths are compared component by component, ignoring case and accepting
+/// `\\` and `/` as separators; a path with a `..` component is neither.
+#[must_use]
+pub fn is_same_image(image: &Path, installed: &Path) -> bool {
+    match (
+        path_components(&image.to_string_lossy()),
+        path_components(&installed.to_string_lossy()),
+    ) {
+        (Some(image), Some(installed)) => !installed.is_empty() && image == installed,
+        _ => false,
+    }
+}
 
 /// The pipe name prefix; the user's SID and Windows session complete it,
 /// so each user's agent in each session has its own name.
@@ -56,29 +83,25 @@ pub const SIGNATURE_DEADLINE: Duration = Duration::from_secs(
     REACH_WINDOW.as_secs() + OPERATION_LIFETIME.as_secs() + TRANSFER_MARGIN.as_secs(),
 );
 
-/// The environment variables that name the Program Files directories,
-/// which only administrators can write to on a default Windows install.
-pub const PROGRAM_DIRECTORY_VARIABLES: [&str; 3] =
-    ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"];
-
-/// The label the phone shows for a program.
+/// The label the operation context carries for a program, or `None` when its
+/// image path names no file.
 ///
 /// A product name for the browsers people use when their image lies under
-/// a Program Files directory this process's environment names
-/// ([`PROGRAM_DIRECTORY_VARIABLES`]), otherwise the image's file name.
-/// The phone shows what asks, not where the request goes, because CNG
-/// does not tell a key storage provider the site.
+/// a Program Files directory Windows reports
+/// ([`identity::program_directories`]), which only administrators can write
+/// to on a default Windows install; otherwise the image's file name, so a
+/// same-user program named `msedge.exe` elsewhere shows as that file and not
+/// as Microsoft Edge. The context says what asks, not where the request
+/// goes, because CNG does not tell a key storage provider the site.
+#[cfg(windows)]
 #[must_use]
-pub fn program_label(image: &Path) -> String {
-    let roots: Vec<String> = PROGRAM_DIRECTORY_VARIABLES
-        .iter()
-        .filter_map(|variable| std::env::var(variable).ok())
-        .collect();
-    program_label_within(image, &roots)
+pub fn program_label(image: &Path) -> Option<String> {
+    program_label_within(image, &identity::program_directories())
 }
 
-/// The label the phone shows for a program whose image is `image`, where
-/// `trusted_roots` are the directories only administrators can write to.
+/// The label the operation context carries for a program whose image is
+/// `image`, where `trusted_roots` are the directories only administrators can
+/// write to, or `None` when `image` names no file.
 ///
 /// A product name for the browsers people use, only when the image lies
 /// strictly below one of `trusted_roots`; otherwise the image's file name.
@@ -86,7 +109,7 @@ pub fn program_label(image: &Path) -> String {
 /// accepting `\` and `/` as separators; a path with a `..` component is
 /// below no root, and an empty root is ignored.
 #[must_use]
-pub fn program_label_within(image: &Path, trusted_roots: &[String]) -> String {
+pub fn program_label_within(image: &Path, trusted_roots: &[String]) -> Option<String> {
     let image = image.to_string_lossy();
     let file = image
         .rsplit(PATH_SEPARATORS)
@@ -103,9 +126,9 @@ pub fn program_label_within(image: &Path, trusted_roots: &[String]) -> String {
     };
     let trusted = trusted_roots.iter().any(|root| lies_below(&image, root));
     match known {
-        Some(name) if trusted => name.to_owned(),
-        _ if file.is_empty() => "A Windows program".to_owned(),
-        _ => file,
+        Some(name) if trusted => Some(name.to_owned()),
+        _ if file.is_empty() => None,
+        _ => Some(file),
     }
 }
 
@@ -128,14 +151,63 @@ fn lies_below(path: &str, root: &str) -> bool {
     !root.is_empty() && path.len() > root.len() && path.starts_with(&root)
 }
 
-/// What the phone shows as the asking party (W-R-10): the program, and the
-/// computer it runs on, labelled as such.
+/// The asking party as the operation context carries it (W-R-10).
+///
+/// The program and the computer it runs on. RAPP section 9.2 requires this
+/// field and calls it `origin`, but no Requester can know the site, so it never
+/// names one, and the phone does not show it (section 11 item 1).
 #[must_use]
 pub fn requester_context(program: &str, computer: &str) -> String {
     if computer.is_empty() {
         program.to_owned()
     } else {
         format!("{program} on {computer}")
+    }
+}
+
+/// The key a program inside whose process a provider runs asks to use.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RemoteKey {
+    /// The authentication key, behind PIN 1.
+    Authentication,
+    /// The qualified signature key, behind PIN 2.
+    QualifiedSignature,
+}
+
+/// The operation a provider running inside the calling `program` sends for
+/// a hash it was handed (W-R-10, W-R-20).
+///
+/// An authentication's context carries the image's file name and the
+/// computer; no directory is trusted for a product name, because this
+/// process's environment belongs to the program being named. A qualified
+/// signature carries, as its `document_name`, the description RAPP
+/// v26.11.2 section 9.3 prescribes when the program names no document,
+/// in the computer's interface `language`: a platform signing call carries
+/// only a hash.
+#[must_use]
+pub fn in_process_operation(
+    key: RemoteKey,
+    program: &CallingProgram,
+    computer: &str,
+    language: InterfaceLanguage,
+    key_profile: KeyProfile,
+    algorithm: SignatureAlgorithm,
+    digest: Vec<u8>,
+) -> CardOperation {
+    match key {
+        RemoteKey::QualifiedSignature => CardOperation::SignDocument {
+            document_name: unnamed_document_description(program, computer, language),
+            contained_files: None,
+            key_profile,
+            algorithm,
+            digest,
+        },
+        RemoteKey::Authentication => CardOperation::BrowserAuthenticate {
+            origin: requester_context(program.file_name(), computer),
+            key_profile,
+            algorithm,
+            digest,
+        },
     }
 }
 
@@ -158,7 +230,7 @@ pub enum PipeError {
     /// Another agent already serves this user (W-R-15).
     AgentRunning,
     /// The process at the other end runs as another user or in another
-    /// session.
+    /// session, or, seen from the provider, is not the installed agent.
     Stranger,
     /// The other end did not answer in time.
     TimedOut,
@@ -218,7 +290,111 @@ mod tests {
     }
 
     fn label(image: &str) -> String {
-        program_label_within(Path::new(image), &roots())
+        program_label_within(Path::new(image), &roots()).expect("the image names a file")
+    }
+
+    const EDGE_IMAGE: &str = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe";
+    const COMPUTER: &str = "EXAMPLE-HOST";
+    const DIGEST: &[u8] = b"a digest of thirty-two bytes ...";
+
+    fn in_process(key: RemoteKey, image: &str) -> CardOperation {
+        let program = CallingProgram::of_image(Path::new(image), Some("Microsoft Edge"))
+            .expect("the image names a file");
+        in_process_operation(
+            key,
+            &program,
+            COMPUTER,
+            InterfaceLanguage::English,
+            KeyProfile::EcdsaP384,
+            SignatureAlgorithm::EcdsaSha256,
+            DIGEST.to_vec(),
+        )
+    }
+
+    fn authentication_context(image: &str) -> String {
+        match in_process(RemoteKey::Authentication, image) {
+            CardOperation::BrowserAuthenticate { origin, .. } => origin,
+            other => panic!("not an authentication: {other:?}"),
+        }
+    }
+
+    fn signed_document_name(image: &str) -> String {
+        match in_process(RemoteKey::QualifiedSignature, image) {
+            CardOperation::SignDocument {
+                document_name,
+                contained_files: None,
+                ..
+            } => document_name,
+            other => panic!("not a single document's signature: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn only_the_installed_image_is_the_agent() {
+        let installed = Path::new(r"C:\Program Files\RefineID\refineid-agent.exe");
+        assert!(is_same_image(installed, installed));
+        assert!(is_same_image(
+            Path::new(r"c:/program files/REFINEID/Refineid-Agent.EXE"),
+            installed
+        ));
+        for other in [
+            r"C:\Users\someone\AppData\Local\Temp\refineid-agent.exe",
+            r"C:\Program Files\RefineID\other.exe",
+            r"C:\Program Files\RefineID\..\RefineID\refineid-agent.exe",
+            r"C:\Program Files\RefineID",
+            "refineid-agent.exe",
+            "",
+        ] {
+            assert!(!is_same_image(Path::new(other), installed), "{other}");
+        }
+        assert!(!is_same_image(Path::new(""), Path::new("")));
+    }
+
+    #[test]
+    fn an_authentication_names_the_program_and_the_computer_and_no_site() {
+        assert_eq!(
+            authentication_context(r"C:\Tools\signer.exe"),
+            "signer.exe on EXAMPLE-HOST"
+        );
+    }
+
+    #[test]
+    fn inside_the_caller_no_directory_earns_a_product_name() {
+        assert_eq!(
+            authentication_context(EDGE_IMAGE),
+            "msedge.exe on EXAMPLE-HOST"
+        );
+    }
+
+    #[test]
+    fn a_qualified_signature_from_a_signing_call_says_no_document_was_named() {
+        assert_eq!(
+            signed_document_name(EDGE_IMAGE),
+            "Microsoft Edge on EXAMPLE-HOST asks for a signature (the program did not name the document)"
+        );
+    }
+
+    #[test]
+    fn the_removed_origin_variables_change_nothing() {
+        const VARIABLES: [&str; 2] = ["REFINEID_RP_ORIGIN", "REFINEID_ORIGIN"];
+        const THIS_TEST: &str = "tests::the_removed_origin_variables_change_nothing";
+        const PLANTED: &str = "https://planted.example";
+        if std::env::var_os(VARIABLES[0]).is_some() {
+            let context = authentication_context(r"C:\Tools\signer.exe");
+            assert_eq!(context, "signer.exe on EXAMPLE-HOST");
+            assert_eq!(
+                signed_document_name(EDGE_IMAGE),
+                "Microsoft Edge on EXAMPLE-HOST asks for a signature (the program did not name the document)"
+            );
+            return;
+        }
+        let mut child =
+            std::process::Command::new(std::env::current_exe().expect("the test binary's path"));
+        child.args(["--exact", THIS_TEST]);
+        for variable in VARIABLES {
+            child.env(variable, PLANTED);
+        }
+        assert!(child.status().expect("the test binary runs").success());
     }
 
     #[test]
@@ -259,8 +435,8 @@ mod tests {
     fn the_root_itself_is_not_below_it() {
         let roots = vec![r"C:\Program Files\msedge.exe".to_owned()];
         assert_eq!(
-            program_label_within(Path::new(r"C:\Program Files\msedge.exe"), &roots),
-            "msedge.exe"
+            program_label_within(Path::new(r"C:\Program Files\msedge.exe"), &roots).as_deref(),
+            Some("msedge.exe")
         );
     }
 
@@ -283,8 +459,9 @@ mod tests {
             program_label_within(
                 Path::new(r"C:\Program Files\Vivaldi\Application\vivaldi.exe"),
                 &slashed
-            ),
-            "Vivaldi"
+            )
+            .as_deref(),
+            Some("Vivaldi")
         );
     }
 
@@ -292,14 +469,14 @@ mod tests {
     fn an_empty_root_trusts_nothing() {
         let roots = vec![String::new()];
         assert_eq!(
-            program_label_within(Path::new(r"C:\Opera\opera.exe"), &roots),
-            "opera.exe"
+            program_label_within(Path::new(r"C:\Opera\opera.exe"), &roots).as_deref(),
+            Some("opera.exe")
         );
     }
 
     #[test]
     fn an_unknown_program_is_its_file_name() {
         assert_eq!(label(r"C:\Program Files\Tool\tool.exe"), "tool.exe");
-        assert_eq!(label(""), "A Windows program");
+        assert_eq!(program_label_within(Path::new(""), &roots()), None);
     }
 }

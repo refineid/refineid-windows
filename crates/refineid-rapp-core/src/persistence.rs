@@ -7,8 +7,9 @@
 //! no external serde surface. The keys travel inside the engine's own
 //! encoding of its record ([`refineid_rapp::encode_pair_record`]), which
 //! [`refineid_rapp::decode_pair_record`] checks back into a record whose
-//! every predicate holds; the cached certificates come back only as
-//! certificates that parse.
+//! every predicate holds. A record holds no certificate: the card's
+//! authentication certificate is read from the phone at every session and
+//! kept in memory only.
 //!
 //! The encoded blob carries the private key, so [`encode_pairing_record`]
 //! returns it inside [`Zeroizing`]; callers hand it straight to device-only
@@ -17,13 +18,13 @@
 //! fails closed rather than yielding a half-built record. Neither direction
 //! ever prints a key.
 //!
-//! Stored records are not migrated. A record written for an earlier RAPP
-//! protocol version, or one whose engine record is in a format the engine
-//! does not read, is refused: [`decode_pairing_records`] leaves it out of
-//! the set and counts it, so the store that writes the set back drops it
+//! Stored records are not migrated. A record of a superseded revision,
+//! written for an earlier RAPP protocol version or holding certificates a
+//! record may no longer hold, or one whose engine record is in a format the
+//! engine does not read, is refused: [`decode_pairing_records`] leaves it out
+//! of the set and counts it, so the store that writes the set back drops it
 //! for good and its peer pairs again.
 
-use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
 use refineid_rapp::{
     DisplayName, EncodedPairRecord, EndpointRole, PAIR_ID_SIZE, PairRecordCodecError,
 };
@@ -36,11 +37,12 @@ use crate::store::{PairingRecord, PairingState};
 const PAIRING_BLOB_MAGIC: &[u8] = b"RAPP-pair-record";
 
 /// The pairing-record encoding revision.
-const PAIRING_BLOB_VERSION: u8 = 9;
+const PAIRING_BLOB_VERSION: u8 = 11;
 
-/// The highest revision written for an earlier RAPP protocol version. Those
-/// pairings cannot open RAPP v26.11.2 sessions, so they are not loaded.
-const LAST_EARLIER_PROTOCOL_BLOB_VERSION: u8 = 8;
+/// The highest superseded revision. Those records were written for an earlier
+/// RAPP protocol version, or hold certificates a record may no longer hold,
+/// so they are not loaded.
+const LAST_SUPERSEDED_BLOB_VERSION: u8 = 10;
 
 /// The lowest revision ever written.
 const FIRST_BLOB_VERSION: u8 = 1;
@@ -53,8 +55,8 @@ const PAIRING_SET_VERSION: u8 = 1;
 
 /// Keys tag: the engine's record, keys held, follows.
 const KEYS_HELD: u8 = 0;
-/// Keys tag: the keys are destroyed; the pair identifier, who revoked and
-/// the peer's last display name follow.
+/// Keys tag: the keys are destroyed; the pair identifier, who revoked, when,
+/// and the peer's last display name follow.
 const KEYS_REVOKED: u8 = 1;
 
 /// Boolean false on the wire.
@@ -65,14 +67,17 @@ const BOOLEAN_TRUE: u8 = 1;
 /// Bytes of one encoded length.
 const LENGTH_BYTES: usize = size_of::<u32>();
 
+/// Bytes of a revoked record's revocation time, big-endian.
+const TIME_BYTES: usize = size_of::<u64>();
+
 /// Why a stored pairing blob could not be encoded or decoded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PairingCodecError {
     /// The blob did not begin with the pairing-record format tag.
     BadMagic,
-    /// The record was written for an earlier RAPP protocol version, whose
-    /// pairings cannot open sessions with this one.
-    EarlierProtocol {
+    /// The record is of a superseded revision: written for an earlier RAPP
+    /// protocol version, or holding certificates a record may no longer hold.
+    Superseded {
         /// The revision found in the blob.
         found: u8,
     },
@@ -99,8 +104,6 @@ pub enum PairingCodecError {
     PairRecord(PairRecordCodecError),
     /// The engine's record belongs to a custodian, not to this requester.
     NotRequester,
-    /// A cached certificate does not parse as an X.509 certificate.
-    InvalidCertificate,
 }
 
 impl core::fmt::Display for PairingCodecError {
@@ -110,11 +113,8 @@ impl core::fmt::Display for PairingCodecError {
             Self::UnsupportedVersion { found } => {
                 write!(formatter, "unsupported pairing-record revision {found}")
             }
-            Self::EarlierProtocol { found } => {
-                write!(
-                    formatter,
-                    "pairing-record revision {found} belongs to an earlier protocol version"
-                )
+            Self::Superseded { found } => {
+                write!(formatter, "pairing-record revision {found} is superseded")
             }
             Self::Truncated => formatter.write_str("pairing record ended mid-field"),
             Self::TrailingBytes => formatter.write_str("pairing record had trailing bytes"),
@@ -127,9 +127,6 @@ impl core::fmt::Display for PairingCodecError {
             Self::Oversized => formatter.write_str("pairing record field too long"),
             Self::PairRecord(error) => write!(formatter, "pairing keys refused: {error}"),
             Self::NotRequester => formatter.write_str("pairing record is not a requester's"),
-            Self::InvalidCertificate => {
-                formatter.write_str("pairing record held an invalid certificate")
-            }
         }
     }
 }
@@ -166,14 +163,11 @@ pub fn encode_pairing_record(
                 state,
                 PairingState::Revoked { by_peer: true }
             )));
+            out.extend_from_slice(&record.revoked_at_ms().unwrap_or_default().to_be_bytes());
             put_bytes(&mut out, record.peer_display_name().as_str().as_bytes())?;
         }
     }
     put_bytes(&mut out, record.peer_platform().as_bytes())?;
-    put_optional_certificate(&mut out, record.authentication_certificate())?;
-    put_optional_certificate(&mut out, record.signature_certificate())?;
-    put_optional_certificate(&mut out, record.root_certificate())?;
-    put_optional_certificate(&mut out, record.intermediate_certificate())?;
     Ok(out)
 }
 
@@ -183,8 +177,7 @@ pub fn encode_pairing_record(
 ///
 /// Fails when the blob is not a pairing record, uses an unknown revision, ends
 /// mid-field, carries trailing bytes, or holds a malformed field: keys the
-/// engine refuses, a custodian's record, or a certificate that does not
-/// parse.
+/// engine refuses or a custodian's record.
 pub fn decode_pairing_record(blob: &[u8]) -> Result<PairingRecord, PairingCodecError> {
     let mut reader = Reader::new(blob);
     if reader.take(PAIRING_BLOB_MAGIC.len())? != PAIRING_BLOB_MAGIC {
@@ -192,8 +185,8 @@ pub fn decode_pairing_record(blob: &[u8]) -> Result<PairingRecord, PairingCodecE
     }
     let version = reader.take_u8()?;
     if version != PAIRING_BLOB_VERSION {
-        if (FIRST_BLOB_VERSION..=LAST_EARLIER_PROTOCOL_BLOB_VERSION).contains(&version) {
-            return Err(PairingCodecError::EarlierProtocol { found: version });
+        if (FIRST_BLOB_VERSION..=LAST_SUPERSEDED_BLOB_VERSION).contains(&version) {
+            return Err(PairingCodecError::Superseded { found: version });
         }
         return Err(PairingCodecError::UnsupportedVersion { found: version });
     }
@@ -210,29 +203,20 @@ pub fn decode_pairing_record(blob: &[u8]) -> Result<PairingRecord, PairingCodecE
         KEYS_REVOKED => {
             let pair_id = PairId::from_array(reader.take_array::<PAIR_ID_SIZE>()?);
             let by_peer = boolean_from_tag(reader.take_u8()?)?;
+            let at_ms = u64::from_be_bytes(reader.take_array::<TIME_BYTES>()?);
             let name = DisplayName::parse(reader.take_text()?)
                 .map_err(|_| PairingCodecError::InvalidDisplayName)?;
-            Err((pair_id, by_peer, name))
+            Err((pair_id, by_peer, at_ms, name))
         }
         _ => return Err(PairingCodecError::InvalidKeys),
     };
     let platform = reader.take_text()?;
-    let mut record = match keys {
+    let record = match keys {
         Ok(keys) => PairingRecord::new(keys, platform),
-        Err((pair_id, by_peer, name)) => PairingRecord::revoked(pair_id, by_peer, name, platform),
+        Err((pair_id, by_peer, at_ms, name)) => {
+            PairingRecord::revoked(pair_id, by_peer, at_ms, name, platform)
+        }
     };
-    if let Some(certificate) = reader.take_optional_certificate()? {
-        record.remember_authentication_certificate(certificate);
-    }
-    if let Some(certificate) = reader.take_optional_certificate()? {
-        record.remember_signature_certificate(certificate);
-    }
-    if let Some(certificate) = reader.take_optional_certificate()? {
-        record.remember_root_certificate(certificate);
-    }
-    if let Some(certificate) = reader.take_optional_certificate()? {
-        record.remember_intermediate_certificate(certificate);
-    }
     reader.finish()?;
     Ok(record)
 }
@@ -265,8 +249,8 @@ pub struct PairingSet {
     /// The records this build reads, in stored order.
     pub records: Vec<PairingRecord>,
     /// How many stored records were refused and left out of
-    /// [`Self::records`]: written for an earlier RAPP protocol version, or
-    /// holding an engine record in a format the engine does not read.
+    /// [`Self::records`]: of a superseded revision, or holding an engine
+    /// record in a format the engine does not read.
     pub refused: usize,
 }
 
@@ -275,7 +259,7 @@ pub struct PairingSet {
 const fn is_refused_record(error: PairingCodecError) -> bool {
     matches!(
         error,
-        PairingCodecError::EarlierProtocol { .. }
+        PairingCodecError::Superseded { .. }
             | PairingCodecError::PairRecord(PairRecordCodecError::UnsupportedVersion)
     )
 }
@@ -346,20 +330,6 @@ fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), PairingCodecError> {
     Ok(())
 }
 
-/// Appends an optional certificate as its length-prefixed DER.
-fn put_optional_certificate(
-    out: &mut Vec<u8>,
-    certificate: Option<&OwnedCert>,
-) -> Result<(), PairingCodecError> {
-    if let Some(certificate) = certificate {
-        out.push(BOOLEAN_TRUE);
-        put_bytes(out, certificate.as_der())
-    } else {
-        out.push(BOOLEAN_FALSE);
-        Ok(())
-    }
-}
-
 /// A bounds-checked forward cursor over a blob.
 struct Reader<'blob> {
     remaining: &'blob [u8],
@@ -416,18 +386,6 @@ impl<'blob> Reader<'blob> {
             .map_err(|_error| PairingCodecError::InvalidText)
     }
 
-    /// Takes an optional certificate, parsed at this border.
-    fn take_optional_certificate(&mut self) -> Result<Option<OwnedCert>, PairingCodecError> {
-        if !boolean_from_tag(self.take_u8()?)? {
-            return Ok(None);
-        }
-        OwnedCert::from_der(UnvalidatedCertificate::new(
-            self.take_length_prefixed()?.to_vec(),
-        ))
-        .map(Some)
-        .map_err(|_error| PairingCodecError::InvalidCertificate)
-    }
-
     /// Confirms the blob was consumed exactly.
     const fn finish(&self) -> Result<(), PairingCodecError> {
         if self.remaining.is_empty() {
@@ -445,19 +403,17 @@ impl<'blob> Reader<'blob> {
 )]
 mod tests {
     use super::{
-        LAST_EARLIER_PROTOCOL_BLOB_VERSION, PAIRING_BLOB_MAGIC, PAIRING_SET_MAGIC,
-        PAIRING_SET_VERSION, PairingCodecError, Reader, decode_pairing_record,
-        decode_pairing_records, encode_pairing_record, encode_pairing_records, put_bytes,
-        put_length,
+        LAST_SUPERSEDED_BLOB_VERSION, PAIRING_BLOB_MAGIC, PAIRING_SET_MAGIC, PAIRING_SET_VERSION,
+        PairingCodecError, Reader, decode_pairing_record, decode_pairing_records,
+        encode_pairing_record, encode_pairing_records, put_bytes, put_length,
     };
-    use refineid_lib_core::x509::OwnedCert;
     use refineid_rapp::{
         PAIR_RECORD_FORMAT_VERSION, PairRecordCodecError, WireValue, decode_deterministic_cbor,
         encode_deterministic_cbor,
     };
 
     use crate::store::fixtures::{
-        FIRST_PAIR, SECOND_PAIR, certificate, record, unconfirmed_record,
+        CREATED_AT_MS, FIRST_PAIR, SECOND_PAIR, record, unconfirmed_record,
     };
     use crate::store::{
         MemoryPairingStore, PairingRecord, PairingState, PairingStore, forget_pairing,
@@ -474,14 +430,9 @@ mod tests {
     /// display name.
     const PEER_DISPLAY_NAME_FIELD: &str = "peer_display_name";
 
-    /// The full record, certificates included.
+    /// The full record.
     fn sample() -> PairingRecord {
-        let mut sample = record(FIRST_PAIR);
-        sample.remember_authentication_certificate(certificate());
-        sample.remember_signature_certificate(certificate());
-        sample.remember_root_certificate(certificate());
-        sample.remember_intermediate_certificate(certificate());
-        sample
+        record(FIRST_PAIR)
     }
 
     fn round_trip(record: &PairingRecord) -> PairingRecord {
@@ -513,22 +464,6 @@ mod tests {
                 .pair_record()
                 .map(refineid_rapp::PairRecord::grants_hash)
         );
-        assert_eq!(
-            left.authentication_certificate().map(OwnedCert::as_der),
-            right.authentication_certificate().map(OwnedCert::as_der)
-        );
-        assert_eq!(
-            left.signature_certificate().map(OwnedCert::as_der),
-            right.signature_certificate().map(OwnedCert::as_der)
-        );
-        assert_eq!(
-            left.root_certificate().map(OwnedCert::as_der),
-            right.root_certificate().map(OwnedCert::as_der)
-        );
-        assert_eq!(
-            left.intermediate_certificate().map(OwnedCert::as_der),
-            right.intermediate_certificate().map(OwnedCert::as_der)
-        );
     }
 
     /// A store holding `record` in the state `prepare` leaves it in.
@@ -541,6 +476,15 @@ mod tests {
         store.insert(record).unwrap();
         prepare(&mut store);
         round_trip(store.get(pair_id).unwrap())
+    }
+
+    #[test]
+    fn a_revocation_time_round_trips() {
+        let mut store = MemoryPairingStore::new();
+        store.insert(sample()).unwrap();
+        revoke_pairing(&mut store, FIRST_PAIR, true, CREATED_AT_MS).unwrap();
+        let decoded = round_trip(store.get(FIRST_PAIR).unwrap());
+        assert_eq!(decoded.revoked_at_ms(), Some(CREATED_AT_MS));
     }
 
     #[test]
@@ -574,12 +518,11 @@ mod tests {
     #[test]
     fn round_trips_a_revoked_record() {
         let decoded = stored(sample(), |store| {
-            revoke_pairing(store, FIRST_PAIR, true).unwrap();
+            revoke_pairing(store, FIRST_PAIR, true, CREATED_AT_MS).unwrap();
         });
         assert_eq!(decoded.state(), PairingState::Revoked { by_peer: true });
         assert_eq!(decoded.pair_id(), FIRST_PAIR);
         assert!(decoded.pair_record().is_none());
-        assert!(decoded.authentication_certificate().is_none());
     }
 
     #[test]
@@ -662,8 +605,8 @@ mod tests {
     #[test]
     fn refuses_a_record_of_an_earlier_protocol_version() {
         assert!(matches!(
-            decode_pairing_record(&with_version(&sample(), LAST_EARLIER_PROTOCOL_BLOB_VERSION)),
-            Err(PairingCodecError::EarlierProtocol { .. })
+            decode_pairing_record(&with_version(&sample(), LAST_SUPERSEDED_BLOB_VERSION)),
+            Err(PairingCodecError::Superseded { .. })
         ));
     }
 
@@ -715,7 +658,7 @@ mod tests {
     #[test]
     fn a_set_leaves_out_records_of_an_earlier_protocol_version() {
         let current = record(SECOND_PAIR);
-        let earlier = with_version(&sample(), LAST_EARLIER_PROTOCOL_BLOB_VERSION);
+        let earlier = with_version(&sample(), LAST_SUPERSEDED_BLOB_VERSION);
         let decoded = decode_pairing_records(&set_of(&[
             earlier,
             encode_pairing_record(&current).unwrap().to_vec(),

@@ -153,7 +153,7 @@ const fn card_absent(reader: CardReader) -> CardStatusMessage {
 /// A registered consequential operation for the authentication tests.
 fn authentication_operation() -> CardOperation {
     CardOperation::BrowserAuthenticate {
-        origin: "kortti.tunnistautuminen.suomi.fi".into(),
+        origin: "loopback.exe on EXAMPLE-HOST".into(),
         key_profile: KeyProfile::Rsa3072,
         algorithm: SignatureAlgorithm::RsaPkcs1Sha256,
         digest: Sha256::digest(LOGIN_CHALLENGE).to_vec(),

@@ -133,10 +133,10 @@
     <value>Vaihdettava tunnus</value>
   </data>
   <data name="ChangeSlotPin1Item.Content" xml:space="preserve">
-    <value>Perustunnusluku (PIN 1)</value>
+    <value>Perustunnusluku 1</value>
   </data>
   <data name="ChangeSlotPin2Item.Content" xml:space="preserve">
-    <value>Allekirjoitustunnusluku (PIN 2)</value>
+    <value>Allekirjoitustunnusluku 2</value>
   </data>
   <data name="CurrentPinBox.Header" xml:space="preserve">
     <value>Nykyinen tunnusluku</value>
@@ -163,10 +163,10 @@
     <value>Palautettava tunnus</value>
   </data>
   <data name="UnblockSlotPin1Item.Content" xml:space="preserve">
-    <value>Perustunnusluku (PIN 1)</value>
+    <value>Perustunnusluku 1</value>
   </data>
   <data name="UnblockSlotPin2Item.Content" xml:space="preserve">
-    <value>Allekirjoitustunnusluku (PIN 2)</value>
+    <value>Allekirjoitustunnusluku 2</value>
   </data>
   <data name="PukBox.Header" xml:space="preserve">
     <value>Palautuskoodi (PUK)</value>
@@ -199,28 +199,28 @@
     <value>Aktivointitunnusluku kirjeestä</value>
   </data>
   <data name="ActivationPin1Box.Header" xml:space="preserve">
-    <value>Uusi perustunnusluku (PIN 1)</value>
+    <value>Uusi perustunnusluku 1</value>
   </data>
   <data name="ActivationPin1Box.AutomationProperties.Name" xml:space="preserve">
-    <value>Uusi perustunnusluku (PIN 1)</value>
+    <value>Uusi perustunnusluku 1</value>
   </data>
   <data name="ActivationPin1ConfirmationBox.Header" xml:space="preserve">
-    <value>Toista PIN 1</value>
+    <value>Perustunnusluku 1 uudelleen</value>
   </data>
   <data name="ActivationPin1ConfirmationBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Toista PIN 1</value>
+    <value>Perustunnusluku 1 uudelleen</value>
   </data>
   <data name="ActivationPin2Box.Header" xml:space="preserve">
-    <value>Uusi allekirjoitustunnusluku (PIN 2)</value>
+    <value>Uusi allekirjoitustunnusluku 2</value>
   </data>
   <data name="ActivationPin2Box.AutomationProperties.Name" xml:space="preserve">
-    <value>Uusi allekirjoitustunnusluku (PIN 2)</value>
+    <value>Uusi allekirjoitustunnusluku 2</value>
   </data>
   <data name="ActivationPin2ConfirmationBox.Header" xml:space="preserve">
-    <value>Toista PIN 2</value>
+    <value>Allekirjoitustunnusluku 2 uudelleen</value>
   </data>
   <data name="ActivationPin2ConfirmationBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Toista PIN 2</value>
+    <value>Allekirjoitustunnusluku 2 uudelleen</value>
   </data>
   <data name="ActivateButton.Content" xml:space="preserve">
     <value>Aktivoi henkilökortti</value>
@@ -268,10 +268,10 @@
     <value>ASiC-E-paketti</value>
   </data>
   <data name="PinBox.Header" xml:space="preserve">
-    <value>Allekirjoitustunnusluku (PIN 2)</value>
+    <value>Allekirjoitustunnusluku 2</value>
   </data>
   <data name="PinBox.AutomationProperties.Name" xml:space="preserve">
-    <value>Allekirjoitustunnusluku (PIN 2)</value>
+    <value>Allekirjoitustunnusluku 2</value>
   </data>
   <data name="ReasonBox.Header" xml:space="preserve">
     <value>Syy</value>
@@ -303,11 +303,14 @@
   <data name="SignatureValid" xml:space="preserve">
     <value>Kelvollinen</value>
   </data>
+  <data name="SignatureIndeterminate" xml:space="preserve">
+    <value>Ei varmistettu</value>
+  </data>
   <data name="SignatureInvalid" xml:space="preserve">
     <value>Virheellinen</value>
   </data>
   <data name="Pin2LengthRule" xml:space="preserve">
-    <value>PIN 2:n on oltava {0}–{1} numeroa.</value>
+    <value>Allekirjoitustunnusluvun 2 on oltava {0}–{1} numeroa.</value>
   </data>
   <data name="ReasonTooLong" xml:space="preserve">
     <value>Syy on liian pitkä.</value>
@@ -318,6 +321,9 @@
   </data>
   <data name="DocumentSigned" xml:space="preserve">
     <value>Allekirjoitettu</value>
+  </data>
+  <data name="SignedDevelopmentBuild" xml:space="preserve">
+    <value>Allekirjoitettu kehitysversiolla alemmalle tasolle kuin julkaistu versio vaatii</value>
   </data>
   <data name="SignatureDidNotVerify" xml:space="preserve">
     <value>{0}: allekirjoituksen tarkastus ei onnistunut</value>
@@ -359,15 +365,15 @@
     <value>Pääsykoodia tarkistetaan</value>
   </data>
   <data name="NewPin1Field" xml:space="preserve">
-    <value>Uusi perustunnusluku (PIN 1)</value>
+    <value>Uusi perustunnusluku 1</value>
   </data>
   <data name="NewPin2Field" xml:space="preserve">
-    <value>Uusi allekirjoitustunnusluku (PIN 2)</value>
+    <value>Uusi allekirjoitustunnusluku 2</value>
   </data>
   <data name="RepeatPin1Field" xml:space="preserve">
-    <value>Toista PIN 1</value>
+    <value>Perustunnusluku 1 uudelleen</value>
   </data>
   <data name="RepeatPin2Field" xml:space="preserve">
-    <value>Toista PIN 2</value>
+    <value>Allekirjoitustunnusluku 2 uudelleen</value>
   </data>
 </root>

@@ -16,10 +16,15 @@ pcsc.workspace = true
 zeroize.workspace = true
 refineid-card-manager-core.workspace = true
 refineid-doc-sign.workspace = true
+refineid-emrtd.workspace = true
 refineid-lib-core.workspace = true
 refineid-lib-pcsc.workspace = true
+refineid-pace.workspace = true
+refineid-pcsc.workspace = true
+refineid-pkcs15.workspace = true
 refineid-rapp-core.workspace = true
 refineid-windows-credential-store.workspace = true
+refineid-windows-doc-sign.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
@@ -27,10 +32,12 @@ windows = { workspace = true, features = [
     "Win32_Globalization",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_GdiPlus",
+    "Win32_System_Com",
     "Win32_System_LibraryLoader",
     "Win32_System_SystemServices",
     "Win32_UI_Controls",
     "Win32_UI_Controls_Dialogs",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

@@ -91,7 +91,6 @@ fn main() {
         Some("clear-pairing") => clear_pairing(),
         Some("forget-pairing") => forget_pairing_cmd(&arguments[1..]),
         Some("list-pairing") => list_pairing(),
-        Some("export-cert") => export_cert(&arguments[1..]),
         Some("export-pairing") => export_pairing(&arguments[1..]),
         Some("import-pairing") => import_pairing(&arguments[1..]),
         #[cfg(windows)]
@@ -114,12 +113,11 @@ fn main() {
                 "      [--count <n>] [--identity-name <name>] [--person-id <id>] [--card-absent]"
             );
             eprintln!(
-                "  refineid-rapp setup-mock-pairing [--cert <path>] [--root-ca <path>] [--intermediate-ca <path>] [--state <path>] [--serve]"
+                "  refineid-rapp setup-mock-pairing [--cert <path>] [--state <path>] [--serve]"
             );
             eprintln!("  refineid-rapp forget-pairing <pair-id>");
             eprintln!("  refineid-rapp clear-pairing   (local wipe; no phone is told)");
             eprintln!("  refineid-rapp list-pairing");
-            eprintln!("  refineid-rapp export-cert [<path>]");
             eprintln!("  refineid-rapp export-pairing [<path>]");
             eprintln!("  refineid-rapp import-pairing <path>");
             #[cfg(windows)]
@@ -414,40 +412,6 @@ pub(crate) fn profile_list(profiles: &[ProfileName]) -> String {
         .join(", ")
 }
 
-fn record_certificate_outcome<S: PairingStore>(
-    requester: &mut Requester<S>,
-    pair_id: PairId,
-    operation: &CardOperation,
-    outcome: &OperationOutcome,
-) {
-    let OperationOutcome::Completed(CardOperationResult::Certificate(der)) = outcome else {
-        return;
-    };
-    if !matches!(
-        operation,
-        CardOperation::ReadCertificate {
-            kind: CertificateKind::Authentication,
-        }
-    ) {
-        return;
-    }
-    let Ok(certificate) = OwnedCert::from_der(UnvalidatedCertificate::new(der.clone())) else {
-        println!("warning: the phone's certificate does not parse");
-        return;
-    };
-    let update_res = requester.store_mut().update(pair_id, &mut |rec| {
-        rec.remember_authentication_certificate(certificate.clone());
-    });
-    if let Err(e) = update_res {
-        println!("warning: could not keep the certificate in the pairing store: {e:?}");
-    } else {
-        println!(
-            "persisted authentication certificate ({} bytes) to store",
-            der.len()
-        );
-    }
-}
-
 /// Dials sessions for one pairing until interrupted: each session runs the
 /// read operations and an optional signature, then disconnects. Shared by
 /// `pair-demo` and `reconnect`.
@@ -492,7 +456,7 @@ fn serve_sessions<S: PairingStore>(
         ];
         if let Some((key_profile, algorithm)) = sign_profile {
             operations.push(CardOperation::BrowserAuthenticate {
-                origin: "rapp-demo.refineid.fi".into(),
+                origin: DEMO_REQUESTER_CONTEXT.into(),
                 key_profile,
                 algorithm,
                 digest: demo_digest(algorithm)?,
@@ -504,7 +468,6 @@ fn serve_sessions<S: PairingStore>(
             match requester.execute(&mut session, operation, OPERATION_EXPIRY_MS) {
                 Ok(outcome) => {
                     report(operation, &outcome);
-                    record_certificate_outcome(requester, pair_id, operation, &outcome);
                     flush_now();
                 }
                 Err(error) => {
@@ -612,6 +575,9 @@ fn confirm_grants(peer: &PeerIntroduction, requested: &[ProfileName]) -> Option<
 }
 
 /// A fresh random digest of the algorithm's registered length.
+/// The asking party the demo's authentication names: this tool, not a site.
+const DEMO_REQUESTER_CONTEXT: &str = "refineid-rapp";
+
 fn demo_digest(algorithm: SignatureAlgorithm) -> Result<Vec<u8>, String> {
     let mut digest = Vec::new();
     while digest.len() < algorithm.digest_length() {
@@ -680,8 +646,6 @@ fn read_optional(path: Option<&str>, label: &str) -> Result<Option<OwnedCert>, S
 
 fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
     let mut cert_path = None;
-    let mut root_ca_path = None;
-    let mut intermediate_ca_path = None;
     let mut state_path = "mock-proxy.state".to_owned();
     let mut serve = false;
     let mut cursor = arguments.iter();
@@ -694,8 +658,6 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
         };
         match flag.as_str() {
             "--cert" => cert_path = Some(value()?),
-            "--root-ca" => root_ca_path = Some(value()?),
-            "--intermediate-ca" => intermediate_ca_path = Some(value()?),
             "--state" => state_path = value()?,
             "--serve" => serve = true,
             other => return Err(format!("unknown flag {other}")),
@@ -705,8 +667,6 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
     let defaults = MockProxyOptions::with_mock_certificate()?;
     let certificate =
         read_optional(cert_path.as_deref(), "certificate")?.unwrap_or(defaults.certificate);
-    let root = read_optional(root_ca_path.as_deref(), "root CA")?;
-    let intermediate = read_optional(intermediate_ca_path.as_deref(), "intermediate CA")?;
 
     let options = MockProxyOptions {
         code: Some(MOCK_PAIRING_CODE.to_owned()),
@@ -739,29 +699,9 @@ fn setup_mock_pairing(arguments: &[String]) -> Result<(), String> {
         )
         .map_err(|e| format!("pairing failed: {e:?}"))?;
 
-    requester
-        .store_mut()
-        .update(pair_id, &mut |rec| {
-            rec.remember_authentication_certificate(certificate.clone());
-            rec.remember_signature_certificate(certificate.clone());
-            if let Some(root) = &root {
-                rec.remember_root_certificate(root.clone());
-            }
-            if let Some(intermediate) = &intermediate {
-                rec.remember_intermediate_certificate(intermediate.clone());
-            }
-        })
-        .map_err(|e| format!("failed to update pairing record: {e:?}"))?;
-
     println!("Mock pairing established and stored in Windows Credential Store:");
     println!("  pair_id: {}", hex::encode(pair_id.as_bytes()));
     println!("  auth_cert: {} bytes", certificate.as_der().len());
-    if let Some(r) = &root {
-        println!("  root_ca: {} bytes", r.as_der().len());
-    }
-    if let Some(i) = &intermediate {
-        println!("  intermediate_ca: {} bytes", i.as_der().len());
-    }
     println!("  proxy state saved to: {state_path}");
 
     if serve {
@@ -845,36 +785,7 @@ fn list_pairing() -> Result<(), String> {
             "      Profiles: {}",
             profile_list(record.granted_profiles())
         );
-        println!(
-            "      Has Auth Cert: {}",
-            record.authentication_certificate().is_some()
-        );
-        println!("      Has Root CA: {}", record.root_certificate().is_some());
-        println!(
-            "      Has Intermediate CA: {}",
-            record.intermediate_certificate().is_some()
-        );
     }
-    Ok(())
-}
-
-fn export_cert(arguments: &[String]) -> Result<(), String> {
-    let out_path = arguments
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "auth_cert.der".to_owned());
-    let store = ProtectedPairingStore::load()
-        .map_err(|e| format!("cannot load ProtectedPairingStore: {e}"))?;
-    let record = store.usable_pairing().ok_or("no usable pairing found")?;
-    let auth_der = record
-        .authentication_certificate()
-        .ok_or("no auth cert stored in pairing")?
-        .as_der();
-    std::fs::write(&out_path, auth_der).map_err(|e| format!("failed to write {out_path}: {e}"))?;
-    println!(
-        "Exported auth cert ({} bytes) to {out_path}",
-        auth_der.len()
-    );
     Ok(())
 }
 
@@ -1004,7 +915,8 @@ mod tests {
     #[test]
     fn clearing_removes_only_what_the_attempt_revoked() {
         let mut requester = requester(true);
-        revoke_pairing(requester.store_mut(), FIRST_PAIR, false).expect("revoke held");
+        revoke_pairing(requester.store_mut(), FIRST_PAIR, false, CREATED_AT_MS)
+            .expect("revoke held");
         clear_revoked_pairings(&mut requester, &[FIRST_PAIR, SECOND_PAIR]);
         assert!(requester.store().get(FIRST_PAIR).is_err());
         assert!(requester.store().get(SECOND_PAIR).is_ok());
