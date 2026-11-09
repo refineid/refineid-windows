@@ -45,9 +45,9 @@ use crypto_bigint::{
 
 use crate::ber::{BerTlv, BerTlvAny, BerTlvIter, Integer, OctetString, Oid, Sequence};
 use crate::crypto::container::{EcdsaDer, EcdsaP256, EcdsaP384, Signature};
-use crate::crypto::digest::{Sha1, Sha224, Sha256, Sha384, Sha512};
 use crate::hex::Hex;
 use crate::oid::{Oid as KnownOid, known};
+use refineid_digest::{Sha1, Sha224, Sha256, Sha384, Sha512};
 
 /// SEC1 uncompressed-point tag byte.
 const SEC1_UNCOMPRESSED_TAG: u8 = 0x04;
