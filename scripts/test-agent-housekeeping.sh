@@ -25,6 +25,7 @@ stale_after_seconds=86400
 idle_seconds=$((2 * stale_after_seconds))
 
 sandbox=$(mktemp -d)
+sandbox=$(cd "${sandbox}" && pwd -P)
 trap 'rm -rf "${sandbox}"' EXIT
 
 # The layout mirrors the policy: the repository beside a wt/ directory under
@@ -34,9 +35,15 @@ worktrees="${sandbox}/src/wt"
 mkdir -p "${repo}" "${worktrees}"
 
 git -C "${repo}" init --quiet --initial-branch=main
+# Match worktree paths to the form Git prints in its porcelain listing.
+# Keep sandbox itself in POSIX form for the wrapper directory in PATH.
+repo=$(git -C "${repo}" rev-parse --show-toplevel)
+worktrees="${repo%/*}/wt"
 git -C "${repo}" config user.name "Housekeeping Test"
 git -C "${repo}" config user.email "housekeeping@example.invalid"
-git -C "${repo}" commit --quiet --allow-empty -m "Initial commit"
+echo '* text=auto eol=lf' >"${repo}/.gitattributes"
+git -C "${repo}" add .gitattributes
+git -C "${repo}" commit --quiet -m "Initial commit"
 
 seconds_ago() {
   echo $(( $(date +%s) - $1 ))
@@ -130,6 +137,83 @@ set_mtime "${path}" "$(seconds_ago "${idle_seconds}")"
 output=$(run_housekeeping --clean)
 expect_verdict "${label}" "REVIEW (needs an owner decision)" "${output}"
 expect_present "${label}" "${path}" pending
+echo "ok: ${label}"
+
+# A detached checkout must be judged by its own commit and retained even
+# when its commit is merged, because it has no upstream to prove publication.
+label="detached worktrees and subsequent branch"
+unmerged="${worktrees}/detached-unmerged"
+merged_detached="${worktrees}/detached-merged"
+fresh_detached="${worktrees}/detached-fresh"
+dirty_detached="${worktrees}/detached-dirty"
+following="${worktrees}/following"
+git -C "${repo}" worktree add --quiet --detach "${unmerged}" main
+echo "detached work" >"${unmerged}/detached.txt"
+git -C "${unmerged}" add detached.txt
+commit_time="$(seconds_ago "${idle_seconds}") +0000"
+GIT_AUTHOR_DATE="${commit_time}" GIT_COMMITTER_DATE="${commit_time}" \
+  git -C "${unmerged}" commit --quiet -m "Unmerged detached work"
+git -C "${repo}" worktree add --quiet --detach "${merged_detached}" main
+git -C "${repo}" worktree add --quiet --detach "${fresh_detached}" main
+git -C "${repo}" worktree add --quiet --detach "${dirty_detached}" main
+echo "uncommitted" >"${dirty_detached}/uncommitted.txt"
+git -C "${repo}" worktree add --quiet "${following}" -b following
+for target in "${unmerged}" "${merged_detached}" "${dirty_detached}" "${following}"; do
+  set_mtime "${target}" "$(seconds_ago "${idle_seconds}")"
+done
+output=$(run_housekeeping --clean)
+[[ "${output}" != *"policy: NON-COMPLIANT"* ]] || { echo "FAIL ${label}: compliant worktree reported outside wt" >&2; exit 1; }
+for target in "${unmerged}" "${merged_detached}" "${fresh_detached}" "${dirty_detached}"; do
+  if [[ ! -d "${target}" ]]; then
+    echo "FAIL ${label}: detached worktree was removed" >&2
+    exit 1
+  fi
+done
+for target in "${unmerged}" "${merged_detached}"; do
+  entry=$(awk -v path="${target}" 'index($0, "--- " path " [") == 1 {found=1} found {print} found && /^$/ {exit}' <<<"${output}")
+  expect_verdict "${label}" "REVIEW (needs an owner decision)" "${entry}"
+  [[ "${entry}" == *"unpushed: ?"* ]] || { echo "FAIL ${label}: detached publication was assumed" >&2; exit 1; }
+done
+entry=$(awk -v path="${unmerged}" 'index($0, "--- " path " [") == 1 {found=1} found {print} found && /^$/ {exit}' <<<"${output}")
+[[ "${entry}" == *"merged: no"* && "${entry}" == *"latest: Unmerged detached work"* ]] || { echo "FAIL ${label}: wrong detached commit assessed" >&2; exit 1; }
+entry=$(awk -v path="${merged_detached}" 'index($0, "--- " path " [") == 1 {found=1} found {print} found && /^$/ {exit}' <<<"${output}")
+[[ "${entry}" == *"merged: yes (ancestry)"* ]] || { echo "FAIL ${label}: merged checkout not identified" >&2; exit 1; }
+for target in "${fresh_detached}" "${dirty_detached}"; do
+  entry=$(awk -v path="${target}" 'index($0, "--- " path " [") == 1 {found=1} found {print} found && /^$/ {exit}' <<<"${output}")
+  expect_verdict "${label}" "KEEP (live claim)" "${entry}"
+done
+entry=$(awk -v path="${dirty_detached}" 'index($0, "--- " path " [") == 1 {found=1} found {print} found && /^$/ {exit}' <<<"${output}")
+[[ "${entry}" == *"dirty: yes"* && "${entry}" == *"activity: stale"* ]] || { echo "FAIL ${label}: dirty protection not exercised" >&2; exit 1; }
+entry=$(awk -v path="${fresh_detached}" 'index($0, "--- " path " [") == 1 {found=1} found {print} found && /^$/ {exit}' <<<"${output}")
+[[ "${entry}" == *"dirty: no"* && "${entry}" == *"activity: fresh"* ]] || { echo "FAIL ${label}: fresh protection not exercised" >&2; exit 1; }
+expect_absent "${label}" "${following}" following
+echo "ok: ${label}"
+
+# Advance a clean candidate after its snapshot, while du reports its size.
+label="worktree advances during report"
+racing="${worktrees}/racing"
+git -C "${repo}" worktree add --quiet "${racing}" -b racing
+set_mtime "${racing}" "$(seconds_ago "${idle_seconds}")"
+wrapper_dir="${sandbox}/bin"
+mkdir -p "${wrapper_dir}"
+real_du=$(command -v du)
+cat >"${wrapper_dir}/du" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${2:-}" == "${HOUSEKEEPING_TEST_WORKTREE}" ]]; then
+  echo "new work" >"${HOUSEKEEPING_TEST_WORKTREE}/new.txt"
+  git -C "${HOUSEKEEPING_TEST_WORKTREE}" add new.txt
+  git -C "${HOUSEKEEPING_TEST_WORKTREE}" commit --quiet -m "New work during report"
+fi
+exec "${HOUSEKEEPING_TEST_DU}" "$@"
+EOF
+chmod +x "${wrapper_dir}/du"
+output=$(PATH="${wrapper_dir}:${PATH}" HOUSEKEEPING_TEST_WORKTREE="${racing}" \
+  HOUSEKEEPING_TEST_DU="${real_du}" run_housekeeping --clean)
+entry=$(awk -v path="${racing}" 'index($0, "--- " path " [") == 1 {found=1} found {print} found && /^$/ {exit}' <<<"${output}")
+expect_verdict "${label}" "REVIEW (needs an owner decision)" "${entry}"
+expect_present "${label}" "${racing}" racing
+[[ "$(git -C "${racing}" log -1 --format=%s)" == "New work during report" ]] || { echo "FAIL ${label}: new commit lost" >&2; exit 1; }
 echo "ok: ${label}"
 
 echo "ok: all housekeeping verdicts"
