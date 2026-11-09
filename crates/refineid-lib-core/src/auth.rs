@@ -1169,9 +1169,9 @@ pub const fn classify_verify_sw(sw: StatusWord) -> VerifyOutcome {
 mod tests {
 
     use super::*;
-    use crate::atr::{Atr, AtrError, MINIMAL_DIRECT_ATR};
     use crate::pkcs15::esign_wire;
     use crate::transport::{CommandApdu, ResponseApdu, TransportOutcome};
+    use refineid_atr::{Atr, AtrError, MINIMAL_DIRECT_ATR};
 
     struct MockTx {
         expected: Vec<u8>,

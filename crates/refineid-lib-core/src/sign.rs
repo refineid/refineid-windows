@@ -1115,8 +1115,8 @@ impl<T: CardTransport + ?Sized> SignOps for T {}
 mod tests {
 
     use super::*;
-    use crate::atr::{Atr, AtrError, MINIMAL_DIRECT_ATR};
     use crate::transport::{CommandApdu, ResponseApdu, TransportOutcome};
+    use refineid_atr::{Atr, AtrError, MINIMAL_DIRECT_ATR};
 
     /// Scripted transport that asserts each APDU matches an
     /// expected sequence and returns canned responses.

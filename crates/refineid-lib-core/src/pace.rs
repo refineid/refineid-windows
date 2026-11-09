@@ -852,7 +852,7 @@ impl PaceHelpers {
 mod tests {
 
     use super::*;
-    use crate::atr::{Atr, AtrError, MINIMAL_DIRECT_ATR};
+    use refineid_atr::{Atr, AtrError, MINIMAL_DIRECT_ATR};
 
     /// Constants sanity: the OID body is the right length (10 bytes,
     /// the body of 0.4.0.127.0.7.2.2.4.2.4).

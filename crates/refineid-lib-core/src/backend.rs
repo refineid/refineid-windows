@@ -347,8 +347,8 @@ mod tests {
         ReaderAccessCap, ReaderBackend, ReaderBackendOps as _, ReaderFilter, ReaderId, ReaderInfo,
         ReaderPickError, pick_single_reader,
     };
-    use crate::atr::{Atr, AtrError};
     use crate::transport::{CardTransport, CommandApdu, TransportOutcome};
+    use refineid_atr::{Atr, AtrError};
 
     /// Transport that is declared but never opened. `pick_single_reader`
     /// decides purely from `enumerate()` and returns a [`ReaderId`];

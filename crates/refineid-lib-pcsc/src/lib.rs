@@ -52,8 +52,8 @@ use pcsc::{
     Transaction,
 };
 
+use refineid_atr::{Atr, AtrError};
 use refineid_lib_core::apdu::iso7816::{ApduClass, GetResponse};
-use refineid_lib_core::atr::{Atr, AtrError};
 use refineid_lib_core::backend::{ReaderAccessCap, ReaderBackend, ReaderId, ReaderInfo};
 use refineid_lib_core::transport::{
     CardTransport, CommandApdu, ResponseApdu, TransportErrorExt, TransportErrorKind,
@@ -223,7 +223,7 @@ pub struct PcscCard {
     card: Card,
     /// Card's Answer-To-Reset bytes, captured at connect time
     /// via `SCardStatus`. Cached so the ATR-classification
-    /// step (see `refineid-lib-core::Atr`) doesn't have to
+    /// step (see `refineid_atr::Atr`) doesn't have to
     /// re-call into the PC/SC service mid-session.
     atr: Vec<u8>,
     /// Active protocol captured from `SCardStatus`.
