@@ -53,8 +53,8 @@
 use core::fmt;
 use core::marker::PhantomData;
 
-use crate::crypto::digest::Sha256;
 use crate::x509::{Certificate, DateTime, KeyUsage, X509Error};
+use refineid_digest::Sha256;
 
 // ----- Stage 0: CertDer (owned) -----------------------------
 

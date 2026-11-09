@@ -148,14 +148,14 @@ use refineid_agent_pipe::identity::{calling_program, computer_name, interface_la
 #[cfg(windows)]
 use refineid_agent_pipe::{RemoteKey, in_process_operation};
 #[cfg(windows)]
+use refineid_digest::{Sha256, Sha384};
+#[cfg(windows)]
 use refineid_lib_core::auth::{
     AuthError, CardPinLengths, ChangePinOutcome, PIN_MAX_LENGTH, PIN_MIN_LENGTH, PUK_MAX_LENGTH,
     PUK_MIN_LENGTH, PinOps, PinReferenceScheme, PinSlot, PinStatus, UnblockOutcome, VerifyOutcome,
 };
 #[cfg(windows)]
 use refineid_lib_core::crypto::container::{Ciphertext, RsaPkcs1};
-#[cfg(windows)]
-use refineid_lib_core::crypto::digest::{Sha256, Sha384};
 #[cfg(windows)]
 use refineid_lib_core::crypto::rsa::HashAlg as PssHashAlg;
 #[cfg(windows)]

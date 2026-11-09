@@ -12,6 +12,7 @@ publish = false
 workspace = true
 
 [dependencies]
+refineid-digest.workspace = true
 # Crypto stack for PACE + secure messaging.
 aes.workspace = true
 cbc.workspace = true
@@ -22,10 +23,7 @@ subtle.workspace = true
 spki.workspace = true
 # Compile-time dotted-decimal OID parser for the `oid::known` table.
 const-oid.workspace = true
-sha1.workspace = true
 sha2.workspace = true
-# NSS trust records carry the MD5 of a certificate's DER as a lookup key.
-md-5.workspace = true
 # PACE ephemeral-key randomness (run_pace_step_3).
 getrandom.workspace = true
 hmac.workspace = true

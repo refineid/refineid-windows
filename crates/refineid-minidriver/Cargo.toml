@@ -22,6 +22,7 @@ name = "refineid_minidriver"
 [target.'cfg(windows)'.dependencies]
 refineid-agent-pipe.workspace = true
 refineid-dev-errors.workspace = true
+refineid-digest.workspace = true
 refineid-lib-core.workspace = true
 refineid-rapp-core.workspace = true
 refineid-windows-credential-store.workspace = true

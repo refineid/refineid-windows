@@ -89,7 +89,7 @@ impl CardId {
         let mut seeded = Vec::with_capacity(CARD_ID_DOMAIN.len() + certificate.len());
         seeded.extend_from_slice(CARD_ID_DOMAIN);
         seeded.extend_from_slice(certificate);
-        let digest = refineid_lib_core::crypto::digest::Sha256::of(seeded);
+        let digest = refineid_digest::Sha256::of(&seeded);
         let mut identifier = [0; CARD_ID_BYTES];
         identifier.copy_from_slice(&digest.as_bytes()[..CARD_ID_BYTES]);
         Self(identifier)

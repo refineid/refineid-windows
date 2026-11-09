@@ -49,8 +49,8 @@ use crate::auth::PinReferenceScheme;
 use crate::crypto::container::{
     Ciphertext, EcdsaP256, EcdsaP384, Plaintext, RsaPkcs1, RsaPkcs1Sha256, Signature,
 };
-use crate::crypto::digest::{Sha1, Sha224, Sha256, Sha384, Sha512};
 use crate::transport::{CardTransport, TransportDispatchError};
+use refineid_digest::{Sha1, Sha224, Sha256, Sha384, Sha512};
 
 /// Shortened transport-error alias for sign-path dispatchers.
 /// Same pattern as the auth-flow and PACE aliases; saves
