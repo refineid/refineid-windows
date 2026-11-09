@@ -49,7 +49,6 @@
 //! contactless / SM-on-contact paths land.
 use subtle::ConstantTimeEq as _;
 
-use crate::atr::{Atr, AtrError};
 use crate::ber::{self, BerTlvIter};
 use crate::crypto::container::{AesCbc, Ciphertext};
 use crate::crypto::symmetric::{
@@ -61,6 +60,7 @@ use crate::transport::{
     CardTransport, CommandApdu, ResponseApdu, TransportErrorExt, TransportErrorKind,
     TransportOutcome,
 };
+use refineid_atr::{Atr, AtrError};
 
 /// SM tagged data objects we touch.
 ///
@@ -583,7 +583,7 @@ impl SmHelpers {
 mod tests {
 
     use super::*;
-    use crate::atr::MINIMAL_DIRECT_ATR;
+    use refineid_atr::MINIMAL_DIRECT_ATR;
 
     #[test]
     fn iso7816_4_pad_round_trips() {

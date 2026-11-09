@@ -36,7 +36,7 @@
 
 use core::fmt::{self, Write as _};
 
-use refineid_lib_core::fineid_card::{Atr, AtrError};
+use refineid_atr::{Atr, AtrError};
 
 use crate::cards::CardRegistration;
 
@@ -348,7 +348,8 @@ mod tests {
         NT_EXTENSION, SMART_CARD_CLASS_GUID, UMPASS_SECTIONS, card_devices, card_inf,
     };
     use crate::cards::{CARDS, CardRegistration};
-    use refineid_lib_core::fineid_card::{Atr, FineidCardModel};
+    use refineid_atr::Atr;
+    use refineid_lib_core::fineid_card::FineidCardModel;
 
     /// The hardware ID Device Manager showed for a FINEID S4-1 v4.0 card
     /// (chip revision 2.0.0) in an ACS ACR1581 contact slot on Windows 11

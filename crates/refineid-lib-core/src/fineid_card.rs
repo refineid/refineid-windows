@@ -17,25 +17,9 @@
 //!
 //! The models and their ATR/ATS values come from DVV's technology note on ATR bytes.
 
-// Library-facade re-export: `fineid_card::Atr` is the entry
-// point external consumers reach for FINEID card-model
-// classification.  Atr / AtrError / the length constants are
-// canonically defined in `crate::atr`; re-exporting them here
-// collects all the model-classification types in one namespace
-// (matches the lib.rs doc-link layout at lines 42-46).
-// Per-item `#[expect(clippy::pub_use)]` is rejected by rustc as
-// "useless lint attribute" -- the lint fires at module scope,
-// not on the use-item -- so the suppression lives as a
-// module-level inner attribute here.
-#![expect(
-    clippy::pub_use,
-    reason = "library-facade pattern: the FINEID-model docs collect Atr / AtrError / ATR_MAX_LEN / ATR_MIN_LEN under fineid_card::* so external consumers don't split their imports between two adjacent modules"
-)]
-
 use core::fmt;
 
-use crate::atr::HistoricalDataObject;
-pub use crate::atr::{ATR_MAX_LEN, ATR_MIN_LEN, Atr, AtrError};
+use refineid_atr::{Atr, HistoricalDataObject};
 
 /// FINEID interpretation of the ISO 7816-4 pre-issuing data
 /// (compact-TLV tag 6), per FINEID S4-1 §3.3.1.
@@ -85,9 +69,7 @@ impl FineidPreIssuingData {
             chip_id,
         }
     }
-}
 
-impl Atr {
     /// The FINEID pre-issuing data (compact-TLV tag 6, 5 bytes), if
     /// present and well-formed.
     ///
@@ -96,8 +78,8 @@ impl Atr {
     /// historical bytes carry no 5-byte pre-issuing object (e.g. a
     /// non-FINEID card).
     #[must_use]
-    pub fn fineid_pre_issuing(&self) -> Option<FineidPreIssuingData> {
-        self.historical_bytes()
+    pub fn from_atr(atr: &Atr) -> Option<Self> {
+        atr.historical_bytes()
             .data_objects()
             .into_iter()
             .find_map(|object| {
@@ -105,15 +87,15 @@ impl Atr {
                     return None;
                 };
                 match bytes.as_slice() {
-                    &[b0, b1, b2, b3, b4] => {
-                        Some(FineidPreIssuingData::from_array([b0, b1, b2, b3, b4]))
-                    }
+                    &[b0, b1, b2, b3, b4] => Some(Self::from_array([b0, b1, b2, b3, b4])),
                     _ => None,
                 }
             })
     }
+}
 
-    /// Classify this ATR to a known FINEID card model.
+impl FineidCardModel {
+    /// Classify an ATR to a known FINEID card model.
     ///
     /// Field-driven (FINEID S4-1 §3.3.1): reads the typed pre-issuing
     /// data's family / product / OS-version markers rather than
@@ -127,12 +109,12 @@ impl Atr {
     /// [`CardClassificationError::UnknownOrUnsupportedAtr`] when the
     /// ATR carries no FINEID pre-issuing data or its markers match no
     /// in-scope model.
-    pub fn classify(&self) -> Result<FineidCardModel, CardClassificationError> {
-        self.fineid_pre_issuing()
-            .and_then(FineidCardModel::from_pre_issuing)
-            .or_else(|| FineidCardModel::from_exact_atr(&self.to_wire_bytes()))
+    pub fn from_atr(atr: &Atr) -> Result<Self, CardClassificationError> {
+        FineidPreIssuingData::from_atr(atr)
+            .and_then(Self::from_pre_issuing)
+            .or_else(|| Self::from_exact_atr(&atr.to_wire_bytes()))
             .ok_or_else(|| CardClassificationError::UnknownOrUnsupportedAtr {
-                observed: self.clone(),
+                observed: atr.clone(),
             })
     }
 }
@@ -501,7 +483,7 @@ impl FineidCardModel {
     }
 }
 
-/// Error returned by [`Atr::classify`].
+/// Error returned by [`FineidCardModel::from_atr`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CardClassificationError {
     /// Observed ATR didn't match any FINEID card model in
@@ -527,16 +509,14 @@ impl fmt::Display for CardClassificationError {
 
 impl core::error::Error for CardClassificationError {}
 
-// `classify_card_by_atr` is a method on `Atr` (see `Atr::classify`).
-
 #[cfg(test)]
 mod tests {
 
     use super::{
-        Atr, AtrError, Ats, AtsError, CardClassificationError, CardType, CardVendor,
-        FineidCardModel, FineidPreIssuingData,
+        Ats, AtsError, CardClassificationError, CardType, CardVendor, FineidCardModel,
+        FineidPreIssuingData,
     };
-    use crate::atr::{Convention, MINIMAL_DIRECT_ATR, T0, Yi};
+    use refineid_atr::Atr;
 
     #[test]
     fn fineid_pre_issuing_extracts_named_fields() {
@@ -546,7 +526,7 @@ mod tests {
             0x12, 0x24, 0x60, 0x82, 0x90, 0x00,
         ])
         .expect("Thales v5.0 ATR fixture parses");
-        let pre = atr.fineid_pre_issuing().expect("pre-issuing present");
+        let pre = FineidPreIssuingData::from_atr(&atr).expect("pre-issuing present");
         assert_eq!(
             pre,
             FineidPreIssuingData {
@@ -570,7 +550,10 @@ mod tests {
             0x12, 0x24, 0x60, 0x82, 0x90, 0x00,
         ])
         .expect("unknown-chip-revision ATR fixture parses");
-        assert_eq!(atr.classify(), Ok(FineidCardModel::ThalesMultiAppV5_0));
+        assert_eq!(
+            FineidCardModel::from_atr(&atr),
+            Ok(FineidCardModel::ThalesMultiAppV5_0)
+        );
     }
 
     #[test]
@@ -583,7 +566,7 @@ mod tests {
         ])
         .expect("Gemalto v3.0 ATR fixture parses");
         assert!(matches!(
-            atr.classify(),
+            FineidCardModel::from_atr(&atr),
             Err(CardClassificationError::UnknownOrUnsupportedAtr { .. })
         ));
     }
@@ -597,49 +580,11 @@ mod tests {
             0x12, 0x24, 0x60, 0x82, 0x90, 0x00,
         ])
         .expect("non-FINEID-marker ATR fixture parses");
-        assert!(atr.fineid_pre_issuing().is_some());
+        assert!(FineidPreIssuingData::from_atr(&atr).is_some());
         assert!(matches!(
-            atr.classify(),
+            FineidCardModel::from_atr(&atr),
             Err(CardClassificationError::UnknownOrUnsupportedAtr { .. })
         ));
-    }
-
-    #[test]
-    fn atr_rejects_too_short() {
-        assert_eq!(Atr::new([0x3B]), Err(AtrError::TooShort { got: 1 }));
-        assert_eq!(Atr::new([]), Err(AtrError::TooShort { got: 0 }));
-    }
-
-    #[test]
-    fn atr_rejects_too_long() {
-        let v = vec![0_u8; 34];
-        assert_eq!(Atr::new(v), Err(AtrError::TooLong { got: 34 }));
-    }
-
-    #[test]
-    fn atr_accepts_minimum_window() {
-        let _atr = Atr::new(MINIMAL_DIRECT_ATR).expect("minimal direct ATR parses");
-    }
-
-    #[test]
-    fn atr_display_is_space_separated_uppercase_hex() {
-        // Minimal valid ATR: TS=Direct convention, T0 with
-        // Y1 nibble = 0 (no interface bytes) and K = 0 (no
-        // historical bytes). No TCK because no non-T=0
-        // protocol is indicated. Renders as the two-byte hex
-        // pair.
-        let minimal_t0 = T0 {
-            y1: Yi::from_nibble(0),
-            historical_byte_count: 0,
-        };
-        let atr = Atr::new([Convention::Direct.as_ts(), minimal_t0.as_byte()])
-            .expect("two-byte minimal ATR parses");
-        let convention_byte_hex = format!("{:02X}", Convention::Direct.as_ts());
-        let format_byte_hex = format!("{:02X}", minimal_t0.as_byte());
-        assert_eq!(
-            format!("{atr}"),
-            format!("{convention_byte_hex} {format_byte_hex}")
-        );
     }
 
     #[test]
@@ -658,7 +603,7 @@ mod tests {
         for bytes in FineidCardModel::ThalesMultiAppV5_0.contact_atr_byte_sets() {
             let atr = Atr::new(*bytes).expect("known Thales v5.0 ATR parses");
             assert_eq!(
-                atr.classify().expect("known Thales v5.0 ATR classifies"),
+                FineidCardModel::from_atr(&atr).expect("known Thales v5.0 ATR classifies"),
                 FineidCardModel::ThalesMultiAppV5_0,
                 "ATR {atr} should classify as Thales MultiApp v5.0"
             );
@@ -670,7 +615,7 @@ mod tests {
         for bytes in FineidCardModel::GemaltoMultiAppV4_2.contact_atr_byte_sets() {
             let atr = Atr::new(*bytes).expect("known Gemalto v4.2 ATR parses");
             assert_eq!(
-                atr.classify().expect("known Gemalto v4.2 ATR classifies"),
+                FineidCardModel::from_atr(&atr).expect("known Gemalto v4.2 ATR classifies"),
                 FineidCardModel::GemaltoMultiAppV4_2
             );
         }
@@ -687,7 +632,7 @@ mod tests {
             0x12, 0x00, 0xF6, 0x82, 0x90, 0x00,
         ];
         let atr = Atr::new(bytes).expect("Gemalto v3.0 ATR fixture parses");
-        match atr.classify() {
+        match FineidCardModel::from_atr(&atr) {
             Err(CardClassificationError::UnknownOrUnsupportedAtr { observed }) => {
                 assert_eq!(observed, atr);
             }
@@ -700,7 +645,7 @@ mod tests {
         for bytes in FineidCardModel::IdemiaCosmoX.contact_atr_byte_sets() {
             let atr = Atr::new(*bytes).expect("Idemia Cosmo X ATR parses");
             assert_eq!(
-                atr.classify().expect("Idemia Cosmo X ATR classifies"),
+                FineidCardModel::from_atr(&atr).expect("Idemia Cosmo X ATR classifies"),
                 FineidCardModel::IdemiaCosmoX
             );
         }

@@ -1089,7 +1089,7 @@ impl<B: crate::backend::ReaderBackend + ?Sized> FineidReaderPicker for B where
 /// FINEID-aware single-reader picker, deterministic for the CLI.
 ///
 /// Same shape as [`crate::backend::pick_single_reader`] but
-/// runs ATR classification ([`crate::fineid_card::Atr`]) on
+/// runs ATR classification ([`crate::fineid_card::FineidCardModel::from_atr`]) on
 /// each candidate so the pick can disambiguate when the user
 /// has two readers and only one holds a FINEID-recognised
 /// card. Returns `NoCardPresent` if no FINEID card is found
@@ -1505,8 +1505,8 @@ pub(crate) mod esign_wire {
 mod tests {
 
     use super::{CertSlot, EF_AUTH_CERT_FID, Fci, PKCS15_AID, Pkcs15Error, Pkcs15Ops as _};
-    use crate::atr::{Atr, AtrError, MINIMAL_DIRECT_ATR};
     use crate::transport::{CardTransport, CommandApdu, ResponseApdu, TransportOutcome};
+    use refineid_atr::{Atr, AtrError, MINIMAL_DIRECT_ATR};
 
     /// Scripted in-memory transport that replays a canned `(request,
     /// response)` trace. Same shape as `transport::tests::MockTransport`

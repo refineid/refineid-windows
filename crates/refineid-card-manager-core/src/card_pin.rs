@@ -502,9 +502,7 @@ pub fn establish_card_session(
     let atr = transport
         .atr()
         .map_err(|e| CardPinError::Transport(format!("ATR length: {e}")))?;
-    let model = atr
-        .classify()
-        .map_err(CardPinError::CardModelNotSupported)?;
+    let model = FineidCardModel::from_atr(&atr).map_err(CardPinError::CardModelNotSupported)?;
 
     transport
         .select_pkcs15_application()
@@ -1405,9 +1403,9 @@ impl CardPinHelpers {
 
 #[cfg(test)]
 mod activate_tests {
+    use refineid_atr::{Atr, AtrError, MINIMAL_DIRECT_ATR};
     use refineid_lib_core::activation::{ActivationScheme, PinActivation};
     use refineid_lib_core::apdu::status_word::{PinRetries, StatusWord};
-    use refineid_lib_core::atr::{Atr, AtrError, MINIMAL_DIRECT_ATR};
     use refineid_lib_core::auth::commands::{GetPinInfo, ResetRetryCounter, Verify};
     use refineid_lib_core::auth::{
         PIN1_REFERENCE_ORGANIZATIONAL, PIN1_REFERENCE_PKCS15, PUK_REFERENCE_ORGANIZATIONAL,

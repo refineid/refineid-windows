@@ -12,6 +12,7 @@ publish = false
 workspace = true
 
 [dependencies]
+refineid-atr.workspace = true
 refineid-digest.workspace = true
 # Crypto stack for PACE + secure messaging.
 aes.workspace = true

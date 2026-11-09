@@ -44,6 +44,7 @@ refineid-windows-credential-store = { path = "crates/refineid-windows-credential
 refineid-windows-doc-sign = { path = "crates/refineid-windows-doc-sign", version = "26" }
 refineid-windows-driver-probe = { path = "crates/refineid-windows-driver-probe", version = "26" }
 
+refineid-atr = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
 refineid-digest = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
 refineid-doc-sign = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
 refineid-emrtd = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }

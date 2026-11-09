@@ -59,8 +59,9 @@
 use core::fmt;
 
 use crate::backend::{ReaderAccessCap, ReaderBackend, ReaderId, ReaderInfo};
-use crate::fineid_card::{Atr, AtrError, CardClassificationError, FineidCardModel};
+use crate::fineid_card::{CardClassificationError, FineidCardModel};
 use crate::transport::CardTransport as _;
+use refineid_atr::{Atr, AtrError};
 
 // ----- Reader -----------------------------------------------
 
@@ -186,8 +187,7 @@ pub enum OpenError<E> {
     /// The backend's `open_exclusive` failed (PC/SC error,
     /// reader vanished, etc.).
     Backend(E),
-    /// The card returned an ATR outside ISO 7816-3 (`2..=33`
-    /// bytes). Either a transport bug or a non-conforming card.
+    /// The card returned an ATR rejected by the ISO 7816-3 parser.
     Atr(AtrError),
 }
 
@@ -294,7 +294,7 @@ impl<B: ReaderBackend> Card<'_, B, Untrusted> {
     /// [`CardClassificationError::UnknownOrUnsupportedAtr`]
     /// when the ATR doesn't match any in-scope model.
     pub fn classify_model(&self) -> Result<FineidCardModel, CardClassificationError> {
-        self.atr.classify()
+        FineidCardModel::from_atr(&self.atr)
     }
 }
 
@@ -302,10 +302,10 @@ impl<B: ReaderBackend> Card<'_, B, Untrusted> {
 mod tests {
 
     use super::{OpenError, Reader, Untrusted};
-    use crate::atr::{Atr, AtrError};
     use crate::backend::{ReaderAccessCap, ReaderBackend, ReaderId, ReaderInfo};
     use crate::fineid_card::FineidCardModel;
     use crate::transport::{CardTransport, ResponseApdu, TransportOutcome};
+    use refineid_atr::{Atr, AtrError};
 
     /// Minimal test backend. `atr` is the byte sequence the
     /// opened transport reports; `apdu_response` (unused for

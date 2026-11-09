@@ -41,8 +41,8 @@
 //!   spec-cited static `Oid<'static>` constants. The `Oid` ->
 //!   bare-`&[u8]` migration is in progress; new code uses
 //!   `Oid` directly.
-//! - [`fineid_card`] -- card-identity newtypes ([`Atr`],
-//!   [`Ats`], [`CardType`], [`CardVendor`], [`FineidCardModel`])
+//! - [`fineid_card`] -- card-identity types ([`Ats`], [`CardType`],
+//!   [`CardVendor`], [`FineidCardModel`]) and the shared [`Atr`] parser
 //!   that project DVV's ATR/ATS technote and the wider FINEID
 //!   card-model taxonomy onto the type system. The classifier
 //!   refuses an unrecognised card before any modify APDU.
@@ -53,7 +53,7 @@
 //!   migration follows.
 //!
 //! [`Oid<'a>`]: oid::Oid
-//! [`Atr`]: fineid_card::Atr
+//! [`Atr`]: refineid_atr::Atr
 //! [`Ats`]: fineid_card::Ats
 //! [`CardType`]: fineid_card::CardType
 //! [`CardVendor`]: fineid_card::CardVendor
@@ -83,7 +83,6 @@ extern crate alloc;
 
 pub mod activation;
 pub mod apdu;
-pub mod atr;
 pub mod auth;
 pub mod backend;
 pub(crate) mod ber;

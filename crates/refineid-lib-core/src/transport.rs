@@ -21,7 +21,7 @@
 //! where the bytes are going.
 
 use crate::apdu::status_word::StatusWord;
-use crate::atr::{Atr, AtrError};
+use refineid_atr::{Atr, AtrError};
 
 /// One outgoing smart-card command APDU.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -383,7 +383,7 @@ pub trait CardTransport {
 mod tests {
 
     use super::{CardTransport, CommandApdu, ResponseApdu, TransportErrorKind, TransportOutcome};
-    use crate::atr::{Atr, AtrError, MINIMAL_DIRECT_ATR};
+    use refineid_atr::{Atr, AtrError, Convention, MINIMAL_DIRECT_ATR, T0, TdByte};
 
     /// In-memory transport that replays a canned `(request,
     /// response)` trace. Used by protocol-layer unit tests to
@@ -466,6 +466,25 @@ mod tests {
             .kind(),
             None
         );
+    }
+
+    #[test]
+    fn mock_transport_rejects_a_corrupt_tck() {
+        // ISO 7816-3 §8: T0 announces TD1, which selects T=1;
+        // TCK is the XOR of T0 and TD1 when no historical bytes follow.
+        const TD1_PRESENT: u8 = 0x80;
+        const PROTOCOL_T1: u8 = 1;
+        let t0 = T0::from_byte(TD1_PRESENT).as_byte();
+        let td1 = TdByte::new(PROTOCOL_T1).as_byte();
+        let tck = t0 ^ td1;
+        let mut bytes = vec![Convention::Direct.as_ts(), t0, td1, tck];
+        let valid = MockTransport::new(bytes.clone(), vec![]);
+        assert!(valid.atr().is_ok());
+        if let Some(last) = bytes.last_mut() {
+            *last ^= u8::MAX;
+        }
+        let corrupt = MockTransport::new(bytes, vec![]);
+        assert!(matches!(corrupt.atr(), Err(AtrError::TckMismatch { .. })));
     }
 
     #[test]

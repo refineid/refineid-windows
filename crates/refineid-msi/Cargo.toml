@@ -18,6 +18,7 @@ path = "src/main.rs"
 # The card registrations and the INF derived from them are portable, so
 # their tests run on any host.
 [dependencies]
+refineid-atr.workspace = true
 refineid-lib-core.workspace = true
 
 # The package writer is `#[cfg(windows)]`; the Windows Installer database

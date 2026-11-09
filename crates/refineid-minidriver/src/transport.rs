@@ -26,7 +26,7 @@
 
 use core::time::Duration;
 
-use refineid_lib_core::atr::{Atr, AtrError};
+use refineid_atr::{Atr, AtrError};
 use refineid_lib_core::pace::PaceSession;
 use refineid_lib_core::secure_messaging::{SmError, SmTransport};
 use refineid_lib_core::transport::{
@@ -867,8 +867,32 @@ impl CardTransport for CardSessionTransport {
 
 #[cfg(test)]
 mod tests {
-    use super::RemoteFailure;
+    use super::{
+        CardSessionTransport, REMOTE_SYNTHETIC_ATR, RemoteFailure, ScardProtocol, WinScardTransport,
+    };
     use crate::ffi::{SCARD_E_NO_KEY_CONTAINER, SCARD_W_REMOVED_CARD};
+    use refineid_lib_core::transport::CardTransport as _;
+
+    #[test]
+    fn synthetic_card_atr_survives_both_transport_layers() {
+        let transport = WinScardTransport {
+            h_card: Default::default(),
+            atr: REMOTE_SYNTHETIC_ATR.to_vec(),
+            protocol: ScardProtocol::T0,
+        };
+        assert_eq!(
+            transport
+                .atr()
+                .expect("synthetic ATR parses")
+                .to_wire_bytes(),
+            REMOTE_SYNTHETIC_ATR
+        );
+        let session = CardSessionTransport::plain(transport);
+        assert_eq!(
+            session.atr().expect("session ATR parses").to_wire_bytes(),
+            REMOTE_SYNTHETIC_ATR
+        );
+    }
 
     #[test]
     fn an_absent_phone_reads_as_no_card_in_the_reader() {
