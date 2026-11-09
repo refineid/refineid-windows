@@ -34,7 +34,9 @@ cd "${repo}"
 git worktree prune
 primary=$(git worktree list --porcelain | sed -n 's/^worktree //p' | head -n 1)
 # Worktrees belong in wt/ beside the primary checkout (AGENTS.md).
-wt_root="$(cd "${primary}/.." && pwd -P)/wt"
+# Keep Git's path spelling for comparison with worktree list, including on
+# Git Bash where pwd and Git may use different forms of the same path.
+wt_root="${primary%/*}/wt"
 
 stale_after_seconds=86400
 now=$(date +%s)

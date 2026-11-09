@@ -35,9 +35,15 @@ worktrees="${sandbox}/src/wt"
 mkdir -p "${repo}" "${worktrees}"
 
 git -C "${repo}" init --quiet --initial-branch=main
+# Match worktree paths to the form Git prints in its porcelain listing.
+# Keep sandbox itself in POSIX form for the wrapper directory in PATH.
+repo=$(git -C "${repo}" rev-parse --show-toplevel)
+worktrees="${repo%/*}/wt"
 git -C "${repo}" config user.name "Housekeeping Test"
 git -C "${repo}" config user.email "housekeeping@example.invalid"
-git -C "${repo}" commit --quiet --allow-empty -m "Initial commit"
+echo '* text=auto eol=lf' >"${repo}/.gitattributes"
+git -C "${repo}" add .gitattributes
+git -C "${repo}" commit --quiet -m "Initial commit"
 
 seconds_ago() {
   echo $(( $(date +%s) - $1 ))
@@ -156,6 +162,7 @@ for target in "${unmerged}" "${merged_detached}" "${dirty_detached}" "${followin
   set_mtime "${target}" "$(seconds_ago "${idle_seconds}")"
 done
 output=$(run_housekeeping --clean)
+[[ "${output}" != *"policy: NON-COMPLIANT"* ]] || { echo "FAIL ${label}: compliant worktree reported outside wt" >&2; exit 1; }
 for target in "${unmerged}" "${merged_detached}" "${fresh_detached}" "${dirty_detached}"; do
   if [[ ! -d "${target}" ]]; then
     echo "FAIL ${label}: detached worktree was removed" >&2
