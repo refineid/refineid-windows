@@ -5,7 +5,6 @@
 import os
 from pathlib import Path
 import subprocess
-import stat
 import tempfile
 import unittest
 
@@ -67,8 +66,7 @@ class DocumentationGateTests(unittest.TestCase):
                 self.git('add', '.')
                 self.assertEqual(self.gate().returncode, 1)
         self.git('reset', '--hard', self.base)
-        os.chmod(self.root / 'README.md', (self.root / 'README.md').stat().st_mode | stat.S_IXUSR)
-        self.git('add', '.')
+        self.git('update-index', '--chmod=+x', 'README.md')
         self.assertEqual(self.gate().returncode, 1)
 
     def test_executable_document_is_strict(self):
@@ -94,9 +92,9 @@ class DocumentationGateTests(unittest.TestCase):
         self.assertEqual(self.gate().returncode, 1)
 
     def test_symlink_is_strict(self):
-        (self.root / 'README.md').unlink()
-        (self.root / 'README.md').symlink_to('source.swift')
-        self.git('add', '.')
+        self.write('README.md', 'source.swift')
+        blob = self.git('hash-object', '-w', 'README.md').strip()
+        self.git('update-index', '--cacheinfo', f'120000,{blob},README.md')
         self.assertEqual(self.gate().returncode, 1)
 
     def test_push_new_and_existing_branch(self):
