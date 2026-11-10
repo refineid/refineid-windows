@@ -240,7 +240,7 @@ independent review, run as this repository's AGENTS.md describes.
     always, never, do not, cannot, prohibited, or not allowed, in
     any letter case), and changes no program text such as UI
     strings, log formats, error messages, or test-asserted text.
-  - Run the repository's full gate floor; another agent's review is not
+  - Run the repository's scope-selected gate floor; another agent's review is not
     required. For delegated trivial work, the front agent's inspection
     completes the review; do not recruit a third agent. Only the front
     agent may self-review.
