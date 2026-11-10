@@ -5,6 +5,7 @@
 import os
 from pathlib import Path
 import subprocess
+import stat
 import tempfile
 import unittest
 
@@ -13,6 +14,11 @@ SCRIPT = Path(__file__).with_name('DocumentationGate.py').resolve()
 
 class DocumentationGateTests(unittest.TestCase):
     def setUp(self):
+        self.env = os.environ.copy()
+        # Hooks export repository-local Git variables; fixture repos must not
+        # inherit their parent's index or object directory.
+        for key in subprocess.check_output(['git', 'rev-parse', '--local-env-vars'], text=True).split():
+            self.env.pop(key, None)
         self.directory = tempfile.TemporaryDirectory()
         self.root = Path(self.directory.name)
         self.git('init', '-q', '-b', 'main')
@@ -28,7 +34,7 @@ class DocumentationGateTests(unittest.TestCase):
         self.directory.cleanup()
 
     def git(self, *args):
-        return subprocess.check_output(['git', *args], cwd=self.root, text=True, stderr=subprocess.PIPE)
+        return subprocess.check_output(['git', *args], cwd=self.root, text=True, stderr=subprocess.PIPE, env=self.env)
 
     def write(self, path, content):
         target = self.root / path
@@ -43,7 +49,7 @@ class DocumentationGateTests(unittest.TestCase):
         data = ''
         if mode == 'push':
             data = f'refs/heads/topic {self.git("rev-parse", "HEAD").strip()} refs/heads/topic {old or "0" * 40}\n'
-        return subprocess.run(['python3', '-B', str(SCRIPT), mode, 'origin'], cwd=self.root, input=data, text=True, capture_output=True)
+        return subprocess.run(['python3', '-B', str(SCRIPT), mode, 'origin'], cwd=self.root, input=data, text=True, capture_output=True, env=self.env)
 
     def test_prose_uses_index_not_worktree(self):
         self.write('README.md', 'Updated\n')
@@ -61,7 +67,7 @@ class DocumentationGateTests(unittest.TestCase):
                 self.git('add', '.')
                 self.assertEqual(self.gate().returncode, 1)
         self.git('reset', '--hard', self.base)
-        os.chmod(self.root / 'README.md', 0o755)
+        os.chmod(self.root / 'README.md', (self.root / 'README.md').stat().st_mode | stat.S_IXUSR)
         self.git('add', '.')
         self.assertEqual(self.gate().returncode, 1)
 

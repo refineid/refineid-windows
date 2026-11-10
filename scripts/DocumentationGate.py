@@ -31,7 +31,7 @@ def is_prose(path):
 def changes(base, target):
     args = ['diff', '--raw', '--no-renames', '--no-abbrev', '-z']
     args += ['--cached', base] if target is None else [base, target]
-    fields = git(*args).split(b'\0')
+    fields = git(*args).split(bytes([0]))
     result = []
     for index in range(0, len(fields) - 1, 2):
         metadata = fields[index].decode().split()
