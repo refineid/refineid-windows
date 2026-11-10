@@ -74,11 +74,12 @@ The front agent owns task decomposition, integration, publication, and
 installation under the owner's standing authorization, including the
 authorizations stated in this document, and may complete small
 or tightly coupled changes itself rather than delegating. An
-implementation agent owns only its assigned worktree and brief. General instructions in this
-document to commit, push, merge, file issues, or install apply to the
-front agent. An explicit owner order may delegate commit and push for
-one run, with the commit and scan rules in the brief; opening pull
-requests, review, issue filing,
+implementation agent owns only its assigned worktree and brief.
+General instructions in this document to commit, push, open pull
+requests, merge, review, file issues, or install apply to the
+front agent. An explicit owner order may delegate commit on and push
+to the assigned task branch for one run, with the commit and scan
+rules in the brief; opening pull requests, review, issue filing,
 installation, and merge are never delegated to an implementation
 agent. Workers report deferred findings in their handoff for the
 front agent to file. Where independence is required, the front
@@ -127,7 +128,8 @@ in `doc/`, not here.
 
 - Commits are cheap backups. The front agent makes small, focused commits
   often, without asking for permission, once the required commit checks
-  pass. Workers commit only under an explicit owner order in the brief.
+  pass. Workers commit and push only under an explicit owner order in
+  the brief.
 - Complete the integration without waiting for another instruction
   (this instruction applies to the front agent; workers follow their
   brief): push
