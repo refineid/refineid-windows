@@ -34,8 +34,8 @@
 use core::error::Error as CoreError;
 use core::fmt;
 
-use crate::apdu::primitives::{Aid, Sfi};
 use crate::transport::CommandApdu;
+use refineid_apdu::primitives::{Aid, Sfi};
 
 /// ISO 7816-4 `SELECT` by application identifier (`INS=0xA4
 /// P1=0x04 P2=0x0C`), no FCI returned.
@@ -754,7 +754,7 @@ impl DirectOffset15 {
 
 /// READ BINARY offset/SFI selector per FINEID S1 v4.2 §3.4.2
 /// coding table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ReadBinaryOffset {
     /// Direct-selection form (`b8` of P1 = 0). Reads from the
