@@ -16,25 +16,28 @@ its gates, tests, review and install.
 
 Exercise judgment to advance the task. Follow invariants without exception.
 Apply process in proportion to the change's risk and uncertainty. Do not
-create reviews, delegation, or documentation merely to demonstrate
+create delegation or documentation merely to demonstrate
 activity. When a simpler workflow provides sufficient assurance, use it.
-Simplification never removes required assurance.
+Simplification applies only to default practices; it never removes
+required assurance or alters authority limits.
 
 Instructions fall into three categories:
 
-- **Invariants**: unconditional requirements (e.g. PINs, PUKs, and the CAN
-  never travelling over a network; never logging PIN codes, PUK, CAN,
-  PIN data, or candidate lengths). Zero exceptions, regardless of
-  change size.
-- **Required assurance**: at minimum, the repository's gate floor,
+- **Invariants**: unconditional requirements, namely the shared
+  security invariants: PINs, PUKs, and the CAN never travel over any
+  network, and PIN codes, PUK, CAN, PIN data, candidate lengths, and
+  character offsets are never logged. Unconditional rules in AGENTS.md
+  bind equally. Zero exceptions, regardless of change size.
+- **Required assurance**: at minimum, the repository's full gate floor,
   independent review where required below, STPA sized to the change
   for any change with a control structure to analyse, and hardware
   verification where AGENTS.md requires it.
 - **Default practices**: useful workflows (briefs, delegation) that the
   front agent can simplify when a change is self-evident and adds no
   risk. Worktrees are not simplifiable: the main checkout is never
-  edited directly. A simplified brief keeps its allowed changes, stop
-  conditions, acceptance, and evidence.
+  edited directly. A simplified brief keeps every field of the brief
+  template; simplification shortens prose, never drops fields. The
+  review tier is never simplifiable.
 
 ## Feedback drives the work
 
@@ -51,8 +54,7 @@ developer or an agent. The loops are:
 - **Review** reads every diff before it merges: trivial changes may be
   self-reviewed; consequential diffs need independent review by a model
   from a different family than the one that wrote the change, run as
-  this repository's AGENTS.md describes. See
-  [Independent review](#independent-review) below.
+  this repository's AGENTS.md describes. See [Review](#review) below.
 - **STPA** (System-Theoretic Process Analysis) names the feedback each
   controller needs. The method and its literature:
   <https://github.com/refineid/refineid-core/blob/main/doc/stpa.md>. The
@@ -85,11 +87,12 @@ protocol requires.
 
 ### When to delegate
 
-Delegate when the task has a settled contract, a bounded change surface,
-and an independently checkable result. The front agent retains unresolved
+Delegate when the task has no open interpretation, a bounded change
+surface, and an independently checkable result. The front agent retains
+unresolved
 specification interpretation, security policy, cross-repository design,
-and acceptance decisions. Small or tightly coupled changes may be completed
-directly by the front agent.
+and acceptance decisions. Small or tightly coupled changes may be
+completed by the front agent itself rather than delegating.
 
 Assign implementation agents by demonstrated capability on the
 task class, not permanent model rankings. Every assignee follows
@@ -97,8 +100,8 @@ the implementation agent rules.
 
 - **Scouting agent**: inventory callers, check references, report
   paths and evidence.
-- **Implementation agent**: implement an approved change and its
-  specified failure cases (for example, an adapter).
+- **Coding agent**: implement an approved change and its specified
+  failure cases (for example, an adapter).
 - **Design agent**: draft changes to credential custody, retry behavior,
   trust, or protocol state for front-agent decision.
 
@@ -107,7 +110,8 @@ the implementation agent rules.
 1. The owner's words, quoted.
 2. The goal in one or two sentences.
 3. The authority: specification sections, STPA identifiers, design
-   documents, issue numbers.
+   documents, issue numbers, and any owner order delegating commit
+   and push, with its commit and scan rules.
 4. Constraints: rules from AGENTS.md that matter here, what not to touch,
    and allowed changes (files, interfaces, and the brief's
    repository).
@@ -117,10 +121,10 @@ the implementation agent rules.
 7. How to verify: the exact gate and test commands.
 8. Acceptance: observable success and failure behavior.
 9. Stop and report when: contract changes, conflicting evidence, scope
-   expansion, or two failed attempts at the same problem without new
+   expansion, two failed attempts at the same problem without new
    evidence (an attempt is one edit-and-verify cycle; new evidence is
    a new fact changing the diagnosis, not a different symptom of the
-   same cause).
+   same cause), or four failed attempts at the same problem in total.
 10. Evidence required: base revision, commands, exit status,
     untested items.
 11. What to report: files changed, decisions made, results with commands,
@@ -140,18 +144,22 @@ the implementation agent rules.
   nowhere else.
 - Runs the gate and test commands from AGENTS.md by hand in the worktree.
 - An AI implementation agent runs sandboxed.
-- Does not commit, push, open pull requests, merge, file issues, or
-  install. It leaves the change uncommitted and reports findings in its
-  handoff for the front agent to file. An explicit owner order may grant
+- Does not commit, push, open pull requests, merge, review, file
+  issues, or install. It leaves the change uncommitted and reports
+  findings in its handoff for the front agent to file. An explicit
+  owner order may grant
   commit and push rights for one run only, with the commit and scan
   rules in the brief; opening pull requests, review, issue filing,
   installation, and the merge stay with the front agent.
-- Resolves local implementation choices itself. Escalates decisions that
-  change the brief's contract.
+- Resolves local implementation choices itself when they preserve all
+  invariants, security policy, and settled decisions. Escalates
+  anything touching security policy, anything ambiguous, and anything
+  that changes the brief's contract.
 - After two unsuccessful attempts at the same problem without new
-  evidence, report the smallest reproduction, what was tried, what
-  uncommitted changes remain, and the unresolved question. Never
-  weaken a check or test to complete the brief.
+  evidence, or four unsuccessful attempts at the same problem in
+  total, stop work and report the smallest reproduction, what was
+  tried, what uncommitted changes remain, and the unresolved
+  question. Never weaken a check or test to complete the brief.
 - Reports decisions and ambiguities instead of guessing; the front agent
   takes the ones that are the owner's to the owner.
 - Reports what it ran and what the result was, word for word. "Not run" is
@@ -164,6 +172,9 @@ the implementation agent rules.
   evidence against the final code, not the report. Re-runs checks when the
   evidence is missing, stale, or affected by subsequent edits. Hardware
   acceptance remains required where AGENTS.md requires it.
+- Files deferred findings reported in worker handoffs: searches
+  existing issues first, then files each confirmed defect or quality
+  gap in the owning repository.
 - Verifies commits and pushes directly in its own session using git
   log and status, never from an agent's report. If the owner drives an
   agent directly, it stands down rather than fight for the machine.
@@ -205,46 +216,50 @@ the implementation agent rules.
 - Tells the owner what changed and what to test, briefly, naming
   specification identifiers (MF, EF.CardAccess), not bare hex.
 
-## Independent review
+## Review
 
 Review is tiered: every change is reviewed before merge. Trivial changes
 may be self-reviewed as described below; every other change needs
 independent review, run as this repository's AGENTS.md describes.
 
-- Self-review for trivial changes: the front agent may self-review a
-  trivial change when its complete effect is readily apparent from the
-  diff and it does not change executable behavior, security policy,
-  protocol meaning, dependencies, build or release behavior, or
-  instructions governing agent authority.
-  - Eligible: comment prose corrections (excluding doctests, doc
-    attributes, code blocks, and tool directives such as lint
-    suppressions or formatter controls, which can execute or change
-    tool behavior), output of the repository's own formatter and
-    nothing else, broken documentation links with an unambiguous
-    replacement, and minor wording that preserves meaning, touches
-    no sentence carrying a requirement keyword (MUST, SHALL,
-    SHOULD, REQUIRED, always, never, in any letter case, including
-    negations) or an invariant, and changes no user-visible,
-    logged, or test-asserted text.
-  - Run the repository's gate floor; another agent's review is not
+- Self-review for trivial changes: the front agent self-reviews a
+  trivial change whose complete effect is readily apparent from the
+  diff and that changes none of the following: executable behavior,
+  security policy, protocol meaning, dependencies, build or release
+  behavior, or instructions governing agent authority.
+  - Eligible cases (exhaustive): comment prose corrections
+    (excluding doctests, doc attributes, code blocks, and tool
+    directives such as lint suppressions or formatter controls,
+    which can execute or change tool behavior), output of the
+    repository's own formatter and nothing else, broken
+    documentation links with an unambiguous replacement, and minor
+    wording in documentation prose that preserves meaning, touches
+    no sentence stating a requirement, constraint, or invariant
+    (such as sentences carrying MUST, SHALL, SHOULD, REQUIRED,
+    always, never, do not, cannot, prohibited, or not allowed, in
+    any letter case), and changes no program text such as UI
+    strings, log formats, error messages, or test-asserted text.
+  - Run the repository's full gate floor; another agent's review is not
     required. For delegated trivial work, the front agent's inspection
     completes the review; do not recruit a third agent. Only the front
     agent may self-review.
-  - Record `Self-reviewed: wording only; meaning unchanged`,
-    `Self-reviewed: formatting only`, or `Self-reviewed: link fix
-    only` as a line in the squash body. No separate justification
-    document or owner approval is needed.
-- Other changes: semantic changes to credential custody, trust
-  decisions, cryptography, protocol state, or card retry behavior
-  always require independent review. Where AGENTS.md requires a second
-  reviewer, run it.
+  - Record the matching markers as lines in the squash body, one per
+    category touched: `Self-reviewed: wording only; meaning
+    unchanged`, `Self-reviewed: formatting only`, or `Self-reviewed:
+    link fix only`. Comment prose corrections take the wording
+    marker. No separate justification document or owner approval is
+    needed.
+- Consequential changes: every change not eligible for self-review
+  requires independent review. In particular, semantic changes to
+  credential custody, trust decisions, cryptography, protocol state,
+  or card retry behavior always require independent review.
 - Semantic effect over line count: judge by semantic effect, not line
   count or file extension. Any logic, signature, or control-flow change
   requires independent review, even if one line. If the effect is
   uncertain, investigate or obtain review. Do not split a consequential
   change into small patches to evade review.
-- Disagreement: if there is any disagreement about whether a change
-  is trivial, treat it as consequential.
+- Disagreement: if there is any disagreement or doubt about whether
+  a change is trivial, treat it as consequential.
 
 ## Personal data
 
@@ -301,10 +316,11 @@ delegation boundaries and escalation mechanics across languages.)
    - Escalation: instead of inventing an unapproved variant or editing
      core repositories, the worker halts per the brief's stop condition:
      "Stopped: handling this status requires adding a variant to
-     `CardError` in core. The worktree holds only the reproduction
-     test in `tests/adapter_tests.*`."
+     `CardError` in core. Uncommitted work remains: partial adapter
+     logic and the reproduction test in `tests/adapter_tests.*`."
 4. Resolution (front agent):
    - The front agent verifies the reproduction, designs the core
      change, runs it through the required gates and independent
-     review, merges it in the core repository, then issues an updated
-     brief to the adapter worker.
+     review, including a second reviewer for this protocol change,
+     then merges it in the core repository and issues an updated
+     brief naming the new base commit.
