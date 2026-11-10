@@ -68,6 +68,23 @@
   it after merge. Verify with `git worktree list`.
 - Do not publish unsigned or test-signed binaries as production releases.
 
+## Agent roles and authority
+
+The front agent owns task decomposition, integration, publication, and
+installation under the owner's standing authorization, including the
+authorizations stated in this document, and may complete small
+or tightly coupled changes itself rather than delegating. An
+implementation agent owns only its assigned worktree and brief. General instructions in this
+document to commit, push, merge, file issues, or install apply to the
+front agent. An explicit owner order may delegate commit and push for
+one run, with the commit and scan rules in the brief; opening pull
+requests, review, issue filing,
+installation, and merge are never delegated to an implementation
+agent. Workers report deferred findings in their handoff for the
+front agent to file. Where independence is required, the front
+agent runs the review using a model from a different family than
+the one that wrote the change.
+
 ## Rules live here, not in an agent's memory
 
 Every rule, decision and finding an agent should remember lives in this
@@ -108,9 +125,12 @@ in `doc/`, not here.
 
 ## Commits and integration
 
-- Commits are cheap backups. Make small, focused commits often, without
-  asking for permission, once the required commit checks pass.
-- Complete the integration without waiting for another instruction: push
+- Commits are cheap backups. The front agent makes small, focused commits
+  often, without asking for permission, once the required commit checks
+  pass. Workers commit only under an explicit owner order in the brief.
+- Complete the integration without waiting for another instruction
+  (this instruction applies to the front agent; workers follow their
+  brief): push
   the task branch, open a pull request, and merge it into `main` once mandatory
   local checks pass and review is complete. Sync local `main` with the merged
   remote.
@@ -118,10 +138,11 @@ in `doc/`, not here.
 
 ## Record deferred findings
 
-- While working, file a GitHub issue in the owning repository for each
+- The front agent files a GitHub issue in the owning repository for each
   confirmed, actionable defect or quality gap that cannot reasonably be
   fixed within the current task. Filing these issues is authorized; do not
-  wait for a separate instruction for each finding.
+  wait for a separate instruction for each finding. An implementation
+  agent reports deferred findings in its handoff instead of filing them.
 - Search existing open issues first. Reuse the matching issue and add only
   new, useful evidence instead of creating a duplicate. Group findings only
   when they share a cause and can be resolved by one focused change.
@@ -232,8 +253,10 @@ record for RAPP and its applications.
 
 ## Independent review
 
-- Before a pull request merges, review its diff independently with the `agy`
-  CLI and the `gemini-3.8-flash-high` model.
+- Review is tiered per the working method. Before a pull request
+  merges, review its diff independently with the `agy` CLI and the
+  `gemini-3.8-flash-high` model, unless the change is eligible for
+  self-review.
 - Run `agy` headless in its sandbox and plan mode, from an empty directory,
   with the diff pasted into the prompt and no tool use. Frame the request as
   a code review from the project's author.
