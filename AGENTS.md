@@ -275,12 +275,24 @@ record for RAPP and its applications.
 ## Independent review
 
 - Review is tiered per the working method. Before a pull request
-  merges, review its diff independently with the `agy` CLI and the
-  `gemini-3.8-flash-high` model, unless the change is eligible for
-  self-review.
-- Run `agy` headless in its sandbox and plan mode, from an empty directory,
-  with the diff pasted into the prompt and no tool use. Frame the request as
-  a code review from the project's author.
+  merges, review its diff independently with the first working
+  reviewer below from a different family than the one that wrote
+  it, unless the change is eligible for self-review. Try in this
+  order, strongest model each offers (see each CLI's model list):
+  the `codex` CLI (only when the maintainer has already authorized
+  its use), a Claude model via `agy`, DeepSeek via OpenCode,
+  Gemini via `agy`, and finally the `muse` CLI. Skip any reviewer
+  sharing the author's family or lacking authorization,
+  availability, or quota. If none remains, stop and report to the
+  owner instead of merging unreviewed.
+- A model family is the organization that trained the model. When
+  family membership is uncertain, treat the reviewer as
+  same-family and skip it.
+- Run the reviewer headless from an empty directory, with the diff
+  pasted into the prompt and no tool use; use each CLI's sandbox
+  and plan (no-edit) mode where it offers one, and never run a
+  reviewer with tools enabled. Frame the request as a code review
+  from the project's author.
 - Check every finding against the code. Fix the real ones and list the
   rejected ones, with the reason, in the pull request description.
 
