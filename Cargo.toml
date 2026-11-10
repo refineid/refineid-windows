@@ -23,7 +23,7 @@ members = [
 ]
 
 [workspace.package]
-version = "26.11.9"
+version = "26.11.10"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["Petri Koistinen"]
@@ -44,6 +44,7 @@ refineid-windows-credential-store = { path = "crates/refineid-windows-credential
 refineid-windows-doc-sign = { path = "crates/refineid-windows-doc-sign", version = "26" }
 refineid-windows-driver-probe = { path = "crates/refineid-windows-driver-probe", version = "26" }
 
+refineid-apdu = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
 refineid-atr = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
 refineid-digest = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
 refineid-doc-sign = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }

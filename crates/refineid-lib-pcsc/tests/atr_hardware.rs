@@ -12,11 +12,13 @@
 // implied. See the License for the specific language governing
 // permissions and limitations under the License.
 
-//! Read-only hardware acceptance for ATR parsing and FINEID classification.
+//! Read-only hardware acceptance for FINEID card identification and public certificates.
 
 use refineid_lib_core::backend::{ReaderAccessCap, ReaderBackend as _};
 use refineid_lib_core::fineid_card::FineidCardModel;
+use refineid_lib_core::pkcs15::{CertSlot, Pkcs15Ops as _};
 use refineid_lib_core::transport::CardTransport as _;
+use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
 use refineid_lib_pcsc::PcscBackend;
 
 #[test]
@@ -37,4 +39,28 @@ fn present_fineid_card_atr_is_parsed_and_classified() {
         }
     }
     assert!(recognized, "no recognized FINEID card present");
+}
+
+#[test]
+#[ignore = "requires a FINEID card in a contact reader"]
+fn present_fineid_card_public_auth_certificate_is_read_and_parsed() {
+    let backend = PcscBackend;
+    let readers = backend
+        .enumerate()
+        .unwrap_or_else(|_| panic!("reader enumeration failed"));
+    for reader in readers.into_iter().filter(|reader| reader.card_present) {
+        let mut card = backend
+            .open_session(&reader.id, ReaderAccessCap::Read)
+            .unwrap_or_else(|_| panic!("card connection failed"));
+        let atr = card.atr().unwrap_or_else(|_| panic!("ATR parsing failed"));
+        if FineidCardModel::from_atr(&atr).is_ok() {
+            let der = card
+                .read_certificate(CertSlot::Authentication)
+                .unwrap_or_else(|_| panic!("public authentication certificate read failed"));
+            OwnedCert::from_der(UnvalidatedCertificate::new(der.as_bytes().to_vec()))
+                .unwrap_or_else(|_| panic!("public authentication certificate parsing failed"));
+            return;
+        }
+    }
+    panic!("no recognized FINEID card present");
 }

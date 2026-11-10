@@ -16,9 +16,8 @@
 //!
 //! This module hosts the small set of types that every protocol
 //! module needs when constructing or parsing ISO 7816-4 APDUs:
-//! status words, class / instruction bytes, application
-//! identifiers, short-file identifiers, and similar low-level
-//! shapes.
+//! status words, class / instruction bytes, and command shapes.
+//! Application and short-file identifiers come from `refineid-apdu`.
 //!
 //! Protocol-specific APDU command structs (e.g. PACE's
 //! `GeneralAuthenticate`, signature's `ComputeDigitalSignature`,
@@ -36,5 +35,4 @@
 //! [refinement types]: https://github.com/refineid/refineid-core/blob/main/doc/architecture/refinement-types.md
 
 pub mod iso7816;
-pub mod primitives;
 pub mod status_word;

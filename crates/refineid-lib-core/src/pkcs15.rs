@@ -38,9 +38,9 @@ use crate::apdu::iso7816::{
     ApduClass, FileId, ReadBinaryByOffset, SelectByAidNoFci, SelectEfNoFci, SelectFile,
     SelectFileResponseMode, SelectFileTarget,
 };
-use crate::apdu::primitives::{Aid, AidError};
 use crate::apdu::status_word::StatusWord;
 use crate::transport::{CardTransport, CommandApdu, TransportDispatchError};
+use refineid_apdu::primitives::{Aid, AidError};
 
 /// Convenience alias for [`TransportDispatchError`] specialised to
 /// a [`CardTransport`] implementation's own error type.
@@ -1471,8 +1471,8 @@ pub(crate) mod esign_wire {
     use crate::apdu::iso7816::{
         ApduClass, FileId, SelectByAidNoFci, SelectFile, SelectFileResponseMode, SelectFileTarget,
     };
-    use crate::apdu::primitives::Aid;
     use crate::transport::CommandApdu;
+    use refineid_apdu::primitives::Aid;
 
     fn select_any_by_fid(fid: FileId) -> CommandApdu {
         SelectFile {
