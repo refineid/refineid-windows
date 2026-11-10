@@ -28,7 +28,7 @@ Instructions fall into three categories:
   network, and PIN codes, PUK, CAN, PIN data, candidate lengths, and
   character offsets are never logged. Unconditional rules in AGENTS.md
   bind equally. Zero exceptions, regardless of change size.
-- **Required assurance**: at minimum, the repository's full gate floor,
+- **Required assurance**: at minimum, the repository's gate floor selected by change scope,
   independent review where required below, STPA sized to the change
   for any change with a control structure to analyse, and hardware
   verification where AGENTS.md requires it.
@@ -48,8 +48,9 @@ developer or an agent. The loops are:
 - **The owner tries the change on real devices** and says what is wrong.
 - **Development builds show every error** on screen and in the system log
   (this repository's AGENTS.md). Release builds log nothing.
-- **Gates** run at commit and push: format, lint, build, tests. Never skip
-  them. Continuous integration reports problems after the merge; it never
+- **Gates** run at commit and push. Allowlisted prose-only changes run
+  documentation checks; code, mixed changes and unknown paths run the strict
+  engineering floor. Never bypass the hooks. Continuous integration reports problems after the merge; it never
   gates one.
 - **Review** reads every diff before it merges: trivial changes may be
   self-reviewed; consequential diffs need independent review by a model
@@ -239,7 +240,7 @@ independent review, run as this repository's AGENTS.md describes.
     always, never, do not, cannot, prohibited, or not allowed, in
     any letter case), and changes no program text such as UI
     strings, log formats, error messages, or test-asserted text.
-  - Run the repository's full gate floor; another agent's review is not
+  - Run the repository's scope-selected gate floor; another agent's review is not
     required. For delegated trivial work, the front agent's inspection
     completes the review; do not recruit a third agent. Only the front
     agent may self-review.
