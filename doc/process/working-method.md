@@ -21,6 +21,16 @@ activity. When a simpler workflow provides sufficient assurance, use it.
 Simplification applies only to default practices; it never removes
 required assurance or alters authority limits.
 
+An owner-decided change is not a design task. When the owner states
+the exact change, apply it faithfully, verify the diff contains
+nothing else, and land it once its review tier is satisfied.
+Do not re-litigate the decision; report defects found while
+verifying, and escalate before acting when the decision violates
+an invariant or contradicts a specification.
+Hook-maintained lockfile and version-stamp refreshes under a change
+are expected side effects, not scope expansion; confirm they change
+only versions and revisions, and investigate any new source.
+
 Instructions fall into three categories:
 
 - **Invariants**: unconditional requirements, namely the shared
@@ -229,7 +239,8 @@ independent review, run as this repository's AGENTS.md describes.
 - Self-review for trivial changes: the front agent self-reviews a
   trivial change whose complete effect is readily apparent from the
   diff and that changes none of the following: executable behavior,
-  security policy, protocol meaning, dependencies, build or release
+  security policy, protocol meaning, dependencies (their identity,
+  versions, sources, features, or overrides), build or release
   behavior, gates, verification commands, or instructions governing
   agent authority or review procedure.
   - Eligible cases (exhaustive): comment prose corrections
@@ -243,7 +254,10 @@ independent review, run as this repository's AGENTS.md describes.
     (such as sentences carrying MUST, SHALL, SHOULD, REQUIRED,
     always, never, do not, cannot, prohibited, or not allowed, in
     any letter case), and changes no program text such as UI
-    strings, log formats, error messages, or test-asserted text.
+    strings, log formats, error messages, or test-asserted text;
+    and owner-stated exact changes applied verbatim with no other
+    diff apart from hook-maintained lockfile and version-stamp
+    refreshes.
   - Run the repository's scope-selected gate floor; another agent's review is not
     required. For delegated trivial work, the front agent's inspection
     completes the review; do not recruit a third agent. Only the front
