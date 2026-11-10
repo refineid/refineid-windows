@@ -13,6 +13,11 @@
 
 set -e
 
+if git ls-files | grep -i -E '(^|/)WHATSUP\.md$' >/dev/null; then
+    echo "pre-commit: error: WHATSUP.md files are forbidden."
+    exit 1
+fi
+
 # Classify before dependency refresh or any compiler invocation.
 if python3 "$(git rev-parse --show-toplevel)/scripts/DocumentationGate.py" commit; then
     exit 0
@@ -23,10 +28,7 @@ else
     fi
 fi
 
-if git ls-files | grep -i -E '(^|/)WHATSUP\.md$' >/dev/null; then
-    echo "pre-commit: error: WHATSUP.md files are forbidden."
-    exit 1
-fi
+
 
 # Stamp the workspace version to the UTC day when the day changed. The
 # manifest carries CalVer YY.M.D; the apps and packages add the time bucket
@@ -76,6 +78,8 @@ if [ -n "$escaping" ]; then
     echo "$escaping" >&2
     exit 1
 fi
+
+python3 -B scripts/TestDocumentationGate.py
 
 echo "pre-commit: cargo fmt --all --check"
 cargo fmt --all --check

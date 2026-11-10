@@ -27,6 +27,8 @@ else
     fi
 fi
 
+python3 -B scripts/TestDocumentationGate.py
+
 echo "pre-push: checking that Cargo.lock matches the manifests"
 
 if ! cargo fetch --locked --quiet; then

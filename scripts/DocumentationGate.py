@@ -37,6 +37,8 @@ def changes(base, target):
         metadata = fields[index].decode().split()
         path = fields[index + 1].decode('utf-8')
         old_mode, new_mode = metadata[0][1:], metadata[1]
+        if new_mode == '000000':
+            return None  # Deletions can invalidate links in unchanged documents.
         if not is_prose(path) or any(mode not in {'000000', '100644'} for mode in (old_mode, new_mode)):
             return None
         for blob, mode in ((metadata[2], old_mode), (metadata[3], new_mode)):
@@ -86,6 +88,8 @@ def ranges(mode, remote, updates):
         if len(fields) != 4:
             return None
         local_ref, local, remote_ref, old = fields
+        if not all(re.fullmatch('[0-9a-f]{40}', value) for value in (local, old)):
+            return None
         if set(local) == {'0'}:  # A deleted ref introduces no tree.
             continue
         if not local_ref.startswith('refs/heads/') or not remote_ref.startswith('refs/heads/'):

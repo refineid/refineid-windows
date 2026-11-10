@@ -89,9 +89,9 @@ class DocumentationGateTests(unittest.TestCase):
         self.git('mv', 'source.swift', 'AGENTS.md')
         self.assertEqual(self.gate().returncode, 1)
 
-    def test_document_deletion_is_docs(self):
+    def test_document_deletion_is_strict(self):
         self.git('rm', 'README.md')
-        self.assertEqual(self.gate().returncode, 0)
+        self.assertEqual(self.gate().returncode, 1)
 
     def test_symlink_is_strict(self):
         (self.root / 'README.md').unlink()
