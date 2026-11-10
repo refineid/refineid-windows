@@ -17,6 +17,16 @@
 
 set -eu
 
+# Classify before dependency refresh or any compiler invocation.
+if python3 "$(git rev-parse --show-toplevel)/scripts/DocumentationGate.py" push "${1:-origin}"; then
+    exit 0
+else
+    scope_status=$?
+    if [ "$scope_status" -ne 1 ]; then
+        exit "$scope_status"
+    fi
+fi
+
 echo "pre-push: checking that Cargo.lock matches the manifests"
 
 if ! cargo fetch --locked --quiet; then

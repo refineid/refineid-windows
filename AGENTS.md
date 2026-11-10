@@ -251,6 +251,25 @@ record for RAPP and its applications.
 - Describe what the code does and cite the source; ask the owner before
   changing trust behavior.
 
+## Validation follows the change
+
+- Mandatory hooks select the validation lane; agents never bypass them.
+  Only explicitly allowlisted prose-only changes qualify for documentation
+  checks: whitespace and applicable repository-local links. Keep shared
+  working-method copies identical across the five active implementation repos.
+- Code, tests, dependencies, build configuration, gate scripts, mixed changes
+  and unknown paths retain the existing strict engineering gates. Agent skill
+  or confidence never waives those checks. Executable documentation and build
+  inputs do not qualify as prose merely because they use Markdown.
+- Commit classification covers the staged change. Push classification covers
+  every outgoing commit and ref, including changes later reverted. Uncertain
+  classification takes the full lane; a failed documentation check fails the
+  hook. Changing the classifier or its hooks requires the full lane itself.
+- Review and validation are separate: consequential policy changes need
+  independent review, but prose alone needs no application build, signing,
+  installation or hardware test. Install and hardware instructions apply only
+  when the change affects the relevant application or card behavior.
+
 ## Independent review
 
 - Review is tiered per the working method. Before a pull request
