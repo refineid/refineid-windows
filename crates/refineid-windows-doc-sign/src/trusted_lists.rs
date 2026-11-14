@@ -234,9 +234,10 @@ impl ListCache {
 ///
 /// The lists in `cache` are read under `signers`, every signature
 /// verified again, and used as they are unless a fetch is due:
-/// `refresh` is [`Refresh::Now`], there are no lists, the cache is
-/// older than [`REFRESH_AFTER`], or one list no longer reads or is past
-/// its `NextUpdate` and the last fetch is older than [`RETRY_AFTER`]. A
+/// `refresh` is [`Refresh::Now`], there are no lists, a cached record
+/// carries a fetch time after `now`, the cache is older than
+/// [`REFRESH_AFTER`], or one list no longer reads or is past its
+/// `NextUpdate` and the last fetch is older than [`RETRY_AFTER`]. A
 /// due fetch reads the lists again with `get` and
 /// the cache takes the result; a list of the lists that does not
 /// arrive or read leaves the cached lists in use. Under
@@ -266,10 +267,13 @@ pub fn run_anchors(
     let due = |lists: &TrustedLists| match refresh {
         Refresh::Now => true,
         Refresh::CacheOnly => false,
-        Refresh::WhenDue => refresh_due(
-            lists.is_stale(now) || read_count(lists) != records.len(),
-            age(lists.fetched_at(), now),
-        ),
+        Refresh::WhenDue => {
+            records.iter().any(|record| record.fetched_at() > now)
+                || refresh_due(
+                    lists.is_stale(now) || read_count(lists) != records.len(),
+                    age(lists.fetched_at(), now),
+                )
+        }
     };
     let lists = match cached {
         Some(lists) if !due(&lists) => Ok(lists),
