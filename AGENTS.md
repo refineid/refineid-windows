@@ -145,9 +145,10 @@ in `doc/`, not here.
   fixed within the current task. Filing these issues is authorized; do not
   wait for a separate instruction for each finding. An implementation
   agent reports deferred findings in its handoff instead of filing them.
-- Search existing open issues first. Reuse the matching issue and add only
-  new, useful evidence instead of creating a duplicate. Group findings only
-  when they share a cause and can be resolved by one focused change.
+- The front agent searches existing open issues first, reuses any
+  matching issue by adding only new, useful evidence instead of
+  creating a duplicate, and groups findings only when they share a
+  cause and can be resolved by one focused change.
 - State the observed behavior, expected behavior, affected repository-relative
   paths, reproduction or inspection evidence, impact, and acceptance checks.
   Distinguish observations from hypotheses and specification requirements.
