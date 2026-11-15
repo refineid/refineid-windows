@@ -269,6 +269,7 @@ pub fn run_anchors(
         Refresh::CacheOnly => false,
         Refresh::WhenDue => {
             records.iter().any(|record| record.fetched_at() > now)
+                || lists.fetched_at() > now
                 || refresh_due(
                     lists.is_stale(now) || read_count(lists) != records.len(),
                     age(lists.fetched_at(), now),
