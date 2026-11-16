@@ -43,7 +43,7 @@
 #[cfg(windows)]
 use crate::CredentialStoreError;
 #[cfg(windows)]
-use crate::certstore::{PersonalStore, wide_text};
+use crate::win_store::CertStore;
 
 /// The container of the card's authentication key, which the Card Module
 /// reports to Windows (`refineid-minidriver` `cardmod`).
@@ -351,7 +351,7 @@ where
 
 /// The current user's Personal store, as its FINEID entries.
 #[cfg(windows)]
-pub struct PersonalCardEntries(PersonalStore);
+pub struct PersonalCardEntries(CertStore);
 
 #[cfg(windows)]
 impl core::fmt::Debug for PersonalCardEntries {
@@ -367,7 +367,7 @@ impl PersonalCardEntries {
     /// # Errors
     /// The store cannot be opened.
     pub fn open() -> Result<Self, CredentialStoreError> {
-        PersonalStore::open().map(Self)
+        CertStore::open_personal().map(Self)
     }
 }
 
@@ -376,11 +376,11 @@ impl FineidEntries for PersonalCardEntries {
     type Error = CredentialStoreError;
 
     fn certificates(&mut self) -> Result<Vec<CardCertificate>, Self::Error> {
-        Ok(fineid_certificates_in(self.0.0, &is_fineid_entry))
+        Ok(fineid_certificates_in(&self.0, &is_fineid_entry))
     }
 
     fn remove(&mut self, certificate: &CardCertificate) -> Result<usize, Self::Error> {
-        remove_fineid_entries(self.0.0, &is_fineid_entry, certificate)
+        remove_fineid_entries(&self.0, &is_fineid_entry, certificate)
     }
 }
 
@@ -389,60 +389,37 @@ impl FineidEntries for PersonalCardEntries {
 type EntryFilter = dyn Fn(&str, &str, &[u8]) -> bool;
 
 /// Calls `visit` with each entry of the open `store` that `is_fineid`
-/// accepts, and its certificate, until `visit` returns `false`.
+/// accepts, and its certificate, stopping early when `visit` returns an error.
 #[cfg(windows)]
-fn each_fineid_entry(
-    store: *mut core::ffi::c_void,
+fn try_for_each_fineid_entry<E>(
+    store: &CertStore,
     is_fineid: &EntryFilter,
-    mut visit: impl FnMut(
-        *const windows_sys::Win32::Security::Cryptography::CERT_CONTEXT,
-        &[u8],
-    ) -> bool,
-) {
-    use windows_sys::Win32::Security::Cryptography::{
-        CERT_CONTEXT, CertEnumCertificatesInStore, CertFreeCertificateContext,
-    };
-
-    let mut context: *const CERT_CONTEXT = core::ptr::null();
-    loop {
-        // SAFETY: `context` is null or the context the previous iteration
-        // received from this same enumeration, which frees it.
-        context = unsafe { CertEnumCertificatesInStore(store, context) };
-        if context.is_null() {
-            return;
-        }
-        let Some((provider, container)) = key_provider_info(context) else {
-            continue;
+    mut visit: impl for<'a> FnMut(crate::win_store::CertContext<'a>, &'a [u8]) -> Result<(), E>,
+) -> Result<(), E> {
+    store.try_for_each(|context| {
+        let Some((provider, container)) = context.key_provider_info() else {
+            return Ok(());
         };
-        // SAFETY: the context is live; its encoded certificate is
-        // `cbCertEncoded` bytes at `pbCertEncoded`, null only when empty.
-        let certificate = unsafe {
-            let encoded = (*context).pbCertEncoded;
-            if encoded.is_null() {
-                continue;
-            }
-            core::slice::from_raw_parts(encoded, (*context).cbCertEncoded as usize)
-        };
-        if is_fineid(&provider, &container, certificate) && !visit(context, certificate) {
-            // SAFETY: the enumeration stops here, so its context is ours to
-            // free.
-            unsafe { CertFreeCertificateContext(context) };
-            return;
+        let certificate = context.encoded_der();
+        if certificate.is_empty() || !is_fineid(&provider, &container, certificate) {
+            return Ok(());
         }
-    }
+        visit(context, certificate)
+    })
 }
 
 /// The certificates of the FINEID entries of the open `store`.
 #[cfg(windows)]
-fn fineid_certificates_in(
-    store: *mut core::ffi::c_void,
-    is_fineid: &EntryFilter,
-) -> Vec<CardCertificate> {
+fn fineid_certificates_in(store: &CertStore, is_fineid: &EntryFilter) -> Vec<CardCertificate> {
     let mut certificates = Vec::new();
-    each_fineid_entry(store, is_fineid, |_, certificate| {
-        certificates.push(CardCertificate::new(certificate.to_vec()));
-        true
-    });
+    let Ok(()) = try_for_each_fineid_entry::<core::convert::Infallible>(
+        store,
+        is_fineid,
+        |_context, certificate| {
+            certificates.push(CardCertificate::new(certificate.to_vec()));
+            Ok(())
+        },
+    );
     certificates
 }
 
@@ -450,82 +427,20 @@ fn fineid_certificates_in(
 /// `certificate`, and returns how many it removed.
 #[cfg(windows)]
 fn remove_fineid_entries(
-    store: *mut core::ffi::c_void,
+    store: &CertStore,
     is_fineid: &EntryFilter,
     certificate: &CardCertificate,
 ) -> Result<usize, CredentialStoreError> {
-    use windows_sys::Win32::Foundation::GetLastError;
-    use windows_sys::Win32::Security::Cryptography::{
-        CertDeleteCertificateFromStore, CertDuplicateCertificateContext,
-    };
-
     let mut removed = 0;
-    let mut failure = None;
-    each_fineid_entry(store, is_fineid, |context, der| {
+    try_for_each_fineid_entry(store, is_fineid, |context, der| {
         if der != certificate.as_bytes() {
-            return true;
+            return Ok(());
         }
-        // SAFETY: deletion consumes a context of its own, so the enumeration
-        // keeps the original and continues from it.
-        let deleted =
-            unsafe { CertDeleteCertificateFromStore(CertDuplicateCertificateContext(context)) };
-        if deleted == 0 {
-            // SAFETY: read before any other Windows call.
-            let code = unsafe { GetLastError() };
-            failure = Some(CredentialStoreError::CertificateStore { code });
-            return false;
-        }
+        context.delete_duplicated()?;
         removed += 1;
-        true
-    });
-    failure.map_or(Ok(removed), Err)
-}
-
-/// The key provider and container of an entry, or `None` when it has none.
-#[cfg(windows)]
-pub(crate) fn key_provider_info(
-    context: *const windows_sys::Win32::Security::Cryptography::CERT_CONTEXT,
-) -> Option<(String, String)> {
-    use windows_sys::Win32::Security::Cryptography::{
-        CERT_KEY_PROV_INFO_PROP_ID, CRYPT_KEY_PROV_INFO, CertGetCertificateContextProperty,
-    };
-
-    let mut size = 0u32;
-    // SAFETY: a size query with a null buffer and a valid size pointer.
-    let sized = unsafe {
-        CertGetCertificateContextProperty(
-            context,
-            CERT_KEY_PROV_INFO_PROP_ID,
-            core::ptr::null_mut(),
-            &raw mut size,
-        )
-    };
-    if sized == 0 || (size as usize) < size_of::<CRYPT_KEY_PROV_INFO>() {
-        return None;
-    }
-    let mut buffer = vec![0u64; (size as usize).div_ceil(size_of::<u64>())];
-    // SAFETY: `buffer` holds at least `size` bytes with the alignment the
-    // structure needs; its string pointers point into the same buffer or are
-    // null, and `wide_text` reads them within `size`.
-    unsafe {
-        if CertGetCertificateContextProperty(
-            context,
-            CERT_KEY_PROV_INFO_PROP_ID,
-            buffer.as_mut_ptr().cast(),
-            &raw mut size,
-        ) == 0
-        {
-            return None;
-        }
-        let info = buffer
-            .as_ptr()
-            .cast::<CRYPT_KEY_PROV_INFO>()
-            .read_unaligned();
-        Some((
-            wide_text(info.pwszProvName, size as usize),
-            wide_text(info.pwszContainerName, size as usize),
-        ))
-    }
+        Ok(())
+    })?;
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -874,12 +789,11 @@ mod tests {
     #[cfg(windows)]
     mod store {
         use super::super::*;
+        use crate::win_store::encode_wide;
         use windows_sys::Win32::Security::Cryptography::{
-            CERT_CLOSE_STORE_FORCE_FLAG, CERT_CONTEXT, CERT_KEY_PROV_INFO_PROP_ID,
-            CERT_STORE_ADD_ALWAYS, CERT_STORE_PROV_MEMORY, CRYPT_KEY_PROV_INFO,
-            CertAddEncodedCertificateToStore, CertCloseStore, CertEnumCertificatesInStore,
-            CertFreeCertificateContext, CertOpenStore, CertSetCertificateContextProperty,
-            PKCS_7_ASN_ENCODING, X509_ASN_ENCODING,
+            CERT_CONTEXT, CERT_KEY_PROV_INFO_PROP_ID, CERT_STORE_ADD_ALWAYS, CRYPT_KEY_PROV_INFO,
+            CertAddEncodedCertificateToStore, CertFreeCertificateContext,
+            CertSetCertificateContextProperty, PKCS_7_ASN_ENCODING, X509_ASN_ENCODING,
         };
 
         /// A synthetic certificate standing in for a FINEID entry.
@@ -893,20 +807,16 @@ mod tests {
         /// The container of the entry it must leave.
         const OTHER_CONTAINER: &str = "{11111111-2222-3333-4444-555555555555}";
 
-        fn wide(text: &str) -> Vec<u16> {
-            text.encode_utf16().chain(core::iter::once(0)).collect()
-        }
-
-        fn add(store: *mut core::ffi::c_void, der: &[u8], container: &str) {
+        fn add(store: &CertStore, der: &[u8], container: &str) {
             let mut context: *mut CERT_CONTEXT = core::ptr::null_mut();
-            let provider = wide(PROVIDER);
-            let container = wide(container);
+            let provider = encode_wide(PROVIDER);
+            let container = encode_wide(container);
             // SAFETY: the store is open, `der` a certificate, and the
             // property's strings live for the calls, which copy them.
             unsafe {
                 assert_ne!(
                     CertAddEncodedCertificateToStore(
-                        store,
+                        store.as_raw(),
                         X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
                         der.as_ptr(),
                         u32::try_from(der.len()).expect("a small certificate"),
@@ -931,49 +841,39 @@ mod tests {
             }
         }
 
-        fn count(store: *mut core::ffi::c_void) -> usize {
+        fn count(store: &CertStore) -> usize {
             let mut seen = 0;
-            let mut context: *const CERT_CONTEXT = core::ptr::null();
-            loop {
-                // SAFETY: the enumeration frees the context it is given.
-                context = unsafe { CertEnumCertificatesInStore(store, context) };
-                if context.is_null() {
-                    return seen;
-                }
+            store.for_each(|_| {
                 seen += 1;
-            }
+            });
+            seen
         }
 
         #[test]
         fn only_the_fineid_entry_with_the_certificate_goes() {
-            // SAFETY: an in-memory store with no parameter; closed below. The
-            // user's own Personal store is never opened by this test.
-            let store =
-                unsafe { CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, 0, core::ptr::null()) };
-            assert!(!store.is_null());
-            add(store, SWEPT, SWEPT_CONTAINER);
-            add(store, OTHER, OTHER_CONTAINER);
+            let store = CertStore::open_memory().expect("an in-memory store");
+            add(&store, SWEPT, SWEPT_CONTAINER);
+            add(&store, OTHER, OTHER_CONTAINER);
             let is_fineid = |_: &str, container: &str, _: &[u8]| container == SWEPT_CONTAINER;
 
             let swept = CardCertificate::new(SWEPT.to_vec());
             assert_eq!(
-                fineid_certificates_in(store, &is_fineid),
+                fineid_certificates_in(&store, &is_fineid),
                 vec![swept.clone()]
             );
             let other = CardCertificate::new(OTHER.to_vec());
             assert_eq!(
-                remove_fineid_entries(store, &is_fineid, &other).expect("the store answers"),
+                remove_fineid_entries(&store, &is_fineid, &other).expect("the store answers"),
                 0,
                 "another vendor's entry is not FINEID's"
             );
             assert_eq!(
-                remove_fineid_entries(store, &is_fineid, &swept).expect("the store answers"),
+                remove_fineid_entries(&store, &is_fineid, &swept).expect("the store answers"),
                 1
             );
-            assert_eq!(count(store), 1, "the other entry stays");
-            assert!(fineid_certificates_in(store, &is_fineid).is_empty());
-            // SAFETY: closes the store opened above, once.
-            unsafe { CertCloseStore(store, CERT_CLOSE_STORE_FORCE_FLAG) };
+            assert_eq!(count(&store), 1, "the other entry stays");
+            assert!(fineid_certificates_in(&store, &is_fineid).is_empty());
+            assert!(store.close_checked());
         }
     }
 }

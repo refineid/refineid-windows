@@ -176,17 +176,16 @@ pub use windows_store::present_card_cas;
 mod windows_store {
     use windows_sys::Win32::Foundation::{CRYPT_E_EXISTS, GetLastError};
     use windows_sys::Win32::Security::Cryptography::{
-        CERT_CONTEXT, CERT_FIRST_USER_PROP_ID, CERT_STORE_ADD_NEW, CERT_STORE_OPEN_EXISTING_FLAG,
-        CERT_STORE_PROV_SYSTEM_W, CERT_SYSTEM_STORE_CURRENT_USER, CRYPT_INTEGER_BLOB, CTL_USAGE,
-        CertAddEncodedCertificateToStore, CertCloseStore, CertDeleteCertificateFromStore,
-        CertDuplicateCertificateContext, CertEnumCertificatesInStore, CertFreeCertificateContext,
-        CertGetCertificateContextProperty, CertOpenStore, CertSetCertificateContextProperty,
-        CertSetEnhancedKeyUsage, HCERTSTORE, PKCS_7_ASN_ENCODING, X509_ASN_ENCODING,
-        szOID_PKIX_KP_CLIENT_AUTH,
+        CERT_CONTEXT, CERT_FIRST_USER_PROP_ID, CERT_STORE_ADD_NEW, CRYPT_INTEGER_BLOB, CTL_USAGE,
+        CertAddEncodedCertificateToStore, CertDeleteCertificateFromStore,
+        CertFreeCertificateContext, CertGetCertificateContextProperty,
+        CertSetCertificateContextProperty, CertSetEnhancedKeyUsage, PKCS_7_ASN_ENCODING,
+        X509_ASN_ENCODING, szOID_PKIX_KP_CLIENT_AUTH,
     };
 
     use super::{CardCas, PRESENTED_MARK, Usage, wanted_certificates};
     use crate::CredentialStoreError;
+    use crate::win_store::{CertStore, UNSPECIFIED_STORE_ERROR_CODE, last_certificate_store_error};
 
     /// The user's Intermediate Certification Authorities store (Microsoft,
     /// "System Store Locations").
@@ -205,91 +204,26 @@ mod windows_store {
     /// The encoding of a certificate in a store.
     const ENCODING: u32 = X509_ASN_ENCODING | PKCS_7_ASN_ENCODING;
 
-    /// The user's CA store, open for writing.
-    struct IntermediateStore(HCERTSTORE);
-
-    impl IntermediateStore {
-        fn open() -> Result<Self, CredentialStoreError> {
-            let name: Vec<u16> = INTERMEDIATE_STORE.encode_utf16().chain([0]).collect();
-            // SAFETY: the provider constant selects the system store opened by
-            // a NUL-terminated wide name, which `name` is for the whole call.
-            let store = unsafe {
-                CertOpenStore(
-                    CERT_STORE_PROV_SYSTEM_W,
-                    0,
-                    0,
-                    CERT_SYSTEM_STORE_CURRENT_USER | CERT_STORE_OPEN_EXISTING_FLAG,
-                    name.as_ptr().cast(),
-                )
-            };
-            if store.is_null() {
-                return Err(last_store_error());
-            }
-            Ok(Self(store))
-        }
-    }
-
-    impl Drop for IntermediateStore {
-        fn drop(&mut self) {
-            // SAFETY: the handle came from a successful `CertOpenStore` and is
-            // closed exactly once.
-            unsafe {
-                let _ = CertCloseStore(self.0, 0);
-            }
-        }
-    }
-
-    /// The certificate store failure Windows just reported.
-    fn last_store_error() -> CredentialStoreError {
-        // SAFETY: `GetLastError` is read before any other Windows call.
-        CredentialStoreError::CertificateStore {
-            code: unsafe { GetLastError() },
-        }
-    }
-
     /// Makes the user's CA store hold the CAs of the cards in readers,
     /// `present`, and no other entry of this module's.
     ///
     /// # Errors
     /// A Windows certificate store failure.
     pub fn present_card_cas(present: &[CardCas]) -> Result<(), CredentialStoreError> {
-        let store = IntermediateStore::open()?;
+        let store = CertStore::open_current_user(INTERMEDIATE_STORE)?;
         let wanted = wanted_certificates(present);
         let mut standing: Vec<Vec<u8>> = Vec::new();
-        let mut context: *const CERT_CONTEXT = core::ptr::null();
-        loop {
-            // SAFETY: `context` is null or the context the previous iteration
-            // received from this same enumeration, which frees it.
-            context = unsafe { CertEnumCertificatesInStore(store.0, context) };
-            if context.is_null() {
-                break;
+        store.try_for_each(|context| {
+            if !is_presented(context.as_raw()) {
+                return Ok(());
             }
-            if !is_presented(context) {
-                continue;
-            }
-            // SAFETY: the context is live; its encoded certificate is
-            // `cbCertEncoded` bytes at `pbCertEncoded`.
-            let certificate = unsafe {
-                core::slice::from_raw_parts(
-                    (*context).pbCertEncoded,
-                    (*context).cbCertEncoded as usize,
-                )
-            };
+            let certificate = context.encoded_der();
             if wanted.iter().any(|wanted| wanted.der == certificate) {
                 standing.push(certificate.to_vec());
-                continue;
+                return Ok(());
             }
-            // SAFETY: deleting frees the context passed in, so a duplicate
-            // goes to the delete while the enumeration keeps its own.
-            if unsafe { CertDeleteCertificateFromStore(CertDuplicateCertificateContext(context)) }
-                == 0
-            {
-                let error = last_store_error();
-                // SAFETY: the enumeration's context is freed once, here.
-                unsafe { CertFreeCertificateContext(context) };
-                return Err(error);
-            }
-        }
+            context.delete_duplicated()
+        })?;
         for certificate in wanted {
             if !standing.contains(&certificate.der) {
                 add(&store, &certificate.der, certificate.usage)?;
@@ -319,7 +253,7 @@ mod windows_store {
     /// certificate the store already holds is someone else's entry and is
     /// left as it is.
     fn add(
-        store: &IntermediateStore,
+        store: &CertStore,
         certificate: &[u8],
         usage: Usage,
     ) -> Result<(), CredentialStoreError> {
@@ -330,7 +264,7 @@ mod windows_store {
         // receives a context this function frees.
         if unsafe {
             CertAddEncodedCertificateToStore(
-                store.0,
+                store.as_raw(),
                 ENCODING,
                 certificate.as_ptr(),
                 length,
@@ -346,6 +280,11 @@ mod windows_store {
             } else {
                 Err(CredentialStoreError::CertificateStore { code })
             };
+        }
+        if added.is_null() {
+            return Err(CredentialStoreError::CertificateStore {
+                code: UNSPECIFIED_STORE_ERROR_CODE,
+            });
         }
         let outcome = match usage {
             Usage::AsIssued => Ok(()),
@@ -373,7 +312,7 @@ mod windows_store {
         // SAFETY: `context` is a live store context; `usage` names one
         // NUL-terminated object identifier for the whole call.
         if unsafe { CertSetEnhancedKeyUsage(context, &raw const usage) } == 0 {
-            return Err(last_store_error());
+            return Err(last_certificate_store_error());
         }
         Ok(())
     }
@@ -395,7 +334,7 @@ mod windows_store {
             )
         } == 0
         {
-            return Err(last_store_error());
+            return Err(last_certificate_store_error());
         }
         Ok(())
     }

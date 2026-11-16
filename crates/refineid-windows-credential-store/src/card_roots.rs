@@ -118,13 +118,10 @@ pub use windows_store::remove_card_module_roots;
 #[cfg(windows)]
 mod windows_store {
     use windows_sys::Win32::Foundation::{
-        ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, GetLastError, WIN32_ERROR,
+        ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, WIN32_ERROR,
     };
     use windows_sys::Win32::Security::Cryptography::{
-        CERT_CONTEXT, CERT_SMART_CARD_ROOT_INFO_PROP_ID, CERT_STORE_PROV_REG,
-        CERT_STORE_READONLY_FLAG, CertCloseStore, CertDeleteCertificateFromStore,
-        CertDuplicateCertificateContext, CertEnumCertificatesInStore, CertFreeCertificateContext,
-        CertGetCertificateContextProperty, CertOpenStore, HCERTSTORE,
+        CERT_CONTEXT, CERT_SMART_CARD_ROOT_INFO_PROP_ID, CertGetCertificateContextProperty,
     };
     use windows_sys::Win32::System::Registry::{
         HKEY, HKEY_USERS, KEY_ALL_ACCESS, KEY_READ, REG_SAM_FLAGS, RegCloseKey, RegEnumKeyExW,
@@ -133,9 +130,8 @@ mod windows_store {
 
     use super::is_card_module_root;
     use crate::CredentialStoreError;
-    use crate::card_certificates::{
-        CardId, FINEID_AUTHENTICATION_CONTAINER, is_fineid_entry, key_provider_info,
-    };
+    use crate::card_certificates::{CardId, FINEID_AUTHENTICATION_CONTAINER, is_fineid_entry};
+    use crate::win_store::{CertStore, encode_wide};
 
     /// A user's propagated roots, under the user's hive.
     const SMART_CARD_ROOT_KEY: &str = r"Software\Microsoft\SystemCertificates\SmartCardRoot";
@@ -154,7 +150,7 @@ mod windows_store {
         /// `path` under `parent` with `access`; `Ok(None)` when it does not
         /// exist.
         fn open(parent: HKEY, path: &str, access: REG_SAM_FLAGS) -> Result<Option<Self>, u32> {
-            let path = wide(path);
+            let path = encode_wide(path);
             let mut key: HKEY = core::ptr::null_mut();
             // SAFETY: `path` is NUL-terminated for the call and `key` receives
             // the handle.
@@ -175,87 +171,19 @@ mod windows_store {
         }
     }
 
-    /// A certificate store over a registry key, closed on drop.
-    struct Store(HCERTSTORE);
-
-    impl Store {
-        /// The store `key` holds, read-only when `read_only`.
-        fn over(key: &Key, read_only: bool) -> Result<Self, CredentialStoreError> {
-            let flags = if read_only {
-                CERT_STORE_READONLY_FLAG
-            } else {
-                0
-            };
-            // SAFETY: the registry provider takes an open key handle, which
-            // lives for the call; the store keeps its own.
-            let store = unsafe { CertOpenStore(CERT_STORE_PROV_REG, 0, 0, flags, key.0.cast()) };
-            if store.is_null() {
-                // SAFETY: read before any other Windows call.
-                let code = unsafe { GetLastError() };
-                return Err(CredentialStoreError::CertificateStore { code });
-            }
-            Ok(Self(store))
-        }
-
-        /// Calls `visit` with each entry until it returns `false`.
-        fn each(&self, mut visit: impl FnMut(*const CERT_CONTEXT) -> bool) {
-            let mut context: *const CERT_CONTEXT = core::ptr::null();
-            loop {
-                // SAFETY: `context` is null or the context the previous
-                // iteration received from this enumeration, which frees it.
-                context = unsafe { CertEnumCertificatesInStore(self.0, context) };
-                if context.is_null() {
-                    return;
-                }
-                if !visit(context) {
-                    // SAFETY: the enumeration stops here, so its context is
-                    // ours to free.
-                    unsafe { CertFreeCertificateContext(context) };
-                    return;
-                }
-            }
-        }
-    }
-
-    impl Drop for Store {
-        fn drop(&mut self) {
-            // SAFETY: the handle came from a successful `CertOpenStore` and
-            // is closed once.
-            unsafe {
-                let _ = CertCloseStore(self.0, 0);
-            }
-        }
-    }
-
-    /// Wide, NUL-terminated copy of `text`.
-    fn wide(text: &str) -> Vec<u16> {
-        text.encode_utf16().chain(core::iter::once(0)).collect()
-    }
-
-    /// The encoded certificate of a live `context`.
-    const fn encoded<'a>(context: *const CERT_CONTEXT) -> &'a [u8] {
-        // SAFETY: the context is live while the caller holds it; its encoded
-        // certificate is `cbCertEncoded` bytes at `pbCertEncoded`. The slice
-        // does not outlive the visit that reads it.
-        unsafe {
-            core::slice::from_raw_parts((*context).pbCertEncoded, (*context).cbCertEncoded as usize)
-        }
-    }
-
     /// The identifiers the Card Module gives the cards whose
     /// authentication certificates propagation put in `personal`.
-    fn module_cards(personal: &Store) -> Vec<CardId> {
+    fn module_cards(personal: &CertStore) -> Vec<CardId> {
         let mut cards = Vec::new();
-        personal.each(|context| {
-            if let Some((provider, container)) = key_provider_info(context) {
-                let certificate = encoded(context);
+        personal.for_each(|context| {
+            if let Some((provider, container)) = context.key_provider_info() {
+                let certificate = context.encoded_der();
                 if container.eq_ignore_ascii_case(FINEID_AUTHENTICATION_CONTAINER)
                     && is_fineid_entry(&provider, &container, certificate)
                 {
                     cards.push(CardId::of_authentication_certificate(certificate));
                 }
             }
-            true
         });
         cards
     }
@@ -272,7 +200,7 @@ mod windows_store {
                 &raw mut size,
             )
         };
-        if sized == 0 {
+        if sized == 0 || size == 0 {
             return None;
         }
         let mut property = vec![0u8; size as usize];
@@ -305,33 +233,25 @@ mod windows_store {
         else {
             return Ok(0);
         };
-        let cards = module_cards(&Store::over(&personal_key, true)?);
+        // SAFETY: `personal_key` holds an open registry key handle.
+        let cards = module_cards(&unsafe { CertStore::open_registry(personal_key.0, true)? });
         if cards.is_empty() {
             return Ok(0);
         }
-        let roots = Store::over(&roots_key, false)?;
+        // SAFETY: `roots_key` holds an open registry key handle.
+        let roots = unsafe { CertStore::open_registry(roots_key.0, false)? };
         let mut removed = 0;
-        let mut failure = None;
-        roots.each(|context| {
-            let ours = root_information(context)
+        roots.try_for_each(|context| {
+            let ours = root_information(context.as_raw())
                 .is_some_and(|property| is_card_module_root(&property, &cards));
             if !ours {
-                return true;
+                return Ok(());
             }
-            // SAFETY: deletion consumes a context of its own, so the
-            // enumeration keeps the original and continues from it.
-            let deleted =
-                unsafe { CertDeleteCertificateFromStore(CertDuplicateCertificateContext(context)) };
-            if deleted == 0 {
-                // SAFETY: read before any other Windows call.
-                let code = unsafe { GetLastError() };
-                failure = Some(CredentialStoreError::CertificateStore { code });
-                return false;
-            }
+            context.delete_duplicated()?;
             removed += 1;
-            true
-        });
-        failure.map_or(Ok(removed), Err)
+            Ok(())
+        })?;
+        Ok(removed)
     }
 
     /// Removes the Card Module's propagated roots from every user profile
