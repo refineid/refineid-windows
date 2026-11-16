@@ -130,59 +130,6 @@ pub fn stale_browser_entries(
         .collect()
 }
 
-/// Wide, NUL-terminated copy of `text`.
-#[cfg(windows)]
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(core::iter::once(0)).collect()
-}
-
-/// The current user's personal store, closed on drop.
-#[cfg(windows)]
-pub struct PersonalStore(pub *mut core::ffi::c_void);
-
-#[cfg(windows)]
-impl PersonalStore {
-    pub fn open() -> Result<Self, CredentialStoreError> {
-        use windows_sys::Win32::Foundation::GetLastError;
-        use windows_sys::Win32::Security::Cryptography::{
-            CERT_STORE_OPEN_EXISTING_FLAG, CERT_STORE_PROV_SYSTEM_W,
-            CERT_SYSTEM_STORE_CURRENT_USER, CertOpenStore,
-        };
-
-        let name = wide("My");
-        // SAFETY: the provider constant selects the system store opened by a
-        // NUL-terminated wide name, which `name` is for the whole call.
-        let store = unsafe {
-            CertOpenStore(
-                CERT_STORE_PROV_SYSTEM_W,
-                0,
-                0,
-                CERT_SYSTEM_STORE_CURRENT_USER | CERT_STORE_OPEN_EXISTING_FLAG,
-                name.as_ptr().cast(),
-            )
-        };
-        if store.is_null() {
-            // SAFETY: `GetLastError` is read before any other Windows call.
-            let code = unsafe { GetLastError() };
-            return Err(CredentialStoreError::CertificateStore { code });
-        }
-        Ok(Self(store))
-    }
-}
-
-#[cfg(windows)]
-impl Drop for PersonalStore {
-    fn drop(&mut self) {
-        use windows_sys::Win32::Security::Cryptography::CertCloseStore;
-
-        // SAFETY: the handle came from a successful `CertOpenStore` and is
-        // closed exactly once.
-        unsafe {
-            let _ = CertCloseStore(self.0, 0);
-        }
-    }
-}
-
 /// Put the pairing's authentication certificate into the current user's
 /// personal store, bound to the `RefineID` key storage provider.
 ///
@@ -204,16 +151,18 @@ pub fn install_browser_certificate(
         CertFreeCertificateContext, CertSetCertificateContextProperty, X509_ASN_ENCODING,
     };
 
+    use crate::win_store::{CertStore, encode_wide, last_certificate_store_error};
+
     let der = certificate.as_der();
     let length = u32::try_from(der.len())
         .map_err(|_error| CredentialStoreError::CertificateStore { code: 0 })?;
-    let store = PersonalStore::open()?;
+    let store = CertStore::open_personal()?;
     let mut context = core::ptr::null_mut();
     // SAFETY: `der` is readable for `length` bytes and `context` is a valid
     // out pointer; a returned context is released below.
     let added = unsafe {
         CertAddEncodedCertificateToStore(
-            store.0,
+            store.as_raw(),
             X509_ASN_ENCODING,
             der.as_ptr(),
             length,
@@ -222,13 +171,11 @@ pub fn install_browser_certificate(
         )
     };
     if added == 0 || context.is_null() {
-        // SAFETY: `GetLastError` is read before any other Windows call.
-        let code = unsafe { GetLastError() };
-        return Err(CredentialStoreError::CertificateStore { code });
+        return Err(last_certificate_store_error());
     }
 
-    let mut container = wide(&browser_key_name(pair_id));
-    let mut provider = wide(KEY_STORAGE_PROVIDER);
+    let mut container = encode_wide(&browser_key_name(pair_id));
+    let mut provider = encode_wide(KEY_STORAGE_PROVIDER);
     let key_info = CRYPT_KEY_PROV_INFO {
         pwszContainerName: container.as_mut_ptr(),
         pwszProvName: provider.as_mut_ptr(),
@@ -238,8 +185,8 @@ pub fn install_browser_certificate(
         rgProvParam: core::ptr::null_mut(),
         dwKeySpec: 0,
     };
-    let mut friendly = wide(FRIENDLY_NAME);
-    let friendly_bytes = u32::try_from(friendly.len() * 2).unwrap_or(0);
+    let mut friendly = encode_wide(FRIENDLY_NAME);
+    let friendly_bytes = u32::try_from(friendly.len() * size_of::<u16>()).unwrap_or(0);
     let friendly_blob = CRYPT_INTEGER_BLOB {
         cbData: friendly_bytes,
         pbData: friendly.as_mut_ptr().cast(),
@@ -356,142 +303,28 @@ pub const fn remove_browser_entries(_stale: &[BrowserEntry]) {}
 fn visit_browser_entries(
     remove: &mut dyn FnMut(&BrowserEntry) -> bool,
 ) -> Result<usize, CredentialStoreError> {
-    use windows_sys::Win32::Foundation::GetLastError;
-    use windows_sys::Win32::Security::Cryptography::{
-        CERT_CONTEXT, CERT_KEY_PROV_INFO_PROP_ID, CRYPT_KEY_PROV_INFO,
-        CertDeleteCertificateFromStore, CertDuplicateCertificateContext,
-        CertEnumCertificatesInStore, CertFreeCertificateContext, CertGetCertificateContextProperty,
-    };
+    use crate::win_store::CertStore;
 
-    let store = PersonalStore::open()?;
-    let provider = wide(KEY_STORAGE_PROVIDER);
+    let store = CertStore::open_personal()?;
     let mut removed = 0;
-    let mut context: *mut CERT_CONTEXT = core::ptr::null_mut();
-    loop {
-        // SAFETY: `context` is null or the context the previous iteration
-        // received from this same enumeration, which frees it.
-        context = unsafe { CertEnumCertificatesInStore(store.0, context) };
-        if context.is_null() {
-            break;
-        }
-        let mut size = 0u32;
-        // SAFETY: a size query with a null buffer and a valid size pointer.
-        let sized = unsafe {
-            CertGetCertificateContextProperty(
-                context,
-                CERT_KEY_PROV_INFO_PROP_ID,
-                core::ptr::null_mut(),
-                &raw mut size,
-            )
+    store.try_for_each(|context| {
+        let Some((provider, name)) = context.key_provider_info() else {
+            return Ok(());
         };
-        if sized == 0 || (size as usize) < size_of::<CRYPT_KEY_PROV_INFO>() {
-            continue;
+        if provider != KEY_STORAGE_PROVIDER {
+            return Ok(());
         }
-        let units = (size as usize).div_ceil(size_of::<u64>());
-        let mut buffer = vec![0u64; units];
-        // SAFETY: `buffer` holds at least `size` bytes with the alignment
-        // the structure needs; the property is a `CRYPT_KEY_PROV_INFO`
-        // whose string pointers point into this same buffer, or are null.
-        let name = unsafe {
-            let read = CertGetCertificateContextProperty(
-                context,
-                CERT_KEY_PROV_INFO_PROP_ID,
-                buffer.as_mut_ptr().cast(),
-                &raw mut size,
-            );
-            if read == 0 {
-                None
-            } else {
-                let info = buffer
-                    .as_ptr()
-                    .cast::<CRYPT_KEY_PROV_INFO>()
-                    .read_unaligned();
-                if !info.pwszProvName.is_null() && wide_equals(info.pwszProvName, &provider) {
-                    Some(wide_text(info.pwszContainerName, size as usize))
-                } else {
-                    None
-                }
-            }
+        let entry = BrowserEntry {
+            name,
+            certificate: context.encoded_der().to_vec(),
         };
-        let Some(name) = name else {
-            continue;
-        };
-        // SAFETY: the context is live; its encoded certificate is
-        // `cbCertEncoded` bytes at `pbCertEncoded`, null only when empty.
-        let certificate = unsafe {
-            let encoded = (*context).pbCertEncoded;
-            if encoded.is_null() {
-                Vec::new()
-            } else {
-                core::slice::from_raw_parts(encoded, (*context).cbCertEncoded as usize).to_vec()
-            }
-        };
-        if !remove(&BrowserEntry { name, certificate }) {
-            continue;
+        if remove(&entry) {
+            context.delete_duplicated()?;
+            removed += 1;
         }
-        // SAFETY: deletion consumes a context of its own, so the enumeration
-        // keeps the original and continues from it.
-        let deleted =
-            unsafe { CertDeleteCertificateFromStore(CertDuplicateCertificateContext(context)) };
-        if deleted == 0 {
-            // SAFETY: `GetLastError` is read before any other Windows call;
-            // the enumeration context is ours to free once the loop ends.
-            let code = unsafe {
-                let code = GetLastError();
-                CertFreeCertificateContext(context);
-                code
-            };
-            return Err(CredentialStoreError::CertificateStore { code });
-        }
-        removed += 1;
-    }
+        Ok(())
+    })?;
     Ok(removed)
-}
-
-/// The NUL-terminated wide string at `text`, read no further than
-/// `limit_bytes`; a null pointer is an empty string.
-///
-/// # Safety
-/// `text` must be null or point at a wide string readable up to its NUL or
-/// `limit_bytes`, whichever comes first.
-#[cfg(windows)]
-pub unsafe fn wide_text(text: *const u16, limit_bytes: usize) -> String {
-    if text.is_null() {
-        return String::new();
-    }
-    let limit = limit_bytes / size_of::<u16>();
-    let mut units = Vec::new();
-    for index in 0..limit {
-        // SAFETY: every unit read so far was non-NUL and `index` is within
-        // the bound the caller guarantees.
-        let unit = unsafe { text.add(index).read() };
-        if unit == 0 {
-            break;
-        }
-        units.push(unit);
-    }
-    String::from_utf16_lossy(&units)
-}
-
-/// Whether the NUL-terminated wide string at `text` equals `expected`,
-/// reading no further than `expected` is long.
-///
-/// # Safety
-/// `text` must point at a readable NUL-terminated wide string.
-#[cfg(windows)]
-unsafe fn wide_equals(text: *const u16, expected: &[u16]) -> bool {
-    for (index, &unit) in expected.iter().enumerate() {
-        // SAFETY: every unit read so far was non-NUL, so the string
-        // continues at least one unit further.
-        let actual = unsafe { text.add(index).read() };
-        if actual != unit {
-            return false;
-        }
-        if unit == 0 {
-            return true;
-        }
-    }
-    true
 }
 
 #[cfg(test)]

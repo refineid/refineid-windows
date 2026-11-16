@@ -44,6 +44,8 @@ pub mod card_reading;
 pub mod card_roots;
 mod certstore;
 mod pairing;
+#[cfg(any(windows, test))]
+mod win_store;
 
 pub use certstore::{
     BROWSER_KEY_PREFIX, BrowserEntry, KEY_STORAGE_PROVIDER, browser_entries, browser_key_name,
