@@ -575,23 +575,6 @@ impl CardSessionTransport {
         }
     }
 
-    /// Mutable reference to the remote card transport if remote.
-    pub(crate) fn remote_mut(&mut self) -> Option<&mut RemoteCardTransport> {
-        match self {
-            Self::Remote(transport) => Some(transport.as_mut()),
-            _ => None,
-        }
-    }
-
-    /// The raw Windows transport beneath the optional SM channel.
-    pub(crate) const fn raw(&self) -> &WinScardTransport {
-        match self {
-            Self::Plain(transport) => transport,
-            Self::Protected(transport) => transport.inner(),
-            Self::Remote(_) => panic!("raw transport requested for remote card"),
-        }
-    }
-
     /// The raw Windows transport beneath the optional SM channel.
     ///
     /// A protected caller may use this only to establish the replacement PACE
@@ -617,15 +600,6 @@ impl CardSessionTransport {
             Self::Plain(transport) => transport.h_card,
             Self::Protected(transport) => transport.inner().h_card,
             Self::Remote(_) => 0,
-        }
-    }
-
-    /// Active PC/SC protocol, for bounded diagnostics only.
-    pub(crate) const fn protocol(&self) -> ScardProtocol {
-        match self {
-            Self::Plain(transport) => transport.protocol,
-            Self::Protected(transport) => transport.inner().protocol,
-            Self::Remote(_) => ScardProtocol::T1,
         }
     }
 

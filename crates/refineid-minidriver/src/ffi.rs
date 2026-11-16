@@ -24,10 +24,15 @@
 
 // ABI mirror of `cardmod.h`: the Windows header is the authority for
 // these names and shapes. The C names are verbatim (`non_snake_case` /
-// `non_camel_case_types`) and the full ABI surface is declared whether
-// or not it is wired yet (`dead_code`). Items are `pub(crate)` (the
-// cdylib's real exports are the `extern "system"` entry points, not
-// these), which keeps them off the crate's public docs.
+// `non_camel_case_types`) and the full ABI surface is declared even
+// where this read-only v6 card profile does not consume every item
+// (`dead_code`). Items are `pub(crate)` (the cdylib's real exports are
+// the `extern "system"` entry points, not these), which keeps them off
+// the crate's public docs.
+#![expect(
+    dead_code,
+    reason = "Windows Card Module FFI mirrors the complete cardmod.h ABI surface, including status codes, constants, and v7 definitions unused by this read-only v6 card profile"
+)]
 #![expect(
     nonstandard_style,
     reason = "Windows Card Module FFI mirrors cardmod.h verbatim; if this module stops carrying the ABI spellings, the expectation should go noisy so the exemption can be revisited"

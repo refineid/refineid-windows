@@ -160,16 +160,6 @@ impl Digest {
             _ => None,
         }
     }
-
-    /// Digest length in bytes.
-    pub(crate) const fn length(self) -> usize {
-        match self {
-            Self::Sha224 => 28,
-            Self::Sha256 => 32,
-            Self::Sha384 => 48,
-            Self::Sha512 => 64,
-        }
-    }
 }
 
 /// `BCRYPT_ECCPUBLIC_BLOB` for an uncompressed SEC 1 point
@@ -325,6 +315,5 @@ mod tests {
         assert_eq!(Digest::from_length(20), None);
         assert_eq!(Digest::from_cng_algorithm("SHA256"), Some(Digest::Sha256));
         assert_eq!(Digest::from_cng_algorithm("SHA1"), None);
-        assert_eq!(Digest::Sha512.length(), 64);
     }
 }

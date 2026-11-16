@@ -57,13 +57,6 @@
 #![cfg_attr(
     windows,
     expect(
-        dead_code,
-        reason = "incremental Card Module port -- entry-point users of the data model + scaffolding land in later commits; the unfulfilled expectation will flag this for removal at completion"
-    )
-)]
-#![cfg_attr(
-    windows,
-    expect(
         unsafe_code,
         reason = "the Card Module ABI is a C function table the Base CSP/KSP calls -- extern \"system\" FFI over caller-provided pointers is the entire point"
     )
@@ -352,19 +345,6 @@ const PIN_ID_PUK: DWORD = ROLE_ADMIN;
 #[cfg(windows)]
 const PIN_ID_QUALIFIED_SIG: DWORD = 3;
 #[cfg(windows)]
-const CALG_SHA1: DWORD = 0x0000_8004;
-#[cfg(windows)]
-const CALG_SHA_224: DWORD = 0x0000_800C;
-#[cfg(windows)]
-const CALG_SHA_256: DWORD = 0x0000_800C;
-#[cfg(windows)]
-const CALG_SHA_384: DWORD = 0x0000_800D;
-#[cfg(windows)]
-const CALG_SHA_512: DWORD = 0x0000_800E;
-#[cfg(windows)]
-const ENABLE_CNG_KSP_SURFACE: bool = false;
-
-#[cfg(windows)]
 #[expect(
     clippy::too_many_lines,
     reason = "CardAcquireContext is the ABI entry point that validates CARD_DATA, probes the handle, reads the auth cert, and installs the vendor context in one place"
@@ -389,12 +369,7 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
         return SCARD_E_UNSUPPORTED_FEATURE;
     }
 
-    let max_supported_version = if ENABLE_CNG_KSP_SURFACE {
-        CARD_DATA_CURRENT_VERSION
-    } else {
-        CARD_DATA_VERSION_SIX
-    };
-    cd.dwVersion = cd.dwVersion.min(max_supported_version);
+    cd.dwVersion = cd.dwVersion.min(CARD_DATA_VERSION_SIX);
 
     if cd.pbAtr.is_null() || cd.cbAtr == 0 || cd.hScard == 0 {
         refineid_dev_errors::report!(
@@ -596,19 +571,6 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
         cd.pfnCardGetProperty = Some(entry!(CardGetProperty));
         cd.pfnCardSetProperty = Some(unsupported_set_property);
     }
-    if ENABLE_CNG_KSP_SURFACE && cd.dwVersion >= CARD_DATA_VERSION_SEVEN {
-        cd.pfnCspUnpadData = None;
-        cd.pfnMDImportSessionKey = Some(unsupported_md_import_session_key);
-        cd.pfnMDEncryptData = Some(unsupported_md_encrypt_data);
-        cd.pfnCardImportSessionKey = Some(unsupported_card_import_session_key);
-        cd.pfnCardGetSharedKeyHandle = Some(unsupported_get_shared_key_handle);
-        cd.pfnCardGetAlgorithmProperty = Some(unsupported_get_algorithm_property);
-        cd.pfnCardGetKeyProperty = Some(unsupported_get_key_property);
-        cd.pfnCardSetKeyProperty = Some(unsupported_set_key_property);
-        cd.pfnCardDestroyKey = Some(unsupported_destroy_key);
-        cd.pfnCardProcessEncryptedData = Some(unsupported_process_encrypted_data);
-        cd.pfnCardCreateContainerEx = Some(unsupported_create_container_ex);
-    }
 
     SCARD_S_SUCCESS
 }
@@ -669,19 +631,6 @@ static CARDCF_VALUE: AtomicU64 = AtomicU64::new(0);
 #[cfg(windows)]
 fn cardcf_initial_value() -> u64 {
     1
-}
-
-/// Advance the synthetic cardcf freshness counter so the Base CSP /
-/// KSP data cache (including any cached PIN state keyed on cardcf)
-/// is treated as stale and discarded.
-#[cfg(windows)]
-fn bump_cardcf() {
-    let mut current = CARDCF_VALUE.load(Ordering::Relaxed);
-    if current == 0 {
-        current = cardcf_initial_value();
-    }
-    let next = (current.wrapping_add(1)) & 0x0000_00FF_FFFF_FFFF;
-    CARDCF_VALUE.store(next.max(1), Ordering::Relaxed);
 }
 
 #[cfg(windows)]
@@ -3076,375 +3025,98 @@ unsafe extern "system" fn CardChangeAuthenticatorEx(
     }
 }
 
+/// Defines Card Module `extern "system"` entry points that answer
+/// [`SCARD_E_UNSUPPORTED_FEATURE`] for operations this read-only card
+/// profile does not support.
 #[cfg(windows)]
-unsafe extern "system" fn unsupported_delete_container(
-    _p: *mut CARD_DATA,
-    _container: BYTE,
-    _flags: DWORD,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
+macro_rules! unsupported_card_entries {
+    ($($name:ident($($argument:ident: $type:ty),* $(,)?);)*) => {
+        $(
+            unsafe extern "system" fn $name($($argument: $type),*) -> DWORD {
+                SCARD_E_UNSUPPORTED_FEATURE
+            }
+        )*
+    };
 }
 
 #[cfg(windows)]
-unsafe extern "system" fn unsupported_create_container(
-    _p: *mut CARD_DATA,
-    _container: BYTE,
-    _flags: DWORD,
-    _keySpec: DWORD,
-    _keySize: DWORD,
-    _keyData: PBYTE,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_get_container_info(
-    _p: *mut CARD_DATA,
-    _container: BYTE,
-    _flags: DWORD,
-    _info: *mut CONTAINER_INFO,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_authenticate_pin(
-    _p: *mut CARD_DATA,
-    _pwszUserId: LPWSTR,
-    _pbPin: PBYTE,
-    _cbPin: DWORD,
-    _pcAttemptsRemaining: PDWORD,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_get_challenge(
-    _p: *mut CARD_DATA,
-    _pbChallenge: *mut PBYTE,
-    _pcbChallenge: PDWORD,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_authenticate_challenge(
-    _p: *mut CARD_DATA,
-    _pbResponse: PBYTE,
-    _cbResponse: DWORD,
-    _pcAttemptsRemaining: PDWORD,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_deauthenticate(
-    _p: *mut CARD_DATA,
-    _pwszUserId: LPWSTR,
-    _dwFlags: DWORD,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_create_directory(
-    _p: *mut CARD_DATA,
-    _pszDirectoryName: LPSTR,
-    _AccessCondition: DWORD,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_delete_directory(
-    _p: *mut CARD_DATA,
-    _pszDirectoryName: LPSTR,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_create_file(
-    _p: *mut CARD_DATA,
-    _pszDirectoryName: LPSTR,
-    _pszFileName: LPSTR,
-    _cbInitialCreationSize: DWORD,
-    _AccessCondition: DWORD,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_read_file(
-    _p: *mut CARD_DATA,
-    _pszDirectoryName: LPSTR,
-    _pszFileName: LPSTR,
-    _dwFlags: DWORD,
-    _ppbData: *mut PBYTE,
-    _pcbData: PDWORD,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_write_file(
-    _p: *mut CARD_DATA,
-    _pszDirectoryName: LPSTR,
-    _pszFileName: LPSTR,
-    _dwFlags: DWORD,
-    _pbData: PBYTE,
-    _cbData: DWORD,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_delete_file(
-    _p: *mut CARD_DATA,
-    _pszDirectoryName: LPSTR,
-    _pszFileName: LPSTR,
-    _dwFlags: DWORD,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_enum_files(
-    _p: *mut CARD_DATA,
-    _pszDirectoryName: LPSTR,
-    _ppmszFileNames: *mut LPSTR,
-    _pdwcbFileName: PDWORD,
-    _dwFlags: DWORD,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_get_file_info(
-    _p: *mut CARD_DATA,
-    _pszDirectoryName: LPSTR,
-    _pszFileName: LPSTR,
-    _pCardFileInfo: *mut CARD_FILE_INFO,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_query_free_space(
-    _p: *mut CARD_DATA,
-    _dwFlags: DWORD,
-    _pCardFreeSpaceInfo: *mut CARD_FREE_SPACE_INFO,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_query_key_sizes(
-    _p: *mut CARD_DATA,
-    _dwKeySpec: DWORD,
-    _dwFlags: DWORD,
-    _pCardKeySizes: *mut CARD_KEY_SIZES,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_sign_data(
-    _p: *mut CARD_DATA,
-    _pInfo: *mut CARD_SIGNING_INFO,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_rsa_decrypt(_p: *mut CARD_DATA, _pInfo: PVOID) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_construct_dh_agreement(
-    _p: *mut CARD_DATA,
-    _info: PVOID,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_derive_key(_p: *mut CARD_DATA, _info: PVOID) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_destroy_dh_agreement(
-    _p: *mut CARD_DATA,
-    _b: BYTE,
-    _flags: DWORD,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_csp_get_dh_agreement(
-    _p: *mut CARD_DATA,
-    _hSecretAgreement: PVOID,
-    _pbSecretAgreementIndex: *mut BYTE,
-    _dwFlags: DWORD,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_get_challenge_ex(
-    _p: *mut CARD_DATA,
-    _PinId: DWORD,
-    _ppbChallengeData: *mut PBYTE,
-    _pcbChallengeData: PDWORD,
-    _dwFlags: DWORD,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_deauthenticate_ex(
-    _p: *mut CARD_DATA,
-    _PinId: DWORD,
-    _dwFlags: DWORD,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_get_container_property(
-    _p: *mut CARD_DATA,
-    _bContainerIndex: BYTE,
-    _wszProperty: LPCWSTR,
-    _pbData: PBYTE,
-    _cbData: DWORD,
-    _pdwDataLen: PDWORD,
-    _dwFlags: DWORD,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_set_container_property(
-    _p: *mut CARD_DATA,
-    _bContainerIndex: BYTE,
-    _wszProperty: LPCWSTR,
-    _pbData: PBYTE,
-    _cbData: DWORD,
-    _dwFlags: DWORD,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_get_property(
-    _p: *mut CARD_DATA,
-    _wszProperty: LPCWSTR,
-    _pbData: PBYTE,
-    _cbData: DWORD,
-    _pdwDataLen: PDWORD,
-    _dwFlags: DWORD,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_set_property(
-    _p: *mut CARD_DATA,
-    _wszProperty: LPCWSTR,
-    _pbData: PBYTE,
-    _cbData: DWORD,
-    _dwFlags: DWORD,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_md_import_session_key(
-    _p: *mut CARD_DATA,
-    _pInfo: PVOID,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_md_encrypt_data(_p: *mut CARD_DATA, _pInfo: PVOID) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_card_import_session_key(
-    _p: *mut CARD_DATA,
-    _pInfo: PVOID,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_get_shared_key_handle(
-    _p: *mut CARD_DATA,
-    _pInfo: PVOID,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_get_algorithm_property(
-    _p: *mut CARD_DATA,
-    _pwszAlgId: LPCWSTR,
-    _pwszProperty: LPCWSTR,
-    _pbData: PBYTE,
-    _cbData: DWORD,
-    _pdwDataLen: PDWORD,
-    _dwFlags: DWORD,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_get_key_property(
-    _p: *mut CARD_DATA,
-    _hKey: CARD_KEY_HANDLE,
-    _pwszProperty: LPCWSTR,
-    _pbData: PBYTE,
-    _cbData: DWORD,
-    _pdwDataLen: PDWORD,
-    _dwFlags: DWORD,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_set_key_property(_p: *mut CARD_DATA, _info: PVOID) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_destroy_key(_p: *mut CARD_DATA, _info: PVOID) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_process_encrypted_data(
-    _p: *mut CARD_DATA,
-    _info: PVOID,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn unsupported_create_container_ex(
-    _p: *mut CARD_DATA,
-    _container: BYTE,
-    _flags: DWORD,
-    _keySpec: DWORD,
-    _keySize: DWORD,
-    _keyData: PBYTE,
-    _pinId: DWORD,
-) -> DWORD {
-    SCARD_E_UNSUPPORTED_FEATURE
+unsupported_card_entries! {
+    unsupported_delete_container(
+        _pCardData: *mut CARD_DATA,
+        _bContainerIndex: BYTE,
+        _dwReserved: DWORD,
+    );
+    unsupported_create_container(
+        _pCardData: *mut CARD_DATA,
+        _bContainerIndex: BYTE,
+        _dwFlags: DWORD,
+        _dwKeySpec: DWORD,
+        _dwKeySize: DWORD,
+        _pbKeyData: PBYTE,
+    );
+    unsupported_get_challenge(
+        _pCardData: *mut CARD_DATA,
+        _ppbChallengeData: *mut PBYTE,
+        _pcbChallengeData: PDWORD,
+    );
+    unsupported_authenticate_challenge(
+        _pCardData: *mut CARD_DATA,
+        _pbResponseData: PBYTE,
+        _cbResponseData: DWORD,
+        _pcAttemptsRemaining: PDWORD,
+    );
+    unsupported_create_directory(
+        _pCardData: *mut CARD_DATA,
+        _pszDirectoryName: LPSTR,
+        _AccessCondition: DWORD,
+    );
+    unsupported_delete_directory(
+        _pCardData: *mut CARD_DATA,
+        _pszDirectoryName: LPSTR,
+    );
+    unsupported_create_file(
+        _pCardData: *mut CARD_DATA,
+        _pszDirectoryName: LPSTR,
+        _pszFileName: LPSTR,
+        _cbInitialCreationSize: DWORD,
+        _AccessCondition: DWORD,
+    );
+    unsupported_write_file(
+        _pCardData: *mut CARD_DATA,
+        _pszDirectoryName: LPSTR,
+        _pszFileName: LPSTR,
+        _dwFlags: DWORD,
+        _pbData: PBYTE,
+        _cbData: DWORD,
+    );
+    unsupported_delete_file(
+        _pCardData: *mut CARD_DATA,
+        _pszDirectoryName: LPSTR,
+        _pszFileName: LPSTR,
+        _dwFlags: DWORD,
+    );
+    unsupported_get_challenge_ex(
+        _pCardData: *mut CARD_DATA,
+        _PinId: DWORD,
+        _ppbChallengeData: *mut PBYTE,
+        _pcbChallengeData: PDWORD,
+        _dwFlags: DWORD,
+    );
+    unsupported_set_container_property(
+        _pCardData: *mut CARD_DATA,
+        _bContainerIndex: BYTE,
+        _wszProperty: LPCWSTR,
+        _pbData: PBYTE,
+        _cbData: DWORD,
+        _dwFlags: DWORD,
+    );
+    unsupported_set_property(
+        _pCardData: *mut CARD_DATA,
+        _wszProperty: LPCWSTR,
+        _pbData: PBYTE,
+        _cbData: DWORD,
+        _dwFlags: DWORD,
+    );
 }
 
 #[cfg(test)]
