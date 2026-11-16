@@ -53,9 +53,9 @@ pub(crate) struct Ctx {
 /// PIN role IDs as the Base CSP addresses them. `ROLE_USER` /
 /// `ROLE_ADMIN` are the ABI's user/admin roles; the qualified-
 /// signature PIN gets the next free id (3).
-const PIN_ID_AUTH: DWORD = ROLE_USER;
-const PIN_ID_PUK: DWORD = ROLE_ADMIN;
-const PIN_ID_QUALIFIED_SIG: DWORD = 3;
+pub(crate) const PIN_ID_AUTH: DWORD = ROLE_USER;
+pub(crate) const PIN_ID_PUK: DWORD = ROLE_ADMIN;
+pub(crate) const PIN_ID_QUALIFIED_SIG: DWORD = 3;
 
 // Windows' Base Smart Card CSP/msclmd signing path parses characters
 // 30..36 of the container name as a PIV certificate file tag before
@@ -316,7 +316,7 @@ impl CardCapabilityModel {
 
 /// The single-bit `PIN_SET` mask for a PIN id (the Base CSP's
 /// `PIN_SET` is a bitfield indexed by PIN id).
-fn create_pin_set(pin_id: DWORD) -> DWORD {
+pub(crate) fn create_pin_set(pin_id: DWORD) -> DWORD {
     1_u32 << pin_id
 }
 
@@ -670,9 +670,59 @@ mod tests {
     use super::remote_ecdsa_to_p1363;
     use super::{
         CONTAINER_MAP_DEFAULT_CONTAINER, CONTAINER_MAP_RECORD, CONTAINER_MAP_VALID_CONTAINER,
-        CardCapabilityModel, KeyAlgorithm, PIN_ID_QUALIFIED_SIG, ecdsa_der_to_p1363,
-        qualified_signature_container,
+        CardCapabilityModel, KeyAlgorithm, PIN_ID_AUTH, PIN_ID_PUK, PIN_ID_QUALIFIED_SIG,
+        create_pin_set, ecdsa_der_to_p1363, qualified_signature_container,
     };
+    use crate::ffi::{BYTE, PIN_SET_NONE};
+
+    const EMPTY_CMAP_FLAGS: BYTE = 0;
+    const RSA_3072_BITS: u16 = 3072;
+    const SINGLE_BIT_MASK: u32 = 1;
+
+    #[test]
+    fn create_pin_set_indexes_each_pin_role_bit() {
+        let auth_mask = create_pin_set(PIN_ID_AUTH);
+        let puk_mask = create_pin_set(PIN_ID_PUK);
+        let sig_mask = create_pin_set(PIN_ID_QUALIFIED_SIG);
+
+        assert_eq!(auth_mask, SINGLE_BIT_MASK << PIN_ID_AUTH);
+        assert_eq!(puk_mask, SINGLE_BIT_MASK << PIN_ID_PUK);
+        assert_eq!(sig_mask, SINGLE_BIT_MASK << PIN_ID_QUALIFIED_SIG);
+        assert_eq!(auth_mask & puk_mask, PIN_SET_NONE);
+        assert_eq!(auth_mask & sig_mask, PIN_SET_NONE);
+        assert_eq!(puk_mask & sig_mask, PIN_SET_NONE);
+    }
+
+    #[test]
+    fn pin_set_includes_qualified_signature_pin_only_when_visible() {
+        let mut container = qualified_signature_container(
+            b"cert".to_vec(),
+            KeyAlgorithm::Rsa {
+                bits: RSA_3072_BITS,
+            },
+        )
+        .expect("valid descriptor");
+        let visible_model = CardCapabilityModel {
+            containers: vec![container.clone()],
+            cmapfile_records: Vec::new(),
+        };
+        assert_eq!(
+            visible_model.pin_set(),
+            create_pin_set(PIN_ID_AUTH)
+                | create_pin_set(PIN_ID_PUK)
+                | create_pin_set(PIN_ID_QUALIFIED_SIG)
+        );
+
+        container.cmap_flags = EMPTY_CMAP_FLAGS;
+        let hidden_model = CardCapabilityModel {
+            containers: vec![container],
+            cmapfile_records: Vec::new(),
+        };
+        assert_eq!(
+            hidden_model.pin_set(),
+            create_pin_set(PIN_ID_AUTH) | create_pin_set(PIN_ID_PUK)
+        );
+    }
 
     #[test]
     fn qualified_signature_container_routes_to_pin2() {
