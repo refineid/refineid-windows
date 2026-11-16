@@ -12,14 +12,11 @@
 // implied. See the License for the specific language governing
 // permissions and limitations under the License.
 
-//! Card Module (cardmod) implementation -- the body of the Windows
-//! minidriver.
+//! Card Module (`cardmod`) data model: per-context state, container and
+//! capability descriptors, Base CSP `cmapfile` cache lookup, and ECDSA
+//! signature conversion.
 //!
-//! Windows-only; declared `#[cfg(windows)]` from `lib.rs`. The
-//! `CardXxx` entry points and the function-table wiring land in
-//! later commits; this module starts with the data model (the
-//! per-context state and the card-capability description the entry
-//! points operate on).
+//! Windows-only; declared `#[cfg(windows)]` from `lib.rs`.
 #![expect(
     clippy::redundant_pub_crate,
     reason = "This private helper module still uses pub(crate) consistently for crate-internal minidriver state and capability types"
@@ -29,14 +26,12 @@ use core::ffi::c_void;
 use std::sync::Mutex;
 
 use crate::ffi::{
-    AT_ECDSA_P256, AT_ECDSA_P384, AT_SIGNATURE, BYTE, CARD_DATA, CARD_DEFAULT_CONTAINER,
-    CONTAINER_MAP_DEFAULT_CONTAINER, CONTAINER_MAP_RECORD, CONTAINER_MAP_VALID_CONTAINER, DWORD,
-    MAX_CONTAINER_NAME_LEN, PBYTE, PVOID, ROLE_ADMIN, ROLE_USER, SCARD_E_NO_MEMORY,
-    SCARD_E_UNSUPPORTED_FEATURE, SCARD_S_SUCCESS,
+    BYTE, CARD_DATA, CARD_DEFAULT_CONTAINER, CONTAINER_MAP_DEFAULT_CONTAINER, CONTAINER_MAP_RECORD,
+    CONTAINER_MAP_VALID_CONTAINER, DWORD, MAX_CONTAINER_NAME_LEN, PBYTE, PVOID, ROLE_ADMIN,
+    ROLE_USER, SCARD_E_UNSUPPORTED_FEATURE, SCARD_S_SUCCESS,
 };
 use crate::transport::CardSessionTransport;
 use refineid_lib_core::auth::PinReferenceScheme;
-use refineid_lib_core::sign::{KEY_REF_AUTH, KEY_REF_SIGN};
 use refineid_lib_core::x509::{
     EcCurve, OwnedCert, PublicKeyAlgorithm, UnvalidatedCertificate, parse_subject_public_key_info,
 };
@@ -71,15 +66,6 @@ const AUTH_CONTAINER_GUID: &str =
 const QUAL_SIG_CONTAINER_GUID: &str =
     refineid_windows_credential_store::card_certificates::FINEID_QUALIFIED_CONTAINER;
 const MAX_VIRTUAL_CONTAINERS: usize = 32;
-
-/// Bounded buffer limits enforced at the ABI boundary so an
-/// adversarial / malformed `CARD_DATA` can't drive an unbounded
-/// read or allocation.
-const MAX_ATR_LEN: usize = 33;
-const MAX_PIN1_LEN: usize = 12;
-const MAX_PIN2_LEN: usize = 12;
-const MAX_SIGN_INPUT_LEN: usize = 4096;
-const MAX_DECRYPT_INPUT_LEN: usize = 4096;
 
 /// A Windows key-container GUID: the
 /// `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}` string the Base CSP uses as
@@ -143,7 +129,6 @@ fn qualified_signature_container(
         pin_id: PIN_ID_QUALIFIED_SIG,
         cert_der,
         key_alg,
-        key_ref: KEY_REF_SIGN,
         allow_sign: true,
         allow_decrypt: false,
         allow_pss: matches!(key_alg, KeyAlgorithm::Rsa { .. }),
@@ -156,8 +141,7 @@ fn qualified_signature_container(
 }
 
 /// The key algorithm a container's certificate carries. Drives the
-/// reported key sizes, the `AT_*` key-spec the Base CSP expects, and
-/// the signature-length advertised back.
+/// reported key sizes and the signature length advertised back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum KeyAlgorithm {
     Rsa { bits: u16 },
@@ -184,22 +168,6 @@ impl KeyAlgorithm {
             Self::Ec(curve) => (curve.bits() / 8) * 2,
         }
     }
-
-    /// The Base CSP `AT_*` key-spec for this algorithm. EC maps by
-    /// field size (256 -> P-256, else P-384, matching FINEID's
-    /// newer-scheme P-384 qualified key).
-    pub(crate) fn key_spec(self) -> DWORD {
-        match self {
-            Self::Rsa { .. } => AT_SIGNATURE,
-            Self::Ec(curve) => {
-                if curve.bits() == 256 {
-                    AT_ECDSA_P256
-                } else {
-                    AT_ECDSA_P384
-                }
-            }
-        }
-    }
 }
 
 /// One certificate slot exposed to the Base CSP as a key container.
@@ -210,7 +178,6 @@ pub(crate) struct ContainerDescriptor {
     pub(crate) pin_id: DWORD,
     pub(crate) cert_der: Vec<u8>,
     pub(crate) key_alg: KeyAlgorithm,
-    pub(crate) key_ref: u8,
     pub(crate) allow_sign: bool,
     pub(crate) allow_decrypt: bool,
     pub(crate) allow_pss: bool,
@@ -260,12 +227,6 @@ impl CardCapabilityModel {
     pub(crate) fn visible_container(&self, index: BYTE) -> Option<&ContainerDescriptor> {
         self.container(index)
             .filter(|container| container.is_visible())
-    }
-
-    pub(crate) fn container_mut(&mut self, index: BYTE) -> Option<&mut ContainerDescriptor> {
-        self.containers
-            .iter_mut()
-            .find(|container| container.index == index)
     }
 
     /// The signing algorithms the card advertises (`"RSA"` / `"ECDSA"`),
@@ -361,8 +322,7 @@ fn create_pin_set(pin_id: DWORD) -> DWORD {
 
 /// Card-model construction helpers, grouped on a unit struct so the
 /// borrowed-parameter entries are associated fns, not top-level free
-/// fns (typing-discipline Rule A). `build_card_model` joins this in a
-/// later commit.
+/// fns (typing-discipline Rule A).
 pub(crate) struct CardModel;
 
 impl CardModel {
@@ -456,15 +416,13 @@ impl CardModel {
             pin_id: PIN_ID_AUTH,
             cert_der: auth_cert_der,
             key_alg: auth_key_alg,
-            key_ref: KEY_REF_AUTH,
             allow_sign: true,
             allow_decrypt: false,
             // TLS 1.3 client-cert signatures require RSASSA-PSS
             // (RFC 8446 §4.2.3); Firefox's osclientcerts and
-            // Schannel both request PSS on the auth key. The card
-            // itself only pads PKCS#1 v1.5, so `CardSignData` does
-            // host-side EMSA-PSS + the raw private-key op. EC keys
-            // never use PSS.
+            // Schannel both request PSS on the auth key, which
+            // CardSignData executes via the card-native FINEID
+            // RSASSA-PSS algorithm reference. EC keys never use PSS.
             allow_pss: matches!(auth_key_alg, KeyAlgorithm::Rsa { .. }),
             cmap_flags: CONTAINER_MAP_VALID_CONTAINER | CONTAINER_MAP_DEFAULT_CONTAINER,
             reported_sig_bits: auth_key_alg.bits(),
@@ -641,20 +599,18 @@ impl CONTAINER_MAP_RECORD {
     }
 }
 
-// ----- Base CSP file cache (CspCacheLookupFile / AddFile / DeleteFile) -----
+// ----- Base CSP file cache (CspCacheLookupFile / DeleteFile) -----
 //
 // The Base CSP hands the Card Module a small key/value cache through
 // callback pointers in `CARD_DATA`, keyed by a wide-string tag and
-// scoped to `pvCacheContext`. The minidriver uses it to persist the
-// virtual cmapfile (the container map) across calls instead of
-// re-deriving it every context. Every callback is optional -- a CSP
-// may pass null pointers, in which case the operation degrades to a
-// cache miss / unsupported-feature.
+// scoped to `pvCacheContext`. The minidriver inspects it for a
+// persisted virtual cmapfile (the container map) and deletes malformed
+// entries. Every callback is optional -- a CSP may pass null pointers,
+// in which case the operation degrades to a cache miss /
+// unsupported-feature.
 //
-// Buffer ownership crosses the boundary in both directions: AddFile
-// data must be allocated from the CSP's own allocator (`pfnCspAlloc`),
-// and a successful LookupFile hands back a CSP-owned buffer the Card
-// Module must copy out of and release with `pfnCspFree`.
+// A successful LookupFile hands back a CSP-owned buffer the Card Module
+// must copy out of and release with `pfnCspFree`.
 
 /// Cache tag for the persisted virtual cmapfile blob.
 const VIRTUAL_CMAPFILE_CACHE_TAG: &str = "refineid.virtual.cmapfile";
@@ -663,15 +619,6 @@ const VIRTUAL_CMAPFILE_CACHE_TAG: &str = "refineid.virtual.cmapfile";
 /// wide-string CSP cache callbacks.
 fn cache_tag_wide(tag: &str) -> Vec<u16> {
     tag.encode_utf16().chain(core::iter::once(0)).collect()
-}
-
-/// Allocate `len` bytes from the CSP's allocator, or null if the
-/// allocator callback is absent.
-unsafe fn cspalloc(cd: &CARD_DATA, len: usize) -> PVOID {
-    match cd.pfnCspAlloc {
-        Some(alloc) => unsafe { alloc(len) },
-        None => core::ptr::null_mut(),
-    }
 }
 
 /// Release a CSP-allocated buffer through the CSP's free callback
@@ -708,35 +655,6 @@ unsafe fn cache_lookup_bytes(cd: &CARD_DATA, tag: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// Store `bytes` under `tag` in the Base CSP file cache via a
-/// CSP-allocated copy. Returns the callback's status word, or an
-/// unsupported / no-memory status when the callback or allocation
-/// is unavailable.
-unsafe fn cache_store_bytes(cd: &CARD_DATA, tag: &str, bytes: &[u8]) -> DWORD {
-    let Some(add) = cd.pfnCspCacheAddFile else {
-        return SCARD_E_UNSUPPORTED_FEATURE;
-    };
-    let wide = cache_tag_wide(tag);
-    let ptr = unsafe { cspalloc(cd, bytes.len()) };
-    if ptr.is_null() {
-        refineid_dev_errors::report!(CardModule, "card cache store failed", "no memory");
-        return SCARD_E_NO_MEMORY;
-    }
-    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.cast::<u8>(), bytes.len()) };
-    let len = DWORD::try_from(bytes.len()).unwrap_or(DWORD::MAX);
-    let rc = unsafe {
-        add(
-            cd.pvCacheContext,
-            wide.as_ptr().cast_mut(),
-            0,
-            ptr.cast::<BYTE>(),
-            len,
-        )
-    };
-    unsafe { cspfree(cd, ptr) };
-    rc
-}
-
 /// Delete `tag` from the Base CSP file cache. Returns the callback's
 /// status word, or unsupported-feature when the callback is absent.
 unsafe fn cache_delete_tag(cd: &CARD_DATA, tag: &str) -> DWORD {
@@ -752,12 +670,12 @@ mod tests {
     use super::remote_ecdsa_to_p1363;
     use super::{
         CONTAINER_MAP_DEFAULT_CONTAINER, CONTAINER_MAP_RECORD, CONTAINER_MAP_VALID_CONTAINER,
-        CardCapabilityModel, KEY_REF_SIGN, KeyAlgorithm, PIN_ID_QUALIFIED_SIG, ecdsa_der_to_p1363,
+        CardCapabilityModel, KeyAlgorithm, PIN_ID_QUALIFIED_SIG, ecdsa_der_to_p1363,
         qualified_signature_container,
     };
 
     #[test]
-    fn qualified_signature_container_routes_to_pin2_and_key_ref_02() {
+    fn qualified_signature_container_routes_to_pin2() {
         let cert = vec![1, 2, 3];
         let container =
             qualified_signature_container(cert.clone(), KeyAlgorithm::Rsa { bits: 3072 })
@@ -765,7 +683,6 @@ mod tests {
 
         assert_eq!(container.index, 1);
         assert_eq!(container.pin_id, PIN_ID_QUALIFIED_SIG);
-        assert_eq!(container.key_ref, KEY_REF_SIGN);
         assert_eq!(container.cert_der, cert);
         assert_eq!(container.sig_file, "ksc01");
         assert!(container.allow_sign);
@@ -786,7 +703,6 @@ mod tests {
         .expect("valid descriptor");
 
         assert_eq!(container.pin_id, PIN_ID_QUALIFIED_SIG);
-        assert_eq!(container.key_ref, KEY_REF_SIGN);
         assert!(container.allow_sign);
         assert!(!container.allow_decrypt);
         assert!(!container.allow_pss);
