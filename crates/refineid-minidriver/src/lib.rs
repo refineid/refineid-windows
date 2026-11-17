@@ -55,7 +55,7 @@
     )
 )]
 #![cfg_attr(
-    windows,
+    any(windows, test),
     expect(
         unsafe_code,
         reason = "the Card Module ABI is a C function table the Base CSP/KSP calls -- extern \"system\" FFI over caller-provided pointers is the entire point"
@@ -69,7 +69,7 @@
 // `allow` (not `expect`) because the lint fires on hundreds of
 // SDK-named items by design, not as leftover debt.
 #![cfg_attr(
-    windows,
+    any(windows, test),
     allow(
         non_snake_case,
         non_camel_case_types,
@@ -86,7 +86,7 @@ mod card_registrations;
 mod card_roots;
 #[cfg(windows)]
 mod cardmod;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 mod ffi;
 #[cfg(windows)]
 mod ksp;
@@ -133,7 +133,7 @@ use cardmod::{
     CardCapabilityModel, CardModel, ContainerDescriptor, Ctx, KeyAlgorithm, PIN_ID_AUTH,
     PIN_ID_PUK, PIN_ID_QUALIFIED_SIG, create_pin_set,
 };
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 #[allow(
     clippy::wildcard_imports,
     reason = "The Card Module implementation mirrors the complete crate-private Windows ABI table"
@@ -1005,8 +1005,8 @@ fn reverify_cached_pin(
     }
 }
 
-#[cfg(windows)]
-unsafe fn read_wstr(p: LPCWSTR) -> String {
+#[cfg(any(windows, test))]
+pub(crate) unsafe fn read_wstr(p: LPCWSTR) -> String {
     if p.is_null() {
         return String::new();
     }
@@ -1016,6 +1016,93 @@ unsafe fn read_wstr(p: LPCWSTR) -> String {
     }
     let slice = unsafe { core::slice::from_raw_parts(p, len) };
     String::from_utf16_lossy(slice)
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ParsedSigningPadding {
+    Pkcs1 { hash_name: Option<String> },
+    Pss { hash_name: String, salt_len: usize },
+}
+
+#[cfg(any(windows, test))]
+pub(crate) unsafe fn parse_signing_padding(
+    p_info: *const CARD_SIGNING_INFO,
+) -> Result<ParsedSigningPadding, DWORD> {
+    if p_info.is_null() {
+        return Err(SCARD_E_INVALID_PARAMETER);
+    }
+    let dw_version = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*p_info).dwVersion)) };
+    if !(CARD_SIGNING_INFO_BASIC_VERSION..=CARD_SIGNING_INFO_CURRENT_VERSION).contains(&dw_version)
+    {
+        return Err(SCARD_E_INVALID_PARAMETER);
+    }
+    let basic = unsafe { &*p_info.cast::<CARD_SIGNING_INFO_BASIC>() };
+    if dw_version >= CARD_SIGNING_INFO_CURRENT_VERSION
+        && (basic.dwSigningFlags & CARD_PADDING_INFO_PRESENT) != 0
+    {
+        let v2 = unsafe { &*p_info };
+        match v2.dwPaddingType {
+            CARD_PADDING_PKCS1 => {
+                let hash_name = if v2.pPaddingInfo.is_null() {
+                    None
+                } else {
+                    let pad = unsafe { &*v2.pPaddingInfo.cast::<BCRYPT_PKCS1_PADDING_INFO>() };
+                    if pad.pszAlgId.is_null() {
+                        None
+                    } else {
+                        Some(unsafe { read_wstr(pad.pszAlgId) }.to_uppercase())
+                    }
+                };
+                Ok(ParsedSigningPadding::Pkcs1 { hash_name })
+            }
+            CARD_PADDING_PSS => {
+                if v2.pPaddingInfo.is_null() {
+                    return Err(SCARD_E_INVALID_PARAMETER);
+                }
+                let pad = unsafe { &*v2.pPaddingInfo.cast::<BCRYPT_PSS_PADDING_INFO>() };
+                let hash_name = if pad.pszAlgId.is_null() {
+                    String::from("SHA256")
+                } else {
+                    unsafe { read_wstr(pad.pszAlgId) }.to_uppercase()
+                };
+                let salt_len = pad.cbSalt as usize;
+                Ok(ParsedSigningPadding::Pss {
+                    hash_name,
+                    salt_len,
+                })
+            }
+            _ => Err(SCARD_E_UNSUPPORTED_FEATURE),
+        }
+    } else {
+        // v1 callers or v2 without CARD_PADDING_INFO_PRESENT default to PKCS#1 v1.5 per cardmod.h.
+        // v2.pPaddingInfo and v2.dwPaddingType are unpopulated and MUST NOT be read.
+        Ok(ParsedSigningPadding::Pkcs1 { hash_name: None })
+    }
+}
+
+#[cfg(any(windows, test))]
+pub(crate) unsafe fn parse_rsa_decrypt_padding(p_info: PVOID) -> Result<(), DWORD> {
+    if p_info.is_null() {
+        return Err(SCARD_E_INVALID_PARAMETER);
+    }
+    let dw_version = unsafe { core::ptr::read_unaligned(p_info.cast::<DWORD>()) };
+    if !(CARD_RSA_DECRYPT_INFO_BASIC_VERSION..=CARD_RSA_DECRYPT_INFO_CURRENT_VERSION)
+        .contains(&dw_version)
+    {
+        return Err(SCARD_E_INVALID_PARAMETER);
+    }
+    if dw_version >= CARD_RSA_DECRYPT_INFO_CURRENT_VERSION {
+        let v2 = unsafe { &*p_info.cast::<CARD_RSA_DECRYPT_INFO>() };
+        if v2.dwPaddingType == CARD_PADDING_NONE {
+            return Err(SCARD_E_UNSUPPORTED_FEATURE);
+        }
+        if v2.dwPaddingType != CARD_PADDING_PKCS1 {
+            return Err(SCARD_E_UNSUPPORTED_FEATURE);
+        }
+    }
+    // v1 callers always imply PKCS#1 v1.5 per cardmod.h.
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -2072,12 +2159,16 @@ unsafe extern "system" fn CardSignData(
     if pInfo.is_null() {
         return SCARD_E_INVALID_PARAMETER;
     }
+    let padding = match unsafe { parse_signing_padding(pInfo) } {
+        Ok(p) => p,
+        Err(rc) => return rc,
+    };
     let (cd, ctx) = match unsafe { checked_card_data_and_ctx_mut(pCardData) } {
         Ok(values) => values,
         Err(rc) => return rc,
     };
-    let info = unsafe { &mut *pInfo };
-    let Some(container) = ctx.card.visible_container(info.bContainerIndex).cloned() else {
+    let basic = unsafe { &mut *pInfo.cast::<CARD_SIGNING_INFO_BASIC>() };
+    let Some(container) = ctx.card.visible_container(basic.bContainerIndex).cloned() else {
         return SCARD_E_NO_KEY_CONTAINER;
     };
 
@@ -2111,22 +2202,22 @@ unsafe extern "system" fn CardSignData(
         return SCARD_W_WRONG_CHV;
     }
 
-    if info.dwSigningFlags & CARD_BUFFER_SIZE_ONLY != 0 {
-        info.pbSignedData = core::ptr::null_mut();
-        info.cbSignedData = match try_dword_len(container.key_alg.signature_len()) {
+    if basic.dwSigningFlags & CARD_BUFFER_SIZE_ONLY != 0 {
+        basic.pbSignedData = core::ptr::null_mut();
+        basic.cbSignedData = match try_dword_len(container.key_alg.signature_len()) {
             Some(len) => len,
             None => return SCARD_F_INTERNAL_ERROR,
         };
         return SCARD_S_SUCCESS;
     }
-    if info.pbData.is_null() || info.cbData == 0 {
+    if basic.pbData.is_null() || basic.cbData == 0 {
         return SCARD_E_INVALID_PARAMETER;
     }
-    let in_bytes = unsafe { core::slice::from_raw_parts(info.pbData, info.cbData as usize) };
+    let in_bytes = unsafe { core::slice::from_raw_parts(basic.pbData, basic.cbData as usize) };
 
     if let Some((pair_id, atr)) = remote_arm {
-        let (key_profile, algorithm) = match (&container.key_alg, info.dwPaddingType) {
-            (KeyAlgorithm::Rsa { bits }, CARD_PADDING_PSS) => {
+        let (key_profile, algorithm) = match (&container.key_alg, &padding) {
+            (KeyAlgorithm::Rsa { bits }, ParsedSigningPadding::Pss { .. }) => {
                 let kp = if *bits <= 2048 {
                     KeyProfile::Rsa2048
                 } else {
@@ -2134,16 +2225,24 @@ unsafe extern "system" fn CardSignData(
                 };
                 (kp, SignatureAlgorithm::RsaPssSha256)
             }
-            (KeyAlgorithm::Rsa { bits }, _) => {
+            (KeyAlgorithm::Rsa { bits }, ParsedSigningPadding::Pkcs1 { hash_name }) => {
                 let kp = if *bits <= 2048 {
                     KeyProfile::Rsa2048
                 } else {
                     KeyProfile::Rsa3072
                 };
-                let algo = match in_bytes.len() {
-                    48 => SignatureAlgorithm::RsaPkcs1Sha384,
-                    64 => SignatureAlgorithm::RsaPkcs1Sha512,
-                    _ => SignatureAlgorithm::RsaPkcs1Sha256,
+                let algo = if let Some(name) = hash_name {
+                    match name.as_str() {
+                        "SHA384" => SignatureAlgorithm::RsaPkcs1Sha384,
+                        "SHA512" => SignatureAlgorithm::RsaPkcs1Sha512,
+                        _ => SignatureAlgorithm::RsaPkcs1Sha256,
+                    }
+                } else {
+                    match in_bytes.len() {
+                        48 => SignatureAlgorithm::RsaPkcs1Sha384,
+                        64 => SignatureAlgorithm::RsaPkcs1Sha512,
+                        _ => SignatureAlgorithm::RsaPkcs1Sha256,
+                    }
                 };
                 (kp, algo)
             }
@@ -2232,8 +2331,8 @@ unsafe extern "system" fn CardSignData(
         let Some(p) = (unsafe { alloc_copy(cd, &sig_bytes) }) else {
             return SCARD_E_NO_MEMORY;
         };
-        info.pbSignedData = p;
-        info.cbSignedData = needed;
+        basic.pbSignedData = p;
+        basic.cbSignedData = needed;
         return SCARD_S_SUCCESS;
     }
 
@@ -2247,19 +2346,14 @@ unsafe extern "system" fn CardSignData(
     // CNG KSP callers) requires RSASSA-PSS. FINEID S1 v4.2 Table 6
     // defines a native RSA-PSS algorithm reference, so send the digest
     // through PSO:HASH and let the card perform PSS internally.
-    if info.dwPaddingType == CARD_PADDING_PSS {
+    if let ParsedSigningPadding::Pss {
+        ref hash_name,
+        salt_len,
+    } = padding
+    {
         if !container.allow_pss || !matches!(container.key_alg, KeyAlgorithm::Rsa { .. }) {
             return SCARD_E_UNSUPPORTED_FEATURE;
         }
-        if info.pPaddingInfo.is_null() {
-            return SCARD_E_INVALID_PARAMETER;
-        }
-        let pad = unsafe { &*info.pPaddingInfo.cast::<BCRYPT_PSS_PADDING_INFO>() };
-        let hash_name = if pad.pszAlgId.is_null() {
-            String::from("SHA256")
-        } else {
-            unsafe { read_wstr(pad.pszAlgId) }.to_uppercase()
-        };
         let Ok(hash_alg) = PssHashAlg::try_from(hash_name.as_str()) else {
             return SCARD_E_INVALID_PARAMETER;
         };
@@ -2269,7 +2363,7 @@ unsafe extern "system" fn CardSignData(
             PssHashAlg::Sha384 => 48,
             PssHashAlg::Sha512 => 64,
         };
-        if pad.cbSalt as usize != digest_len {
+        if salt_len != digest_len {
             return SCARD_E_INVALID_PARAMETER;
         }
         let hash = match hash_alg {
@@ -2330,16 +2424,62 @@ unsafe extern "system" fn CardSignData(
         let Some(p) = (unsafe { alloc_copy(cd, &sig_bytes) }) else {
             return SCARD_E_NO_MEMORY;
         };
-        info.pbSignedData = p;
-        info.cbSignedData = sig_len;
+        basic.pbSignedData = p;
+        basic.cbSignedData = sig_len;
         if container.pin_id == PIN_ID_QUALIFIED_SIG {
             spend_pin2(ctx);
         }
         return SCARD_S_SUCCESS;
     }
 
-    let Some(hash) = external_hash_from_alg_and_bytes(info.aiHashAlg, in_bytes) else {
-        return SCARD_E_INVALID_PARAMETER;
+    let hash = if let ParsedSigningPadding::Pkcs1 {
+        hash_name: Some(name),
+    } = &padding
+    {
+        match name.as_str() {
+            "SHA1" => {
+                if in_bytes.len() != 20 {
+                    return SCARD_E_INVALID_PARAMETER;
+                }
+                match in_bytes.try_into() {
+                    Ok(b) => ExternalHashValue::Sha1(b),
+                    Err(_) => return SCARD_E_INVALID_PARAMETER,
+                }
+            }
+            "SHA256" => {
+                if in_bytes.len() != 32 {
+                    return SCARD_E_INVALID_PARAMETER;
+                }
+                match in_bytes.try_into() {
+                    Ok(b) => ExternalHashValue::Sha256(b),
+                    Err(_) => return SCARD_E_INVALID_PARAMETER,
+                }
+            }
+            "SHA384" => {
+                if in_bytes.len() != 48 {
+                    return SCARD_E_INVALID_PARAMETER;
+                }
+                match in_bytes.try_into() {
+                    Ok(b) => ExternalHashValue::Sha384(b),
+                    Err(_) => return SCARD_E_INVALID_PARAMETER,
+                }
+            }
+            "SHA512" => {
+                if in_bytes.len() != 64 {
+                    return SCARD_E_INVALID_PARAMETER;
+                }
+                match in_bytes.try_into() {
+                    Ok(b) => ExternalHashValue::Sha512(b),
+                    Err(_) => return SCARD_E_INVALID_PARAMETER,
+                }
+            }
+            _ => return SCARD_E_INVALID_PARAMETER,
+        }
+    } else {
+        let Some(h) = external_hash_from_alg_and_bytes(basic.aiHashAlg, in_bytes) else {
+            return SCARD_E_INVALID_PARAMETER;
+        };
+        h
     };
 
     let mut tx = lock_transport(&ctx.transport);
@@ -2396,8 +2536,8 @@ unsafe extern "system" fn CardSignData(
     let Some(p) = (unsafe { alloc_copy(cd, &sig_bytes) }) else {
         return SCARD_E_NO_MEMORY;
     };
-    info.pbSignedData = p;
-    info.cbSignedData = needed;
+    basic.pbSignedData = p;
+    basic.cbSignedData = needed;
     if container.pin_id == PIN_ID_QUALIFIED_SIG {
         spend_pin2(ctx);
     }
@@ -2444,6 +2584,9 @@ unsafe extern "system" fn CardRSADecrypt(pCardData: *mut CARD_DATA, pInfo: PVOID
     if pInfo.is_null() {
         return SCARD_E_INVALID_PARAMETER;
     }
+    if let Err(rc) = unsafe { parse_rsa_decrypt_padding(pInfo) } {
+        return rc;
+    }
     let (cd, ctx) = match unsafe { checked_card_data_and_ctx_mut(pCardData) } {
         Ok(values) => values,
         Err(rc) => return rc,
@@ -2451,22 +2594,19 @@ unsafe extern "system" fn CardRSADecrypt(pCardData: *mut CARD_DATA, pInfo: PVOID
     if ctx.transport.lock().is_ok_and(|tx| tx.is_remote()) {
         return SCARD_E_UNSUPPORTED_FEATURE;
     }
-    let info = unsafe { &mut *pInfo.cast::<CARD_RSA_DECRYPT_INFO>() };
-    let Some(container) = ctx.card.visible_container(info.bContainerIndex).cloned() else {
+    let basic = unsafe { &mut *pInfo.cast::<CARD_RSA_DECRYPT_INFO_BASIC>() };
+    let Some(container) = ctx.card.visible_container(basic.bContainerIndex).cloned() else {
         return SCARD_E_NO_KEY_CONTAINER;
     };
     if !container.allow_decrypt {
         return SCARD_E_UNSUPPORTED_FEATURE;
     }
-    if info.pbData.is_null() || info.cbData == 0 {
+    if basic.pbData.is_null() || basic.cbData == 0 {
         return SCARD_E_INVALID_PARAMETER;
-    }
-    if info.dwPaddingType != CARD_PADDING_NONE && info.dwPaddingType != CARD_PADDING_PKCS1 {
-        return SCARD_E_UNSUPPORTED_FEATURE;
     }
 
     let ciphertext =
-        unsafe { core::slice::from_raw_parts(info.pbData, info.cbData as usize) }.to_vec();
+        unsafe { core::slice::from_raw_parts(basic.pbData, basic.cbData as usize) }.to_vec();
     let mut tx = lock_transport(&ctx.transport);
     if let Err(rc) = sync_transport_handle(
         &mut tx,
@@ -2491,18 +2631,18 @@ unsafe extern "system" fn CardRSADecrypt(pCardData: *mut CARD_DATA, pInfo: PVOID
         return SCARD_F_INTERNAL_ERROR;
     };
     let plaintext_bytes = plaintext.as_bytes();
-    if plaintext_bytes.len() > info.cbData as usize {
+    if plaintext_bytes.len() > basic.cbData as usize {
         return SCARD_E_INSUFFICIENT_BUFFER;
     }
 
-    let pad_len = (info.cbData as usize).saturating_sub(plaintext_bytes.len());
+    let pad_len = (basic.cbData as usize).saturating_sub(plaintext_bytes.len());
     unsafe {
         for i in 0..pad_len {
-            *info.pbData.add(i) = 0;
+            *basic.pbData.add(i) = 0;
         }
         core::ptr::copy_nonoverlapping(
             plaintext_bytes.as_ptr(),
-            info.pbData.add(pad_len),
+            basic.pbData.add(pad_len),
             plaintext_bytes.len(),
         );
     }
@@ -3186,6 +3326,392 @@ mod tests {
             CardFile::resolve(Some(""), "cardcf"),
             Err(NoSuchFile::Directory)
         );
+    }
+
+    mod padding_and_version_tests {
+        use crate::ffi::{
+            BCRYPT_PKCS1_PADDING_INFO, BCRYPT_PSS_PADDING_INFO, CARD_PADDING_INFO_PRESENT,
+            CARD_PADDING_NONE, CARD_PADDING_OAEP, CARD_PADDING_PKCS1, CARD_PADDING_PSS,
+            CARD_RSA_DECRYPT_INFO, CARD_RSA_DECRYPT_INFO_BASIC,
+            CARD_RSA_DECRYPT_INFO_BASIC_VERSION, CARD_RSA_DECRYPT_INFO_CURRENT_VERSION,
+            CARD_SIGNING_INFO, CARD_SIGNING_INFO_BASIC, CARD_SIGNING_INFO_BASIC_VERSION,
+            CARD_SIGNING_INFO_CURRENT_VERSION, SCARD_E_INVALID_PARAMETER,
+            SCARD_E_UNSUPPORTED_FEATURE,
+        };
+        use crate::{ParsedSigningPadding, parse_rsa_decrypt_padding, parse_signing_padding};
+
+        #[test]
+        fn struct_layout_and_offsets() {
+            assert!(size_of::<CARD_SIGNING_INFO_BASIC>() < size_of::<CARD_SIGNING_INFO>());
+            assert_eq!(
+                core::mem::offset_of!(CARD_SIGNING_INFO_BASIC, dwVersion),
+                core::mem::offset_of!(CARD_SIGNING_INFO, dwVersion)
+            );
+            assert_eq!(
+                core::mem::offset_of!(CARD_SIGNING_INFO_BASIC, bContainerIndex),
+                core::mem::offset_of!(CARD_SIGNING_INFO, bContainerIndex)
+            );
+            assert_eq!(
+                core::mem::offset_of!(CARD_SIGNING_INFO_BASIC, dwKeySpec),
+                core::mem::offset_of!(CARD_SIGNING_INFO, dwKeySpec)
+            );
+            assert_eq!(
+                core::mem::offset_of!(CARD_SIGNING_INFO_BASIC, dwSigningFlags),
+                core::mem::offset_of!(CARD_SIGNING_INFO, dwSigningFlags)
+            );
+            assert_eq!(
+                core::mem::offset_of!(CARD_SIGNING_INFO_BASIC, aiHashAlg),
+                core::mem::offset_of!(CARD_SIGNING_INFO, aiHashAlg)
+            );
+            assert_eq!(
+                core::mem::offset_of!(CARD_SIGNING_INFO_BASIC, pbData),
+                core::mem::offset_of!(CARD_SIGNING_INFO, pbData)
+            );
+            assert_eq!(
+                core::mem::offset_of!(CARD_SIGNING_INFO_BASIC, cbData),
+                core::mem::offset_of!(CARD_SIGNING_INFO, cbData)
+            );
+            assert_eq!(
+                core::mem::offset_of!(CARD_SIGNING_INFO_BASIC, pbSignedData),
+                core::mem::offset_of!(CARD_SIGNING_INFO, pbSignedData)
+            );
+            assert_eq!(
+                core::mem::offset_of!(CARD_SIGNING_INFO_BASIC, cbSignedData),
+                core::mem::offset_of!(CARD_SIGNING_INFO, cbSignedData)
+            );
+
+            assert!(size_of::<CARD_RSA_DECRYPT_INFO_BASIC>() < size_of::<CARD_RSA_DECRYPT_INFO>());
+            assert_eq!(
+                core::mem::offset_of!(CARD_RSA_DECRYPT_INFO_BASIC, dwVersion),
+                core::mem::offset_of!(CARD_RSA_DECRYPT_INFO, dwVersion)
+            );
+            assert_eq!(
+                core::mem::offset_of!(CARD_RSA_DECRYPT_INFO_BASIC, bContainerIndex),
+                core::mem::offset_of!(CARD_RSA_DECRYPT_INFO, bContainerIndex)
+            );
+            assert_eq!(
+                core::mem::offset_of!(CARD_RSA_DECRYPT_INFO_BASIC, dwKeySpec),
+                core::mem::offset_of!(CARD_RSA_DECRYPT_INFO, dwKeySpec)
+            );
+            assert_eq!(
+                core::mem::offset_of!(CARD_RSA_DECRYPT_INFO_BASIC, pbData),
+                core::mem::offset_of!(CARD_RSA_DECRYPT_INFO, pbData)
+            );
+            assert_eq!(
+                core::mem::offset_of!(CARD_RSA_DECRYPT_INFO_BASIC, cbData),
+                core::mem::offset_of!(CARD_RSA_DECRYPT_INFO, cbData)
+            );
+        }
+
+        #[test]
+        fn card_signing_info_v1_allocation_is_parsed_as_pkcs1_without_reading_v2_tail() {
+            let mut basic = CARD_SIGNING_INFO_BASIC {
+                dwVersion: CARD_SIGNING_INFO_BASIC_VERSION,
+                bContainerIndex: 0,
+                dwKeySpec: 1,
+                dwSigningFlags: 0,
+                aiHashAlg: 0x8004,
+                pbData: core::ptr::null_mut(),
+                cbData: 0,
+                pbSignedData: core::ptr::null_mut(),
+                cbSignedData: 0,
+            };
+            let p_info = (&raw mut basic).cast::<CARD_SIGNING_INFO>();
+            let parsed = unsafe { parse_signing_padding(p_info) };
+            assert_eq!(parsed, Ok(ParsedSigningPadding::Pkcs1 { hash_name: None }));
+        }
+
+        #[test]
+        fn card_signing_info_v2_without_padding_flag_ignores_v2_tail() {
+            let v2 = CARD_SIGNING_INFO {
+                dwVersion: CARD_SIGNING_INFO_CURRENT_VERSION,
+                bContainerIndex: 0,
+                dwKeySpec: 1,
+                dwSigningFlags: 0, // CARD_PADDING_INFO_PRESENT not set
+                aiHashAlg: 0x8004,
+                pbData: core::ptr::null_mut(),
+                cbData: 0,
+                pbSignedData: core::ptr::null_mut(),
+                cbSignedData: 0,
+                pPaddingInfo: 0xDEAD_BEEF as *mut _,
+                dwPaddingType: 0xBAAD_F00D,
+            };
+            let parsed = unsafe { parse_signing_padding(&raw const v2) };
+            assert_eq!(parsed, Ok(ParsedSigningPadding::Pkcs1 { hash_name: None }));
+        }
+
+        #[test]
+        fn card_signing_info_v2_with_pkcs1_padding_reads_hash_name() {
+            let alg_name: Vec<u16> = "SHA256\0".encode_utf16().collect();
+            let pad_info = BCRYPT_PKCS1_PADDING_INFO {
+                pszAlgId: alg_name.as_ptr(),
+            };
+            let v2 = CARD_SIGNING_INFO {
+                dwVersion: CARD_SIGNING_INFO_CURRENT_VERSION,
+                bContainerIndex: 0,
+                dwKeySpec: 1,
+                dwSigningFlags: CARD_PADDING_INFO_PRESENT,
+                aiHashAlg: 0,
+                pbData: core::ptr::null_mut(),
+                cbData: 0,
+                pbSignedData: core::ptr::null_mut(),
+                cbSignedData: 0,
+                pPaddingInfo: (&raw const pad_info).cast_mut().cast(),
+                dwPaddingType: CARD_PADDING_PKCS1,
+            };
+            let parsed = unsafe { parse_signing_padding(&raw const v2) };
+            assert_eq!(
+                parsed,
+                Ok(ParsedSigningPadding::Pkcs1 {
+                    hash_name: Some("SHA256".to_string()),
+                })
+            );
+
+            // Null pPaddingInfo with PKCS1 is allowed (defaults to None hash_name)
+            let v2_null_pad = CARD_SIGNING_INFO {
+                dwVersion: CARD_SIGNING_INFO_CURRENT_VERSION,
+                bContainerIndex: 0,
+                dwKeySpec: 1,
+                dwSigningFlags: CARD_PADDING_INFO_PRESENT,
+                aiHashAlg: 0,
+                pbData: core::ptr::null_mut(),
+                cbData: 0,
+                pbSignedData: core::ptr::null_mut(),
+                cbSignedData: 0,
+                pPaddingInfo: core::ptr::null_mut(),
+                dwPaddingType: CARD_PADDING_PKCS1,
+            };
+            assert_eq!(
+                unsafe { parse_signing_padding(&raw const v2_null_pad) },
+                Ok(ParsedSigningPadding::Pkcs1 { hash_name: None })
+            );
+
+            // Null pszAlgId in pad_info also yields None
+            let pad_info_null_alg = BCRYPT_PKCS1_PADDING_INFO {
+                pszAlgId: core::ptr::null(),
+            };
+            let v2_null_alg = CARD_SIGNING_INFO {
+                dwVersion: CARD_SIGNING_INFO_CURRENT_VERSION,
+                bContainerIndex: 0,
+                dwKeySpec: 1,
+                dwSigningFlags: CARD_PADDING_INFO_PRESENT,
+                aiHashAlg: 0,
+                pbData: core::ptr::null_mut(),
+                cbData: 0,
+                pbSignedData: core::ptr::null_mut(),
+                cbSignedData: 0,
+                pPaddingInfo: (&raw const pad_info_null_alg).cast_mut().cast(),
+                dwPaddingType: CARD_PADDING_PKCS1,
+            };
+            assert_eq!(
+                unsafe { parse_signing_padding(&raw const v2_null_alg) },
+                Ok(ParsedSigningPadding::Pkcs1 { hash_name: None })
+            );
+        }
+
+        #[test]
+        fn card_signing_info_v2_with_pss_padding_reads_hash_and_salt() {
+            let alg_name: Vec<u16> = "SHA384\0".encode_utf16().collect();
+            let pad_info = BCRYPT_PSS_PADDING_INFO {
+                pszAlgId: alg_name.as_ptr(),
+                cbSalt: 48,
+            };
+            let v2 = CARD_SIGNING_INFO {
+                dwVersion: CARD_SIGNING_INFO_CURRENT_VERSION,
+                bContainerIndex: 0,
+                dwKeySpec: 1,
+                dwSigningFlags: CARD_PADDING_INFO_PRESENT,
+                aiHashAlg: 0,
+                pbData: core::ptr::null_mut(),
+                cbData: 0,
+                pbSignedData: core::ptr::null_mut(),
+                cbSignedData: 0,
+                pPaddingInfo: (&raw const pad_info).cast_mut().cast(),
+                dwPaddingType: CARD_PADDING_PSS,
+            };
+            assert_eq!(
+                unsafe { parse_signing_padding(&raw const v2) },
+                Ok(ParsedSigningPadding::Pss {
+                    hash_name: "SHA384".to_string(),
+                    salt_len: 48,
+                })
+            );
+
+            // Null pszAlgId defaults to SHA256
+            let pad_info_default_alg = BCRYPT_PSS_PADDING_INFO {
+                pszAlgId: core::ptr::null(),
+                cbSalt: 32,
+            };
+            let v2_default_alg = CARD_SIGNING_INFO {
+                dwVersion: CARD_SIGNING_INFO_CURRENT_VERSION,
+                bContainerIndex: 0,
+                dwKeySpec: 1,
+                dwSigningFlags: CARD_PADDING_INFO_PRESENT,
+                aiHashAlg: 0,
+                pbData: core::ptr::null_mut(),
+                cbData: 0,
+                pbSignedData: core::ptr::null_mut(),
+                cbSignedData: 0,
+                pPaddingInfo: (&raw const pad_info_default_alg).cast_mut().cast(),
+                dwPaddingType: CARD_PADDING_PSS,
+            };
+            assert_eq!(
+                unsafe { parse_signing_padding(&raw const v2_default_alg) },
+                Ok(ParsedSigningPadding::Pss {
+                    hash_name: "SHA256".to_string(),
+                    salt_len: 32,
+                })
+            );
+
+            // PSS requires pPaddingInfo
+            let v2_no_pad = CARD_SIGNING_INFO {
+                dwVersion: CARD_SIGNING_INFO_CURRENT_VERSION,
+                bContainerIndex: 0,
+                dwKeySpec: 1,
+                dwSigningFlags: CARD_PADDING_INFO_PRESENT,
+                aiHashAlg: 0,
+                pbData: core::ptr::null_mut(),
+                cbData: 0,
+                pbSignedData: core::ptr::null_mut(),
+                cbSignedData: 0,
+                pPaddingInfo: core::ptr::null_mut(),
+                dwPaddingType: CARD_PADDING_PSS,
+            };
+            assert_eq!(
+                unsafe { parse_signing_padding(&raw const v2_no_pad) },
+                Err(SCARD_E_INVALID_PARAMETER)
+            );
+        }
+
+        #[test]
+        fn card_signing_info_v2_rejects_unsupported_padding() {
+            for pad_type in [CARD_PADDING_NONE, CARD_PADDING_OAEP, 0x9999] {
+                let v2 = CARD_SIGNING_INFO {
+                    dwVersion: CARD_SIGNING_INFO_CURRENT_VERSION,
+                    bContainerIndex: 0,
+                    dwKeySpec: 1,
+                    dwSigningFlags: CARD_PADDING_INFO_PRESENT,
+                    aiHashAlg: 0,
+                    pbData: core::ptr::null_mut(),
+                    cbData: 0,
+                    pbSignedData: core::ptr::null_mut(),
+                    cbSignedData: 0,
+                    pPaddingInfo: core::ptr::null_mut(),
+                    dwPaddingType: pad_type,
+                };
+                assert_eq!(
+                    unsafe { parse_signing_padding(&raw const v2) },
+                    Err(SCARD_E_UNSUPPORTED_FEATURE)
+                );
+            }
+        }
+
+        #[test]
+        fn card_signing_info_invalid_version_or_null() {
+            assert_eq!(
+                unsafe { parse_signing_padding(core::ptr::null()) },
+                Err(SCARD_E_INVALID_PARAMETER)
+            );
+
+            for bad_version in [0, 3, 100] {
+                let v = CARD_SIGNING_INFO {
+                    dwVersion: bad_version,
+                    bContainerIndex: 0,
+                    dwKeySpec: 1,
+                    dwSigningFlags: 0,
+                    aiHashAlg: 0,
+                    pbData: core::ptr::null_mut(),
+                    cbData: 0,
+                    pbSignedData: core::ptr::null_mut(),
+                    cbSignedData: 0,
+                    pPaddingInfo: core::ptr::null_mut(),
+                    dwPaddingType: 0,
+                };
+                assert_eq!(
+                    unsafe { parse_signing_padding(&raw const v) },
+                    Err(SCARD_E_INVALID_PARAMETER)
+                );
+            }
+        }
+
+        #[test]
+        fn card_rsa_decrypt_v1_allocation_is_parsed_without_reading_v2_tail() {
+            let mut basic = CARD_RSA_DECRYPT_INFO_BASIC {
+                dwVersion: CARD_RSA_DECRYPT_INFO_BASIC_VERSION,
+                bContainerIndex: 0,
+                dwKeySpec: 1,
+                pbData: core::ptr::null_mut(),
+                cbData: 0,
+            };
+            let p_info = (&raw mut basic).cast::<core::ffi::c_void>();
+            assert_eq!(unsafe { parse_rsa_decrypt_padding(p_info) }, Ok(()));
+        }
+
+        #[test]
+        fn card_rsa_decrypt_v2_checks() {
+            let v2_pkcs1 = CARD_RSA_DECRYPT_INFO {
+                dwVersion: CARD_RSA_DECRYPT_INFO_CURRENT_VERSION,
+                bContainerIndex: 0,
+                dwKeySpec: 1,
+                pbData: core::ptr::null_mut(),
+                cbData: 0,
+                pPaddingInfo: core::ptr::null_mut(),
+                dwPaddingType: CARD_PADDING_PKCS1,
+            };
+            assert_eq!(
+                unsafe { parse_rsa_decrypt_padding((&raw const v2_pkcs1).cast_mut().cast()) },
+                Ok(())
+            );
+
+            let v2_none = CARD_RSA_DECRYPT_INFO {
+                dwVersion: CARD_RSA_DECRYPT_INFO_CURRENT_VERSION,
+                bContainerIndex: 0,
+                dwKeySpec: 1,
+                pbData: core::ptr::null_mut(),
+                cbData: 0,
+                pPaddingInfo: core::ptr::null_mut(),
+                dwPaddingType: CARD_PADDING_NONE,
+            };
+            assert_eq!(
+                unsafe { parse_rsa_decrypt_padding((&raw const v2_none).cast_mut().cast()) },
+                Err(SCARD_E_UNSUPPORTED_FEATURE)
+            );
+
+            let v2_oaep = CARD_RSA_DECRYPT_INFO {
+                dwVersion: CARD_RSA_DECRYPT_INFO_CURRENT_VERSION,
+                bContainerIndex: 0,
+                dwKeySpec: 1,
+                pbData: core::ptr::null_mut(),
+                cbData: 0,
+                pPaddingInfo: core::ptr::null_mut(),
+                dwPaddingType: CARD_PADDING_OAEP,
+            };
+            assert_eq!(
+                unsafe { parse_rsa_decrypt_padding((&raw const v2_oaep).cast_mut().cast()) },
+                Err(SCARD_E_UNSUPPORTED_FEATURE)
+            );
+
+            assert_eq!(
+                unsafe { parse_rsa_decrypt_padding(core::ptr::null_mut()) },
+                Err(SCARD_E_INVALID_PARAMETER)
+            );
+
+            for bad_version in [0, 3, 100] {
+                let v = CARD_RSA_DECRYPT_INFO {
+                    dwVersion: bad_version,
+                    bContainerIndex: 0,
+                    dwKeySpec: 1,
+                    pbData: core::ptr::null_mut(),
+                    cbData: 0,
+                    pPaddingInfo: core::ptr::null_mut(),
+                    dwPaddingType: CARD_PADDING_PKCS1,
+                };
+                assert_eq!(
+                    unsafe { parse_rsa_decrypt_padding((&raw const v).cast_mut().cast()) },
+                    Err(SCARD_E_INVALID_PARAMETER)
+                );
+            }
+        }
     }
 
     #[cfg(windows)]

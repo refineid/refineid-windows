@@ -204,6 +204,15 @@ pub(crate) const ROLE_EVERYONE: DWORD = 0;
 // CardRSADecrypt info structure -- Base CSP populates this and hands
 // it to the minidriver. Layout per cardmod.h CARD_RSA_DECRYPT_INFO.
 #[repr(C)]
+pub(crate) struct CARD_RSA_DECRYPT_INFO_BASIC {
+    pub(crate) dwVersion: DWORD,
+    pub(crate) bContainerIndex: BYTE,
+    pub(crate) dwKeySpec: DWORD,
+    pub(crate) pbData: PBYTE, // in/out: ciphertext, replaced with plaintext
+    pub(crate) cbData: DWORD, // length of pbData buffer
+}
+
+#[repr(C)]
 pub(crate) struct CARD_RSA_DECRYPT_INFO {
     pub(crate) dwVersion: DWORD,
     pub(crate) bContainerIndex: BYTE,
@@ -217,6 +226,19 @@ pub(crate) const CARD_RSA_DECRYPT_INFO_BASIC_VERSION: DWORD = 1;
 pub(crate) const CARD_RSA_DECRYPT_INFO_CURRENT_VERSION: DWORD = 2;
 
 // CardSignData info structure
+#[repr(C)]
+pub(crate) struct CARD_SIGNING_INFO_BASIC {
+    pub(crate) dwVersion: DWORD,
+    pub(crate) bContainerIndex: BYTE,
+    pub(crate) dwKeySpec: DWORD,
+    pub(crate) dwSigningFlags: DWORD,
+    pub(crate) aiHashAlg: DWORD, // ALG_ID
+    pub(crate) pbData: PBYTE,
+    pub(crate) cbData: DWORD,
+    pub(crate) pbSignedData: PBYTE,
+    pub(crate) cbSignedData: DWORD,
+}
+
 #[repr(C)]
 pub(crate) struct CARD_SIGNING_INFO {
     pub(crate) dwVersion: DWORD,
@@ -741,7 +763,7 @@ pub(crate) struct CONTAINER_MAP_RECORD {
 pub(crate) const CONTAINER_MAP_VALID_CONTAINER: BYTE = 1;
 pub(crate) const CONTAINER_MAP_DEFAULT_CONTAINER: BYTE = 2;
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     //! Every status constant against the Windows SDK value `windows-sys`
     //! carries for the same name.

@@ -114,8 +114,7 @@ pub fn program_label_within(image: &Path, trusted_roots: &[String]) -> Option<St
     let file = image
         .rsplit(PATH_SEPARATORS)
         .next()
-        .map(|name| name.trim().to_owned())
-        .unwrap_or_default();
+        .map_or_default(|name| name.trim().to_owned());
     let known = match file.to_ascii_lowercase().as_str() {
         "msedge.exe" => Some("Microsoft Edge"),
         "chrome.exe" => Some("Google Chrome"),

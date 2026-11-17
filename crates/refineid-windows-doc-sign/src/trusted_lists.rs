@@ -250,7 +250,7 @@ pub fn run_anchors(
     signers: &[OwnedCert],
     get: impl FnMut(&Uri) -> Option<Vec<u8>>,
 ) -> RunAnchors {
-    let records = cache.map(ListCache::load).unwrap_or_default();
+    let records = cache.map_or_default(ListCache::load);
     let cached = (!records.is_empty())
         .then(|| match TrustedLists::from_cache(&records, signers) {
             Ok(lists) => Some(lists),
