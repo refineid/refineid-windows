@@ -822,6 +822,9 @@ fn lock_transport(
     }
 }
 
+#[cfg(windows)]
+const INVALID_SCARD_HANDLE: SCARDHANDLE = 0;
+
 /// The Base CSP may reconnect and hand a different `SCARDHANDLE`
 /// between entry points. Refresh the transport handle from the live
 /// `CARD_DATA` and drop in-process PIN state on change -- a new
@@ -832,10 +835,13 @@ fn sync_transport_handle(
     tx: &mut CardSessionTransport,
     pin1_authenticated: &mut bool,
     pin2_authenticated: &mut bool,
-    live_h_card: usize,
+    live_h_card: SCARDHANDLE,
 ) -> Result<bool, DWORD> {
     if tx.is_remote() {
         return Ok(false);
+    }
+    if live_h_card == INVALID_SCARD_HANDLE {
+        return Err(SCARD_E_INVALID_HANDLE);
     }
     if tx.h_card() == live_h_card {
         return Ok(false);
@@ -1434,11 +1440,20 @@ fn map_change_pin_outcome(ctx: &mut Ctx, outcome: ChangePinOutcome) -> (DWORD, O
 #[cfg(windows)]
 fn change_card_pin(
     ctx: &mut Ctx,
+    live_h_card: SCARDHANDLE,
     slot: PinSlot,
     current_pin: &PinBytes,
     new_pin: PinBytes,
 ) -> (DWORD, Option<DWORD>) {
     let mut tx = lock_transport(&ctx.transport);
+    if let Err(error) = sync_transport_handle(
+        &mut tx,
+        &mut ctx.pin1_authenticated,
+        &mut ctx.pin2_authenticated,
+        live_h_card,
+    ) {
+        return (error, None);
+    }
     let serial = match live_token_serial(&mut tx) {
         Ok(serial) => serial,
         Err(error) => return (error, None),
@@ -1497,11 +1512,20 @@ fn map_unblock_outcome(ctx: &mut Ctx, outcome: UnblockOutcome) -> DWORD {
 #[cfg(windows)]
 fn unblock_card_pin(
     ctx: &mut Ctx,
+    live_h_card: SCARDHANDLE,
     target_slot: PinSlot,
     puk: PinBytes,
     new_pin: PinBytes,
 ) -> DWORD {
     let mut tx = lock_transport(&ctx.transport);
+    if let Err(error) = sync_transport_handle(
+        &mut tx,
+        &mut ctx.pin1_authenticated,
+        &mut ctx.pin2_authenticated,
+        live_h_card,
+    ) {
+        return error;
+    }
     if let Err(error) = live_token_serial(&mut tx) {
         return error;
     }
@@ -2057,13 +2081,20 @@ unsafe extern "system" fn CardSignData(
         return SCARD_E_NO_KEY_CONTAINER;
     };
 
-    {
+    let remote_arm = {
         let (pin1, pin2) = (&mut ctx.pin1_authenticated, &mut ctx.pin2_authenticated);
         let mut tx = lock_transport(&ctx.transport);
-        let _ = sync_transport_handle(&mut tx, pin1, pin2, cd.hScard);
-    }
+        if let Err(rc) = sync_transport_handle(&mut tx, pin1, pin2, cd.hScard) {
+            return rc;
+        }
+        if tx.is_remote() {
+            tx.remote_ref().map(|r| (r.pair_id, r.atr.clone()))
+        } else {
+            None
+        }
+    };
 
-    let authenticated = if ctx.transport.lock().is_ok_and(|tx| tx.is_remote()) {
+    let authenticated = if remote_arm.is_some() {
         true
     } else if container.pin_id == PIN_ID_QUALIFIED_SIG {
         ctx.pin2_authenticated
@@ -2092,15 +2123,6 @@ unsafe extern "system" fn CardSignData(
         return SCARD_E_INVALID_PARAMETER;
     }
     let in_bytes = unsafe { core::slice::from_raw_parts(info.pbData, info.cbData as usize) };
-
-    let remote_arm = {
-        let tx = lock_transport(&ctx.transport);
-        if tx.is_remote() {
-            tx.remote_ref().map(|r| (r.pair_id, r.atr.clone()))
-        } else {
-            None
-        }
-    };
 
     if let Some((pair_id, atr)) = remote_arm {
         let (key_profile, algorithm) = match (&container.key_alg, info.dwPaddingType) {
@@ -2269,6 +2291,14 @@ unsafe extern "system" fn CardSignData(
             }),
         };
         let mut tx = lock_transport(&ctx.transport);
+        if let Err(rc) = sync_transport_handle(
+            &mut tx,
+            &mut ctx.pin1_authenticated,
+            &mut ctx.pin2_authenticated,
+            cd.hScard,
+        ) {
+            return rc;
+        }
         // The card may have been reset since PIN verification (the
         // Base CSP reconnects between calls); re-verify with the
         // cached PIN inside the same transaction so the security
@@ -2313,6 +2343,14 @@ unsafe extern "system" fn CardSignData(
     };
 
     let mut tx = lock_transport(&ctx.transport);
+    if let Err(rc) = sync_transport_handle(
+        &mut tx,
+        &mut ctx.pin1_authenticated,
+        &mut ctx.pin2_authenticated,
+        cd.hScard,
+    ) {
+        return rc;
+    }
     if let Some(rc) = reverify_cached_pin(
         &mut ctx.pin1_authenticated,
         &mut ctx.pin2_authenticated,
@@ -2406,7 +2444,7 @@ unsafe extern "system" fn CardRSADecrypt(pCardData: *mut CARD_DATA, pInfo: PVOID
     if pInfo.is_null() {
         return SCARD_E_INVALID_PARAMETER;
     }
-    let (_cd, ctx) = match unsafe { checked_card_data_and_ctx_mut(pCardData) } {
+    let (cd, ctx) = match unsafe { checked_card_data_and_ctx_mut(pCardData) } {
         Ok(values) => values,
         Err(rc) => return rc,
     };
@@ -2430,6 +2468,14 @@ unsafe extern "system" fn CardRSADecrypt(pCardData: *mut CARD_DATA, pInfo: PVOID
     let ciphertext =
         unsafe { core::slice::from_raw_parts(info.pbData, info.cbData as usize) }.to_vec();
     let mut tx = lock_transport(&ctx.transport);
+    if let Err(rc) = sync_transport_handle(
+        &mut tx,
+        &mut ctx.pin1_authenticated,
+        &mut ctx.pin2_authenticated,
+        cd.hScard,
+    ) {
+        return rc;
+    }
     if let Some(rc) = reverify_cached_pin(
         &mut ctx.pin1_authenticated,
         &mut ctx.pin2_authenticated,
@@ -2805,7 +2851,7 @@ unsafe extern "system" fn CardUnblockPin(
     let Some(target_slot) = pin_slot_for_id(target_pin_id) else {
         return SCARD_E_INVALID_PARAMETER;
     };
-    let (_cd, ctx) = match unsafe { checked_card_data_and_ctx_mut(pCardData) } {
+    let (cd, ctx) = match unsafe { checked_card_data_and_ctx_mut(pCardData) } {
         Ok(values) => values,
         Err(rc) => return rc,
     };
@@ -2821,7 +2867,7 @@ unsafe extern "system" fn CardUnblockPin(
         Ok(pin) => pin,
         Err(rc) => return rc,
     };
-    unblock_card_pin(ctx, target_slot, puk, new_pin)
+    unblock_card_pin(ctx, cd.hScard, target_slot, puk, new_pin)
 }
 
 #[cfg(windows)]
@@ -2840,7 +2886,7 @@ unsafe extern "system" fn CardChangeAuthenticator(
     let Some(slot) = pin_slot_for_id(pin_id) else {
         return SCARD_E_INVALID_PARAMETER;
     };
-    let (_cd, ctx) = match unsafe { checked_card_data_and_ctx_mut(pCardData) } {
+    let (cd, ctx) = match unsafe { checked_card_data_and_ctx_mut(pCardData) } {
         Ok(values) => values,
         Err(rc) => return rc,
     };
@@ -2856,7 +2902,7 @@ unsafe extern "system" fn CardChangeAuthenticator(
         Ok(pin) => pin,
         Err(rc) => return rc,
     };
-    let (status, attempts) = change_card_pin(ctx, slot, &current_pin, new_pin);
+    let (status, attempts) = change_card_pin(ctx, cd.hScard, slot, &current_pin, new_pin);
     unsafe {
         write_attempts_remaining(pcAttemptsRemaining, attempts);
     }
@@ -2932,7 +2978,7 @@ unsafe extern "system" fn CardChangeAuthenticatorEx(
     _cRetries: DWORD,
     pcAttemptsRemaining: PDWORD,
 ) -> DWORD {
-    let (_cd, ctx) = match unsafe { checked_card_data_and_ctx_mut(pCardData) } {
+    let (cd, ctx) = match unsafe { checked_card_data_and_ctx_mut(pCardData) } {
         Ok(values) => values,
         Err(rc) => return rc,
     };
@@ -2956,7 +3002,7 @@ unsafe extern "system" fn CardChangeAuthenticatorEx(
             Ok(p) => p,
             Err(rc) => return rc,
         };
-        return unblock_card_pin(ctx, target_slot, puk, new_pin);
+        return unblock_card_pin(ctx, cd.hScard, target_slot, puk, new_pin);
     }
 
     if dwAuthenticatingPinId != dwTargetPinId {
@@ -2979,7 +3025,7 @@ unsafe extern "system" fn CardChangeAuthenticatorEx(
         Ok(p) => p,
         Err(rc) => return rc,
     };
-    let (status, attempts) = change_card_pin(ctx, target_slot, &current_pin, new_pin);
+    let (status, attempts) = change_card_pin(ctx, cd.hScard, target_slot, &current_pin, new_pin);
     unsafe {
         write_attempts_remaining(pcAttemptsRemaining, attempts);
     }
@@ -3156,15 +3202,18 @@ mod tests {
             CardCapabilityModel, Ctx, PIN_ID_AUTH, PIN_ID_PUK, PIN_ID_QUALIFIED_SIG,
         };
         use crate::ffi::{
-            DWORD, ROLE_EVERYONE, SCARD_E_INVALID_PARAMETER, SCARD_F_INTERNAL_ERROR,
-            SCARD_S_SUCCESS, SCARD_W_CHV_BLOCKED, SCARD_W_WRONG_CHV,
+            DWORD, ROLE_EVERYONE, SCARD_E_INVALID_HANDLE, SCARD_E_INVALID_PARAMETER,
+            SCARD_F_INTERNAL_ERROR, SCARD_S_SUCCESS, SCARD_W_CHV_BLOCKED, SCARD_W_WRONG_CHV,
         };
         use crate::transport::{CardSessionTransport, ScardProtocol, WinScardTransport};
         use crate::{
-            NO_ATTEMPTS_REMAINING, VerifyCaller, map_change_pin_outcome, map_unblock_outcome,
-            map_verify_outcome, pin_len_bounds, pin_slot_for_id, write_attempts_remaining,
+            INVALID_SCARD_HANDLE, NO_ATTEMPTS_REMAINING, VerifyCaller, map_change_pin_outcome,
+            map_unblock_outcome, map_verify_outcome, pin_len_bounds, pin_slot_for_id,
+            sync_transport_handle, write_attempts_remaining,
         };
 
+        const INITIAL_H_CARD: usize = 1;
+        const RECONNECTED_H_CARD: usize = 2;
         const TWO_RETRIES: u8 = 2;
         const UNTOUCHED_ATTEMPTS_SENTINEL: DWORD = DWORD::MAX;
 
@@ -3435,6 +3484,52 @@ mod tests {
                 write_attempts_remaining(&raw mut attempts, Some(DWORD::from(TWO_RETRIES)));
             }
             assert_eq!(attempts, DWORD::from(TWO_RETRIES));
+        }
+
+        #[test]
+        fn sync_transport_handle_refreshes_handle_and_clears_pin_state() {
+            let mut ctx = test_ctx(true, true);
+            let tx = ctx.transport.get_mut().expect("unpoisoned");
+            tx.raw_mut().h_card = INITIAL_H_CARD;
+            assert_eq!(
+                sync_transport_handle(
+                    tx,
+                    &mut ctx.pin1_authenticated,
+                    &mut ctx.pin2_authenticated,
+                    INVALID_SCARD_HANDLE,
+                ),
+                Err(SCARD_E_INVALID_HANDLE)
+            );
+            assert_eq!(tx.h_card(), INITIAL_H_CARD);
+            assert!(ctx.pin1_authenticated);
+            assert!(ctx.pin2_authenticated);
+
+            let tx = ctx.transport.get_mut().expect("unpoisoned");
+            assert_eq!(
+                sync_transport_handle(
+                    tx,
+                    &mut ctx.pin1_authenticated,
+                    &mut ctx.pin2_authenticated,
+                    INITIAL_H_CARD,
+                ),
+                Ok(false)
+            );
+            assert!(ctx.pin1_authenticated);
+            assert!(ctx.pin2_authenticated);
+
+            let tx = ctx.transport.get_mut().expect("unpoisoned");
+            assert_eq!(
+                sync_transport_handle(
+                    tx,
+                    &mut ctx.pin1_authenticated,
+                    &mut ctx.pin2_authenticated,
+                    RECONNECTED_H_CARD,
+                ),
+                Ok(true)
+            );
+            assert_eq!(tx.h_card(), RECONNECTED_H_CARD);
+            assert!(!ctx.pin1_authenticated);
+            assert!(!ctx.pin2_authenticated);
         }
     }
 }
