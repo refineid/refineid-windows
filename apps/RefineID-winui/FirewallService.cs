@@ -17,6 +17,7 @@ namespace RefineID;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.IO;
 
 /// <summary>
 /// Finds and disables, without elevation, the inbound Windows Firewall rule earlier
@@ -27,18 +28,41 @@ internal static class FirewallService
     private const string RuleName = "RefineID RAPP";
 
     /// <summary>
+    /// Resolves netsh.exe to its canonical system path in the Windows system directory.
+    /// Returns null if the system directory is unavailable or unresolvable.
+    /// </summary>
+    private static string? GetNetshPath()
+    {
+        string systemDir = Environment.SystemDirectory;
+        if (string.IsNullOrEmpty(systemDir))
+        {
+            return null;
+        }
+
+        string candidate = Path.Combine(systemDir, "netsh.exe");
+        return Path.IsPathFullyQualified(candidate) ? candidate : null;
+    }
+
+    /// <summary>
     /// Checks whether the inbound firewall rule for RefineID RAPP is configured and enabled.
     /// </summary>
     public static bool IsRuleConfigured()
     {
+        string? netshPath = GetNetshPath();
+        if (netshPath is null)
+        {
+            return false;
+        }
+
         try
         {
             using var process = new Process
             {
                 StartInfo = new ProcessStartInfo
                 {
-                    FileName = "netsh",
+                    FileName = netshPath,
                     Arguments = $"advfirewall firewall show rule name=\"{RuleName}\"",
+                    WorkingDirectory = Environment.SystemDirectory,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
@@ -89,14 +113,21 @@ internal static class FirewallService
             return true;
         }
 
+        string? netshPath = GetNetshPath();
+        if (netshPath is null)
+        {
+            return false;
+        }
+
         try
         {
             using var process = new Process
             {
                 StartInfo = new ProcessStartInfo
                 {
-                    FileName = "netsh",
+                    FileName = netshPath,
                     Arguments = $"advfirewall firewall set rule name=\"{RuleName}\" new enable=no",
+                    WorkingDirectory = Environment.SystemDirectory,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
