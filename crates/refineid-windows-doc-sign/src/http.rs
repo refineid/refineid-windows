@@ -31,12 +31,13 @@ use windows::Win32::Networking::WinHttp::{
     ERROR_WINHTTP_SECURE_CERT_CN_INVALID, ERROR_WINHTTP_SECURE_CERT_DATE_INVALID,
     ERROR_WINHTTP_SECURE_CHANNEL_ERROR, ERROR_WINHTTP_SECURE_FAILURE,
     ERROR_WINHTTP_SECURE_INVALID_CA, ERROR_WINHTTP_TIMEOUT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+    WINHTTP_AUTOLOGON_SECURITY_LEVEL_HIGH, WINHTTP_DISABLE_AUTHENTICATION, WINHTTP_DISABLE_COOKIES,
     WINHTTP_DISABLE_REDIRECTS, WINHTTP_FLAG_SECURE, WINHTTP_OPEN_REQUEST_FLAGS,
-    WINHTTP_OPTION_DISABLE_FEATURE, WINHTTP_QUERY_CONTENT_LENGTH, WINHTTP_QUERY_FLAG_NUMBER,
-    WINHTTP_QUERY_LOCATION, WINHTTP_QUERY_STATUS_CODE, WINHTTP_QUERY_STATUS_TEXT,
-    WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryDataAvailable,
-    WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest,
-    WinHttpSetOption, WinHttpSetTimeouts,
+    WINHTTP_OPTION_AUTOLOGON_POLICY, WINHTTP_OPTION_DISABLE_FEATURE, WINHTTP_QUERY_CONTENT_LENGTH,
+    WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_LOCATION, WINHTTP_QUERY_STATUS_CODE,
+    WINHTTP_QUERY_STATUS_TEXT, WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
+    WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
+    WinHttpSendRequest, WinHttpSetOption, WinHttpSetTimeouts,
 };
 #[cfg(windows)]
 use windows::core::PCWSTR;
@@ -56,6 +57,17 @@ pub fn install() {
     INSTALLED.call_once(|| core_http::set_http_transport(Box::new(WinHttpTransport)));
 }
 
+/// Rejects CR, LF, and NUL characters in HTTP header values to prevent header injection.
+fn validate_header_value(name: &str, value: &str) -> Result<(), HttpError> {
+    if value.chars().any(|c| c == '\r' || c == '\n' || c == '\0') {
+        return Err(HttpError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid characters in {name} header: CR, LF, and NUL are forbidden"),
+        )));
+    }
+    Ok(())
+}
+
 /// The transport [`install`] registers.
 #[derive(Debug, Clone, Copy)]
 struct WinHttpTransport;
@@ -68,14 +80,17 @@ impl HttpTransport for WinHttpTransport {
     fn get(
         &self,
         url: &Uri,
-        _vetted: &[SocketAddr],
+        vetted: &[SocketAddr],
         max_bytes: usize,
     ) -> Result<Vec<u8>, HttpError> {
         follow(
             Method::Get,
             url,
             Endpoint::CertificateMaterial,
-            &mut |hop| roundtrip(Method::Get, hop, None, &[], max_bytes, None),
+            vetted,
+            &mut |hop, target_addr| {
+                roundtrip(Method::Get, hop, None, &[], max_bytes, None, target_addr)
+            },
             &certificate_hop_admitted,
         )
     }
@@ -83,16 +98,28 @@ impl HttpTransport for WinHttpTransport {
     fn post(
         &self,
         url: &Uri,
-        _vetted: &[SocketAddr],
+        vetted: &[SocketAddr],
         content_type: &str,
         body: &[u8],
         max_bytes: usize,
     ) -> Result<Vec<u8>, HttpError> {
+        validate_header_value("Content-Type", content_type)?;
         follow(
             Method::Post,
             url,
             Endpoint::CertificateMaterial,
-            &mut |hop| roundtrip(Method::Post, hop, Some(content_type), body, max_bytes, None),
+            vetted,
+            &mut |hop, target_addr| {
+                roundtrip(
+                    Method::Post,
+                    hop,
+                    Some(content_type),
+                    body,
+                    max_bytes,
+                    None,
+                    target_addr,
+                )
+            },
             &certificate_hop_admitted,
         )
     }
@@ -105,11 +132,16 @@ impl HttpTransport for WinHttpTransport {
         max_bytes: usize,
         auth_header: Option<&str>,
     ) -> Result<Vec<u8>, HttpError> {
+        validate_header_value("Content-Type", content_type)?;
+        if let Some(auth) = auth_header {
+            validate_header_value("Authorization", auth)?;
+        }
         follow(
             Method::Post,
             url,
             Endpoint::Authority,
-            &mut |hop| {
+            &[],
+            &mut |hop, target_addr| {
                 roundtrip(
                     Method::Post,
                     hop,
@@ -117,6 +149,7 @@ impl HttpTransport for WinHttpTransport {
                     body,
                     max_bytes,
                     auth_header,
+                    target_addr,
                 )
             },
             &certificate_hop_admitted,
@@ -126,8 +159,8 @@ impl HttpTransport for WinHttpTransport {
 
 /// Whether a redirect of certificate material may go to `next`: core's
 /// guard admits a host that resolves to public unicast addresses only.
-fn certificate_hop_admitted(next: &Uri) -> Result<(), HttpError> {
-    core_http::guard_destination(&WinHttpTransport, next).map(|_addresses| ())
+fn certificate_hop_admitted(next: &Uri) -> Result<Vec<SocketAddr>, HttpError> {
+    core_http::guard_destination(&WinHttpTransport, next)
 }
 
 /// Why one HTTP exchange is being made.
@@ -204,6 +237,9 @@ struct Response {
     body: Vec<u8>,
 }
 
+/// Dynamic callback for a single HTTP hop.
+type Roundtrip<'a> = dyn FnMut(&Uri, Option<&SocketAddr>) -> Result<Response, HttpError> + 'a;
+
 /// Exchange `url` with `roundtrip`, following its redirects within
 /// `endpoint`'s budget: a certificate-material hop only where `admitted`
 /// allows, an authority hop only within its origin.
@@ -211,12 +247,14 @@ fn follow(
     method: Method,
     url: &Uri,
     endpoint: Endpoint,
-    roundtrip: &mut dyn FnMut(&Uri) -> Result<Response, HttpError>,
-    admitted: &dyn Fn(&Uri) -> Result<(), HttpError>,
+    initial_vetted: &[SocketAddr],
+    roundtrip: &mut Roundtrip<'_>,
+    admitted: &dyn Fn(&Uri) -> Result<Vec<SocketAddr>, HttpError>,
 ) -> Result<Vec<u8>, HttpError> {
     let mut current = url.clone();
+    let mut current_vetted = initial_vetted.first().copied();
     for _ in 0..=endpoint.max_redirects() {
-        let response = roundtrip(&current)?;
+        let response = roundtrip(&current, current_vetted.as_ref())?;
         if SUCCESS.contains(&response.code) {
             return Ok(response.body);
         }
@@ -236,16 +274,20 @@ fn follow(
         let next = current
             .join(location)
             .map_err(|_| HttpError::UnsafeRedirect("unparseable Location".to_owned()))?;
-        match endpoint {
-            Endpoint::CertificateMaterial => admitted(&next)?,
+        current_vetted = match endpoint {
+            Endpoint::CertificateMaterial => {
+                let addrs = admitted(&next)?;
+                addrs.first().copied()
+            }
             Endpoint::Authority => {
                 if !core_http::authority_redirect_ok(&current, &next) {
                     return Err(HttpError::UnsafeRedirect(
                         "authority redirect crossed origins".to_owned(),
                     ));
                 }
+                None
             }
-        }
+        };
         current = next;
     }
     Err(HttpError::UnsafeRedirect("too many redirects".to_owned()))
@@ -284,12 +326,24 @@ fn roundtrip(
     body: &[u8],
     max_bytes: usize,
     authorization: Option<&str>,
+    target_addr: Option<&SocketAddr>,
 ) -> Result<Response, HttpError> {
     let secure = match url.scheme() {
         Scheme::Https => true,
         Scheme::Http => false,
     };
-    let host_wide = wide_nul(&url.host().to_string());
+    // For unencrypted HTTP certificate-material requests, connect directly to
+    // the vetted IP address from core's guard to avoid DNS rebinding TOCTOU.
+    // For HTTPS, preserve the hostname so TLS SNI and server certificate validation work.
+    let (connect_host, connect_port, add_host_header) = if secure {
+        (url.host().to_string(), url.port(), false)
+    } else {
+        target_addr.map_or_else(
+            || (url.host().to_string(), url.port(), false),
+            |target| (target.ip().to_string(), target.port(), true),
+        )
+    };
+    let host_wide = wide_nul(&connect_host);
     let target_wide = wide_nul(&request_target(url));
     let verb_wide = wide_nul(method.verb());
     let agent_wide = wide_nul(USER_AGENT);
@@ -318,7 +372,7 @@ fn roundtrip(
         .map_err(map_winhttp_error)?;
     }
     let connection =
-        unsafe { WinHttpConnect(session.0, PCWSTR(host_wide.as_ptr()), url.port(), 0) };
+        unsafe { WinHttpConnect(session.0, PCWSTR(host_wide.as_ptr()), connect_port, 0) };
     if connection.is_null() {
         return Err(map_winhttp_null_handle());
     }
@@ -344,22 +398,43 @@ fn roundtrip(
     }
     let request = Handle(request);
     unsafe {
-        let flag = WINHTTP_DISABLE_REDIRECTS.to_ne_bytes();
+        let flag =
+            (WINHTTP_DISABLE_REDIRECTS | WINHTTP_DISABLE_AUTHENTICATION | WINHTTP_DISABLE_COOKIES)
+                .to_ne_bytes();
         WinHttpSetOption(
             Some(request.0.cast_const()),
             WINHTTP_OPTION_DISABLE_FEATURE,
             Some(&flag),
         )
         .map_err(map_winhttp_error)?;
+
+        let autologon = WINHTTP_AUTOLOGON_SECURITY_LEVEL_HIGH.to_ne_bytes();
+        WinHttpSetOption(
+            Some(request.0.cast_const()),
+            WINHTTP_OPTION_AUTOLOGON_POLICY,
+            Some(&autologon),
+        )
+        .map_err(map_winhttp_error)?;
     }
 
     let mut headers = String::new();
+    if add_host_header {
+        headers.push_str("Host: ");
+        headers.push_str(&url.host().to_string());
+        if url.port() != url.scheme().default_port() {
+            headers.push(':');
+            headers.push_str(&url.port().to_string());
+        }
+        headers.push_str("\r\n");
+    }
     if let Some(content_type) = content_type {
+        validate_header_value("Content-Type", content_type)?;
         headers.push_str("Content-Type: ");
         headers.push_str(content_type);
         headers.push_str("\r\n");
     }
     if let Some(authorization) = authorization {
+        validate_header_value("Authorization", authorization)?;
         headers.push_str("Authorization: ");
         headers.push_str(authorization);
         headers.push_str("\r\n");
@@ -457,6 +532,7 @@ fn roundtrip(
     _body: &[u8],
     _max_bytes: usize,
     _authorization: Option<&str>,
+    _target_addr: Option<&SocketAddr>,
 ) -> Result<Response, HttpError> {
     Err(HttpError::Io(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -616,9 +692,9 @@ mod tests {
     /// A scripted server: one response per hop, in order.
     fn scripted(
         responses: Vec<Response>,
-    ) -> impl FnMut(&Uri) -> Result<Response, HttpError> + 'static {
+    ) -> impl FnMut(&Uri, Option<&SocketAddr>) -> Result<Response, HttpError> + 'static {
         let mut queue: VecDeque<Response> = responses.into();
-        move |_hop| {
+        move |_hop, _addr| {
             queue
                 .pop_front()
                 .ok_or_else(|| HttpError::Io(io::Error::other("the script ran out of responses")))
@@ -646,10 +722,11 @@ mod tests {
     }
 
     /// A guard admitting every hop.
-    const EVERY_HOP: &dyn Fn(&Uri) -> Result<(), HttpError> = &|_next| Ok(());
+    const EVERY_HOP: &dyn Fn(&Uri) -> Result<Vec<SocketAddr>, HttpError> =
+        &|_next| Ok(vec![SocketAddr::from(([93, 184, 216, 34], 80))]);
 
     /// A guard admitting no hop.
-    const NO_HOP: &dyn Fn(&Uri) -> Result<(), HttpError> =
+    const NO_HOP: &dyn Fn(&Uri) -> Result<Vec<SocketAddr>, HttpError> =
         &|next| Err(HttpError::UnsafeDestination(next.to_string()));
 
     fn uri(text: &str) -> Uri {
@@ -662,6 +739,7 @@ mod tests {
             Method::Get,
             &uri("http://ocsp.example/"),
             Endpoint::CertificateMaterial,
+            &[],
             &mut scripted(vec![ok("answer")]),
             EVERY_HOP,
         );
@@ -674,6 +752,7 @@ mod tests {
             Method::Get,
             &uri("http://crl.example/list"),
             Endpoint::CertificateMaterial,
+            &[],
             &mut scripted(vec![
                 redirect(302, Some("http://cdn.example/list")),
                 ok("list"),
@@ -689,6 +768,7 @@ mod tests {
             Method::Get,
             &uri("http://crl.example/list"),
             Endpoint::CertificateMaterial,
+            &[],
             &mut scripted(vec![redirect(301, Some("http://internal.example/"))]),
             NO_HOP,
         );
@@ -701,6 +781,7 @@ mod tests {
             Method::Post,
             &uri("http://ocsp.example/"),
             Endpoint::CertificateMaterial,
+            &[],
             &mut scripted(vec![redirect(302, Some("http://ocsp.example/other"))]),
             EVERY_HOP,
         );
@@ -716,6 +797,7 @@ mod tests {
             Method::Post,
             &uri("http://tsa.example/"),
             Endpoint::Authority,
+            &[],
             &mut scripted(vec![redirect(307, Some("http://other.example/"))]),
             EVERY_HOP,
         );
@@ -724,6 +806,7 @@ mod tests {
             Method::Post,
             &uri("http://tsa.example:8443/"),
             Endpoint::Authority,
+            &[],
             &mut scripted(vec![
                 redirect(307, Some("https://tsa.example:8443/")),
                 ok("token"),
@@ -742,6 +825,7 @@ mod tests {
             Method::Get,
             &uri("http://crl.example/list"),
             Endpoint::CertificateMaterial,
+            &[],
             &mut scripted(hops),
             EVERY_HOP,
         );
@@ -754,6 +838,7 @@ mod tests {
             Method::Get,
             &uri("http://crl.example/list"),
             Endpoint::CertificateMaterial,
+            &[],
             &mut scripted(vec![redirect(301, None)]),
             EVERY_HOP,
         );
@@ -764,5 +849,43 @@ mod tests {
     fn the_user_agent_names_the_project_and_its_contact() {
         assert!(USER_AGENT.starts_with("RefineID/"));
         assert!(USER_AGENT.ends_with("(+https://www.refineid.fi/)"));
+    }
+
+    #[test]
+    fn validate_header_value_rejects_crlf_and_nul() {
+        assert!(validate_header_value("Content-Type", "application/pkix-crl").is_ok());
+        assert!(validate_header_value("Content-Type", "application/pkix-crl\r\nX-Bad: 1").is_err());
+        assert!(validate_header_value("Content-Type", "application/pkix-crl\n").is_err());
+        assert!(validate_header_value("Authorization", "Bearer abc").is_ok());
+        assert!(validate_header_value("Authorization", "Bearer abc\0def").is_err());
+    }
+
+    #[test]
+    fn follow_passes_vetted_socket_addr_to_roundtrip() {
+        let initial_addr = SocketAddr::from(([93, 184, 216, 34], 80));
+        let redirect_addr = SocketAddr::from(([151, 101, 1, 69], 80));
+        let mut observed_addrs = Vec::new();
+        let mut responses = VecDeque::from(vec![
+            redirect(302, Some("http://cdn.example/list")),
+            ok("list"),
+        ]);
+        let outcome = follow(
+            Method::Get,
+            &uri("http://crl.example/list"),
+            Endpoint::CertificateMaterial,
+            &[initial_addr],
+            &mut |_hop, addr| {
+                observed_addrs.push(addr.copied());
+                responses
+                    .pop_front()
+                    .ok_or_else(|| HttpError::Io(io::Error::other("empty")))
+            },
+            &|_next| Ok(vec![redirect_addr]),
+        );
+        assert_eq!(outcome.ok(), Some(b"list".to_vec()));
+        assert_eq!(
+            observed_addrs,
+            vec![Some(initial_addr), Some(redirect_addr)]
+        );
     }
 }
