@@ -923,7 +923,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-agent"
-version = "26.11.17"
+version = "26.11.18"
 dependencies = [
  "pcsc",
  "refineid-agent-pipe",
@@ -940,7 +940,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-agent-pipe"
-version = "26.11.17"
+version = "26.11.18"
 dependencies = [
  "refineid-dev-errors",
  "refineid-rapp",
@@ -989,7 +989,7 @@ source = "git+https://github.com/refineid/refineid-core.git?branch=main#26280c21
 
 [[package]]
 name = "refineid-card-manager-core"
-version = "26.11.17"
+version = "26.11.18"
 dependencies = [
  "refineid-atr",
  "refineid-dev-errors",
@@ -1018,7 +1018,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-dev-errors"
-version = "26.11.17"
+version = "26.11.18"
 dependencies = [
  "windows-sys",
 ]
@@ -1072,7 +1072,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-gui-win32"
-version = "26.11.17"
+version = "26.11.18"
 dependencies = [
  "pcsc",
  "refineid-card-manager-core",
@@ -1093,7 +1093,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-lib-core"
-version = "26.11.17"
+version = "26.11.18"
 dependencies = [
  "aes 0.9.4",
  "cbc",
@@ -1117,7 +1117,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-lib-pcsc"
-version = "26.11.17"
+version = "26.11.18"
 dependencies = [
  "pcsc",
  "refineid-atr",
@@ -1127,7 +1127,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-minidriver"
-version = "26.11.17"
+version = "26.11.18"
 dependencies = [
  "refineid-agent-pipe",
  "refineid-atr",
@@ -1141,7 +1141,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-msi"
-version = "26.11.17"
+version = "26.11.18"
 dependencies = [
  "refineid-atr",
  "refineid-lib-core",
@@ -1184,19 +1184,6 @@ dependencies = [
 [[package]]
 name = "refineid-pkcs11"
 version = "26.11.17"
-dependencies = [
- "refineid-agent-pipe",
- "refineid-dev-errors",
- "refineid-lib-core",
- "refineid-pkcs11 26.11.17 (git+https://github.com/refineid/refineid-core.git?branch=main)",
- "refineid-rapp-core",
- "refineid-remote",
- "refineid-windows-credential-store",
-]
-
-[[package]]
-name = "refineid-pkcs11"
-version = "26.11.17"
 source = "git+https://github.com/refineid/refineid-core.git?branch=main#26280c217732a2689cb4131d9fb5b8a1d421ff8e"
 dependencies = [
  "getrandom 0.4.3",
@@ -1213,6 +1200,19 @@ dependencies = [
  "rustix",
  "spki",
  "zeroize",
+]
+
+[[package]]
+name = "refineid-pkcs11"
+version = "26.11.18"
+dependencies = [
+ "refineid-agent-pipe",
+ "refineid-dev-errors",
+ "refineid-lib-core",
+ "refineid-pkcs11 26.11.17",
+ "refineid-rapp-core",
+ "refineid-remote",
+ "refineid-windows-credential-store",
 ]
 
 [[package]]
@@ -1242,7 +1242,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-rapp-ble"
-version = "26.11.17"
+version = "26.11.18"
 dependencies = [
  "refineid-dev-errors",
  "refineid-rapp",
@@ -1252,7 +1252,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-rapp-cli"
-version = "26.11.17"
+version = "26.11.18"
 dependencies = [
  "getrandom 0.4.3",
  "hex",
@@ -1269,7 +1269,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-rapp-core"
-version = "26.11.17"
+version = "26.11.18"
 dependencies = [
  "getrandom 0.4.3",
  "if-addrs",
@@ -1287,7 +1287,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-rapp-ffi"
-version = "26.11.17"
+version = "26.11.18"
 dependencies = [
  "getrandom 0.4.3",
  "hex",
@@ -1310,7 +1310,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-settings-ffi"
-version = "26.11.17"
+version = "26.11.18"
 dependencies = [
  "refineid-card-manager-core",
  "refineid-dev-errors",
@@ -1338,11 +1338,11 @@ dependencies = [
 
 [[package]]
 name = "refineid-stamp"
-version = "26.11.17"
+version = "26.11.18"
 
 [[package]]
 name = "refineid-windows-credential-store"
-version = "26.11.17"
+version = "26.11.18"
 dependencies = [
  "refineid-dev-errors",
  "refineid-digest",
@@ -1356,7 +1356,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-windows-doc-sign"
-version = "26.11.17"
+version = "26.11.18"
 dependencies = [
  "hex",
  "refineid-dev-errors",
@@ -1374,7 +1374,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-windows-driver-probe"
-version = "26.11.17"
+version = "26.11.18"
 dependencies = [
  "pcsc",
  "windows-sys",

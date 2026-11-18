@@ -26,5 +26,6 @@ refineid-rapp.workspace = true
 windows-sys = { workspace = true, features = [
     "Win32_Security_Credentials",
     "Win32_Security_Cryptography",
+    "Win32_System_LibraryLoader",
     "Win32_System_Registry",
 ] }

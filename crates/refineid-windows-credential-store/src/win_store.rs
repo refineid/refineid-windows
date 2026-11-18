@@ -52,10 +52,6 @@ const NO_STORE_ENCODING: u32 = 0;
 #[cfg(windows)]
 const DEFAULT_CRYPTO_PROVIDER: HCRYPTPROV_LEGACY = 0;
 
-/// Store flags for a writable registry-backed store.
-#[cfg(windows)]
-const WRITABLE_STORE_FLAGS: u32 = 0;
-
 /// Default flags passed to `CertCloseStore`.
 #[cfg(windows)]
 const DEFAULT_CLOSE_FLAGS: u32 = 0;
@@ -104,7 +100,7 @@ fn decode_property_wide_string(
         return Some(String::new());
     };
     let offset = addr.checked_sub(base_addr)?;
-    if offset < header_bytes {
+    if offset < header_bytes || offset >= buffer.len() {
         return None;
     }
     wide_from_buffer(buffer, offset)
@@ -188,9 +184,9 @@ impl CertStore {
             });
         }
         let flags = if read_only {
-            CERT_STORE_READONLY_FLAG
+            CERT_STORE_READONLY_FLAG | CERT_STORE_OPEN_EXISTING_FLAG
         } else {
-            WRITABLE_STORE_FLAGS
+            CERT_STORE_OPEN_EXISTING_FLAG
         };
         // SAFETY: caller guarantees `key` is an open registry key handle for
         // the call; `CERT_STORE_PROV_REG` keeps its own state once opened.
@@ -221,7 +217,7 @@ impl CertStore {
                 CERT_STORE_PROV_MEMORY,
                 NO_STORE_ENCODING,
                 DEFAULT_CRYPTO_PROVIDER,
-                WRITABLE_STORE_FLAGS,
+                0,
                 core::ptr::null(),
             )
         };
@@ -728,6 +724,14 @@ mod tests {
             empty_context.cbCertEncoded = NON_EMPTY_CLAIM;
             // SAFETY: `empty_context` is live on the stack with null `pbCertEncoded`.
             assert!(unsafe { encoded_der(&raw const empty_context) }.is_empty());
+
+            // A non-null pbCertEncoded with cbCertEncoded == 0 is also empty.
+            let mut zero_len_context: CERT_CONTEXT = unsafe { core::mem::zeroed() };
+            let dummy_byte = 0x42_u8;
+            zero_len_context.pbCertEncoded = (&raw const dummy_byte).cast_mut();
+            zero_len_context.cbCertEncoded = 0;
+            // SAFETY: `zero_len_context` is live on the stack.
+            assert!(unsafe { encoded_der(&raw const zero_len_context) }.is_empty());
         }
 
         #[test]
