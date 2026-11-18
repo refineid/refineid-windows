@@ -112,23 +112,33 @@ pub fn is_card_module_root(property: &[u8], module_cards: &[CardId]) -> bool {
         .is_some_and(|cards| cards.iter().all(|card| module_cards.contains(card)))
 }
 
+/// Splits a Windows registry path into non-empty segments delimited by backslash (`\`).
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn split_registry_path(path: &str) -> Vec<&str> {
+    path.split('\\').filter(|s| !s.is_empty()).collect()
+}
+
 #[cfg(windows)]
 pub use windows_store::remove_card_module_roots;
 
 #[cfg(windows)]
 mod windows_store {
     use windows_sys::Win32::Foundation::{
-        ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, WIN32_ERROR,
+        ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS,
+        ERROR_SUCCESS, WIN32_ERROR,
     };
     use windows_sys::Win32::Security::Cryptography::{
         CERT_CONTEXT, CERT_SMART_CARD_ROOT_INFO_PROP_ID, CertGetCertificateContextProperty,
     };
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows_sys::Win32::System::Registry::{
-        HKEY, HKEY_USERS, KEY_ALL_ACCESS, KEY_READ, REG_SAM_FLAGS, RegCloseKey, RegEnumKeyExW,
-        RegOpenKeyExW,
+        HKEY, HKEY_USERS, KEY_ALL_ACCESS, KEY_QUERY_VALUE, KEY_READ, REG_LINK,
+        REG_OPTION_OPEN_LINK, REG_SAM_FLAGS, RegCloseKey, RegEnumKeyExW, RegOpenKeyExW,
+        RegQueryValueExW,
     };
 
-    use super::is_card_module_root;
+    use super::{is_card_module_root, split_registry_path};
     use crate::CredentialStoreError;
     use crate::card_certificates::{CardId, FINEID_AUTHENTICATION_CONTAINER, is_fineid_entry};
     use crate::win_store::{CertStore, encode_wide};
@@ -143,23 +153,151 @@ mod windows_store {
     /// The longest registry key name, in UTF-16 units with its NUL.
     const MAX_KEY_NAME_UNITS: usize = 256;
 
+    /// Checks whether `key` is a registry symbolic link (`REG_LINK`).
+    fn is_symlink(key: HKEY) -> bool {
+        let value_name = encode_wide("SymbolicLinkValue");
+        let mut val_type = 0u32;
+        // SAFETY: querying value type with null data buffer.
+        let status = unsafe {
+            RegQueryValueExW(
+                key,
+                value_name.as_ptr(),
+                core::ptr::null_mut(),
+                &raw mut val_type,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            )
+        };
+        if (status == ERROR_SUCCESS || status == ERROR_MORE_DATA) && val_type == REG_LINK {
+            return true;
+        }
+
+        is_symlink_nt(key)
+    }
+
+    /// Checks whether `key` is marked as a symbolic link via NT `KeyFlagsInformation`.
+    fn is_symlink_nt(key: HKEY) -> bool {
+        const KEY_FLAGS_INFORMATION: u32 = 5;
+        const KEY_CTRL_FL_SYM_LINK: u32 = 0x0002;
+
+        #[allow(
+            clippy::struct_field_names,
+            reason = "matches Windows NT KEY_FLAGS_INFORMATION ABI layout"
+        )]
+        #[repr(C)]
+        struct KeyFlagsInformation {
+            wow64_flags: u32,
+            key_flags: u32,
+            control_flags: u32,
+        }
+
+        type NtQueryKeyFn =
+            unsafe extern "system" fn(HKEY, u32, *mut core::ffi::c_void, u32, *mut u32) -> i32;
+
+        let ntdll_name = encode_wide("ntdll.dll");
+        // SAFETY: ntdll.dll is guaranteed to be loaded in any Windows process.
+        let ntdll = unsafe { GetModuleHandleW(ntdll_name.as_ptr()) };
+        if ntdll.is_null() {
+            return false;
+        }
+        // SAFETY: querying NtQueryKey symbol from loaded ntdll.
+        let proc = unsafe { GetProcAddress(ntdll, c"NtQueryKey".as_ptr().cast()) };
+        let Some(proc) = proc else {
+            return false;
+        };
+        let nt_query_key: NtQueryKeyFn = unsafe { core::mem::transmute(proc) };
+
+        let mut info = KeyFlagsInformation {
+            wow64_flags: 0,
+            key_flags: 0,
+            control_flags: 0,
+        };
+        let mut result_length = 0u32;
+        let buffer_size = u32::try_from(size_of::<KeyFlagsInformation>()).unwrap_or(0);
+        // SAFETY: info buffer is correctly sized for KeyFlagsInformation.
+        let status = unsafe {
+            nt_query_key(
+                key,
+                KEY_FLAGS_INFORMATION,
+                (&raw mut info).cast(),
+                buffer_size,
+                &raw mut result_length,
+            )
+        };
+        if status == 0 {
+            (info.control_flags & KEY_CTRL_FL_SYM_LINK) != 0
+        } else {
+            false
+        }
+    }
+
     /// An open registry key, closed on drop.
+    #[derive(Debug, PartialEq, Eq)]
     struct Key(HKEY);
 
     impl Key {
-        /// `path` under `parent` with `access`; `Ok(None)` when it does not
-        /// exist.
+        /// Opens `path` under `parent` safely without traversing any registry
+        /// symbolic links (`REG_LINK`).
+        ///
+        /// Every path segment is opened sequentially with `REG_OPTION_OPEN_LINK`
+        /// and checked against both `SymbolicLinkValue` and `NtQueryKey`. If any
+        /// intermediate or final key is a symbolic link, `Err(ERROR_ACCESS_DENIED)`
+        /// is returned. If any key does not exist, `Ok(None)` is returned.
         fn open(parent: HKEY, path: &str, access: REG_SAM_FLAGS) -> Result<Option<Self>, u32> {
-            let path = encode_wide(path);
-            let mut key: HKEY = core::ptr::null_mut();
-            // SAFETY: `path` is NUL-terminated for the call and `key` receives
-            // the handle.
-            let status = unsafe { RegOpenKeyExW(parent, path.as_ptr(), 0, access, &raw mut key) };
-            match status {
-                ERROR_SUCCESS => Ok(Some(Self(key))),
-                ERROR_FILE_NOT_FOUND => Ok(None),
-                other => Err(other),
+            let segments = split_registry_path(path);
+            if segments.is_empty() {
+                return Ok(None);
             }
+            let mut current_parent = parent;
+            #[allow(
+                clippy::collection_is_never_read,
+                reason = "holder maintains intermediate key handle RAII lifetime across loop iterations"
+            )]
+            let mut _current_key_holder: Option<Self> = None;
+
+            for (i, &segment) in segments.iter().enumerate() {
+                let is_last = i == segments.len() - 1;
+                let segment_access = if is_last {
+                    access | KEY_QUERY_VALUE
+                } else {
+                    KEY_READ
+                };
+                let wide_segment = encode_wide(segment);
+                let mut next_key: HKEY = core::ptr::null_mut();
+                // SAFETY: `wide_segment` is NUL-terminated and `next_key` receives the handle.
+                // `REG_OPTION_OPEN_LINK` ensures that if this segment is a symbolic link,
+                // the link itself is opened rather than being resolved/traversed.
+                let status = unsafe {
+                    RegOpenKeyExW(
+                        current_parent,
+                        wide_segment.as_ptr(),
+                        REG_OPTION_OPEN_LINK,
+                        segment_access,
+                        &raw mut next_key,
+                    )
+                };
+                match status {
+                    ERROR_SUCCESS => {}
+                    ERROR_FILE_NOT_FOUND => return Ok(None),
+                    other => return Err(other),
+                }
+
+                if is_symlink(next_key) {
+                    // SAFETY: `next_key` is a live open key handle that must be closed before returning.
+                    let _ = unsafe { RegCloseKey(next_key) };
+                    return Err(ERROR_ACCESS_DENIED);
+                }
+
+                if is_last {
+                    return Ok(Some(Self(next_key)));
+                }
+
+                let next_holder = Self(next_key);
+                current_parent = next_holder.0;
+                _current_key_holder = Some(next_holder);
+            }
+
+            Ok(None)
         }
     }
 
@@ -234,12 +372,29 @@ mod windows_store {
             return Ok(0);
         };
         // SAFETY: `personal_key` holds an open registry key handle.
-        let cards = module_cards(&unsafe { CertStore::open_registry(personal_key.0, true)? });
+        let personal_store = match unsafe { CertStore::open_registry(personal_key.0, true) } {
+            Ok(store) => store,
+            Err(CredentialStoreError::CertificateStore { code })
+                if code == ERROR_FILE_NOT_FOUND =>
+            {
+                return Ok(0);
+            }
+            Err(e) => return Err(e),
+        };
+        let cards = module_cards(&personal_store);
         if cards.is_empty() {
             return Ok(0);
         }
         // SAFETY: `roots_key` holds an open registry key handle.
-        let roots = unsafe { CertStore::open_registry(roots_key.0, false)? };
+        let roots = match unsafe { CertStore::open_registry(roots_key.0, false) } {
+            Ok(store) => store,
+            Err(CredentialStoreError::CertificateStore { code })
+                if code == ERROR_FILE_NOT_FOUND =>
+            {
+                return Ok(0);
+            }
+            Err(e) => return Err(e),
+        };
         let mut removed = 0;
         roots.try_for_each(|context| {
             let ours = root_information(context.as_raw())
@@ -310,6 +465,34 @@ mod windows_store {
             }
         }
         first_failure.map_or(Ok(removed), Err)
+    }
+
+    #[cfg(test)]
+    mod windows_tests {
+        use super::*;
+
+        #[test]
+        fn symlink_detection_on_root_hive() {
+            // HKEY_USERS is a standard root hive and not a symlink.
+            assert!(!is_symlink(HKEY_USERS));
+        }
+
+        #[test]
+        fn key_open_safely_handles_nonexistent_paths() {
+            // Opening a nonexistent path returns Ok(None).
+            let outcome = Key::open(
+                HKEY_USERS,
+                r"NonExistentSid12345\Software\Microsoft\SystemCertificates\SmartCardRoot",
+                KEY_READ,
+            );
+            assert_eq!(outcome, Ok(None));
+        }
+
+        #[test]
+        fn key_open_empty_path_returns_none() {
+            assert_eq!(Key::open(HKEY_USERS, "", KEY_READ), Ok(None));
+            assert_eq!(Key::open(HKEY_USERS, r"\\\\", KEY_READ), Ok(None));
+        }
     }
 }
 
@@ -393,5 +576,26 @@ mod tests {
         assert!(!is_card_module_root(&property(&[other_card()]), &ours));
         assert!(!is_card_module_root(b"not a property", &ours));
         assert!(!is_card_module_root(&property(&[module_card()]), &[]));
+    }
+
+    #[test]
+    fn split_registry_path_breaks_keys_into_individual_segments() {
+        assert_eq!(
+            split_registry_path(r"Software\Microsoft\SystemCertificates\SmartCardRoot"),
+            vec![
+                "Software",
+                "Microsoft",
+                "SystemCertificates",
+                "SmartCardRoot"
+            ]
+        );
+        assert_eq!(
+            split_registry_path(r"Software\Microsoft\SystemCertificates\My"),
+            vec!["Software", "Microsoft", "SystemCertificates", "My"]
+        );
+        assert_eq!(split_registry_path(r"\A\\B\C\"), vec!["A", "B", "C"]);
+        assert_eq!(split_registry_path(""), Vec::<&str>::new());
+        assert_eq!(split_registry_path(r"\\\\"), Vec::<&str>::new());
+        assert_eq!(split_registry_path("SingleKey"), vec!["SingleKey"]);
     }
 }
