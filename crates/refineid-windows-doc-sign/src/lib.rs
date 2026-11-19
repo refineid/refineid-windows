@@ -66,13 +66,6 @@ mod test_util {
         pub fn path(&self) -> &Path {
             &self.path
         }
-
-        /// Write `bytes` to the file `name` in the directory.
-        pub fn write(&self, name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
-            let path = self.path.join(name);
-            std::fs::write(&path, bytes)?;
-            Ok(path)
-        }
     }
 
     impl Drop for TempDir {
