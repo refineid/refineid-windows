@@ -53,7 +53,7 @@ use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use refineid_lib_core::identity::holder_line;
-use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate, extract_key_usage};
+use refineid_lib_core::x509::{FineidNameExt as _, OwnedCert, extract_key_usage};
 use refineid_rapp::ProfileName;
 use refineid_rapp_core::clock::unix_time_ms;
 use refineid_rapp_core::engine::{
@@ -1101,7 +1101,7 @@ fn learns_confirmed_certificate(
     let Ok(OperationOutcome::Completed(CardOperationResult::Certificate(der))) = read else {
         return false;
     };
-    let Some(certificate) = OwnedCert::from_der(UnvalidatedCertificate::new(der))
+    let Some(certificate) = OwnedCert::from_der(&der)
         .ok()
         .filter(|certificate| fingerprint_of(certificate) == fingerprint)
     else {
@@ -1159,7 +1159,7 @@ fn authentication_certificate(
 ) -> Option<OwnedCert> {
     let mut parsed = certificates
         .into_iter()
-        .filter_map(|der| OwnedCert::from_der(UnvalidatedCertificate::new(der)).ok());
+        .filter_map(|der| OwnedCert::from_der(&der).ok());
     match card {
         Some(CardStatusMessage {
             card: CardPresence::Present(fingerprint),

@@ -34,7 +34,7 @@ use std::time::Instant;
 
 use refineid_agent_pipe::identity::{calling_program, computer_name, interface_language};
 use refineid_agent_pipe::{OPERATION_LIFETIME, RemoteKey, in_process_operation};
-use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
+use refineid_lib_core::x509::OwnedCert;
 use refineid_pkcs11::remote::{
     RemoteOffer, RemoteSignError, RemoteTokenSource, SessionCertificate,
 };
@@ -228,7 +228,7 @@ fn confirmed_certificate(pair_id: PairId, withdrawal: &Withdrawal) -> Option<Own
                 Ok(OperationOutcome::Completed(CardOperationResult::Certificate(der)))
                     if CertificateFingerprint::of_certificate(&der) == fingerprint =>
                 {
-                    OwnedCert::from_der(UnvalidatedCertificate::new(der)).ok()
+                    OwnedCert::from_der(&der).ok()
                 }
                 _ => {
                     refineid_dev_errors::report!(

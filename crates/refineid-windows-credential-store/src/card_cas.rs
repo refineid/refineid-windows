@@ -46,8 +46,9 @@
 //! own property; any other entry, the same certificate added by Windows or
 //! another program included, is neither marked nor touched.
 
-use refineid_lib_core::x509::{Certificate, OwnedCert, UnvalidatedCertificate};
-use refineid_lib_core::x509::{Name, extract_basic_constraints};
+use refineid_lib_core::x509::{
+    Certificate, FineidNameExt as _, Name, OwnedCert, extract_basic_constraints,
+};
 
 /// The word DVV puts in the name of every test CA, as in the issuing CA
 /// "DVV TEST Certificates - G5R" of test organization cards.
@@ -96,7 +97,7 @@ impl CardCas {
     /// [`Self::from_card`], with a test root presented when
     /// `presents_test_roots`.
     fn presented(root: &[u8], issuing: Option<&[u8]>, presents_test_roots: bool) -> Option<Self> {
-        let root = OwnedCert::from_der(UnvalidatedCertificate::new(root.to_vec())).ok()?;
+        let root = OwnedCert::from_der(root).ok()?;
         let root_view = root.view();
         if root_view.subject != root_view.issuer
             || !is_ca(root_view)
@@ -112,7 +113,7 @@ impl CardCas {
             });
         }
         let issuing = issuing
-            .and_then(|der| OwnedCert::from_der(UnvalidatedCertificate::new(der.to_vec())).ok())
+            .and_then(|der| OwnedCert::from_der(der).ok())
             .filter(|issuing| {
                 let view = issuing.view();
                 let root_name = root_view.subject;

@@ -51,9 +51,7 @@ impl Hex {
     }
 
     /// Decode one ASCII hex digit at const-eval time.
-    ///
-    /// Panics (= compile error in const context) on anything that
-    /// is not `0-9A-Fa-f`.
+    #[cfg(test)]
     #[expect(
         clippy::arithmetic_side_effects,
         clippy::panic,
@@ -71,12 +69,8 @@ impl Hex {
     }
 
     /// Decode a hex string literal into a fixed-size byte array at
-    /// const-eval time.
-    ///
-    /// This is the "parse, don't validate" form for spec constants
-    /// (FIPS 186-4 curve parameters, NIST KAT vectors): a mistyped
-    /// digit or a length mismatch fails compilation, so no runtime
-    /// path ever sees a malformed constant.
+    /// const-eval time for KAT test fixtures.
+    #[cfg(test)]
     #[expect(
         clippy::indexing_slicing,
         clippy::arithmetic_side_effects,

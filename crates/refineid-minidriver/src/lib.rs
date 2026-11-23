@@ -153,8 +153,6 @@ use refineid_lib_core::auth::{
 #[cfg(windows)]
 use refineid_lib_core::crypto::container::{Ciphertext, RsaPkcs1};
 #[cfg(windows)]
-use refineid_lib_core::crypto::rsa::HashAlg as PssHashAlg;
-#[cfg(windows)]
 use refineid_lib_core::identity::{TokenSerial, render_token_serial};
 #[cfg(windows)]
 use refineid_lib_core::pace::run_pace_with_can;
@@ -172,9 +170,7 @@ use refineid_lib_core::pkcs15::{CertSlot, Pkcs15Ops};
 #[cfg(windows)]
 use refineid_lib_core::sign::{KeyRef, SignOps, commands::ExternalHashValue};
 #[cfg(windows)]
-use refineid_lib_core::x509::{
-    EcCurve, OwnedCert, PublicKeyAlgorithm, UnvalidatedCertificate, extract_rsa_public_key,
-};
+use refineid_lib_core::x509::{EcCurve, OwnedCert, PublicKeyAlgorithm, extract_rsa_public_key};
 #[cfg(windows)]
 use refineid_rapp_core::operations::{CardOperationResult, KeyProfile, SignatureAlgorithm};
 #[cfg(windows)]
@@ -1718,7 +1714,7 @@ where
 
 #[cfg(windows)]
 fn build_legacy_rsa_pubkey_blob(cert_der: &[u8], alg: u32) -> Option<Vec<u8>> {
-    let cert = OwnedCert::from_der(UnvalidatedCertificate::new(cert_der.to_vec())).ok()?;
+    let cert = OwnedCert::from_der(cert_der).ok()?;
     let spki = cert.view().spki.as_der();
     let pk = extract_rsa_public_key(spki)?;
     let mut exp = 0_u32;
@@ -1743,14 +1739,12 @@ fn build_legacy_rsa_pubkey_blob(cert_der: &[u8], alg: u32) -> Option<Vec<u8>> {
 
 #[cfg(windows)]
 fn build_cng_ecdsa_pubkey_blob(cert_der: &[u8]) -> Option<Vec<u8>> {
-    let cert = OwnedCert::from_der(UnvalidatedCertificate::new(cert_der.to_vec())).ok()?;
+    let cert = OwnedCert::from_der(cert_der).ok()?;
     let spki = cert.view().spki;
     let q = spki.ec_public_key_point()?;
     let field_bytes = match spki.algorithm() {
-        PublicKeyAlgorithm::Ec(EcCurve::Secp256r1 | EcCurve::BrainpoolP256r1)
-        | PublicKeyAlgorithm::EcExplicit { bits: 256 } => 32,
-        PublicKeyAlgorithm::Ec(EcCurve::Secp384r1 | EcCurve::BrainpoolP384r1)
-        | PublicKeyAlgorithm::EcExplicit { bits: 384 } => 48,
+        PublicKeyAlgorithm::Ec(EcCurve::Secp256r1 | EcCurve::BrainpoolP256r1) => 32,
+        PublicKeyAlgorithm::Ec(EcCurve::Secp384r1 | EcCurve::BrainpoolP384r1) => 48,
         _ => return None,
     };
     let point = q.as_bytes();
@@ -2354,36 +2348,40 @@ unsafe extern "system" fn CardSignData(
         if !container.allow_pss || !matches!(container.key_alg, KeyAlgorithm::Rsa { .. }) {
             return SCARD_E_UNSUPPORTED_FEATURE;
         }
-        let Ok(hash_alg) = PssHashAlg::try_from(hash_name.as_str()) else {
-            return SCARD_E_INVALID_PARAMETER;
-        };
-        let digest_len = match hash_alg {
-            PssHashAlg::Sha1 => 20,
-            PssHashAlg::Sha256 => 32,
-            PssHashAlg::Sha384 => 48,
-            PssHashAlg::Sha512 => 64,
+        let (digest_len, hash) = match hash_name.as_str() {
+            "SHA1" => (
+                20,
+                ExternalHashValue::Sha1(match in_bytes.try_into() {
+                    Ok(bytes) => bytes,
+                    Err(_) => return SCARD_E_INVALID_PARAMETER,
+                }),
+            ),
+            "SHA256" => (
+                32,
+                ExternalHashValue::Sha256(match in_bytes.try_into() {
+                    Ok(bytes) => bytes,
+                    Err(_) => return SCARD_E_INVALID_PARAMETER,
+                }),
+            ),
+            "SHA384" => (
+                48,
+                ExternalHashValue::Sha384(match in_bytes.try_into() {
+                    Ok(bytes) => bytes,
+                    Err(_) => return SCARD_E_INVALID_PARAMETER,
+                }),
+            ),
+            "SHA512" => (
+                64,
+                ExternalHashValue::Sha512(match in_bytes.try_into() {
+                    Ok(bytes) => bytes,
+                    Err(_) => return SCARD_E_INVALID_PARAMETER,
+                }),
+            ),
+            _ => return SCARD_E_INVALID_PARAMETER,
         };
         if salt_len != digest_len {
             return SCARD_E_INVALID_PARAMETER;
         }
-        let hash = match hash_alg {
-            PssHashAlg::Sha1 => ExternalHashValue::Sha1(match in_bytes.try_into() {
-                Ok(bytes) => bytes,
-                Err(_) => return SCARD_E_INVALID_PARAMETER,
-            }),
-            PssHashAlg::Sha256 => ExternalHashValue::Sha256(match in_bytes.try_into() {
-                Ok(bytes) => bytes,
-                Err(_) => return SCARD_E_INVALID_PARAMETER,
-            }),
-            PssHashAlg::Sha384 => ExternalHashValue::Sha384(match in_bytes.try_into() {
-                Ok(bytes) => bytes,
-                Err(_) => return SCARD_E_INVALID_PARAMETER,
-            }),
-            PssHashAlg::Sha512 => ExternalHashValue::Sha512(match in_bytes.try_into() {
-                Ok(bytes) => bytes,
-                Err(_) => return SCARD_E_INVALID_PARAMETER,
-            }),
-        };
         let mut tx = lock_transport(&ctx.transport);
         if let Err(rc) = sync_transport_handle(
             &mut tx,

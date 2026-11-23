@@ -1227,6 +1227,7 @@ where
         .read_certificate(CertSlot::Authentication)
         .ok()
         .and_then(|der| {
+            use crate::x509::FineidNameExt as _;
             crate::x509::Certificate::from_der(der.as_bytes())
                 .ok()
                 .map(|cert| {

@@ -47,6 +47,7 @@ refineid-windows-driver-probe = { path = "crates/refineid-windows-driver-probe",
 refineid-apdu = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
 refineid-atr = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
 refineid-ber = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
+refineid-cms = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
 refineid-digest = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
 refineid-doc-sign = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
 refineid-emrtd = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }

@@ -28,6 +28,6 @@
 
 pub mod brainpool_p384;
 pub mod container;
-pub mod ecdsa;
-pub mod rsa;
+pub use refineid_cms::ecdsa;
+pub use refineid_cms::rsa;
 pub mod symmetric;
