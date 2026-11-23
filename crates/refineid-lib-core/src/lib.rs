@@ -85,7 +85,7 @@ pub mod activation;
 pub mod apdu;
 pub mod auth;
 pub mod backend;
-pub(crate) mod ber;
+pub(crate) use refineid_ber as ber;
 pub mod can;
 pub mod card;
 pub mod card_access;

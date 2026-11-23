@@ -834,14 +834,14 @@ impl Fci {
         const TAG_FILE_LENGTH_NON_TLV: u16 = 0x80;
         const TAG_FILE_LENGTH_TLV: u16 = 0x81;
         let outer = BerTlvAny::parse(&self.bytes).ok()?;
-        if outer.tag != TAG_FCP && outer.tag != TAG_FCI {
+        if outer.tag() != TAG_FCP && outer.tag() != TAG_FCI {
             return None;
         }
-        for child in BerTlvIter::new(outer.value) {
+        for child in BerTlvIter::new(outer.value()) {
             let c = child.ok()?;
-            if c.tag == TAG_FILE_LENGTH_NON_TLV || c.tag == TAG_FILE_LENGTH_TLV {
+            if c.tag() == TAG_FILE_LENGTH_NON_TLV || c.tag() == TAG_FILE_LENGTH_TLV {
                 let mut v: usize = 0;
-                for &b in c.value {
+                for &b in c.value() {
                     v = (v << 8_u32) | usize::from(b);
                 }
                 return Some(v);
@@ -919,14 +919,14 @@ impl TokenInfo {
         };
         let outer = BerTlv::<Sequence>::parse(der)?;
         let mut info = Self::default();
-        let mut it = BerTlvIter::new(outer.value);
+        let mut it = BerTlvIter::new(outer.value());
 
         // Version INTEGER.
         if let Some(Ok(version_any)) = it.next()
             && let Ok(version_tlv) = version_any.expect::<Integer>()
         {
             let mut v: u32 = 0;
-            for &b in version_tlv.value {
+            for &b in version_tlv.value() {
                 v = (v << 8_u32) | u32::from(b);
             }
             info.version = Some(v);
@@ -936,7 +936,7 @@ impl TokenInfo {
             && let Ok(serial_tlv) = serial_any.expect::<OctetString>()
         {
             info.serial_number_hex = Some(crate::identity::TokenSerial::new(
-                crate::hex::Hex::encode(serial_tlv.value),
+                crate::hex::Hex::encode(serial_tlv.value()),
             ));
         }
         // The rest of the fields are all optional + variably tagged.
@@ -945,10 +945,10 @@ impl TokenInfo {
         // IMPLICIT-tagged label as best-effort.
         for entry in it {
             let Ok(entry) = entry else { continue };
-            if entry.tag == <Utf8String as BerTag>::TAG
-                || entry.tag == <PrintableString as BerTag>::TAG
+            if entry.tag() == <Utf8String as BerTag>::TAG
+                || entry.tag() == <PrintableString as BerTag>::TAG
             {
-                let s = String::from_utf8_lossy(entry.value).into_owned();
+                let s = String::from_utf8_lossy(entry.value()).into_owned();
                 if info.manufacturer_id.is_none() {
                     info.manufacturer_id = Some(s);
                 } else if info.label.is_none() {
@@ -956,9 +956,9 @@ impl TokenInfo {
                 } else {
                     // Both slots filled; extra string entries ignored.
                 }
-            } else if entry.tag == TAG_TOKEN_INFO_LABEL_IMPLICIT {
+            } else if entry.tag() == TAG_TOKEN_INFO_LABEL_IMPLICIT {
                 // [0] Label -- IMPLICIT UTF8String.
-                info.label = Some(String::from_utf8_lossy(entry.value).into_owned());
+                info.label = Some(String::from_utf8_lossy(entry.value()).into_owned());
             } else {
                 // Other tags in TokenInfo: ignored.
             }
