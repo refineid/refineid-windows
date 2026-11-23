@@ -307,10 +307,15 @@ impl<T: CardTransport> SmTransport<T> {
             let mut do87_value = Vec::with_capacity(1_usize.saturating_add(cipher.len()));
             do87_value.push(0x01);
             do87_value.extend_from_slice(cipher.as_bytes());
-            ber::tlv(TAG_DO87, &do87_value)
+            ber::tlv(TAG_DO87, &do87_value).map_err(|_err| SmError::CommandTooLong)?
         };
 
-        let do97 = le.map_or_else(Vec::new, |le_byte| ber::tlv(TAG_DO97, [le_byte]));
+        let do97 = match le {
+            Some(le_byte) => {
+                ber::tlv(TAG_DO97, [le_byte]).map_err(|_err| SmError::CommandTooLong)?
+            }
+            None => Vec::new(),
+        };
 
         // MAC input: SSC || pad(header) || DO87 || DO97, then pad once
         // more to a 16-byte boundary. Capacity hint uses
@@ -327,7 +332,7 @@ impl<T: CardTransport> SmTransport<T> {
         mac_input.extend_from_slice(&do97);
         mac_input = SmHelpers::iso7816_4_pad(&mac_input);
         let tag = aes256_cmac_truncated(self.k_mac.as_bytes(), &mac_input);
-        let do_mac = ber::tlv(TAG_DO8E, tag.as_bytes());
+        let do_mac = ber::tlv(TAG_DO8E, tag.as_bytes()).map_err(|_err| SmError::CommandTooLong)?;
 
         let body_len = do87
             .len()
@@ -384,10 +389,10 @@ impl<T: CardTransport> SmTransport<T> {
         let iter = BerTlvIter::new(response);
         for parsed in iter {
             let tlv = parsed.map_err(|_ber_err| SmError::Malformed("BER parse failed"))?;
-            match tlv.tag {
-                t if t == u16::from(TAG_DO87) => do87_value = Some(tlv.value),
-                t if t == u16::from(TAG_DO99) => do99_value = Some(tlv.value),
-                t if t == u16::from(TAG_DO8E) => do_mac_value = Some(tlv.value),
+            match tlv.tag() {
+                t if t == u16::from(TAG_DO87) => do87_value = Some(tlv.value()),
+                t if t == u16::from(TAG_DO99) => do99_value = Some(tlv.value()),
+                t if t == u16::from(TAG_DO8E) => do_mac_value = Some(tlv.value()),
                 _ => {} // Tolerate unexpected DOs; SM responses can carry DO81/DO82 too.
             }
         }
@@ -404,9 +409,13 @@ impl<T: CardTransport> SmTransport<T> {
         let mut mac_input = Vec::with_capacity(mac_cap);
         mac_input.extend_from_slice(self.ssc.as_bytes());
         if let Some(v) = do87_value {
-            mac_input.extend_from_slice(&ber::tlv(TAG_DO87, v));
+            let do87 = ber::tlv(TAG_DO87, v)
+                .map_err(|_ber_err| SmError::Malformed("DO87 encode failed"))?;
+            mac_input.extend_from_slice(&do87);
         }
-        mac_input.extend_from_slice(&ber::tlv(TAG_DO99, do99));
+        let do99_tlv = ber::tlv(TAG_DO99, do99)
+            .map_err(|_ber_err| SmError::Malformed("DO99 encode failed"))?;
+        mac_input.extend_from_slice(&do99_tlv);
         mac_input = SmHelpers::iso7816_4_pad(&mac_input);
         let computed = aes256_cmac_truncated(self.k_mac.as_bytes(), &mac_input);
         // Constant-time compare: both byte slices are 8 bytes
@@ -718,8 +727,8 @@ mod tests {
         let mut do87_value = Vec::with_capacity(1 + cipher.len());
         do87_value.push(0x01);
         do87_value.extend_from_slice(cipher.as_bytes());
-        let do_cipher = ber::tlv(TAG_DO87, &do87_value);
-        let do_status = ber::tlv(TAG_DO99, [0x90, 0x00]);
+        let do_cipher = ber::tlv(TAG_DO87, &do87_value).expect("test DO87 encodes");
+        let do_status = ber::tlv(TAG_DO99, [0x90, 0x00]).expect("test DO99 encodes");
 
         let mut mac_input = Vec::new();
         mac_input.extend_from_slice(card.ssc.as_bytes());
@@ -727,7 +736,7 @@ mod tests {
         mac_input.extend_from_slice(&do_status);
         let mac_input = SmHelpers::iso7816_4_pad(&mac_input);
         let tag = aes256_cmac_truncated(card.k_mac.as_bytes(), &mac_input);
-        let do_mac = ber::tlv(TAG_DO8E, tag.as_bytes());
+        let do_mac = ber::tlv(TAG_DO8E, tag.as_bytes()).expect("test DO8E encodes");
 
         let mut response = Vec::new();
         response.extend_from_slice(&do_cipher);
@@ -776,8 +785,8 @@ mod tests {
         let mut do87_value = Vec::with_capacity(1_usize.saturating_add(cipher.len()));
         do87_value.push(DO87_PADDING_INDICATOR);
         do87_value.extend_from_slice(cipher.as_bytes());
-        let cryptogram_object = ber::tlv(TAG_DO87, &do87_value);
-        let status_object = ber::tlv(TAG_DO99, [0x62, 0x82]);
+        let cryptogram_object = ber::tlv(TAG_DO87, &do87_value).expect("test DO87 encodes");
+        let status_object = ber::tlv(TAG_DO99, [0x62, 0x82]).expect("test DO99 encodes");
 
         let mut mac_input = Vec::new();
         mac_input.extend_from_slice(card.ssc.as_bytes());
@@ -785,7 +794,7 @@ mod tests {
         mac_input.extend_from_slice(&status_object);
         let mac_input = SmHelpers::iso7816_4_pad(&mac_input);
         let tag = aes256_cmac_truncated(card.k_mac.as_bytes(), &mac_input);
-        let mac_object = ber::tlv(TAG_DO8E, tag.as_bytes());
+        let mac_object = ber::tlv(TAG_DO8E, tag.as_bytes()).expect("test DO8E encodes");
 
         let mut protected_body = Vec::new();
         protected_body.extend_from_slice(&cryptogram_object);
@@ -837,10 +846,10 @@ mod tests {
         // before any decryption is attempted.
         let mut do87_value = vec![0x01];
         do87_value.extend_from_slice(&[0_u8; 16]);
-        let do_cipher = ber::tlv(TAG_DO87, &do87_value);
-        let do_status = ber::tlv(TAG_DO99, [0x90, 0x00]);
+        let do_cipher = ber::tlv(TAG_DO87, &do87_value).expect("test DO87 encodes");
+        let do_status = ber::tlv(TAG_DO99, [0x90, 0x00]).expect("test DO99 encodes");
         let bogus_tag = [0_u8; 8];
-        let do_mac = ber::tlv(TAG_DO8E, bogus_tag);
+        let do_mac = ber::tlv(TAG_DO8E, bogus_tag).expect("test DO8E encodes");
         let mut response = Vec::new();
         response.extend_from_slice(&do_cipher);
         response.extend_from_slice(&do_status);

@@ -293,13 +293,13 @@ impl Curve {
         let field_type = EcdsaHelpers::next_child(&mut field_iter)?
             .expect::<Oid>()
             .map_err(EcdsaHelpers::bad_modulus)?;
-        if field_type.value != known::PRIME_FIELD.as_bytes() {
+        if field_type.value() != known::PRIME_FIELD.as_bytes() {
             return Err(EcdsaError::BadModulus);
         }
         let prime_tlv = EcdsaHelpers::next_child(&mut field_iter)?
             .expect::<Integer>()
             .map_err(EcdsaHelpers::bad_modulus)?;
-        let p = EcdsaHelpers::strip_sign(prime_tlv.value);
+        let p = EcdsaHelpers::strip_sign(prime_tlv.value());
         let curve_seq = EcdsaHelpers::next_child(&mut it)?
             .expect::<Sequence>()
             .map_err(EcdsaHelpers::bad_modulus)?;
@@ -307,20 +307,20 @@ impl Curve {
         let a_tlv = EcdsaHelpers::next_child(&mut curve_it)?
             .expect::<OctetString>()
             .map_err(EcdsaHelpers::bad_modulus)?;
-        let a = a_tlv.value.to_vec();
+        let a = a_tlv.value().to_vec();
         let b_tlv = EcdsaHelpers::next_child(&mut curve_it)?
             .expect::<OctetString>()
             .map_err(EcdsaHelpers::bad_modulus)?;
-        let b = b_tlv.value.to_vec();
+        let b = b_tlv.value().to_vec();
         // Optional seed BIT STRING -- ignore.
 
         let base_tlv = EcdsaHelpers::next_child(&mut it)?
             .expect::<OctetString>()
             .map_err(EcdsaHelpers::bad_modulus)?;
-        if base_tlv.value.first().copied() != Some(SEC1_UNCOMPRESSED_TAG) {
+        if base_tlv.value().first().copied() != Some(SEC1_UNCOMPRESSED_TAG) {
             return Err(EcdsaError::BadModulus);
         }
-        let g_body = base_tlv.value.get(1..).ok_or(EcdsaError::BadModulus)?;
+        let g_body = base_tlv.value().get(1..).ok_or(EcdsaError::BadModulus)?;
         if !g_body.len().is_multiple_of(2) || g_body.is_empty() {
             return Err(EcdsaError::BadModulus);
         }
@@ -333,7 +333,7 @@ impl Curve {
         let order_tlv = EcdsaHelpers::next_child(&mut it)?
             .expect::<Integer>()
             .map_err(EcdsaHelpers::bad_modulus)?;
-        let n = EcdsaHelpers::strip_sign(order_tlv.value);
+        let n = EcdsaHelpers::strip_sign(order_tlv.value());
         Ok(Self { p, a, b, gx, gy, n })
     }
 }
@@ -647,22 +647,23 @@ impl Signature<EcdsaDer> {
     fn parse_ecdsa_signature(&self) -> Result<(Vec<u8>, Vec<u8>), EcdsaError> {
         let outer =
             BerTlv::<Sequence>::parse(self.as_bytes()).map_err(|_e| EcdsaError::BadSignature)?;
-        let r_tlv = BerTlv::<Integer>::parse(outer.value).map_err(|_e| EcdsaError::BadSignature)?;
+        let r_tlv =
+            BerTlv::<Integer>::parse(outer.value()).map_err(|_e| EcdsaError::BadSignature)?;
         let after_r = outer
-            .value
-            .get(r_tlv.size..)
+            .value()
+            .get(r_tlv.size()..)
             .ok_or(EcdsaError::BadSignature)?;
         let s_tlv = BerTlv::<Integer>::parse(after_r).map_err(|_e| EcdsaError::BadSignature)?;
+        let r_value = r_tlv.value();
+        let s_value = s_tlv.value();
         Ok((
-            r_tlv
-                .value
+            r_value
                 .strip_prefix(&DER_SIGN_PAD_PREFIX)
-                .unwrap_or(r_tlv.value)
+                .unwrap_or(r_value)
                 .to_vec(),
-            s_tlv
-                .value
+            s_value
                 .strip_prefix(&DER_SIGN_PAD_PREFIX)
-                .unwrap_or(s_tlv.value)
+                .unwrap_or(s_value)
                 .to_vec(),
         ))
     }
