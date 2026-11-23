@@ -40,16 +40,6 @@ use crate::identity::TokenSerial;
 use crate::pin::PinBytes;
 use crate::pin_retry_risk::{pin1_status_permits_reusable_cache, reports_no_tries_left};
 
-/// How long a PIN 1 entry is held.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Pin1Retention {
-    /// Held until an invalidation event.
-    Reusable,
-    /// Held for one operation only: the counter was below pristine when the
-    /// PIN was entered.
-    OneShot,
-}
-
 /// A previously card-rejected PIN was offered again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreviouslyRejectedPin {
@@ -73,7 +63,6 @@ struct HeldPin1 {
     serial: TokenSerial,
     pin: PinBytes,
     generation: u64,
-    retention: Pin1Retention,
 }
 
 /// Destructively checked-out PIN 1 for one live card serial.
@@ -92,12 +81,9 @@ impl CheckedOutPin1 {
         &self.entry.pin
     }
 
-    /// Hold this PIN again after the card accepted it; a one-operation PIN
-    /// is destroyed instead. Concurrent or intervening invalidation wins.
+    /// Hold this PIN again after the card accepted it. Concurrent or
+    /// intervening invalidation wins.
     pub fn restore_after_success(self, cache: &mut PinSafetyCache) {
-        if self.entry.retention == Pin1Retention::OneShot {
-            return;
-        }
         self.restore(cache);
     }
 
@@ -157,7 +143,12 @@ impl PinSafetyCache {
         })
     }
 
-    /// Hold a just-verified PIN 1 until an invalidation event.
+    /// Hold a card-confirmed PIN 1 until an invalidation event.
+    ///
+    /// Call only after the card has confirmed PIN 1 verification (which
+    /// resets the PIN 1 retry counter to the try limit, FINEID S1 v4.2
+    /// section 3.5); never before success when the counter is below the try
+    /// limit.
     ///
     /// # Errors
     /// Refuses a value that this process has already seen the card reject.
@@ -166,21 +157,18 @@ impl PinSafetyCache {
         serial: TokenSerial,
         pin: PinBytes,
     ) -> Result<(), PreviouslyRejectedPin> {
-        self.hold_pin1(serial, pin, Pin1Retention::Reusable)
-    }
-
-    /// Hold a just-verified PIN 1 for exactly one checkout: the counter was
-    /// below pristine when it was entered. This bridges PKCS #11 `C_Login`
-    /// to the operation that follows without holding the PIN beyond it.
-    ///
-    /// # Errors
-    /// Refuses a value that this process has already seen the card reject.
-    pub fn stage_pin1_once(
-        &mut self,
-        serial: TokenSerial,
-        pin: PinBytes,
-    ) -> Result<(), PreviouslyRejectedPin> {
-        self.hold_pin1(serial, pin, Pin1Retention::OneShot)
+        if self.is_rejected(&serial, PinSlot::Pin1, &pin) {
+            return Err(PreviouslyRejectedPin {
+                slot: PinSlot::Pin1,
+            });
+        }
+        self.clear_positive();
+        self.held_pin1 = Some(HeldPin1 {
+            serial,
+            pin,
+            generation: self.generation,
+        });
+        Ok(())
     }
 
     /// Destructively check out the held PIN 1 for the freshly read live
@@ -258,27 +246,6 @@ impl PinSafetyCache {
         }
     }
 
-    fn hold_pin1(
-        &mut self,
-        serial: TokenSerial,
-        pin: PinBytes,
-        retention: Pin1Retention,
-    ) -> Result<(), PreviouslyRejectedPin> {
-        if self.is_rejected(&serial, PinSlot::Pin1, &pin) {
-            return Err(PreviouslyRejectedPin {
-                slot: PinSlot::Pin1,
-            });
-        }
-        self.clear_positive();
-        self.held_pin1 = Some(HeldPin1 {
-            serial,
-            pin,
-            generation: self.generation,
-            retention,
-        });
-        Ok(())
-    }
-
     fn fingerprint(
         &self,
         serial: &TokenSerial,
@@ -327,7 +294,7 @@ impl PinSafetyCache {
 /// Whether the live PIN 1 state lets a held PIN 1 be presented again: the
 /// card holds PIN 1 verified, or its retry counter is pristine.
 const fn permits_held_pin1(live: PinStatus) -> bool {
-    matches!(live, PinStatus::Verified) || pin1_status_permits_reusable_cache(live)
+    pin1_status_permits_reusable_cache(live)
 }
 
 impl core::fmt::Debug for PinSafetyCache {
@@ -508,17 +475,35 @@ mod tests {
     }
 
     #[test]
-    fn one_shot_pin1_is_destroyed_after_successful_checkout() {
+    fn card_confirmed_pin1_remains_reusable_while_live_status_is_verified_or_pristine() {
         let card = serial("CARD-A-FULL-SERIAL");
         let mut cache = cache();
         cache
-            .stage_pin1_once(card.clone(), pin(b"1357"))
-            .expect("fresh PIN is accepted");
-        let checkout = cache
+            .store_pin1(card.clone(), pin(b"1357"))
+            .expect("card-confirmed PIN is accepted");
+        let first = cache
             .checkout_pin1(&card, PinStatus::Verified)
-            .expect("one-shot entry permits one checkout");
-        checkout.restore_after_success(&mut cache);
-        assert!(cache.checkout_pin1(&card, PinStatus::Verified).is_none());
+            .expect("verified status permits checkout");
+        first.restore_after_success(&mut cache);
+        let second = cache
+            .checkout_pin1(&card, pristine())
+            .expect("pristine status permits subsequent checkout");
+        second.restore_after_success(&mut cache);
+        assert!(cache.has_positive_pin1());
+    }
+
+    #[test]
+    fn unanswered_restore_still_requires_pristine_or_verified_live_status_to_present() {
+        let card = serial("CARD-A-FULL-SERIAL");
+        let mut cache = holding(&card);
+        let checkout = cache
+            .checkout_pin1(&card, pristine())
+            .expect("entry can be checked out");
+        checkout.restore_after_unanswered(&mut cache);
+        assert!(cache.has_positive_pin1());
+        let lowered = PinStatus::Remaining(PinRetries::from_nibble(4).expect("4 fits PinRetries"));
+        assert!(cache.checkout_pin1(&card, lowered).is_none());
+        assert!(!cache.has_positive_pin1());
     }
 
     #[test]

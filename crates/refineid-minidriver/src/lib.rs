@@ -166,8 +166,7 @@ use refineid_lib_core::pin::PinBytes;
 use refineid_lib_core::pin_cache::PinSafetyCache;
 #[cfg(windows)]
 use refineid_lib_core::pin_retry_risk::{
-    RetryFloorRefusal, check_puk_retry_floor, check_retry_floor,
-    pin1_status_permits_reusable_cache, reports_no_tries_left,
+    RetryFloorRefusal, check_puk_retry_floor, check_retry_floor, reports_no_tries_left,
 };
 #[cfg(windows)]
 use refineid_lib_core::pkcs15::{CertSlot, Pkcs15Ops};
@@ -295,17 +294,16 @@ fn manage_error_answer<TE>(error: &AuthError<TE>) -> DWORD {
     }
 }
 
-/// Hold a just-verified PIN 1: reusable when the counter read before the
-/// VERIFY was pristine, for exactly one checkout otherwise.
+/// Hold a card-confirmed PIN 1 after `VERIFY` succeeded.
+///
+/// A successful PIN 1 `VERIFY` restores the card's retry counter to the try
+/// limit (FINEID S1 v4.2 section 3.5), so caching is allowed after that
+/// card-confirmed success even if the operation started at 4/5 or 3/5.
+/// Prior to verification success nothing is cached, and every subsequent
+/// checkout re-verifies the live serial and retry counter.
 #[cfg(windows)]
-fn hold_verified_pin1(serial: TokenSerial, pin: PinBytes, status: PinStatus) {
-    let _ = with_pin_safety(|cache| {
-        if pin1_status_permits_reusable_cache(status) {
-            cache.store_pin1(serial, pin)
-        } else {
-            cache.stage_pin1_once(serial, pin)
-        }
-    });
+fn hold_verified_pin1(serial: TokenSerial, pin: PinBytes) {
+    let _ = with_pin_safety(|cache| cache.store_pin1(serial, pin));
 }
 
 #[cfg(windows)]
@@ -1497,7 +1495,7 @@ fn verify_card_pin(
     }
     let result = map_verify_outcome(ctx, slot, scheme, caller, outcome);
     if is_ok && slot == PinSlot::Pin1 {
-        hold_verified_pin1(serial, pin, status);
+        hold_verified_pin1(serial, pin);
     }
     result
 }

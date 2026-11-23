@@ -301,11 +301,16 @@ Swedish, with English as the fallback; the strings are under
 
 - PIN values and private card material must never be logged.
 - A card in a reader of this computer follows the phone's PIN rule (RAPP
-  v26.11.2 section 11 item 2): PIN 1 is held in process memory only, never
-  in storage and with no time window, until the card is removed or
-  replaced, rejects it or shows a retry counter below pristine, or the user
-  or the process ends it; a transport failure keeps it. PIN 2 is entered
-  for every signature and never held.
+  v26.11.2 section 11 item 2): PIN 1 is held in process memory only after a
+  card-confirmed PIN 1 verification (which resets the card's retry counter to
+  the try limit, FINEID S1 v4.2 section 3.5), never before verification
+  success when the counter is below the try limit (with no one-use bridge),
+  never in storage, and with no time window. It ends when the card is removed
+  or replaced, rejects it, or reports a retry counter below the try limit (or
+  unreadable), or when the user or the process ends it; a transport failure
+  or failed counter read may retain an existing entry, but retaining it never
+  authorizes presenting it without a fresh live counter reading permitting
+  reuse. PIN 2 is entered for every signature and never held.
 - Secret byte containers are zeroized on drop.
 - `unsafe_code` is denied workspace-wide and explicitly expected only in the
   Windows ABI adapter.
