@@ -301,17 +301,23 @@ pub const fn check_puk_retry_floor(status: PukStatus) -> Result<(), RetryFloorRe
     check_retry_floor(FlooredCredential::Puk, status)
 }
 
-/// Whether PIN1 may be retained in a reusable authentication cache.
+/// Whether PIN1 may be retained or checked out from a reusable authentication
+/// cache.
+///
+/// Permits only a pristine try limit (5/5) or `Verified` (FINEID S1 v4.2
+/// sections 3.5 and 3.11: a card-confirmed verification resets the counter to
+/// the try limit). Known 4/5 or 3/5 counters before verification never permit
+/// creating or reusing a cached entry.
 #[must_use]
 pub const fn pin1_status_permits_reusable_cache(pin1: PinStatus) -> bool {
-    matches!(
-        pin1,
-        PinStatus::Remaining(retries)
-            if matches!(
-                PinRetryRisk::from_retries(retries),
-                Some(risk) if risk.permits_reusable_cache()
-            )
-    )
+    match pin1 {
+        PinStatus::Verified => true,
+        PinStatus::Remaining(retries) => matches!(
+            PinRetryRisk::from_retries(retries),
+            Some(risk) if risk.permits_reusable_cache()
+        ),
+        PinStatus::Locked | PinStatus::NoInfo | PinStatus::Other(_) => false,
+    }
 }
 
 #[cfg(test)]
@@ -542,17 +548,17 @@ mod tests {
     }
 
     #[test]
-    fn a_reusable_cache_requires_a_pristine_pin1() {
+    fn a_reusable_cache_requires_a_pristine_or_verified_pin1() {
         assert!(pin1_status_permits_reusable_cache(remaining(
             RETRIES_PRISTINE
         )));
+        assert!(pin1_status_permits_reusable_cache(PinStatus::Verified));
         assert!(!pin1_status_permits_reusable_cache(remaining(
             RETRIES_ONE_SPENT
         )));
         assert!(!pin1_status_permits_reusable_cache(remaining(
             RETRIES_FLOOR
         )));
-        assert!(!pin1_status_permits_reusable_cache(PinStatus::Verified));
     }
 
     #[test]
