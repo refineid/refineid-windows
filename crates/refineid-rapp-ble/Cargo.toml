@@ -8,14 +8,14 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-refineid-dev-errors.workspace = true
 refineid-rapp.workspace = true
-refineid-rapp-core.workspace = true
 
 # WinRT Bluetooth. Each asynchronous operation blocks its thread in `join()`,
 # which the `std` feature provides; the dependency is Windows-only, so the
 # feature never reaches a host that cannot build `windows-future`.
 [target.'cfg(windows)'.dependencies]
+refineid-dev-errors.workspace = true
+refineid-rapp-core.workspace = true
 windows = { workspace = true, features = [
     "std",
     "Devices_Bluetooth",
