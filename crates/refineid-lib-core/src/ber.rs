@@ -231,8 +231,11 @@ pub enum BerError {
     Truncated,
     /// Length-of-length byte demanded more than four follow-on
     /// bytes (the indefinite-length marker `0x80` or any
-    /// `0x85..=0xFE`) -- this codebase rejects those.
+    /// `0x85..=0xFF`) -- this codebase rejects those.
     UnsupportedLengthForm,
+    /// Multi-byte tag ran to three or more octets (`second & 0x80 != 0`) --
+    /// this codebase frames only one- and two-octet tags.
+    UnsupportedTagForm,
     /// Tag mismatch when promoting a [`BerTlvAny`] to a typed
     /// [`BerTlv<T>`]. `expected` is `T::TAG`; `got` is the
     /// actually-parsed tag.
@@ -250,6 +253,7 @@ impl fmt::Display for BerError {
             Self::Empty => write!(f, "BER: empty input"),
             Self::Truncated => write!(f, "BER: truncated input"),
             Self::UnsupportedLengthForm => write!(f, "BER: length form not supported"),
+            Self::UnsupportedTagForm => write!(f, "BER: tag form not supported"),
             Self::UnexpectedTag { expected, got } => {
                 write!(f, "BER: expected tag {expected:#X}, got {got:#X}")
             }
@@ -394,13 +398,18 @@ impl<'a> BerTlvAny<'a> {
     /// - [`BerError::Empty`] if `bytes` is empty.
     /// - [`BerError::Truncated`] if the tag, length, or value
     ///   is shorter than declared.
-    /// - [`BerError::UnsupportedLengthForm`] for length forms
-    ///   above the four-byte long form.
+    /// - [`BerError::UnsupportedLengthForm`] for the indefinite-length
+    ///   marker or length forms above the four-byte long form.
+    /// - [`BerError::UnsupportedTagForm`] for tags running to three or
+    ///   more octets.
     pub(crate) fn parse(bytes: &'a [u8]) -> Result<Self, BerError> {
         // Two-byte tag detection: ISO 7816-4 sec.5.2.2.1 -- bits 5..=1 of
         // the first byte == 0x1F means "tag continues in the next
         // byte". The only such tag this codebase needs is `7F 49`.
         const MULTI_BYTE_TAG_MASK: u8 = 0x1F;
+        // Continuation bit on a multi-byte tag's second octet (X.690
+        // section 8.1.2.4.2): set means a third tag octet follows.
+        const TAG_MORE_OCTETS: u8 = 0x80;
 
         // `next` consumes one byte from `bytes[idx..]` and returns
         // `BerError::Truncated` if out of range -- turns each
@@ -428,13 +437,16 @@ impl<'a> BerTlvAny<'a> {
 
         let tag: u16 = if first & MULTI_BYTE_TAG_MASK == MULTI_BYTE_TAG_MASK {
             let second = next(false)?;
+            if second & TAG_MORE_OCTETS != 0 {
+                return Err(BerError::UnsupportedTagForm);
+            }
             (u16::from(first) << 8_u32) | u16::from(second)
         } else {
             u16::from(first)
         };
 
         let len_first = next(false)?;
-        let length: usize = if len_first < LONG_FORM_1B {
+        let length: usize = if usize::from(len_first) < SHORT_FORM_CEILING {
             usize::from(len_first)
         } else {
             // Long-form: number of length bytes is `len_first &
@@ -695,6 +707,100 @@ mod tests {
         assert!(matches!(
             BerTlvAny::parse(&buf),
             Err(BerError::UnsupportedLengthForm)
+        ));
+    }
+
+    #[test]
+    fn rejects_indefinite_length_marker() {
+        const TAG_CONTEXT_0: u8 = 0x80;
+        const SHORT_FORM_MAX: u8 = 0x7F;
+        const INDEFINITE_LENGTH: u8 = 0x80;
+        const RESERVED_LONG_FORM: u8 = 0xFF;
+        const END_OF_CONTENTS: u8 = 0x00;
+        const FILL_OCTET: u8 = 0x42;
+        const PAYLOAD_PAST_SHORT_CEILING: usize = 128;
+
+        // Accept-side boundary: 127 (0x7F) is the largest short-form length.
+        let mut max_short_buf = Vec::with_capacity(2 + usize::from(SHORT_FORM_MAX));
+        max_short_buf.push(TAG_CONTEXT_0);
+        max_short_buf.push(SHORT_FORM_MAX);
+        max_short_buf.resize(2 + usize::from(SHORT_FORM_MAX), FILL_OCTET);
+        let max_short = BerTlvAny::parse(&max_short_buf).expect("length 127 short-form parses");
+        assert_eq!(max_short.value.len(), usize::from(SHORT_FORM_MAX));
+
+        let short_buf = [
+            TAG_CONTEXT_0,
+            INDEFINITE_LENGTH,
+            END_OF_CONTENTS,
+            END_OF_CONTENTS,
+        ];
+        assert!(matches!(
+            BerTlvAny::parse(&short_buf),
+            Err(BerError::UnsupportedLengthForm)
+        ));
+
+        let mut long_buf = Vec::with_capacity(2 + PAYLOAD_PAST_SHORT_CEILING);
+        long_buf.push(TAG_CONTEXT_0);
+        long_buf.push(INDEFINITE_LENGTH);
+        long_buf.resize(2 + PAYLOAD_PAST_SHORT_CEILING, FILL_OCTET);
+        assert!(matches!(
+            BerTlvAny::parse(&long_buf),
+            Err(BerError::UnsupportedLengthForm)
+        ));
+
+        let reserved_buf = [TAG_CONTEXT_0, RESERVED_LONG_FORM, FILL_OCTET];
+        assert!(matches!(
+            BerTlvAny::parse(&reserved_buf),
+            Err(BerError::UnsupportedLengthForm)
+        ));
+    }
+
+    #[test]
+    fn rejects_three_byte_tag() {
+        const MULTI_BYTE_LEADER: u8 = 0x7F;
+        const TWO_BYTE_MAX_SECOND: u8 = 0x7F;
+        const CONTINUATION_BIT_ONLY: u8 = 0x80;
+        const CONTINUATION_WITH_MORE: u8 = 0x81;
+        const FINAL_TAG_OCTET: u8 = 0x01;
+        const SHORT_LEN_ONE: u8 = 0x01;
+        const VALUE_OCTET: u8 = 0x42;
+
+        // Accept-side boundary: second tag octet 0x7F has continuation bit clear.
+        let valid_two_byte = [
+            MULTI_BYTE_LEADER,
+            TWO_BYTE_MAX_SECOND,
+            SHORT_LEN_ONE,
+            VALUE_OCTET,
+        ];
+        let parsed = BerTlvAny::parse(&valid_two_byte).expect("two-byte tag 7F7F parses");
+        assert_eq!(
+            parsed.tag,
+            u16::from_be_bytes([MULTI_BYTE_LEADER, TWO_BYTE_MAX_SECOND])
+        );
+        assert_eq!(parsed.value, &[VALUE_OCTET]);
+
+        let min_three_byte = [
+            MULTI_BYTE_LEADER,
+            CONTINUATION_BIT_ONLY,
+            FINAL_TAG_OCTET,
+            SHORT_LEN_ONE,
+            VALUE_OCTET,
+        ];
+        assert!(matches!(
+            BerTlvAny::parse(&min_three_byte),
+            Err(BerError::UnsupportedTagForm)
+        ));
+
+        let buf = [
+            MULTI_BYTE_LEADER,
+            CONTINUATION_WITH_MORE,
+            FINAL_TAG_OCTET,
+            SHORT_LEN_ONE,
+            VALUE_OCTET,
+        ];
+        assert!(matches!(
+            BerTlvAny::parse(&buf),
+            Err(BerError::UnsupportedTagForm)
         ));
     }
 
