@@ -15,10 +15,10 @@
 //! UI-toolkit-independent card-management facade.
 
 use refineid_auth::{PinManageOps as _, PinOps as _};
+use refineid_cms::x509::OwnedCert;
 use refineid_lib_core::activation::{ActivationScheme, PinActivation};
 use refineid_lib_core::auth::{CardPinLengths, PinReferenceScheme, PinSlot, PinStatus, PukStatus};
 use refineid_lib_core::fineid_card::FineidCardModel;
-use refineid_lib_core::x509::OwnedCert;
 use refineid_pace::{Can, SmTransport, read_card_access, run_pace};
 use refineid_pcsc::{PcscBackend, PcscError, ReaderAccessCap, ReaderBackend as _, ReaderPickError};
 use refineid_pkcs15::{CertSlot as CoreCertSlot, Pkcs15Ops as _, TokenSerial, render_token_serial};

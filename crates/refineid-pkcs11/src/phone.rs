@@ -34,7 +34,7 @@ use std::time::Instant;
 
 use refineid_agent_pipe::identity::{calling_program, computer_name, interface_language};
 use refineid_agent_pipe::{OPERATION_LIFETIME, RemoteKey, in_process_operation};
-use refineid_lib_core::x509::OwnedCert;
+use refineid_cms::x509::OwnedCert;
 use refineid_pkcs11::remote::{
     RemoteOffer, RemoteSignError, RemoteTokenSource, SessionCertificate,
 };

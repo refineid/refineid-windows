@@ -42,7 +42,7 @@ use refineid_rapp_core::store::PairingRecord;
 #[cfg(windows)]
 use crate::CredentialStoreError;
 #[cfg(windows)]
-use refineid_lib_core::x509::OwnedCert;
+use refineid_cms::x509::OwnedCert;
 #[cfg(windows)]
 use refineid_rapp_core::store::{PairingStore, offer_stands};
 

@@ -48,7 +48,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use refineid_agent_pipe::client::request_signature;
 use refineid_agent_pipe::wire::{SignAnswer, SignRequest};
 use refineid_agent_pipe::{PipeError, SIGNATURE_DEADLINE};
-use refineid_lib_core::x509::{EcCurve, OwnedCert, PublicKeyAlgorithm, extract_rsa_public_key};
+use refineid_cms::x509::{EcCurve, OwnedCert, PublicKeyAlgorithm, extract_rsa_public_key};
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::operations::{KeyProfile, SignatureAlgorithm};
 use refineid_windows_credential_store::{

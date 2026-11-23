@@ -12,10 +12,9 @@
 // implied. See the License for the specific language governing
 // permissions and limitations under the License.
 
-//! X.509 certificate parsing and verification re-exported from
-//! [`refineid_cms::x509`], plus FINEID-typed distinguished-name accessors.
+//! FINEID-typed distinguished-name accessors over [`refineid_cms::x509::Name`].
 
-pub use refineid_cms::x509::*;
+use refineid_cms::x509::Name;
 
 use crate::oid::{Oid, known};
 use spki::der::asn1::AnyRef;

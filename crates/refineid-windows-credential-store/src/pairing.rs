@@ -1168,7 +1168,7 @@ const fn delete_pairing_set_in(_directory: &Path) -> Result<(), CredentialStoreE
 /// Synthetic records for this crate's tests, on every platform.
 #[cfg(test)]
 pub mod test_records {
-    use refineid_lib_core::x509::OwnedCert;
+    use refineid_cms::x509::OwnedCert;
     use refineid_rapp::noise::x25519_public_key;
     use refineid_rapp::{
         DisplayName, EndpointRole, PairRecord, ProfileName, X25519_KEY_SIZE, compute_grants_hash,

@@ -927,8 +927,8 @@ version = "26.11.23"
 dependencies = [
  "pcsc",
  "refineid-agent-pipe",
+ "refineid-cms",
  "refineid-dev-errors",
- "refineid-lib-core",
  "refineid-pcsc",
  "refineid-pkcs15",
  "refineid-rapp",
@@ -996,6 +996,7 @@ dependencies = [
  "refineid-atr",
  "refineid-auth",
  "refineid-ber",
+ "refineid-cms",
  "refineid-dev-errors",
  "refineid-lib-core",
  "refineid-pace",
@@ -1125,6 +1126,7 @@ dependencies = [
  "refineid-agent-pipe",
  "refineid-apdu",
  "refineid-atr",
+ "refineid-cms",
  "refineid-dev-errors",
  "refineid-digest",
  "refineid-lib-core",
@@ -1183,8 +1185,8 @@ name = "refineid-pkcs11"
 version = "26.11.23"
 dependencies = [
  "refineid-agent-pipe",
+ "refineid-cms",
  "refineid-dev-errors",
- "refineid-lib-core",
  "refineid-pkcs11 26.11.23 (git+https://github.com/refineid/refineid-core.git?branch=main)",
  "refineid-rapp-core",
  "refineid-remote",
@@ -1254,7 +1256,9 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "p384",
- "refineid-lib-core",
+ "refineid-apdu",
+ "refineid-auth",
+ "refineid-cms",
  "refineid-rapp",
  "refineid-rapp-ble",
  "refineid-rapp-core",
@@ -1270,8 +1274,8 @@ version = "26.11.23"
 dependencies = [
  "getrandom 0.4.3",
  "if-addrs",
+ "refineid-cms",
  "refineid-dev-errors",
- "refineid-lib-core",
  "refineid-rapp",
  "serde",
  "serde_json",
@@ -1287,6 +1291,7 @@ version = "26.11.23"
 dependencies = [
  "getrandom 0.4.3",
  "hex",
+ "refineid-cms",
  "refineid-dev-errors",
  "refineid-lib-core",
  "refineid-rapp",
@@ -1342,6 +1347,7 @@ version = "26.11.23"
 name = "refineid-windows-credential-store"
 version = "26.11.23"
 dependencies = [
+ "refineid-cms",
  "refineid-dev-errors",
  "refineid-digest",
  "refineid-doc-sign",

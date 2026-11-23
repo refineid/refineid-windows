@@ -29,7 +29,7 @@
 
 use crate::auth::{PinReferenceScheme, PinStatus};
 use crate::pin::{ActivationPinEight, ActivationPinSeven};
-use crate::x509::DateTime;
+use refineid_cms::x509::DateTime;
 
 /// Year of the DVV cutover to the preset activation PIN.
 const PRESET_PIN_CUTOVER_YEAR: u16 = 2026;
@@ -145,7 +145,7 @@ mod tests {
     use super::{ActivationScheme, PinActivation};
     use crate::apdu::status_word::{PinRetries, StatusWord};
     use crate::auth::{PinReferenceScheme, PinStatus, classify_pin_status_sw};
-    use crate::x509::DateTime;
+    use refineid_cms::x509::DateTime;
 
     /// Midnight, for the cutover dates.
     const MIDNIGHT: u8 = 0;

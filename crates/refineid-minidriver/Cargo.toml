@@ -30,6 +30,7 @@ refineid-pkcs15.workspace = true
 refineid-apdu.workspace = true
 refineid-atr.workspace = true
 refineid-agent-pipe.workspace = true
+refineid-cms.workspace = true
 refineid-dev-errors.workspace = true
 refineid-digest.workspace = true
 refineid-lib-core.workspace = true

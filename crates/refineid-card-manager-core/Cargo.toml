@@ -15,6 +15,7 @@ workspace = true
 refineid-apdu.workspace = true
 refineid-atr.workspace = true
 refineid-auth.workspace = true
+refineid-cms.workspace = true
 refineid-dev-errors.workspace = true
 refineid-lib-core.workspace = true
 refineid-pace.workspace = true
