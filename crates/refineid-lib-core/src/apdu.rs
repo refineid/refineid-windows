@@ -34,5 +34,11 @@
 //!
 //! [refinement types]: https://github.com/refineid/refineid-core/blob/main/doc/architecture/refinement-types.md
 
-pub mod iso7816;
-pub mod status_word;
+pub use refineid_apdu::status_word;
+
+/// Typed ISO 7816-4 command builders and primitives from `refineid-apdu`.
+pub mod iso7816 {
+    pub use refineid_apdu::command::ApduClass;
+    pub use refineid_apdu::iso7816::*;
+    pub use refineid_apdu::primitives::FileId;
+}

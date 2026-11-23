@@ -92,6 +92,18 @@ impl CommandApdu {
     }
 }
 
+impl From<refineid_apdu::CommandApdu> for CommandApdu {
+    fn from(command: refineid_apdu::CommandApdu) -> Self {
+        let allows_wrong_le = command.corrected_wrong_le(0).is_some();
+        let converted = Self::new(command.as_bytes().to_vec());
+        if allows_wrong_le {
+            converted.allow_wrong_le_retry()
+        } else {
+            converted
+        }
+    }
+}
+
 impl From<Vec<u8>> for CommandApdu {
     fn from(bytes: Vec<u8>) -> Self {
         Self::new(bytes)
@@ -507,6 +519,53 @@ mod tests {
         assert_eq!(
             tx.atr().expect("mock exposes its ATR").to_wire_bytes(),
             MINIMAL_DIRECT_ATR
+        );
+    }
+
+    #[test]
+    fn from_core_command_apdu_preserves_wrong_le_retry_policy() {
+        use crate::apdu::iso7816::{
+            ApduClass, DirectOffset15, FileId, GetResponse, ReadBinary, ReadBinaryOffset,
+            SelectEfNoFci,
+        };
+
+        let get_response: CommandApdu = GetResponse {
+            class: ApduClass::Plain,
+            le: 0x00,
+        }
+        .into_apdu()
+        .into();
+        let retried = get_response
+            .corrected_wrong_le(0x20)
+            .expect("GetResponse keeps one wrong-Le retry across From conversion");
+        assert_eq!(retried.as_bytes(), &[0x00, 0xC0, 0x00, 0x00, 0x20]);
+        assert!(
+            retried.corrected_wrong_le(0x10).is_none(),
+            "corrected command cannot be retried a second time"
+        );
+
+        let read_binary: CommandApdu = ReadBinary {
+            class: ApduClass::Plain,
+            offset: ReadBinaryOffset::Direct(
+                DirectOffset15::try_new(0).expect("offset zero fits in DirectOffset15"),
+            ),
+            le: 0x80,
+        }
+        .into_apdu()
+        .into();
+        let retried_read = read_binary
+            .corrected_wrong_le(0x40)
+            .expect("ReadBinary keeps one wrong-Le retry across From conversion");
+        assert_eq!(retried_read.as_bytes(), &[0x00, 0xB0, 0x00, 0x00, 0x40]);
+
+        let select_ef: CommandApdu = SelectEfNoFci {
+            fid: FileId::new([0x43, 0x31]),
+        }
+        .into_apdu()
+        .into();
+        assert!(
+            select_ef.corrected_wrong_le(0x10).is_none(),
+            "non-case-2 SelectEfNoFci must not gain wrong-Le retry across From conversion"
         );
     }
 }

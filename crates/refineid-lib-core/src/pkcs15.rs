@@ -35,8 +35,8 @@
 //!   above: SELECT PKCS#15, SELECT EF.4331, read the X.509 DER blob.
 //!
 use crate::apdu::iso7816::{
-    ApduClass, FileId, ReadBinaryByOffset, SelectByAidNoFci, SelectEfNoFci, SelectFile,
-    SelectFileResponseMode, SelectFileTarget,
+    ApduClass, DirectOffset15, FileId, ReadBinary, ReadBinaryOffset, SelectByAidNoFci,
+    SelectEfNoFci, SelectFile, SelectFileResponseMode, SelectFileTarget,
 };
 use crate::apdu::status_word::StatusWord;
 use crate::transport::{CardTransport, CommandApdu, TransportDispatchError};
@@ -402,7 +402,7 @@ pub trait Pkcs15Ops: CardTransport {
     {
         let file_id = FileId::new(fid);
         let attempts = [
-            SelectEfNoFci { fid }.into_apdu(),
+            SelectEfNoFci { fid: file_id }.into_apdu(),
             SelectFile {
                 class: ApduClass::Plain,
                 target: SelectFileTarget::AnyByFileId(Some(file_id)),
@@ -539,8 +539,10 @@ pub trait Pkcs15Ops: CardTransport {
             let want_usize = remaining.min(usize::from(READ_CHUNK));
             let want = u8::try_from(want_usize).or(Err(Pkcs15Error::TooLarge))?;
             let offset_u16 = u16::try_from(offset).or(Err(Pkcs15Error::TooLarge))?;
-            let apdu = ReadBinaryByOffset {
-                offset: offset_u16,
+            let direct = DirectOffset15::try_new(offset_u16).or(Err(Pkcs15Error::TooLarge))?;
+            let apdu = ReadBinary {
+                class: ApduClass::Plain,
+                offset: ReadBinaryOffset::Direct(direct),
                 le: want,
             }
             .into_apdu();
@@ -602,7 +604,13 @@ pub trait Pkcs15Ops: CardTransport {
             let want_usize = remaining.min(usize::from(READ_CHUNK));
             let want = u8::try_from(want_usize).or(Err(Pkcs15Error::TooLarge))?;
             let offset = u16::try_from(collected.len()).or(Err(Pkcs15Error::TooLarge))?;
-            let apdu = ReadBinaryByOffset { offset, le: want }.into_apdu();
+            let direct = DirectOffset15::try_new(offset).or(Err(Pkcs15Error::TooLarge))?;
+            let apdu = ReadBinary {
+                class: ApduClass::Plain,
+                offset: ReadBinaryOffset::Direct(direct),
+                le: want,
+            }
+            .into_apdu();
             let response = self
                 .transmit(apdu.as_bytes())
                 .map_err(Pkcs15Error::Transport)?;
@@ -1481,6 +1489,7 @@ pub(crate) mod esign_wire {
             response_mode: SelectFileResponseMode::None,
         }
         .into_apdu()
+        .into()
     }
 
     /// SELECT MF, the walk's first command.
@@ -1491,7 +1500,7 @@ pub(crate) mod esign_wire {
     /// SELECT DF.ESIGN by its published name.
     pub fn select_esign_by_name() -> CommandApdu {
         let aid = Aid::from_slice(ESIGN_AID).expect("published E.SIGN AID length is valid");
-        SelectByAidNoFci { aid }.into_apdu()
+        SelectByAidNoFci { aid }.into_apdu().into()
     }
 
     /// SELECT DF.ESIGN as any file by its identifier, the walk's last
