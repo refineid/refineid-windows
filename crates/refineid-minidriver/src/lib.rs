@@ -96,6 +96,8 @@ mod ksp_register;
 mod ksp_verify;
 // Pure byte codecs: compiled on the host too so `cargo test` covers them.
 #[cfg(any(windows, test))]
+mod apdu_bridge;
+#[cfg(any(windows, test))]
 mod ksp_codec;
 #[cfg(any(windows, test))]
 mod pin_scheme;
@@ -153,11 +155,11 @@ use refineid_lib_core::auth::{
     PinOps, PinReferenceScheme, PinSlot, PinStatus, PukStatus, UnblockOutcome, VerifyOutcome,
 };
 #[cfg(windows)]
+use refineid_lib_core::can::Can as LegacyCan;
+#[cfg(windows)]
 use refineid_lib_core::crypto::container::{Ciphertext, RsaPkcs1};
 #[cfg(windows)]
 use refineid_lib_core::identity::{TokenSerial, render_token_serial};
-#[cfg(windows)]
-use refineid_lib_core::pace::run_pace_with_can;
 #[cfg(windows)]
 use refineid_lib_core::pin::PinBytes;
 #[cfg(windows)]
@@ -173,6 +175,11 @@ use refineid_lib_core::pkcs15::{CertSlot, Pkcs15Ops};
 use refineid_lib_core::sign::{KeyRef, SignOps, commands::ExternalHashValue};
 #[cfg(windows)]
 use refineid_lib_core::x509::{EcCurve, OwnedCert, PublicKeyAlgorithm, extract_rsa_public_key};
+#[cfg(windows)]
+use refineid_pace::{
+    Can as CoreCan, CanError as CoreCanError, OpenedByCan, PaceError, PaceSession, UnvalidatedCan,
+    read_card_access, run_pace,
+};
 #[cfg(windows)]
 use refineid_rapp_core::operations::{CardOperationResult, KeyProfile, SignatureAlgorithm};
 #[cfg(windows)]
@@ -437,8 +444,7 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
                         return SCARD_F_INTERNAL_ERROR;
                     }
                 };
-                let _master_file_selection = raw_transport.select_mf();
-                let pace_session = match run_pace_with_can(&mut raw_transport, can) {
+                let pace_session = match open_minidriver_pace(&mut raw_transport, can) {
                     Ok(session) => session,
                     Err(error) => {
                         refineid_dev_errors::report!(CardModule, "contactless PACE failed", error);
@@ -787,6 +793,44 @@ fn lock_transport(
 #[cfg(windows)]
 const INVALID_SCARD_HANDLE: SCARDHANDLE = 0;
 
+/// Failure establishing a PACE secure-messaging channel in the minidriver.
+#[cfg(windows)]
+#[derive(Debug)]
+enum MinidriverPaceError {
+    /// Stored CAN bytes failed `refineid-pace` reconstruction.
+    Can(CoreCanError),
+    /// Reading `EF.CardAccess` or running the PACE handshake failed.
+    Pace(PaceError<transport::TransportError>),
+}
+
+#[cfg(windows)]
+impl core::fmt::Display for MinidriverPaceError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Can(error) => write!(f, "invalid stored card access number: {error}"),
+            Self::Pace(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+/// Select the Master File, read `EF.CardAccess`, and establish a PACE session
+/// using the stored Card Access Number.
+#[cfg(windows)]
+fn open_minidriver_pace(
+    raw: &mut WinScardTransport,
+    can: LegacyCan,
+) -> Result<PaceSession<OpenedByCan>, MinidriverPaceError> {
+    let can_text = core::str::from_utf8(can.as_bytes())
+        .map(str::to_owned)
+        .map_err(|_utf8| MinidriverPaceError::Can(CoreCanError::NonDigit))?;
+    let core_can = CoreCan::reconstruct(UnvalidatedCan::from_owned_text(can_text))
+        .map_err(MinidriverPaceError::Can)?;
+
+    let _master_file_selection = raw.select_mf();
+    let card_access = read_card_access(raw).map_err(MinidriverPaceError::Pace)?;
+    run_pace(raw, &card_access, &core_can).map_err(MinidriverPaceError::Pace)
+}
+
 /// The Base CSP may reconnect and hand a different `SCARDHANDLE`
 /// between entry points. Refresh the transport handle from the live
 /// `CARD_DATA` and drop in-process PIN state on change -- a new
@@ -809,7 +853,6 @@ fn sync_transport_handle(
         return Ok(false);
     }
 
-    tx.raw_mut().h_card = live_h_card;
     *pin1_authenticated = false;
     *pin2_authenticated = false;
 
@@ -829,13 +872,13 @@ fn sync_transport_handle(
                 return Err(SCARD_F_INTERNAL_ERROR);
             }
         };
-        let raw = tx.raw_mut();
-        let _master_file_selection = raw.select_mf();
-        let session = run_pace_with_can(raw, can).map_err(|error| {
-            refineid_dev_errors::report!(CardModule, "contactless PACE failed", error);
-            SCARD_F_INTERNAL_ERROR
-        })?;
-        tx.replace_pace_session(session);
+        tx.refresh_protected(live_h_card, |raw| open_minidriver_pace(raw, can))
+            .map_err(|error| {
+                refineid_dev_errors::report!(CardModule, "contactless PACE failed", error);
+                SCARD_F_INTERNAL_ERROR
+            })?;
+    } else {
+        tx.set_plain_h_card(live_h_card);
     }
     Ok(true)
 }
@@ -3975,7 +4018,7 @@ mod tests {
         fn sync_transport_handle_refreshes_handle_and_clears_pin_state() {
             let mut ctx = test_ctx(true, true);
             let tx = ctx.transport.get_mut().expect("unpoisoned");
-            tx.raw_mut().h_card = INITIAL_H_CARD;
+            tx.set_plain_h_card(INITIAL_H_CARD);
             assert_eq!(
                 sync_transport_handle(
                     tx,

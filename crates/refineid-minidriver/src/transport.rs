@@ -26,13 +26,13 @@
 
 use core::time::Duration;
 
+use refineid_apdu::CredentialCommand;
 use refineid_atr::{Atr, AtrError};
-use refineid_lib_core::pace::PaceSession;
-use refineid_lib_core::secure_messaging::{SmError, SmTransport};
 use refineid_lib_core::transport::{
     CardTransport, CommandApdu, ResponseApdu, TransportErrorExt, TransportErrorKind,
     TransportOutcome,
 };
+use refineid_pace::{OpenedByCan, PaceSession, SmError, SmTransport};
 use refineid_rapp_core::engine::{
     OperationOutcome, Requester, RequesterConfig, Session, SessionEnd, SessionError,
 };
@@ -43,6 +43,8 @@ use refineid_rapp_core::store::{PairingRecord, PairingStore};
 use refineid_rapp_core::stream::{DialCause, StreamError};
 use refineid_rapp_core::transport::TcpFrameTransport;
 use refineid_windows_credential_store::ProtectedPairingStore;
+
+use crate::apdu_bridge::{BridgedCoreCommand, decode_legacy_apdu, t0_case3_from_short_case4};
 
 use crate::ffi::{
     DWORD, SCARD_E_COMM_DATA_LOST, SCARD_E_NO_KEY_CONTAINER, SCARD_F_INTERNAL_ERROR,
@@ -536,7 +538,16 @@ pub(crate) enum CardSessionTransport {
     /// Direct ISO 7816 transmission for a contact card.
     Plain(WinScardTransport),
     /// PACE secure messaging over a contactless PC/SC handle.
-    Protected(SmTransport<WinScardTransport>),
+    Protected {
+        /// Active `refineid-pace` secure-messaging channel.
+        transport: SmTransport<WinScardTransport, OpenedByCan>,
+        /// Active PC/SC handle associated with `transport`.
+        h_card: SCARDHANDLE,
+        /// Raw ATR bytes captured from `CARD_DATA`.
+        atr: Vec<u8>,
+        /// Active PC/SC transmission protocol.
+        protocol: ScardProtocol,
+    },
     /// RAPP remote card bridge over typed operations.
     Remote(Box<RemoteCardTransport>),
 }
@@ -548,8 +559,19 @@ impl CardSessionTransport {
     }
 
     /// Adopt a transport and its freshly established PACE session.
-    pub(crate) fn protected(transport: WinScardTransport, session: PaceSession) -> Self {
-        Self::Protected(SmTransport::new(transport, session))
+    pub(crate) fn protected(
+        transport: WinScardTransport,
+        session: PaceSession<OpenedByCan>,
+    ) -> Self {
+        let h_card = transport.h_card;
+        let atr = transport.atr.clone();
+        let protocol = transport.protocol;
+        Self::Protected {
+            transport: SmTransport::new(transport, session),
+            h_card,
+            atr,
+            protocol,
+        }
     }
 
     /// Adopt a remote RAPP transport.
@@ -559,7 +581,7 @@ impl CardSessionTransport {
 
     /// Whether every application command is currently PACE-protected.
     pub(crate) const fn is_protected(&self) -> bool {
-        matches!(self, Self::Protected(_))
+        matches!(self, Self::Protected { .. })
     }
 
     /// Whether this context represents a RAPP remote card.
@@ -575,30 +597,40 @@ impl CardSessionTransport {
         }
     }
 
-    /// The raw Windows transport beneath the optional SM channel.
-    ///
-    /// A protected caller may use this only to establish the replacement PACE
-    /// session immediately after Windows changed the card handle.
-    pub(crate) const fn raw_mut(&mut self) -> &mut WinScardTransport {
-        match self {
-            Self::Plain(transport) => transport,
-            Self::Protected(transport) => transport.inner_mut(),
-            Self::Remote(_) => panic!("raw_mut transport requested for remote card"),
+    /// Update the active handle of a plain contact transport after Windows
+    /// reconnected the card.
+    pub(crate) const fn set_plain_h_card(&mut self, live_h_card: SCARDHANDLE) {
+        if let Self::Plain(transport) = self {
+            transport.h_card = live_h_card;
         }
     }
 
-    /// Replace the PACE session after Windows reset a protected card.
-    pub(crate) fn replace_pace_session(&mut self, session: PaceSession) {
-        if let Self::Protected(transport) = self {
-            transport.replace_session(session);
-        }
+    /// Refresh a protected contactless session after Windows changed the card
+    /// handle: runs `open_pace` on a fresh raw transport for `live_h_card` and
+    /// installs the replacement `SmTransport` only if PACE succeeds.
+    pub(crate) fn refresh_protected<E>(
+        &mut self,
+        live_h_card: SCARDHANDLE,
+        open_pace: impl FnOnce(&mut WinScardTransport) -> Result<PaceSession<OpenedByCan>, E>,
+    ) -> Result<(), E> {
+        let Self::Protected { atr, protocol, .. } = self else {
+            return Ok(());
+        };
+        let mut raw = WinScardTransport {
+            h_card: live_h_card,
+            atr: atr.clone(),
+            protocol: *protocol,
+        };
+        let session = open_pace(&mut raw)?;
+        *self = Self::protected(raw, session);
+        Ok(())
     }
 
     /// Active PC/SC handle.
     pub(crate) const fn h_card(&self) -> SCARDHANDLE {
         match self {
             Self::Plain(transport) => transport.h_card,
-            Self::Protected(transport) => transport.inner().h_card,
+            Self::Protected { h_card, .. } => *h_card,
             Self::Remote(_) => 0,
         }
     }
@@ -607,7 +639,7 @@ impl CardSessionTransport {
     pub(crate) fn atr_bytes(&self) -> &[u8] {
         match self {
             Self::Plain(transport) => &transport.atr,
-            Self::Protected(transport) => &transport.inner().atr,
+            Self::Protected { atr, .. } => atr,
             Self::Remote(transport) => &transport.atr,
         }
     }
@@ -697,28 +729,6 @@ impl TransportErrorExt for TransportError {
         // return code in `Display` carries the detail.
         TransportErrorKind::Backend
     }
-}
-
-/// Convert one short ISO 7816 case-4 command into the case-3 command
-/// Windows PC/SC accepts for T=0. The card then announces the response
-/// with `61xx`, which the transport continues with `GET RESPONSE`.
-///
-/// Returns `None` for case-1/2/3 commands and extended-length shapes.
-fn t0_case3_from_short_case4(apdu: &[u8]) -> Option<Vec<u8>> {
-    const HEADER_AND_LC_BYTES: usize = 5;
-    const TRAILING_LE_BYTES: usize = 1;
-
-    let lc = usize::from(*apdu.get(4)?);
-    if lc == 0 {
-        return None;
-    }
-    let case4_len = HEADER_AND_LC_BYTES
-        .checked_add(lc)?
-        .checked_add(TRAILING_LE_BYTES)?;
-    if apdu.len() != case4_len {
-        return None;
-    }
-    Some(apdu[..apdu.len() - 1].to_vec())
 }
 
 impl WinScardTransport {
@@ -856,7 +866,7 @@ impl refineid_apdu::CardTransport for WinScardTransport {
 
     fn transmit_credential(
         &mut self,
-        command: refineid_apdu::CredentialCommand,
+        command: CredentialCommand,
     ) -> Result<TransportOutcome, Self::Error> {
         let _transaction = ScardTransaction::begin(self.h_card)?;
 
@@ -929,6 +939,40 @@ impl CardTransport for WinScardTransport {
     }
 }
 
+impl refineid_apdu::CardTransport for CardSessionTransport {
+    type Error = CardSessionTransportError;
+
+    fn transmit(
+        &mut self,
+        command: &refineid_apdu::CommandApdu,
+    ) -> Result<TransportOutcome, Self::Error> {
+        match self {
+            Self::Plain(transport) => refineid_apdu::CardTransport::transmit(transport, command)
+                .map_err(CardSessionTransportError::Plain),
+            Self::Protected { transport, .. } => {
+                refineid_apdu::CardTransport::transmit(transport, command)
+                    .map_err(CardSessionTransportError::Protected)
+            }
+            Self::Remote(_) => Err(CardSessionTransportError::RemoteNotApdu),
+        }
+    }
+
+    fn transmit_credential(
+        &mut self,
+        command: CredentialCommand,
+    ) -> Result<TransportOutcome, Self::Error> {
+        match self {
+            Self::Plain(transport) => transport
+                .transmit_credential(command)
+                .map_err(CardSessionTransportError::Plain),
+            Self::Protected { transport, .. } => transport
+                .transmit_credential(command)
+                .map_err(CardSessionTransportError::Protected),
+            Self::Remote(_) => Err(CardSessionTransportError::RemoteNotApdu),
+        }
+    }
+}
+
 impl CardTransport for CardSessionTransport {
     type Error = CardSessionTransportError;
 
@@ -937,9 +981,20 @@ impl CardTransport for CardSessionTransport {
             Self::Plain(transport) => transport
                 .transmit_outcome(apdu)
                 .map_err(CardSessionTransportError::Plain),
-            Self::Protected(transport) => transport
-                .transmit_outcome(apdu)
-                .map_err(CardSessionTransportError::Protected),
+            Self::Protected { transport, .. } => {
+                match decode_legacy_apdu(apdu.as_bytes())
+                    .map_err(CardSessionTransportError::Protected)?
+                {
+                    BridgedCoreCommand::Plain(command) => {
+                        refineid_apdu::CardTransport::transmit(transport, &command)
+                            .map_err(CardSessionTransportError::Protected)
+                    }
+                    BridgedCoreCommand::Credential(command) => {
+                        refineid_apdu::CardTransport::transmit_credential(transport, command)
+                            .map_err(CardSessionTransportError::Protected)
+                    }
+                }
+            }
             Self::Remote(_) => Err(CardSessionTransportError::RemoteNotApdu),
         }
     }
@@ -990,34 +1045,6 @@ mod tests {
         assert_eq!(
             RemoteFailure::Unpaired.to_string(),
             "the pairing serves nothing; pair again"
-        );
-    }
-
-    #[test]
-    fn t0_short_case4_strips_trailing_le_and_leaves_other_cases_unchanged() {
-        use super::t0_case3_from_short_case4;
-
-        // Short case 4 (Lc = 2, 2 data bytes, trailing Le = 0x00) -> strip Le.
-        assert_eq!(
-            t0_case3_from_short_case4(&[0x00, 0xA4, 0x04, 0x00, 0x02, 0x3F, 0x00, 0x00]),
-            Some(vec![0x00, 0xA4, 0x04, 0x00, 0x02, 0x3F, 0x00])
-        );
-        // Short case 3 (no trailing Le) -> unchanged.
-        assert_eq!(
-            t0_case3_from_short_case4(&[0x00, 0x20, 0x00, 0x11, 0x04, 0x31, 0x32, 0x33, 0x34]),
-            None
-        );
-        // Case 2 (5 bytes) -> unchanged.
-        assert_eq!(
-            t0_case3_from_short_case4(&[0x00, 0xB0, 0x00, 0x00, 0x80]),
-            None
-        );
-        // Case 1 (4 bytes) -> unchanged.
-        assert_eq!(t0_case3_from_short_case4(&[0x00, 0x20, 0x00, 0x11]), None);
-        // Extended-length shape (Lc byte = 0x00) -> unchanged.
-        assert_eq!(
-            t0_case3_from_short_case4(&[0x00, 0x2A, 0x9E, 0x9A, 0x00, 0x00, 0x02, 0xAA, 0xBB]),
-            None
         );
     }
 }

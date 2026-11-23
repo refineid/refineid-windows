@@ -59,11 +59,7 @@ refineid-rapp = { git = "https://github.com/refineid/refineid-core.git", branch 
 refineid-remote = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
 refineid-x509 = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
 
-aes = "0.9"
-cbc = "0.2"
-cmac = "0.8"
 const-oid = { version = "0.10", default-features = false }
-crypto-bigint = { version = "0.7", features = ["alloc", "zeroize"] }
 getrandom = "0.4"
 hex = "0.4"
 # Terminal QR rendering for the RAPP pairing offer in the requester CLI.
