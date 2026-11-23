@@ -21,7 +21,7 @@ mod ble;
 use std::io::Write as _;
 use std::time::{Duration, Instant};
 
-use refineid_lib_core::x509::OwnedCert;
+use refineid_cms::x509::OwnedCert;
 use refineid_rapp::ProfileName;
 use refineid_rapp_cli::mock_proxy::{
     DEFAULT_LISTEN, MockProxyOptions, SERVE_FOREVER, run_mock_proxy,

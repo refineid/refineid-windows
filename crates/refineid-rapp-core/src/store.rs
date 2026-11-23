@@ -48,7 +48,7 @@
 //! here. A record is neither `Clone` nor printable with its keys: the keys
 //! live in the engine's record, which is neither.
 
-use refineid_lib_core::x509::OwnedCert;
+use refineid_cms::x509::OwnedCert;
 use refineid_rapp::{
     ActivePairing, DisplayName, PAIRING_IDLE_EXPIRY_DAYS, PAIRING_IDLE_EXPIRY_MS, PairRecord,
     PairRecordCodecError, PairingError, ProfileName, decode_pair_record,
@@ -740,7 +740,7 @@ impl PairingStore for MemoryPairingStore {
     reason = "test fixtures are constructed to be infallible"
 )]
 pub(crate) mod fixtures {
-    use refineid_lib_core::x509::OwnedCert;
+    use refineid_cms::x509::OwnedCert;
     use refineid_rapp::noise::x25519_public_key;
     use refineid_rapp::{
         DisplayName, EncodedPairRecord, EndpointRole, PairRecord, ProfileName, WireValue,

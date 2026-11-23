@@ -14,8 +14,9 @@
 
 //! FINEID and contactless (PACE-first) reader selection over [`refineid_pcsc`].
 
+use refineid_cms::x509::Certificate;
 use refineid_lib_core::identity::CredentialIdentity;
-use refineid_lib_core::x509::{Certificate, FineidNameExt as _};
+use refineid_lib_core::x509::FineidNameExt as _;
 use refineid_pace::read_card_access;
 use refineid_pcsc::{
     ReaderAccessCap, ReaderBackend, ReaderFilter, ReaderId, ReaderInfo, ReaderPickError,

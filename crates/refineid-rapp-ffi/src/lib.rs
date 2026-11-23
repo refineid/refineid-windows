@@ -52,8 +52,9 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
+use refineid_cms::x509::{OwnedCert, extract_key_usage};
 use refineid_lib_core::identity::holder_line;
-use refineid_lib_core::x509::{FineidNameExt as _, OwnedCert, extract_key_usage};
+use refineid_lib_core::x509::FineidNameExt as _;
 use refineid_rapp::ProfileName;
 use refineid_rapp_core::clock::unix_time_ms;
 use refineid_rapp_core::engine::{
@@ -1595,7 +1596,7 @@ mod tests {
         authentication_certificate, card_request_status, granted_profiles, is_watch_status,
         no_remote_card, search_failure_phase, state_dto,
     };
-    use refineid_lib_core::x509::OwnedCert;
+    use refineid_cms::x509::OwnedCert;
     use refineid_rapp::ProfileName;
     use refineid_rapp_core::engine::{PairingError, PairingSearchError, PeerIntroduction};
     use refineid_rapp_core::ids::PairId;

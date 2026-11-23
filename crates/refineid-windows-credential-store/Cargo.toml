@@ -12,6 +12,7 @@ publish = false
 workspace = true
 
 [dependencies]
+refineid-cms.workspace = true
 refineid-digest.workspace = true
 refineid-dev-errors.workspace = true
 refineid-lib-core.workspace = true

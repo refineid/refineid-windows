@@ -31,10 +31,8 @@ use crate::ffi::{
     ROLE_USER, SCARD_E_UNSUPPORTED_FEATURE, SCARD_S_SUCCESS,
 };
 use crate::transport::CardSessionTransport;
+use refineid_cms::x509::{EcCurve, OwnedCert, PublicKeyAlgorithm, parse_subject_public_key_info};
 use refineid_lib_core::auth::PinReferenceScheme;
-use refineid_lib_core::x509::{
-    EcCurve, OwnedCert, PublicKeyAlgorithm, parse_subject_public_key_info,
-};
 
 /// Per-`CardAcquireContext` state, stored behind `CARD_DATA`'s
 /// `pvVendorSpecific` for the life of the Card Module context.
@@ -746,7 +744,7 @@ mod tests {
         let cert = vec![1, 2, 3];
         let container = qualified_signature_container(
             cert,
-            KeyAlgorithm::Ec(refineid_lib_core::x509::EcCurve::Secp384r1),
+            KeyAlgorithm::Ec(refineid_cms::x509::EcCurve::Secp384r1),
         )
         .expect("valid descriptor");
 

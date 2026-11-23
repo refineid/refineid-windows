@@ -37,6 +37,7 @@ use refineid_auth::{
     PinSlot as CorePinSlot, PinStatus as CorePinStatus, Puk as CorePuk,
     RetryFloorRefusal as CoreRetryFloorRefusal, UnvalidatedSecret, read_pin_change_record,
 };
+use refineid_cms::x509::OwnedCert;
 use refineid_lib_core::activation::{ActivationScheme, PinActivation};
 use refineid_lib_core::auth::{
     CardPinLengths, ChangePinOutcome, PinPolicyReason, PinReferenceScheme, PinSlot, PinStatus,
@@ -46,7 +47,6 @@ use refineid_lib_core::fineid_card::{CardClassificationError, FineidCardModel};
 use refineid_lib_core::identity::CredentialIdentity;
 use refineid_lib_core::pin::{ActivationCode, PinBytes, PinRoleError, Puk};
 use refineid_lib_core::pin_retry_risk::{FlooredCredential, RetryFloorRefusal, check_retry_floor};
-use refineid_lib_core::x509::OwnedCert;
 use refineid_pcsc::{
     PcscBackend, PcscError, ReaderAccessCap, ReaderBackend as _, ReaderFilter, ReaderId,
     ReaderPickError,

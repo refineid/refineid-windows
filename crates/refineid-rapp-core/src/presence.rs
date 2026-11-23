@@ -10,7 +10,7 @@
 //! [`CardSighting`] of each pairing, which the session that heard it records
 //! in the pairing store.
 
-use refineid_lib_core::x509::OwnedCert;
+use refineid_cms::x509::OwnedCert;
 use refineid_rapp::{
     CERTIFICATE_FINGERPRINT_SIZE, CertificateFingerprint, IDENTITY_OFFER_GRACE_MS, PAIR_ID_SIZE,
 };

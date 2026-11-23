@@ -148,6 +148,8 @@ use refineid_agent_pipe::identity::{calling_program, computer_name, interface_la
 #[cfg(windows)]
 use refineid_agent_pipe::{RemoteKey, in_process_operation};
 #[cfg(windows)]
+use refineid_cms::x509::{EcCurve, OwnedCert, PublicKeyAlgorithm, extract_rsa_public_key};
+#[cfg(windows)]
 use refineid_digest::{Sha256, Sha384};
 #[cfg(windows)]
 use refineid_lib_core::auth::{
@@ -168,8 +170,6 @@ use refineid_lib_core::pin_retry_risk::{
 use refineid_lib_core::pkcs15::{CertSlot, Pkcs15Ops};
 #[cfg(windows)]
 use refineid_lib_core::sign::{KeyRef, SignOps, commands::ExternalHashValue};
-#[cfg(windows)]
-use refineid_lib_core::x509::{EcCurve, OwnedCert, PublicKeyAlgorithm, extract_rsa_public_key};
 #[cfg(windows)]
 use refineid_pace::{Can, OpenedByCan, PaceError, PaceSession, read_card_access, run_pace};
 #[cfg(windows)]

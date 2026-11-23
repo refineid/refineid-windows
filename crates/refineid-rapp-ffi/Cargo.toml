@@ -16,6 +16,7 @@ crate-type = ["cdylib"]
 name = "refineid_rapp_ffi"
 
 [dependencies]
+refineid-cms.workspace = true
 refineid-dev-errors.workspace = true
 refineid-lib-core.workspace = true
 refineid-rapp-core.workspace = true

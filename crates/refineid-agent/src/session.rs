@@ -12,7 +12,7 @@ use refineid_agent_pipe::{
     OPERATION_LIFETIME, PipeError, REACH_WINDOW, SIGNATURE_DEADLINE, program_label,
     requester_context,
 };
-use refineid_lib_core::x509::OwnedCert;
+use refineid_cms::x509::OwnedCert;
 use refineid_rapp::{RequesterSessionEnd, RoutingKey};
 use refineid_rapp_ble::gatt::BleLink;
 use refineid_rapp_ble::reach::{ReachError, reach_revocation_notice, reach_session};

@@ -17,10 +17,9 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use refineid_lib_core::apdu::status_word::PinRetries;
-use refineid_lib_core::auth::{PinSlot, PinStatus};
-use refineid_lib_core::pin_retry_risk::{check_retry_floor, reports_no_tries_left};
-use refineid_lib_core::x509::OwnedCert;
+use refineid_apdu::PinRetries;
+use refineid_auth::{PinSlot, PinStatus, check_retry_floor};
+use refineid_cms::x509::OwnedCert;
 use refineid_rapp::{
     BinaryFrame, CardIdentity, CardInspection, CardOperation, CardOperationResult, CardPresence,
     CardReader, CardStatusMessage, CertificateFingerprint, CpaceAttemptSlot, CpaceKc2Responder,
@@ -967,6 +966,15 @@ fn serve_operation(
     };
     let dispatch = dispatch.map_err(|e| format!("result refused: {e:?}"))?;
     session.send_dispatch(dispatch)
+}
+
+/// Whether `status` reports zero tries left or a blocked PIN.
+const fn reports_no_tries_left(status: PinStatus) -> bool {
+    match status {
+        PinStatus::Locked => true,
+        PinStatus::Remaining(retries) => retries.is_exhausted(),
+        PinStatus::Verified | PinStatus::NoInfo | PinStatus::Other(_) => false,
+    }
 }
 
 /// The one card command an approval gives: `card_error` with no card

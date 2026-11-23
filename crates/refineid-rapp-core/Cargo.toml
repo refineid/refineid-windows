@@ -8,8 +8,8 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+refineid-cms.workspace = true
 refineid-dev-errors.workspace = true
-refineid-lib-core.workspace = true
 refineid-rapp.workspace = true
 getrandom.workspace = true
 sha2.workspace = true
