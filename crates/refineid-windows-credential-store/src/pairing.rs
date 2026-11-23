@@ -306,7 +306,11 @@ impl ProtectedPairingStore {
     /// could not be read would lose it.
     pub fn refresh(&mut self) -> Result<(), StoreError> {
         if self.reread()? {
-            self.persist_bound();
+            if let Ok(_lock) = lock_set(&self.directory)
+                && self.reread()?
+            {
+                self.persist_bound();
+            }
             self.judge_what_lies_beside();
         }
         Ok(())
@@ -332,7 +336,10 @@ impl ProtectedPairingStore {
         let housekeeping = housekeeping_due(&self.directory, stamp);
         let entries = (housekeeping && self.judges_browser_entries).then(browser_entries);
         let bounded = self.reread()?;
-        if bounded {
+        if bounded
+            && let Ok(_lock) = lock_set(&self.directory)
+            && self.reread()?
+        {
             self.persist_bound();
         }
         if housekeeping || bounded {
@@ -447,15 +454,19 @@ impl ProtectedPairingStore {
         Ok(())
     }
 
-    /// Re-reads the stored set, applies `change`, and writes it.
+    /// Re-reads the stored set, applies `change`, and writes it, under the
+    /// set's lock, so no other process writes between the read and the write.
     fn change(
         &mut self,
         change: impl FnOnce(&mut Vec<PairingRecord>) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
-        self.refresh()?;
-        change(&mut self.records)?;
-        drop_outlived_revocations(&mut self.records, (self.clock)());
-        self.persist().map_err(|_error| StoreError::WriteRefused)?;
+        {
+            let _lock = lock_set(&self.directory)?;
+            let _ = self.reread()?;
+            change(&mut self.records)?;
+            drop_outlived_revocations(&mut self.records, (self.clock)());
+            self.persist().map_err(|_error| StoreError::WriteRefused)?;
+        }
         self.judge_what_lies_beside();
         Ok(())
     }
@@ -559,31 +570,37 @@ impl PairingStore for ProtectedPairingStore {
         now_ms: u64,
         session_established: bool,
     ) -> Result<SweepOutcome, RecordStoreError<StoreError>> {
-        self.refresh().map_err(RecordStoreError::Store)?;
-        let index = self
-            .records
-            .iter()
-            .position(|entry| entry.pair_id() == pair_id)
-            .ok_or(RecordStoreError::Store(StoreError::Unknown))?;
-        let (before, from) = self.records.split_at_mut(index);
-        let Some((record, after)) = from.split_first_mut() else {
-            return Err(RecordStoreError::Store(StoreError::Unknown));
-        };
-        let directory = &self.directory;
-        let outcome = record.sweep(now_ms, session_established, |checked| {
-            let mut set: Vec<&PairingRecord> = before.iter().collect();
-            if !checked.revoked_record_outlived(now_ms) {
-                set.push(checked);
+        let outcome = {
+            let _lock = lock_set(&self.directory).map_err(RecordStoreError::Store)?;
+            let _ = self.reread().map_err(RecordStoreError::Store)?;
+            let index = self
+                .records
+                .iter()
+                .position(|entry| entry.pair_id() == pair_id)
+                .ok_or(RecordStoreError::Store(StoreError::Unknown))?;
+            let (before, from) = self.records.split_at_mut(index);
+            let Some((record, after)) = from.split_first_mut() else {
+                return Err(RecordStoreError::Store(StoreError::Unknown));
+            };
+            let directory = &self.directory;
+            let outcome = record.sweep(now_ms, session_established, |checked| {
+                let mut set: Vec<&PairingRecord> = before.iter().collect();
+                if !checked.revoked_record_outlived(now_ms) {
+                    set.push(checked);
+                }
+                set.extend(after.iter());
+                let blob = encode_pairing_records(set.iter().copied())
+                    .map_err(|_error| StoreError::WriteRefused)?;
+                write_pairing_set(directory, &blob).map_err(|_error| StoreError::WriteRefused)
+            })?;
+            // A write left the set as held here, so following it reads nothing.
+            self.followed = Some(set_stamp(&self.directory));
+            if outcome == SweepOutcome::Expired {
+                drop_outlived_revocations(&mut self.records, now_ms);
             }
-            set.extend(after.iter());
-            let blob = encode_pairing_records(set.iter().copied())
-                .map_err(|_error| StoreError::WriteRefused)?;
-            write_pairing_set(directory, &blob).map_err(|_error| StoreError::WriteRefused)
-        })?;
-        // A write left the set as held here, so following it reads nothing.
-        self.followed = Some(set_stamp(&self.directory));
+            outcome
+        };
         if outcome == SweepOutcome::Expired {
-            drop_outlived_revocations(&mut self.records, now_ms);
             self.judge_what_lies_beside();
         }
         Ok(outcome)
@@ -595,6 +612,26 @@ const PROFILE_DIRECTORY: &str = "RefineID";
 /// The protected pairing set.
 #[cfg(windows)]
 const PAIRING_SET_FILE: &str = "pairing-set.dpapi";
+/// The file whose exclusive lock every change to the set holds.
+///
+/// The app, the agent and the card module each re-read the set, change it
+/// and write it back. The lock keeps one from writing back a set it read
+/// before another stored a record, which would lose that record.
+const PAIRING_SET_LOCK_FILE: &str = "pairing-set.lock";
+
+/// Takes the set's exclusive lock, waiting for another process to release
+/// it; the lock lasts as long as the returned file is open.
+fn lock_set(directory: &Path) -> Result<std::fs::File, StoreError> {
+    std::fs::create_dir_all(directory).map_err(|_error| StoreError::WriteRefused)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(directory.join(PAIRING_SET_LOCK_FILE))
+        .map_err(|_error| StoreError::WriteRefused)?;
+    file.lock().map_err(|_error| StoreError::WriteRefused)?;
+    Ok(file)
+}
 /// The directory of the last card a session heard present for each
 /// pairing, one unprotected file per pairing: nothing in it is secret.
 const CARD_SIGHTINGS_DIRECTORY: &str = "card-sightings";
@@ -1789,6 +1826,40 @@ mod tests {
                 .is_none()
         );
         assert!(!file.exists(), "the next process removes it");
+    }
+
+    #[test]
+    fn a_record_stored_once_survives_another_store_writing_meanwhile() {
+        // One store adds pairings, each exactly once, as the app stores a
+        // new pairing; another store over the same directory keeps
+        // rewriting the set, as the agent does. No pairing may be lost.
+        const ADDED: u8 = 30;
+        const REWRITES: usize = 60;
+        const WRITERS: usize = 2;
+        let directory = TestDirectory::new("concurrent");
+        let start = std::sync::Arc::new(std::sync::Barrier::new(WRITERS));
+        let rewriter = {
+            let path = directory.0.clone();
+            let start = start.clone();
+            std::thread::spawn(move || {
+                let mut store = load_from(path).expect("load");
+                start.wait();
+                for _ in 0..REWRITES {
+                    store.insert(record(SECOND_PAIR)).expect("rewrite");
+                }
+            })
+        };
+        let mut adder = load_from(directory.0.clone()).expect("load");
+        start.wait();
+        for index in 0..ADDED {
+            let mut id = *b"added pairing   ";
+            let last = id.last_mut().expect("an identifier has bytes");
+            *last = index;
+            adder.insert(record(PairId::from_array(id))).expect("add");
+        }
+        rewriter.join().expect("rewriter");
+        let reloaded = load_from(directory.0.clone()).expect("reload");
+        assert_eq!(reloaded.len(), usize::from(ADDED) + 1);
     }
 
     #[test]
