@@ -14,32 +14,27 @@
 
 //! UI-toolkit-independent card-management facade.
 
-use refineid_auth::PinOps as _;
+use refineid_auth::{PinManageOps as _, PinOps as _};
 use refineid_lib_core::activation::{ActivationScheme, PinActivation};
-use refineid_lib_core::auth::{
-    CardPinLengths, PinOps as _, PinReferenceScheme, PinSlot, PinStatus, PukStatus,
-};
-use refineid_lib_core::backend::{ReaderAccessCap, ReaderBackend as _, ReaderFilter};
+use refineid_lib_core::auth::{CardPinLengths, PinReferenceScheme, PinSlot, PinStatus, PukStatus};
 use refineid_lib_core::can::Can;
 use refineid_lib_core::fineid_card::FineidCardModel;
-use refineid_lib_core::identity::{CredentialIdentity, TokenSerial};
-use refineid_lib_core::pkcs15::{FineidReaderPicker as _, Pkcs15Ops as _};
-use refineid_lib_core::transport::CardTransport as _;
-use refineid_lib_core::x509::{FineidNameExt as _, OwnedCert};
-use refineid_lib_pcsc::{PcscBackend, PcscError};
+use refineid_lib_core::identity::TokenSerial;
+use refineid_lib_core::x509::OwnedCert;
 use refineid_pace::{SmTransport, UnvalidatedCan, read_card_access, run_pace};
-use refineid_pcsc::{
-    PcscBackend as CorePcscBackend, ReaderAccessCap as CoreReaderAccessCap,
-    ReaderBackend as CoreReaderBackend, ReaderId as CoreReaderId,
-};
+use refineid_pcsc::{PcscBackend, PcscError, ReaderAccessCap, ReaderBackend as _, ReaderPickError};
 use refineid_pkcs15::{
     CertSlot as CoreCertSlot, Pkcs15Ops as _, render_token_serial as render_core_token_serial,
 };
 
+pub use refineid_pcsc::ReaderFilter;
+
 use crate::card_pin::{
     ActivateOptions, ActivateReport, ActivationEvidence, CardPinError, ChangePinOptions,
-    ChangePinReport, UnblockPinOptions, UnblockPinReport,
+    ChangePinReport, UnblockPinOptions, UnblockPinReport, convert_core_lengths,
+    convert_core_pin_status, convert_core_puk_status, probe_pin_changed_flag, to_core_scheme,
 };
+use crate::reader_pick::{identity_from_certificate, pick_contactless_reader};
 
 /// Read-only state shown by the Windows settings app.
 #[derive(Debug, Clone)]
@@ -150,10 +145,8 @@ impl ContactlessSnapshot {
 pub fn contactless_lookup_atr(
     reader_filter: Option<&ReaderFilter>,
 ) -> Result<Option<Vec<u8>>, CardPinError> {
-    use refineid_lib_core::backend::ReaderPickError;
-
     let backend = PcscBackend;
-    let reader_id = match backend.pick_contactless_reader(reader_filter) {
+    let reader_id = match pick_contactless_reader(&backend, reader_filter) {
         Ok(reader_id) => reader_id,
         Err(
             ReaderPickError::NoReaders
@@ -202,23 +195,28 @@ fn inspected(reader_filter: Option<&ReaderFilter>) -> Result<CardSnapshot, CardP
         .map_err(|error| CardPinError::Pkcs15Select(format!("{error}")))?;
     crate::card_pin::re_verify_session(&mut transport, &context.bound_serial)?;
     let numbering = context.numbering;
+    let core_scheme = to_core_scheme(numbering);
     let scheme = context.scheme;
-    let lengths = lengths_or_fineid_bounds(transport.read_card_pin_lengths(), numbering);
+    let lengths = lengths_or_fineid_bounds(
+        transport
+            .read_card_pin_lengths_with_scheme(core_scheme)
+            .map(|read| convert_core_lengths(read, numbering)),
+        numbering,
+    );
     let pin1 = transport
-        .pin_status_with_scheme(numbering, PinSlot::Pin1)
-        .ok();
+        .pin_status_with_scheme(core_scheme, refineid_auth::PinSlot::Pin1)
+        .ok()
+        .map(convert_core_pin_status);
     let pin2 = transport
-        .pin_status_with_scheme(numbering, PinSlot::Pin2)
-        .ok();
-    let puk = transport.puk_status_with_scheme(numbering).ok();
-    let pin1_changed = transport
-        .pin_changed_flag_with_scheme(numbering, PinSlot::Pin1)
+        .pin_status_with_scheme(core_scheme, refineid_auth::PinSlot::Pin2)
         .ok()
-        .flatten();
-    let pin2_changed = transport
-        .pin_changed_flag_with_scheme(numbering, PinSlot::Pin2)
+        .map(convert_core_pin_status);
+    let puk = transport
+        .probe_puk_status_with_scheme(core_scheme)
         .ok()
-        .flatten();
+        .map(convert_core_puk_status);
+    let pin1_changed = probe_pin_changed_flag(&mut transport, numbering, PinSlot::Pin1);
+    let pin2_changed = probe_pin_changed_flag(&mut transport, numbering, PinSlot::Pin2);
     let activation_code_length = context.expected_activation_pin_length();
     let pin1_activation = PinActivation::judge(scheme, pin1_changed, pin1);
     let pin2_activation = PinActivation::judge(scheme, pin2_changed, pin2);
@@ -279,10 +277,9 @@ fn inspected_contactless(
     reader_filter: Option<&ReaderFilter>,
     can: Can,
 ) -> Result<ContactlessSnapshot, CardPinError> {
-    let reader_id = PcscBackend.pick_contactless_reader(reader_filter)?;
-    let core_reader_id = CoreReaderId::new(reader_id.as_str().to_owned());
-    let mut transport = CorePcscBackend
-        .open_exclusive(&core_reader_id, CoreReaderAccessCap::Read)
+    let reader_id = pick_contactless_reader(&PcscBackend, reader_filter)?;
+    let mut transport = PcscBackend
+        .open_exclusive(&reader_id, ReaderAccessCap::Read)
         .map_err(|error| CardPinError::Transport(format!("open contactless reader: {error}")))?;
     let lookup_atr = transport
         .atr()
@@ -397,41 +394,6 @@ fn open_contactless_pace(
             Err(pace_error)
         }
     }
-}
-
-const fn convert_core_pin_status(status: refineid_auth::PinStatus) -> PinStatus {
-    match status {
-        refineid_auth::PinStatus::Verified => PinStatus::Verified,
-        refineid_auth::PinStatus::Remaining(retries) => PinStatus::Remaining(retries),
-        refineid_auth::PinStatus::NoInfo => PinStatus::NoInfo,
-        refineid_auth::PinStatus::Locked => PinStatus::Locked,
-        refineid_auth::PinStatus::Other(sw) => PinStatus::Other(sw.as_u16()),
-    }
-}
-
-fn identity_from_certificate(
-    certificate: &refineid_lib_core::x509::Certificate<'_>,
-) -> CredentialIdentity {
-    let subject = certificate.subject;
-    let given_names = subject.given_names();
-    let mut identity = CredentialIdentity::new();
-    if let Some(value) = subject.surname() {
-        identity = identity.with_surname(value);
-    }
-    if let Some(value) = given_names.first {
-        identity = identity.with_first_name(value);
-    }
-    if let Some(value) = given_names.second {
-        identity = identity.with_second_name(value);
-    }
-    identity = identity.with_additional_names(given_names.additional);
-    if let Some(value) = subject.peuin() {
-        identity = identity.with_peuin(value);
-    }
-    if let Some(value) = subject.organization_name() {
-        identity = identity.with_organization(value);
-    }
-    identity
 }
 
 /// Activate the card after binding the action to the displayed serial.

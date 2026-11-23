@@ -571,7 +571,7 @@ pub unsafe extern "C" fn refineid_settings_inspect(
 /// Without a stored CAN the caller is told to prime one; with no contactless
 /// card at all the contact inspection's own failure stands.
 fn inspect_over_contactless(
-    filter: &refineid_lib_core::backend::ReaderFilter,
+    filter: &service::ReaderFilter,
     contact_error: &str,
 ) -> Result<CardSnapshotDto, ApiFailure> {
     let contact_failure = || ApiFailure::new("card_inspection_failed", contact_error.to_owned());

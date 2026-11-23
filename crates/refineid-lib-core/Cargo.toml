@@ -17,7 +17,6 @@ refineid-atr.workspace = true
 refineid-ber.workspace = true
 refineid-cms.workspace = true
 refineid-digest.workspace = true
-refineid-pace.workspace = true
 subtle.workspace = true
 # Standards-based ASN.1 / X.690 DER parsing (re-exports `der`).
 spki.workspace = true

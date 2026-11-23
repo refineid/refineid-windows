@@ -12,11 +12,15 @@ publish = false
 workspace = true
 
 [dependencies]
+refineid-apdu.workspace = true
 refineid-atr.workspace = true
 refineid-auth.workspace = true
 refineid-dev-errors.workspace = true
 refineid-lib-core.workspace = true
-refineid-lib-pcsc.workspace = true
 refineid-pace.workspace = true
 refineid-pcsc.workspace = true
 refineid-pkcs15.workspace = true
+
+[dev-dependencies]
+const-oid.workspace = true
+refineid-ber.workspace = true

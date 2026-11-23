@@ -15,11 +15,10 @@
 //! FINEID smartcard protocol -- language-agnostic, transport-
 //! agnostic.
 //!
-//! Layered from the card edge upwards. The foundation modules
-//! ([`backend`], [`transport`]) define the ports and
-//! types every higher layer depends on. The crypto, protocol, and
-//! use-case layers (PACE, secure messaging, eMRTD, the
-//! `Session` verb API) land on top as they are ported.
+//! Layered from the card edge upwards. The [`transport`] module
+//! defines the card transport port legacy callers still depend on. The
+//! crypto, protocol, and use-case layers (PACE, secure messaging,
+//! eMRTD, the `Session` verb API) land on top as they are ported.
 //!
 //! Initial monorepo scope is the **eMRTD-read floor** plus the
 //! **public-certificate read path** (no PACE, no PIN required).
@@ -74,7 +73,6 @@ extern crate alloc;
 pub mod activation;
 pub mod apdu;
 pub mod auth;
-pub mod backend;
 pub(crate) use refineid_ber as ber;
 pub mod can;
 pub mod country;
@@ -92,13 +90,6 @@ pub mod rng;
 pub mod sign;
 pub mod transport;
 pub mod x509;
-
-// Library-facade re-exports of the crate's public surface.
-// Module-level `#![expect]` at the crate root carries the
-// rationale for the cluster; per-item `#[expect(clippy::pub_use)]`
-// is rejected by rustc as a useless lint attribute (the lint
-// fires at module scope, not on the use-item).
-pub use backend::ReaderBackend;
 
 /// Crate version surfaced to upper layers (PKCS#11 callers will
 /// reflect this through `C_GetTokenInfo` once the cdylib port

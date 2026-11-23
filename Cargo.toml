@@ -8,7 +8,6 @@ members = [
     "crates/refineid-windows-driver-probe",
     "crates/refineid-gui-win32",
     "crates/refineid-lib-core",
-    "crates/refineid-lib-pcsc",
     "crates/refineid-minidriver",
     "crates/refineid-msi",
     "crates/refineid-pkcs11",
@@ -33,7 +32,6 @@ repository = "https://github.com/refineid/refineid-windows"
 [workspace.dependencies]
 refineid-agent-pipe = { path = "crates/refineid-agent-pipe", version = "26" }
 refineid-lib-core = { path = "crates/refineid-lib-core", version = "26" }
-refineid-lib-pcsc = { path = "crates/refineid-lib-pcsc", version = "26" }
 refineid-card-manager-core = { path = "crates/refineid-card-manager-core", version = "26" }
 refineid-dev-errors = { path = "crates/refineid-dev-errors", version = "26" }
 refineid-rapp-core = { path = "crates/refineid-rapp-core", version = "26" }

@@ -23,6 +23,7 @@
 extern crate alloc;
 
 pub mod card_pin;
+pub(crate) mod reader_pick;
 pub mod service;
 
 #[cfg(test)]
