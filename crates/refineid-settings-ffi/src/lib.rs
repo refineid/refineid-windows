@@ -42,16 +42,15 @@ use refineid_lib_core::activation::PinActivation;
 use refineid_lib_core::apdu::status_word::PinRetries;
 use refineid_lib_core::auth::{CardPinLengths, PasswordLengthRange, PinReferenceScheme};
 use refineid_lib_core::auth::{ChangePinOutcome, PinStatus, PukStatus, UnblockOutcome};
-use refineid_lib_core::can::{CAN_DIGITS, Can};
-use refineid_lib_core::identity::TokenSerial;
 use refineid_lib_core::pin::{PinBytes, Puk};
+use refineid_pace::{CAN_DIGITS, Can, UnvalidatedCan};
+use refineid_pkcs15::TokenSerial;
 use refineid_windows_credential_store::{read_can, save_can};
 use refineid_windows_doc_sign::phone::{SigningSource, card_in_a_reader, current_source};
 use refineid_windows_doc_sign::sign::{DocumentSignRequest, sign};
 use refineid_windows_doc_sign::verify::{DocumentVerdict, VerifiedDocument, render, verify_file};
 use refineid_windows_driver_probe::{self, LocalCardSupport};
 use serde::Serialize;
-use zeroize::Zeroize;
 
 /// JSON-view of the probe result exposed to the `WinUI` apps.
 #[derive(Serialize)]
@@ -582,7 +581,7 @@ fn inspect_over_contactless(
     match read_can(&atr) {
         // A stored CAN the card refuses belongs to another card of the same
         // family, or was typed wrong: priming again replaces it.
-        Ok(Some(can)) => service::inspect_contactless(Some(filter), can)
+        Ok(Some(can)) => service::inspect_contactless(Some(filter), &can)
             .map(CardSnapshotDto::from)
             .map_err(|error| match error {
                 refineid_card_manager_core::card_pin::CardPinError::AccessNumberRejected(_) => {
@@ -627,18 +626,25 @@ pub unsafe extern "C" fn refineid_settings_prime_contactless(
         // SAFETY: The input is pointer-checked, bounded, and copied.
         let reader = unsafe { copy_utf8(reader, reader_length, MAX_READER_NAME_BYTES, "reader") }?;
         // SAFETY: The input is pointer-checked, bounded, and copied.
-        let mut can_bytes = unsafe { copy_bytes(can, can_length, CAN_DIGITS, "CAN") }?;
-        let parsed_can = core::str::from_utf8(&can_bytes)
-            .map_err(|_| ApiFailure::new("invalid_can", "The CAN must contain six digits."))
-            .and_then(|value| {
-                Can::new(value).map_err(|error| ApiFailure::new("invalid_can", error.to_string()))
-            });
-        can_bytes.zeroize();
-        let parsed_can = parsed_can?;
+        let can_bytes =
+            zeroize::Zeroizing::new(unsafe { copy_bytes(can, can_length, CAN_DIGITS, "CAN") }?);
+        if can_bytes.len() != CAN_DIGITS {
+            return Err(ApiFailure::new(
+                "invalid_can",
+                format!("CAN must contain exactly {CAN_DIGITS} digits"),
+            ));
+        }
+        let mut can_digits = zeroize::Zeroizing::new([0_u8; CAN_DIGITS]);
+        can_digits.copy_from_slice(&can_bytes);
+        let can_text = core::str::from_utf8(can_digits.as_slice())
+            .map_err(|_| ApiFailure::new("invalid_can", "The CAN must contain six digits."))?
+            .to_owned();
+        let pace_can = Can::reconstruct(UnvalidatedCan::from_owned_text(can_text))
+            .map_err(|error| ApiFailure::new("invalid_can", error.to_string()))?;
         let filter = service::reader_filter(reader);
-        let snapshot = service::inspect_contactless(Some(&filter), parsed_can)
+        let snapshot = service::inspect_contactless(Some(&filter), &pace_can)
             .map_err(|error| ApiFailure::new("contactless_inspection_failed", error.to_string()))?;
-        save_can(&snapshot.lookup_atr, &parsed_can)
+        save_can(&snapshot.lookup_atr, &can_digits)
             .map_err(|error| ApiFailure::new("contactless_storage_failed", error.to_string()))?;
         Ok(ContactlessSnapshotDto::from(snapshot))
     })

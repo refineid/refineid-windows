@@ -15,6 +15,7 @@ workspace = true
 refineid-digest.workspace = true
 refineid-dev-errors.workspace = true
 refineid-lib-core.workspace = true
+refineid-pace.workspace = true
 refineid-rapp-core.workspace = true
 zeroize.workspace = true
 

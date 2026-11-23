@@ -42,10 +42,6 @@ pub trait FineidNameExt {
     /// PEUIN / SATU from the `serialNumber` DN attribute (OID `2.5.4.5`).
     #[must_use]
     fn peuin(&self) -> Option<crate::identity::Peuin>;
-
-    /// `countryName` (OID `2.5.4.6`) as a typed ISO 3166-1 alpha-2.
-    #[must_use]
-    fn country(&self) -> Option<crate::country::IsoAlpha2>;
 }
 
 impl FineidNameExt for Name<'_> {
@@ -80,11 +76,6 @@ impl FineidNameExt for Name<'_> {
     #[inline]
     fn peuin(&self) -> Option<crate::identity::Peuin> {
         crate::identity::Peuin::new(&dn_attribute(*self, known::SERIAL_NUMBER)?).ok()
-    }
-
-    #[inline]
-    fn country(&self) -> Option<crate::country::IsoAlpha2> {
-        crate::country::IsoAlpha2::new(dn_attribute(*self, known::COUNTRY_NAME)?.trim()).ok()
     }
 }
 
@@ -206,10 +197,6 @@ mod tests {
         );
         assert_eq!(name.surname().as_deref(), Some("Juutilainen"));
         assert_eq!(name.given_names().first.as_deref(), Some("Denis"));
-        assert_eq!(
-            name.country().map(|c| c.as_str().to_owned()).as_deref(),
-            Some("FI")
-        );
     }
 
     #[test]

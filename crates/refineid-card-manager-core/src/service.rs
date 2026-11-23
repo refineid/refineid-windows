@@ -17,15 +17,11 @@
 use refineid_auth::{PinManageOps as _, PinOps as _};
 use refineid_lib_core::activation::{ActivationScheme, PinActivation};
 use refineid_lib_core::auth::{CardPinLengths, PinReferenceScheme, PinSlot, PinStatus, PukStatus};
-use refineid_lib_core::can::Can;
 use refineid_lib_core::fineid_card::FineidCardModel;
-use refineid_lib_core::identity::TokenSerial;
 use refineid_lib_core::x509::OwnedCert;
-use refineid_pace::{SmTransport, UnvalidatedCan, read_card_access, run_pace};
+use refineid_pace::{Can, SmTransport, read_card_access, run_pace};
 use refineid_pcsc::{PcscBackend, PcscError, ReaderAccessCap, ReaderBackend as _, ReaderPickError};
-use refineid_pkcs15::{
-    CertSlot as CoreCertSlot, Pkcs15Ops as _, render_token_serial as render_core_token_serial,
-};
+use refineid_pkcs15::{CertSlot as CoreCertSlot, Pkcs15Ops as _, TokenSerial, render_token_serial};
 
 pub use refineid_pcsc::ReaderFilter;
 
@@ -266,7 +262,7 @@ fn lengths_or_fineid_bounds<E: core::fmt::Debug + core::fmt::Display>(
 /// failures.
 pub fn inspect_contactless(
     reader_filter: Option<&ReaderFilter>,
-    can: Can,
+    can: &Can,
 ) -> Result<ContactlessSnapshot, CardPinError> {
     inspected_contactless(reader_filter, can).inspect_err(|error| {
         refineid_dev_errors::report!(CardService, "contactless inspection failed", error);
@@ -275,7 +271,7 @@ pub fn inspect_contactless(
 
 fn inspected_contactless(
     reader_filter: Option<&ReaderFilter>,
-    can: Can,
+    can: &Can,
 ) -> Result<ContactlessSnapshot, CardPinError> {
     let reader_id = pick_contactless_reader(&PcscBackend, reader_filter)?;
     let mut transport = PcscBackend
@@ -299,7 +295,7 @@ fn inspected_contactless(
         let serial = token
             .serial_number_hex()
             .cloned()
-            .map(|serial| TokenSerial::new(render_core_token_serial(serial).as_str().to_owned()))
+            .map(render_token_serial)
             .ok_or_else(|| CardPinError::CardSerialUnavailable {
                 description: "protected EF.TokenInfo did not publish a card serial".to_owned(),
             })?;
@@ -357,14 +353,8 @@ fn inspected_contactless(
 
 fn open_contactless_pace(
     transport: &mut refineid_pcsc::PcscCard,
-    can: Can,
+    can: &Can,
 ) -> Result<refineid_pace::PaceSession<refineid_pace::OpenedByCan>, CardPinError> {
-    let can_text = core::str::from_utf8(can.as_bytes())
-        .map_err(|_err| CardPinError::AccessNumberRejected("invalid CAN encoding".to_owned()))?
-        .to_owned();
-    let pace_can = refineid_pace::Can::reconstruct(UnvalidatedCan::from_owned_text(can_text))
-        .map_err(|error| CardPinError::AccessNumberRejected(error.to_string()))?;
-
     // RefineID-Apple deliberately attempts both proven SELECT MF variants
     // before PACE and still lets EF.CardAccess / MSE:Set AT be the authority
     // if a reader rejects the plain selection.
@@ -382,7 +372,7 @@ fn open_contactless_pace(
             return Err(read_error);
         }
     };
-    match run_pace(transport, &card_access, &pace_can) {
+    match run_pace(transport, &card_access, can) {
         Ok(session) => Ok(session),
         Err(error) => {
             let pace_error = CardPinError::AccessNumberRejected(format!("{error}"));
@@ -481,7 +471,7 @@ pub fn reader_filter(reader: String) -> ReaderFilter {
 #[cfg(test)]
 mod tests {
     use refineid_lib_core::auth::{CardPinLengths, PinReferenceScheme};
-    use refineid_lib_core::identity::TokenSerial;
+    use refineid_pkcs15::TokenSerial;
 
     use super::{ensure_serial, lengths_or_fineid_bounds};
 

@@ -14,14 +14,14 @@
 
 //! FINEID and contactless (PACE-first) reader selection over [`refineid_pcsc`].
 
-use refineid_lib_core::identity::{CredentialIdentity, TokenSerial, derive_printed_serial};
+use refineid_lib_core::identity::CredentialIdentity;
 use refineid_lib_core::x509::{Certificate, FineidNameExt as _};
 use refineid_pace::read_card_access;
 use refineid_pcsc::{
     ReaderAccessCap, ReaderBackend, ReaderFilter, ReaderId, ReaderInfo, ReaderPickError,
 };
 use refineid_pkcs15::{
-    CertSlot as CoreCertSlot, Pkcs15Ops as _, render_token_serial as render_core_token_serial,
+    CertSlot as CoreCertSlot, Pkcs15Ops as _, derive_printed_serial, render_token_serial,
 };
 
 /// Output of [`pick_fineid_reader`]: a reader plus the best-effort identity of
@@ -155,7 +155,7 @@ where
         .ok()?;
     let token = transport.read_token_info().ok()?;
     let serial_hex = token.serial_number_hex()?.clone();
-    let token_full = TokenSerial::new(render_core_token_serial(serial_hex).as_str().to_owned());
+    let token_full = render_token_serial(serial_hex);
     let printed_serial = derive_printed_serial(&token_full);
 
     let mut identity = transport
