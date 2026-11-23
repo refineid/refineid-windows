@@ -699,16 +699,34 @@ impl TransportErrorExt for TransportError {
     }
 }
 
+/// Convert one short ISO 7816 case-4 command into the case-3 command
+/// Windows PC/SC accepts for T=0. The card then announces the response
+/// with `61xx`, which the transport continues with `GET RESPONSE`.
+///
+/// Returns `None` for case-1/2/3 commands and extended-length shapes.
+fn t0_case3_from_short_case4(apdu: &[u8]) -> Option<Vec<u8>> {
+    const HEADER_AND_LC_BYTES: usize = 5;
+    const TRAILING_LE_BYTES: usize = 1;
+
+    let lc = usize::from(*apdu.get(4)?);
+    if lc == 0 {
+        return None;
+    }
+    let case4_len = HEADER_AND_LC_BYTES
+        .checked_add(lc)?
+        .checked_add(TRAILING_LE_BYTES)?;
+    if apdu.len() != case4_len {
+        return None;
+    }
+    Some(apdu[..apdu.len() - 1].to_vec())
+}
+
 impl WinScardTransport {
     /// One raw `SCardTransmit`. Returns the response body (status
     /// bytes split off) plus SW1/SW2, or `None` if the card returned
     /// fewer than two bytes (a protocol desync the caller maps to
     /// [`TransportOutcome::ProtocolDesync`]).
-    fn raw_transmit(
-        &self,
-        apdu: &CommandApdu,
-    ) -> Result<Option<(Vec<u8>, u8, u8)>, TransportError> {
-        let wire = apdu.as_bytes();
+    fn raw_transmit_wire(&self, wire: &[u8]) -> Result<Option<(Vec<u8>, u8, u8)>, TransportError> {
         let send_length = u32::try_from(wire.len())
             .map_err(|_ignored| TransportError::ApduTooLong(wire.len()))?;
 
@@ -747,6 +765,124 @@ impl WinScardTransport {
         };
         Ok(Some((buf, sw1, sw2)))
     }
+
+    fn raw_transmit(
+        &self,
+        apdu: &CommandApdu,
+    ) -> Result<Option<(Vec<u8>, u8, u8)>, TransportError> {
+        self.raw_transmit_wire(apdu.as_bytes())
+    }
+
+    /// Settle a T=0 `61xx` `GET RESPONSE` chain onto `(body, sw1, sw2)`.
+    fn settle_t0_response_chain(
+        &self,
+        initial_cla: u8,
+        mut body: Vec<u8>,
+        mut sw1: u8,
+        mut sw2: u8,
+    ) -> Result<TransportOutcome, TransportError> {
+        let mut chain_iterations = 0_usize;
+        while self.protocol == ScardProtocol::T0 && sw1 == SW1_BYTES_AVAILABLE {
+            chain_iterations = chain_iterations.saturating_add(1);
+            if chain_iterations > MAX_CHAIN_ITERATIONS {
+                return Err(TransportError::ChainIterationLimit);
+            }
+            let get_response = [initial_cla, INS_GET_RESPONSE, P_ZERO, P_ZERO, sw2];
+            let Some((next_body, next_sw1, next_sw2)) = self.raw_transmit_wire(&get_response)?
+            else {
+                return Ok(TransportOutcome::ProtocolDesync);
+            };
+            if next_sw1 == SW1_BYTES_AVAILABLE && next_body.is_empty() {
+                return Err(TransportError::ChainStalled);
+            }
+            let Some(next_len) = body.len().checked_add(next_body.len()) else {
+                return Err(TransportError::ChainTooLong);
+            };
+            if next_len > CHAIN_BODY_MAX_BYTES {
+                return Err(TransportError::ChainTooLong);
+            }
+            body.extend_from_slice(&next_body);
+            sw1 = next_sw1;
+            sw2 = next_sw2;
+        }
+
+        Ok(TransportOutcome::Response(ResponseApdu { body, sw1, sw2 }))
+    }
+}
+
+impl refineid_apdu::CardTransport for WinScardTransport {
+    type Error = TransportError;
+
+    fn transmit(
+        &mut self,
+        command: &refineid_apdu::CommandApdu,
+    ) -> Result<TransportOutcome, Self::Error> {
+        let _transaction = ScardTransaction::begin(self.h_card)?;
+
+        let bytes = command.as_bytes();
+        let initial_cla = bytes
+            .first()
+            .map_or(P_ZERO, |first| first & CLA_HIGH_NIBBLE_MASK);
+
+        let t0_stripped = if self.protocol == ScardProtocol::T0 {
+            t0_case3_from_short_case4(bytes)
+        } else {
+            None
+        };
+        let wire = t0_stripped.as_deref().unwrap_or(bytes);
+
+        let Some((mut body, mut sw1, mut sw2)) = self.raw_transmit_wire(wire)? else {
+            return Ok(TransportOutcome::ProtocolDesync);
+        };
+
+        // Only builder-proven read-only case-2 commands permit one
+        // corrected retry.
+        if self.protocol == ScardProtocol::T0
+            && sw1 == SW1_WRONG_LE
+            && let Some(retry_apdu) = command.corrected_wrong_le(sw2)
+        {
+            let Some((retry_body, retry_sw1, retry_sw2)) =
+                self.raw_transmit_wire(retry_apdu.as_bytes())?
+            else {
+                return Ok(TransportOutcome::ProtocolDesync);
+            };
+            body = retry_body;
+            sw1 = retry_sw1;
+            sw2 = retry_sw2;
+        }
+
+        self.settle_t0_response_chain(initial_cla, body, sw1, sw2)
+    }
+
+    fn transmit_credential(
+        &mut self,
+        command: refineid_apdu::CredentialCommand,
+    ) -> Result<TransportOutcome, Self::Error> {
+        let _transaction = ScardTransaction::begin(self.h_card)?;
+
+        // Send the exposed credential wire bytes exactly once: no 6Cxx retry,
+        // no retention, and any T=0 scratch copy is zeroized before return.
+        let (initial_cla, raw_outcome) = command.expose_wire(|wire| {
+            let cla = wire
+                .first()
+                .map_or(P_ZERO, |first| first & CLA_HIGH_NIBBLE_MASK);
+            let outcome = if self.protocol == ScardProtocol::T0
+                && let Some(stripped) = t0_case3_from_short_case4(wire)
+            {
+                let stripped = zeroize::Zeroizing::new(stripped);
+                self.raw_transmit_wire(stripped.as_slice())
+            } else {
+                self.raw_transmit_wire(wire)
+            };
+            (cla, outcome)
+        });
+
+        let Some((body, sw1, sw2)) = raw_outcome? else {
+            return Ok(TransportOutcome::ProtocolDesync);
+        };
+
+        self.settle_t0_response_chain(initial_cla, body, sw1, sw2)
+    }
 }
 
 impl CardTransport for WinScardTransport {
@@ -782,36 +918,10 @@ impl CardTransport for WinScardTransport {
         // XX bytes. FINEID cert reads issue READ BINARY at multiple
         // offsets, each of which may return `61 XX`; concatenate the
         // chained bodies.
-        let mut chain_iterations = 0_usize;
-        while self.protocol == ScardProtocol::T0 && sw1 == SW1_BYTES_AVAILABLE {
-            chain_iterations = chain_iterations.saturating_add(1);
-            if chain_iterations > MAX_CHAIN_ITERATIONS {
-                return Err(TransportError::ChainIterationLimit);
-            }
-            // Preserve the original CLA high nibble (FINEID uses 0x00).
-            let cla = bytes
-                .first()
-                .map_or(P_ZERO, |first| first & CLA_HIGH_NIBBLE_MASK);
-            let le = sw2;
-            let get_response = CommandApdu::new(vec![cla, INS_GET_RESPONSE, P_ZERO, P_ZERO, le]);
-            let Some((next_body, next_sw1, next_sw2)) = self.raw_transmit(&get_response)? else {
-                return Ok(TransportOutcome::ProtocolDesync);
-            };
-            if next_sw1 == SW1_BYTES_AVAILABLE && next_body.is_empty() {
-                return Err(TransportError::ChainStalled);
-            }
-            let Some(next_len) = body.len().checked_add(next_body.len()) else {
-                return Err(TransportError::ChainTooLong);
-            };
-            if next_len > CHAIN_BODY_MAX_BYTES {
-                return Err(TransportError::ChainTooLong);
-            }
-            body.extend_from_slice(&next_body);
-            sw1 = next_sw1;
-            sw2 = next_sw2;
-        }
-
-        Ok(TransportOutcome::Response(ResponseApdu { body, sw1, sw2 }))
+        let initial_cla = bytes
+            .first()
+            .map_or(P_ZERO, |first| first & CLA_HIGH_NIBBLE_MASK);
+        self.settle_t0_response_chain(initial_cla, body, sw1, sw2)
     }
 
     fn atr(&self) -> Result<Atr, AtrError> {
@@ -880,6 +990,34 @@ mod tests {
         assert_eq!(
             RemoteFailure::Unpaired.to_string(),
             "the pairing serves nothing; pair again"
+        );
+    }
+
+    #[test]
+    fn t0_short_case4_strips_trailing_le_and_leaves_other_cases_unchanged() {
+        use super::t0_case3_from_short_case4;
+
+        // Short case 4 (Lc = 2, 2 data bytes, trailing Le = 0x00) -> strip Le.
+        assert_eq!(
+            t0_case3_from_short_case4(&[0x00, 0xA4, 0x04, 0x00, 0x02, 0x3F, 0x00, 0x00]),
+            Some(vec![0x00, 0xA4, 0x04, 0x00, 0x02, 0x3F, 0x00])
+        );
+        // Short case 3 (no trailing Le) -> unchanged.
+        assert_eq!(
+            t0_case3_from_short_case4(&[0x00, 0x20, 0x00, 0x11, 0x04, 0x31, 0x32, 0x33, 0x34]),
+            None
+        );
+        // Case 2 (5 bytes) -> unchanged.
+        assert_eq!(
+            t0_case3_from_short_case4(&[0x00, 0xB0, 0x00, 0x00, 0x80]),
+            None
+        );
+        // Case 1 (4 bytes) -> unchanged.
+        assert_eq!(t0_case3_from_short_case4(&[0x00, 0x20, 0x00, 0x11]), None);
+        // Extended-length shape (Lc byte = 0x00) -> unchanged.
+        assert_eq!(
+            t0_case3_from_short_case4(&[0x00, 0x2A, 0x9E, 0x9A, 0x00, 0x00, 0x02, 0xAA, 0xBB]),
+            None
         );
     }
 }

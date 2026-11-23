@@ -14,6 +14,7 @@
 
 //! UI-toolkit-independent card-management facade.
 
+use refineid_auth::PinOps as _;
 use refineid_lib_core::activation::{ActivationScheme, PinActivation};
 use refineid_lib_core::auth::{
     CardPinLengths, PinOps as _, PinReferenceScheme, PinSlot, PinStatus, PukStatus,
@@ -21,13 +22,19 @@ use refineid_lib_core::auth::{
 use refineid_lib_core::backend::{ReaderAccessCap, ReaderBackend as _, ReaderFilter};
 use refineid_lib_core::can::Can;
 use refineid_lib_core::fineid_card::FineidCardModel;
-use refineid_lib_core::identity::{CredentialIdentity, TokenSerial, render_token_serial};
-use refineid_lib_core::pace::run_pace_with_can;
-use refineid_lib_core::pkcs15::{CertSlot, FineidReaderPicker as _, Pkcs15Ops as _};
-use refineid_lib_core::secure_messaging::SmTransport;
+use refineid_lib_core::identity::{CredentialIdentity, TokenSerial};
+use refineid_lib_core::pkcs15::{FineidReaderPicker as _, Pkcs15Ops as _};
 use refineid_lib_core::transport::CardTransport as _;
 use refineid_lib_core::x509::{FineidNameExt as _, OwnedCert};
 use refineid_lib_pcsc::{PcscBackend, PcscError};
+use refineid_pace::{SmTransport, UnvalidatedCan, read_card_access, run_pace};
+use refineid_pcsc::{
+    PcscBackend as CorePcscBackend, ReaderAccessCap as CoreReaderAccessCap,
+    ReaderBackend as CoreReaderBackend, ReaderId as CoreReaderId,
+};
+use refineid_pkcs15::{
+    CertSlot as CoreCertSlot, Pkcs15Ops as _, render_token_serial as render_core_token_serial,
+};
 
 use crate::card_pin::{
     ActivateOptions, ActivateReport, ActivationEvidence, CardPinError, ChangePinOptions,
@@ -272,30 +279,17 @@ fn inspected_contactless(
     reader_filter: Option<&ReaderFilter>,
     can: Can,
 ) -> Result<ContactlessSnapshot, CardPinError> {
-    let backend = PcscBackend;
-    let reader_id = backend.pick_contactless_reader(reader_filter)?;
-    let mut transport = backend.open_exclusive(&reader_id, ReaderAccessCap::Read)?;
+    let reader_id = PcscBackend.pick_contactless_reader(reader_filter)?;
+    let core_reader_id = CoreReaderId::new(reader_id.as_str().to_owned());
+    let mut transport = CorePcscBackend
+        .open_exclusive(&core_reader_id, CoreReaderAccessCap::Read)
+        .map_err(|error| CardPinError::Transport(format!("open contactless reader: {error}")))?;
     let lookup_atr = transport
         .atr()
         .map_err(|error| CardPinError::Transport(format!("contactless ATR failed: {error}")))?
         .to_wire_bytes();
 
-    // RefineID-Apple deliberately attempts both proven SELECT MF variants
-    // before PACE and still lets MSE:Set AT be the authority if a reader
-    // rejects the plain selection.
-    let _master_file_selection = transport.select_mf();
-    let pace_session = match run_pace_with_can(&mut transport, can) {
-        Ok(session) => session,
-        Err(error) => {
-            let pace_error = CardPinError::AccessNumberRejected(format!("{error}"));
-            transport.reset().map_err(|reset_error| {
-                CardPinError::Transport(format!(
-                    "contactless PACE failed: {error}; card power reset failed: {reset_error}"
-                ))
-            })?;
-            return Err(pace_error);
-        }
-    };
+    let pace_session = open_contactless_pace(&mut transport, can)?;
     let mut transport = SmTransport::new(transport, pace_session);
 
     let result = (|| {
@@ -306,14 +300,15 @@ fn inspected_contactless(
             CardPinError::Transport(format!("protected EF.TokenInfo read: {error}"))
         })?;
         let serial = token
-            .serial_number_hex
-            .map(render_token_serial)
+            .serial_number_hex()
+            .cloned()
+            .map(|serial| TokenSerial::new(render_core_token_serial(serial).as_str().to_owned()))
             .ok_or_else(|| CardPinError::CardSerialUnavailable {
                 description: "protected EF.TokenInfo did not publish a card serial".to_owned(),
             })?;
 
         let auth_der = transport
-            .read_certificate(CertSlot::Authentication)
+            .read_certificate(CoreCertSlot::Authentication)
             .map_err(|error| {
                 CardPinError::Transport(format!("protected auth cert read: {error}"))
             })?;
@@ -327,8 +322,14 @@ fn inspected_contactless(
         transport
             .select_pkcs15_application()
             .map_err(|error| CardPinError::Pkcs15Select(format!("{error}")))?;
-        let pin1 = transport.pin_status(PinSlot::Pin1).ok();
-        let pin2 = transport.pin_status(PinSlot::Pin2).ok();
+        let pin1 = transport
+            .pin_status(refineid_auth::PinSlot::Pin1)
+            .ok()
+            .map(convert_core_pin_status);
+        let pin2 = transport
+            .pin_status(refineid_auth::PinSlot::Pin2)
+            .ok()
+            .map(convert_core_pin_status);
         // Keep parity with RefineID-Apple: PIN1 and PIN2 are safe probes,
         // but the PUK GET DATA query can answer 6988 over contactless and
         // make the next protected command fail with 6999.
@@ -354,6 +355,57 @@ fn inspected_contactless(
         (Err(error), _) => Err(error),
         (Ok(snapshot), Ok(())) => Ok(snapshot),
         (Ok(_snapshot), Err(error)) => Err(error),
+    }
+}
+
+fn open_contactless_pace(
+    transport: &mut refineid_pcsc::PcscCard,
+    can: Can,
+) -> Result<refineid_pace::PaceSession<refineid_pace::OpenedByCan>, CardPinError> {
+    let can_text = core::str::from_utf8(can.as_bytes())
+        .map_err(|_err| CardPinError::AccessNumberRejected("invalid CAN encoding".to_owned()))?
+        .to_owned();
+    let pace_can = refineid_pace::Can::reconstruct(UnvalidatedCan::from_owned_text(can_text))
+        .map_err(|error| CardPinError::AccessNumberRejected(error.to_string()))?;
+
+    // RefineID-Apple deliberately attempts both proven SELECT MF variants
+    // before PACE and still lets EF.CardAccess / MSE:Set AT be the authority
+    // if a reader rejects the plain selection.
+    let _master_file_selection = transport.select_mf();
+    let card_access = match read_card_access(transport) {
+        Ok(card_access) => card_access,
+        Err(error) => {
+            let read_error =
+                CardPinError::Transport(format!("contactless EF.CardAccess read failed: {error}"));
+            transport.reset().map_err(|reset_error| {
+                CardPinError::Transport(format!(
+                    "contactless EF.CardAccess read failed: {error}; card power reset failed: {reset_error}"
+                ))
+            })?;
+            return Err(read_error);
+        }
+    };
+    match run_pace(transport, &card_access, &pace_can) {
+        Ok(session) => Ok(session),
+        Err(error) => {
+            let pace_error = CardPinError::AccessNumberRejected(format!("{error}"));
+            transport.reset().map_err(|reset_error| {
+                CardPinError::Transport(format!(
+                    "contactless PACE failed: {error}; card power reset failed: {reset_error}"
+                ))
+            })?;
+            Err(pace_error)
+        }
+    }
+}
+
+const fn convert_core_pin_status(status: refineid_auth::PinStatus) -> PinStatus {
+    match status {
+        refineid_auth::PinStatus::Verified => PinStatus::Verified,
+        refineid_auth::PinStatus::Remaining(retries) => PinStatus::Remaining(retries),
+        refineid_auth::PinStatus::NoInfo => PinStatus::NoInfo,
+        refineid_auth::PinStatus::Locked => PinStatus::Locked,
+        refineid_auth::PinStatus::Other(sw) => PinStatus::Other(sw.as_u16()),
     }
 }
 

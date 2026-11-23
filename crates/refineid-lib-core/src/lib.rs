@@ -32,7 +32,7 @@
 //!
 //! ## Typing-discipline backbone
 //!
-//! Three modules carry the type-level safety this codebase
+//! Two modules carry the type-level safety this codebase
 //! leans on (see refineid-core's [refinement types] for the
 //! full position):
 //!
@@ -46,11 +46,6 @@
 //!   that project DVV's ATR/ATS technote and the wider FINEID
 //!   card-model taxonomy onto the type system. The classifier
 //!   refuses an unrecognised card before any modify APDU.
-//! - [`cert_state`] -- cert state lattice typestate
-//!   ([`RawDer`] -> [`ParsedCert`] -> [`PathValidatedCert`] ->
-//!   [`RevocationCheckedCert`] -> [`PurposeBoundCert<P>`]).
-//!   Phase A landed the types and purpose markers; consumer
-//!   migration follows.
 //!
 //! [`Oid<'a>`]: oid::Oid
 //! [`Atr`]: refineid_atr::Atr
@@ -58,11 +53,6 @@
 //! [`CardType`]: fineid_card::CardType
 //! [`CardVendor`]: fineid_card::CardVendor
 //! [`FineidCardModel`]: fineid_card::FineidCardModel
-//! [`RawDer`]: cert_state::RawDer
-//! [`ParsedCert`]: cert_state::ParsedCert
-//! [`PathValidatedCert`]: cert_state::PathValidatedCert
-//! [`RevocationCheckedCert`]: cert_state::RevocationCheckedCert
-//! [`PurposeBoundCert<P>`]: cert_state::PurposeBoundCert
 //! [refinement types]: https://github.com/refineid/refineid-core/blob/main/doc/architecture/refinement-types.md
 
 // `clippy::pub_use` fires on every `pub use submodule::Item;` at
@@ -87,9 +77,7 @@ pub mod auth;
 pub mod backend;
 pub(crate) use refineid_ber as ber;
 pub mod can;
-pub mod card;
 pub mod card_access;
-pub mod cert_state;
 pub mod country;
 pub mod crypto;
 pub mod fineid_card;
@@ -105,7 +93,6 @@ pub mod pkcs15;
 pub mod rng;
 pub mod secure_messaging;
 pub mod sign;
-pub mod text;
 pub mod transport;
 pub mod x509;
 

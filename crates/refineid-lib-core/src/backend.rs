@@ -18,8 +18,8 @@
 //! enumerates readers, opens a transport, may reset a card, and
 //! moves APDU bytes -- but it must not grow business policy.
 //!
-//! [`ReaderId`], [`ReaderInfo`], and [`ReaderAccessCap`] live with
-//! the [`crate::card`] Session API and land when that module ports.
+//! [`ReaderId`], [`ReaderInfo`], and [`ReaderAccessCap`] live here
+//! until the remaining legacy callers migrate to `refineid-pcsc`.
 
 use crate::transport::CardTransport;
 
