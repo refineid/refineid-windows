@@ -18,10 +18,12 @@ p384 = { version = "0.14", default-features = false, features = ["ecdsa"] }
 refineid-lib-core.workspace = true
 refineid-rapp.workspace = true
 refineid-rapp-core.workspace = true
-refineid-rapp-ble.workspace = true
 refineid-windows-credential-store.workspace = true
 sec1 = { version = "0.8", default-features = false, features = ["der"] }
 zeroize.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+refineid-rapp-ble.workspace = true
 
 [dev-dependencies]
 sha2.workspace = true

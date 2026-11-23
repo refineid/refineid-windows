@@ -11,7 +11,6 @@ repository.workspace = true
 refineid-dev-errors.workspace = true
 refineid-lib-core.workspace = true
 refineid-rapp.workspace = true
-refineid-remote.workspace = true
 getrandom.workspace = true
 sha2.workspace = true
 zeroize.workspace = true
