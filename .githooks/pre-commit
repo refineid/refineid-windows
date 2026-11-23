@@ -84,6 +84,9 @@ python3 -B scripts/TestDocumentationGate.py
 echo "pre-commit: cargo fmt --all --check"
 cargo fmt --all --check
 
+echo "pre-commit: magic-number policy"
+RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }-D warnings" cargo run -q -p xtask -- check-magic-numbers --staged
+
 echo "pre-commit: dotnet csharpier check"
 dotnet tool restore >/dev/null
 dotnet csharpier check .
@@ -96,7 +99,7 @@ if rustup target list --installed | grep -q "x86_64-pc-windows-msvc"; then
     cargo clippy --target x86_64-pc-windows-msvc --workspace --all-targets -- -D warnings
 fi
 
-echo "pre-commit: cargo test -p refineid-lib-core"
-cargo test -p refineid-lib-core
+echo "pre-commit: cargo test -p refineid-lib-core -p xtask"
+RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }-D warnings" cargo test -p refineid-lib-core -p xtask
 
 echo "pre-commit: ok (all quality checks passed)"

@@ -22,7 +22,6 @@
 )]
 
 #[cfg(windows)]
-#[path = "win_main.rs"]
 pub(crate) mod win_main;
 
 #[cfg(any(windows, test))]
@@ -43,6 +42,7 @@ fn main() {
 /// Non-Windows stub: the GUI is Win32-only.
 #[cfg(not(windows))]
 fn main() {
+    const UNSUPPORTED_PLATFORM_EXIT_CODE: i32 = 2;
     eprintln!("refineid-gui-win32 runs on Windows only.");
-    std::process::exit(2);
+    std::process::exit(UNSUPPORTED_PLATFORM_EXIT_CODE);
 }

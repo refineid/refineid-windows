@@ -19,6 +19,7 @@ members = [
     "crates/refineid-stamp",
     "crates/refineid-windows-credential-store",
     "crates/refineid-windows-doc-sign",
+    "tools/xtask",
 ]
 
 [workspace.package]
@@ -64,7 +65,9 @@ hex = "0.4"
 # Pure Rust; the image and SVG render features stay off.
 hmac = "0.13"
 pcsc = "2.9"
+proc-macro2 = { version = "1", features = ["span-locations"] }
 proptest = "1"
+rustc_lexer = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.11"
@@ -75,6 +78,8 @@ socket2 = "0.6"
 if-addrs = "0.15"
 spki = "0.8"
 subtle = "2"
+syn = { version = "2", features = ["full", "visit"] }
+walkdir = "2"
 # No default features: the `std` feature pulls `windows-future`,
 # which does not compile for non-Windows hosts and would break
 # host-side `cargo check` of the GUI crate.
