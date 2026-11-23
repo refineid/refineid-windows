@@ -81,10 +81,10 @@ front agent. An explicit owner order may delegate commit on and push
 to the assigned task branch for one run, with the commit and scan
 rules in the brief; opening pull requests, review, issue filing,
 installation, and merge are never delegated to an implementation
-agent. Workers report deferred findings in their handoff for the
-front agent to file. Where independence is required, the front
-agent runs the review using a model from a different family than
-the one that wrote the change.
+agent. Workers report observed problems in their handoff for the front
+agent to confirm and file immediately. Where independence is required,
+the front agent runs the review using a model from a different family
+than the one that wrote the change.
 
 ## Rules live here, not in an agent's memory
 
@@ -138,13 +138,19 @@ in `doc/`, not here.
   remote.
   Use squash merges to keep the `main` history linear; do not use merge commits.
 
-## Record deferred findings
+## File bugs when problems are seen
 
-- The front agent files a GitHub issue in the owning repository for each
-  confirmed, actionable defect or quality gap that cannot reasonably be
-  fixed within the current task. Filing these issues is authorized; do not
-  wait for a separate instruction for each finding. An implementation
-  agent reports deferred findings in its handoff instead of filing them.
+- Standing instruction: as soon as the front agent observes a confirmed
+  defect or quality gap in existing code, tests, scripts, documentation,
+  or hardware behavior -- or confirms one reported in a worker handoff --
+  it files a GitHub issue (`gh issue create`, with `-R <owner>/<repo>`
+  when filing from another checkout) immediately in the owning repository
+  with sanitized evidence, without waiting for user permission or the end
+  of the task, whether the fix will happen next or in a later branch
+  (following the secrecy, personal-data, and security-reporting rules below). Do not file
+  issues for defects in the current branch's own unmerged changes; fix
+  those in the branch. An implementation agent reports observed problems
+  in its handoff instead of filing them directly.
 - The front agent searches existing open issues first, reuses any
   matching issue by adding only new, useful evidence instead of
   creating a duplicate, and groups findings only when they share a
