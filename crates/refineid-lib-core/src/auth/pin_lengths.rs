@@ -132,6 +132,22 @@ impl CardPinLengths {
         Self::from_listed(numbering, None, None, None)
     }
 
+    /// Wrap already-resolved accepted ranges from `refineid-auth`.
+    #[must_use]
+    pub const fn from_accepted(
+        numbering: PinReferenceScheme,
+        pin1: Option<PasswordLengthRange>,
+        pin2: Option<PasswordLengthRange>,
+        puk: Option<PasswordLengthRange>,
+    ) -> Self {
+        Self {
+            numbering,
+            pin1,
+            pin2,
+            puk,
+        }
+    }
+
     const fn from_listed(
         numbering: PinReferenceScheme,
         pin1: Option<PasswordLengthRange>,

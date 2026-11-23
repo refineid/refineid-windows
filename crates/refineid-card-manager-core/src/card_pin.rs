@@ -23,29 +23,39 @@
 //! numbering the card declares: the citizen numbering (FINEID S1 v4.2
 //! §3.5.2) or the organization numbering (FINEID S4-2 v4.0 §4.2).
 //!
-//! PIN bytes never reach argv, env, or any log line; the prompts
-//! use rpassword (or stdin bufread when no tty) and the move into
-//! [`PinBytes`] is immediate so the buffer zeroes on drop.
+//! PIN-bearing operations execute inside [`refineid_pcsc::PcscCard::pin_sequence`]
+//! on a [`ReaderAccessCap::PinSequence`] session so one PC/SC transaction spans
+//! the whole sequence and ends with a card reset.
 
 use alloc::fmt;
 
+use refineid_apdu::{CardTransport, StatusWord};
+use refineid_auth::{
+    AuthError as CoreAuthError, CardPinLengths as CoreCardPinLengths, CredentialInputError,
+    FlooredCredential as CoreFlooredCredential, ManageOutcome, Pin1, Pin2, PinChangeRecord,
+    PinLengthRefusal, PinManageOps as _, PinOps as _, PinReferenceScheme as CorePinReferenceScheme,
+    PinSlot as CorePinSlot, PinStatus as CorePinStatus, Puk as CorePuk,
+    RetryFloorRefusal as CoreRetryFloorRefusal, UnvalidatedSecret, read_pin_change_record,
+};
 use refineid_lib_core::activation::{ActivationScheme, PinActivation};
 use refineid_lib_core::auth::{
-    AuthError, CardPinLengths, ChangePinOutcome, PinOps as _, PinPolicyReason, PinReferenceScheme,
-    PinSlot, PinStatus, UnblockOutcome,
-};
-use refineid_lib_core::backend::{
-    ReaderAccessCap, ReaderBackend as _, ReaderFilter, ReaderPickError,
+    CardPinLengths, ChangePinOutcome, PinPolicyReason, PinReferenceScheme, PinSlot, PinStatus,
+    PukStatus, UnblockOutcome,
 };
 use refineid_lib_core::fineid_card::{CardClassificationError, FineidCardModel};
+use refineid_lib_core::identity::{CredentialIdentity, TokenSerial};
 use refineid_lib_core::pin::{ActivationCode, PinBytes, PinRoleError, Puk};
-use refineid_lib_core::pin_retry_risk::{
-    RetryFloorRefusal, check_puk_retry_floor, check_retry_floor,
-};
-use refineid_lib_core::pkcs15::{CertSlot, FineidReaderPick};
-use refineid_lib_core::pkcs15::{FineidReaderPicker as _, Pkcs15Ops as _};
+use refineid_lib_core::pin_retry_risk::{FlooredCredential, RetryFloorRefusal, check_retry_floor};
 use refineid_lib_core::x509::OwnedCert;
-use refineid_lib_pcsc::{PcscBackend, PcscError};
+use refineid_pcsc::{
+    PcscBackend, PcscError, ReaderAccessCap, ReaderBackend as _, ReaderFilter, ReaderId,
+    ReaderPickError,
+};
+use refineid_pkcs15::{
+    CertSlot as CoreCertSlot, Pkcs15Ops as _, render_token_serial as render_core_token_serial,
+};
+
+use crate::reader_pick::{FineidReaderPick, pick_fineid_reader};
 
 /// Which PIN slot a manage-PIN operation targets. Thin layer over
 /// [`PinSlot`] that also carries the user-facing label so error
@@ -68,6 +78,7 @@ impl PinManageSlot {
             Self::Pin2 => PinSlot::Pin2,
         }
     }
+
     /// User-facing name ("Basic PIN 1" / "Signature PIN 2") for prompts
     /// and report strings. `&'static str` from a fixed compile-time set.
     #[must_use]
@@ -94,40 +105,23 @@ pub struct ChangePinOptions {
     /// "new PIN" prompt). Consumed and zeroized at function
     /// return.
     pub new: PinBytes,
-    /// Optional substring match against reader names; same
-    /// semantics as the rest of the client crate. `None` accepts
+    /// Optional substring match against reader names. `None` accepts
     /// any single FINEID-responding reader (errors on ambiguity).
-    /// Tier 0 `String` -- carried verbatim to
-    /// `ReaderFilter::new`; tighter form would be `ReaderFilter`.
     pub reader_filter: Option<String>,
 }
 
 /// One reader's worth of change-pin output.
 #[derive(Debug, Clone)]
 pub struct ChangePinReport {
-    /// PC/SC reader name the modify APDU landed against. Tier 0
-    /// `String` from `ReaderId::as_str().to_owned()`; tighter
-    /// form would be `ReaderId`.
+    /// PC/SC reader name the modify APDU landed against.
     pub reader: String,
-    /// `CredentialIdentity::best_serial()` of the bound
-    /// card: PKCS#15 token serial when present, else printed /
-    /// PEUIN form. Empty string when nothing was readable.
-    /// Surfaced so the operator can confirm which physical card
-    /// the PIN op landed against when multiple readers are
-    /// connected.
+    /// `CredentialIdentity::best_serial()` of the bound card.
     pub card_serial: String,
-    /// `CredentialIdentity::person_string()` rendering --
-    /// "SURNAME GIVENS" form (still uppercase per
-    /// DVV-emitted cert subject; the typed [`NativeName`]
-    /// rendering is a separate concern).
-    ///
-    /// [`NativeName`]: refineid_lib_core::identity::NativeName
+    /// `CredentialIdentity::person_string()` rendering.
     pub person: String,
     /// Which PIN slot the modify APDU targeted.
     pub slot: PinManageSlot,
-    /// Card-side outcome from `CHANGE REFERENCE DATA`
-    /// (FINEID S4-1 v3.1 §4.1.3 / ISO 7816-4 §7.5.7): Ok,
-    /// `WrongCurrentPin` with retries, Locked, etc.
+    /// Card-side outcome from `CHANGE REFERENCE DATA`.
     pub outcome: ChangePinOutcome,
 }
 
@@ -138,16 +132,12 @@ pub struct UnblockPinOptions {
     /// PIN2.
     pub slot: PinManageSlot,
     /// The PUK code. Typed [`Puk`] forces construction
-    /// via [`Puk::new`] at the operator-input boundary, so a
-    /// non-PUK `PinBytes` value (e.g. a PIN or the activation PIN)
-    /// can't reach the `RESET RETRY COUNTER` APDU by accident.
+    /// via [`Puk::new`] at the operator-input boundary.
     pub puk: Puk,
     /// New PIN value to set after the unblock succeeds. Consumed
     /// and zeroized at function return.
     pub new_pin: PinBytes,
-    /// Optional substring match against reader names; same
-    /// semantics as [`ChangePinOptions::reader_filter`]. Tier 0
-    /// `String` -- presentational input to `ReaderFilter::new`.
+    /// Optional substring match against reader names.
     pub reader_filter: Option<String>,
 }
 
@@ -162,9 +152,7 @@ pub struct UnblockPinReport {
     pub person: String,
     /// Which PIN slot the unblock APDU targeted.
     pub slot: PinManageSlot,
-    /// Card-side outcome from `RESET RETRY COUNTER`
-    /// (FINEID S4-1 v3.1 §4.1.4 / ISO 7816-4 §7.5.10): Ok,
-    /// `WrongPuk` with retries, `PukLocked`, etc.
+    /// Card-side outcome from `RESET RETRY COUNTER`.
     pub outcome: UnblockOutcome,
 }
 
@@ -180,12 +168,10 @@ pub enum CardPinError {
     /// APDU went out. Retry counter is unaffected.
     PinPolicy(PinPolicyReason),
     /// Couldn't SELECT the PKCS#15 application. FINEID gates the
-    /// PIN-management INS bytes (0x20 status-form, 0x24, 0x2C)
-    /// behind app SELECT -- SW=6D00 otherwise.
+    /// PIN-management INS bytes behind app SELECT.
     Pkcs15Select(String),
     /// Lower-level transport / APDU failure not specific to PKCS#15
-    /// SELECT (cert read, EF.TokenInfo read, ...). Tier 0 `String`
-    /// -- presentational rendering of the upstream error.
+    /// SELECT (cert read, EF.TokenInfo read, ...).
     Transport(String),
     /// PACE refused the access number: the card on the contactless slot
     /// is not the one the stored CAN was proved on, or the CAN was typed
@@ -205,34 +191,20 @@ pub enum CardPinError {
     /// The card published no PKCS#15 serial to bind the session to.
     CardSerialUnavailable {
         /// Human-readable detail naming where the serial was missing.
-        /// Tier 0 `String`; presentational.
         description: String,
     },
     /// The bound card session was invalidated between session
-    /// open and the operation. Possible causes: card
-    /// removed from reader mid-flow, reader unplugged, a
-    /// different card inserted, the same physical port re-
-    /// enumerated as a different reader. The binding does not survive
-    /// any of these; the operator must re-run.
+    /// open and the operation.
     CardSessionRevoked {
-        /// Human-readable detail from
-        /// `re_verify_session` explaining which invariant
-        /// diverged (serial mismatch, EF.TokenInfo unreadable,
-        /// ...). Tier 0 `String`; presentational.
+        /// Human-readable detail from `re_verify_session`.
         reason: String,
     },
     /// The card's contact-interface ATR doesn't match any
-    /// FINEID card model refineid recognises. Expired card models
-    /// land here, as does any non-FINEID smartcard inserted in the
-    /// reader.
+    /// FINEID card model refineid recognises.
     CardModelNotSupported(CardClassificationError),
     /// `card change-pin*` / `card unblock-pin*`: the PIN's
-    /// counter-safe probes (PIN changed flag and status) show a PIN
-    /// that awaits its activation ([`PinActivation`]), or the status
-    /// probe returned no status word. Refineid refuses before any
-    /// modify APDU goes out so a wrong-state attempt cannot burn a
-    /// try-counter slot. The operator should run
-    /// `refineid card activate` first.
+    /// counter-safe probes show a PIN that awaits its activation
+    /// ([`PinActivation`]), or the status probe returned no status word.
     CardLooksUnactivated {
         /// Which PIN slot the probe targeted.
         slot: PinManageSlot,
@@ -330,19 +302,185 @@ impl From<ReaderPickError> for CardPinError {
     }
 }
 
-/// Map a lib-core `AuthError<TE>` into the client-side
-/// [`CardPinError`] surface.
-///
-/// Transport errors stringify through the inner `Display` so
-/// the CLI can show the underlying PC/SC message without
-/// leaking the typed error to the public surface. PIN-policy
-/// reasons (digit-only, length bounds) pass through as
-/// `PinPolicy` because they are local-policy hits -- no
-/// counter-burning APDU went out.
-fn auth_to_card_pin(e: AuthError<impl fmt::Display>) -> CardPinError {
+pub(crate) const fn to_core_slot(slot: PinSlot) -> CorePinSlot {
+    match slot {
+        PinSlot::Pin1 => CorePinSlot::Pin1,
+        PinSlot::Pin2 => CorePinSlot::Pin2,
+    }
+}
+
+pub(crate) const fn to_core_scheme(scheme: PinReferenceScheme) -> CorePinReferenceScheme {
+    match scheme {
+        PinReferenceScheme::Citizen => CorePinReferenceScheme::Citizen,
+        PinReferenceScheme::Organizational => CorePinReferenceScheme::Organizational,
+    }
+}
+
+fn from_core_scheme(scheme: CorePinReferenceScheme) -> Result<PinReferenceScheme, CardPinError> {
+    match scheme {
+        CorePinReferenceScheme::Citizen => Ok(PinReferenceScheme::Citizen),
+        CorePinReferenceScheme::Organizational => Ok(PinReferenceScheme::Organizational),
+        CorePinReferenceScheme::Estonian => Err(CardPinError::Transport(
+            "non-FINEID PIN reference scheme is not supported by FINEID PIN management".to_owned(),
+        )),
+    }
+}
+
+pub(crate) const fn convert_core_pin_status(status: CorePinStatus) -> PinStatus {
+    match status {
+        CorePinStatus::Verified => PinStatus::Verified,
+        CorePinStatus::Remaining(retries) => PinStatus::Remaining(retries),
+        CorePinStatus::NoInfo => PinStatus::NoInfo,
+        CorePinStatus::Locked => PinStatus::Locked,
+        CorePinStatus::Other(sw) => PinStatus::Other(sw.as_u16()),
+    }
+}
+
+pub(crate) const fn convert_core_puk_status(status: CorePinStatus) -> PukStatus {
+    match status {
+        CorePinStatus::Remaining(retries) => PukStatus::Remaining(retries),
+        CorePinStatus::Verified | CorePinStatus::NoInfo => PukStatus::NoInfo,
+        CorePinStatus::Locked => PukStatus::Locked,
+        CorePinStatus::Other(sw) => PukStatus::Other(sw.as_u16()),
+    }
+}
+
+pub(crate) const fn convert_core_lengths(
+    lengths: CoreCardPinLengths,
+    numbering: PinReferenceScheme,
+) -> CardPinLengths {
+    CardPinLengths::from_accepted(
+        numbering,
+        lengths.pin1().accepted(),
+        lengths.pin2().accepted(),
+        lengths.puk().accepted(),
+    )
+}
+
+const fn convert_core_floored_credential(credential: CoreFlooredCredential) -> FlooredCredential {
+    match credential {
+        CoreFlooredCredential::Pin1 => FlooredCredential::Pin1,
+        CoreFlooredCredential::Pin2 => FlooredCredential::Pin2,
+        CoreFlooredCredential::Puk => FlooredCredential::Puk,
+    }
+}
+
+const fn convert_core_retry_floor(refusal: CoreRetryFloorRefusal) -> RetryFloorRefusal {
+    match refusal {
+        CoreRetryFloorRefusal::TriesBelowFloor {
+            credential,
+            remaining,
+        } => RetryFloorRefusal::TriesBelowFloor {
+            credential: convert_core_floored_credential(credential),
+            remaining,
+        },
+        CoreRetryFloorRefusal::CounterUnreadable { credential } => {
+            RetryFloorRefusal::CounterUnreadable {
+                credential: convert_core_floored_credential(credential),
+            }
+        }
+    }
+}
+
+const fn convert_core_pin_length(refusal: PinLengthRefusal) -> PinPolicyReason {
+    match refusal {
+        PinLengthRefusal::OutsideAcceptedRange { accepted, .. } => PinPolicyReason::WrongLength {
+            got: 0,
+            min: accepted.min(),
+            max: accepted.max(),
+        },
+        PinLengthRefusal::NoAcceptedLength { .. } => PinPolicyReason::NoAcceptedLength,
+    }
+}
+
+const fn convert_credential_input_error(error: CredentialInputError) -> PinPolicyReason {
+    match error {
+        CredentialInputError::Empty { .. } => PinPolicyReason::WrongLength {
+            got: 0,
+            min: refineid_auth::credentials::PIN_MIN_LENGTH,
+            max: refineid_auth::credentials::PIN_MAX_LENGTH,
+        },
+        CredentialInputError::WrongLength {
+            expected_min,
+            expected_max,
+            ..
+        } => PinPolicyReason::WrongLength {
+            got: 0,
+            min: expected_min,
+            max: expected_max,
+        },
+        CredentialInputError::NonDigit { .. } => PinPolicyReason::NonDigit { byte_offset: 0 },
+    }
+}
+
+const fn convert_manage_to_change(outcome: ManageOutcome) -> ChangePinOutcome {
+    match outcome {
+        ManageOutcome::Ok => ChangePinOutcome::Ok,
+        ManageOutcome::WrongCredential { retries_left } => {
+            ChangePinOutcome::WrongCurrentPin { retries_left }
+        }
+        ManageOutcome::Locked => ChangePinOutcome::Locked,
+        ManageOutcome::Other(StatusWord::WrongLength) => ChangePinOutcome::LengthError,
+        ManageOutcome::Other(sw) => ChangePinOutcome::Other(sw.as_u16()),
+    }
+}
+
+const fn convert_manage_to_unblock(outcome: ManageOutcome) -> UnblockOutcome {
+    match outcome {
+        ManageOutcome::Ok => UnblockOutcome::Ok,
+        ManageOutcome::WrongCredential { retries_left } => {
+            UnblockOutcome::WrongPuk { retries_left }
+        }
+        ManageOutcome::Locked => UnblockOutcome::PukLocked,
+        ManageOutcome::Other(StatusWord::WrongLength) => UnblockOutcome::LengthError,
+        ManageOutcome::Other(sw) => UnblockOutcome::Other(sw.as_u16()),
+    }
+}
+
+/// Map a `refineid-auth` [`CoreAuthError`] into [`CardPinError`].
+fn core_auth_to_card_pin(e: CoreAuthError<impl fmt::Display>) -> CardPinError {
     match e {
-        AuthError::Transport(t) => CardPinError::Transport(format!("{t}")),
-        AuthError::PinPolicy(r) => CardPinError::PinPolicy(r),
+        CoreAuthError::Transport(t) => CardPinError::Transport(format!("{t}")),
+        CoreAuthError::Outcome(o) => CardPinError::Transport(format!("{o}")),
+        CoreAuthError::Command(c) => CardPinError::Transport(format!("{c}")),
+        CoreAuthError::RetryFloor(r) => CardPinError::RetryFloor(convert_core_retry_floor(r)),
+        CoreAuthError::PinLength(r) => CardPinError::PinPolicy(convert_core_pin_length(r)),
+        CoreAuthError::UnsupportedSlot { scheme, slot } => {
+            CardPinError::Transport(format!("{slot:?} is not supported under {scheme:?}"))
+        }
+    }
+}
+
+fn reconstruct_pin1(pin: &PinBytes) -> Result<Pin1, CardPinError> {
+    Pin1::reconstruct(UnvalidatedSecret::from_owned_bytes(pin.as_bytes().to_vec()))
+        .map_err(|error| CardPinError::PinPolicy(convert_credential_input_error(error)))
+}
+
+fn reconstruct_pin2(pin: &PinBytes) -> Result<Pin2, CardPinError> {
+    Pin2::reconstruct(UnvalidatedSecret::from_owned_bytes(pin.as_bytes().to_vec()))
+        .map_err(|error| CardPinError::PinPolicy(convert_credential_input_error(error)))
+}
+
+fn reconstruct_puk(puk: &PinBytes) -> Result<CorePuk, CardPinError> {
+    CorePuk::reconstruct(UnvalidatedSecret::from_owned_bytes(puk.as_bytes().to_vec()))
+        .map_err(|error| CardPinError::PinPolicy(convert_credential_input_error(error)))
+}
+
+/// Read the citizen card's PIN-changed flag (`DF 2F`), returning `None` on
+/// organizational cards (which do not support the citizen PIN container) or
+/// when the card does not report the flag.
+pub(crate) fn probe_pin_changed_flag<T: CardTransport>(
+    transport: &mut T,
+    numbering: PinReferenceScheme,
+    slot: PinSlot,
+) -> Option<bool> {
+    if numbering != PinReferenceScheme::Citizen {
+        return None;
+    }
+    match read_pin_change_record(transport, to_core_slot(slot)).ok()? {
+        PinChangeRecord::Changed => Some(true),
+        PinChangeRecord::Unchanged => Some(false),
+        PinChangeRecord::Unreadable => None,
     }
 }
 
@@ -355,24 +493,17 @@ fn auth_to_card_pin(e: AuthError<impl fmt::Display>) -> CardPinError {
 /// [`ActivationCardContext`] (for `card activate`) or
 /// [`PinManagementCardContext`] (for `card change-pin*` /
 /// `card unblock-pin*`).
-///
-/// Built by `establish_card_session`: card is identified
-/// by ATR against the recognised FINEID model set, and its
-/// PKCS#15 long serial is captured so any later step can
-/// detect a card swap mid-flow.
 #[derive(Debug, Clone)]
 pub struct BoundCardSession {
     /// PC/SC reader id captured at session open; every
     /// subsequent re-open in the flow uses exactly this id.
-    pub reader_id: refineid_lib_core::backend::ReaderId,
-    /// Person identity extracted from the auth cert's subject DN
-    /// (FINEID S2 §6.3.8.3). Read once at session open so PIN
-    /// reports can show "who" without re-reading the cert.
-    pub identity: refineid_lib_core::identity::CredentialIdentity,
+    pub reader_id: ReaderId,
+    /// Person identity extracted from the auth cert's subject DN.
+    pub identity: CredentialIdentity,
     /// PKCS#15 long serial bound at session open; every
     /// subsequent step re-reads and compares against this value
     /// to detect a card swap.
-    pub bound_serial: refineid_lib_core::identity::TokenSerial,
+    pub bound_serial: TokenSerial,
     /// ATR-classified FINEID card model from the recognised set.
     pub model: FineidCardModel,
     /// The credential-reference numbering the card answered to.
@@ -382,23 +513,7 @@ pub struct BoundCardSession {
 }
 
 impl BoundCardSession {
-    /// Promote a bound session into the
-    /// [`PinManagementCardContext`] typestate, the input
-    /// shape for `change_pin_first` and
-    /// `unblock_pin_first`. By calling this constructor the
-    /// caller asserts operator intent: the operator chose a
-    /// PIN-management command (not `card activate`), so they
-    /// are claiming the card is in an already-activated
-    /// state and the modify APDU is appropriate. The compiler
-    /// then enforces that no `card activate` code path can
-    /// consume this value.
-    ///
-    /// This split is the type-level half of the safety; the
-    /// runtime half (`pin_status` preflight + card-side
-    /// counter on wrong PIN attempts) is in the modify
-    /// functions themselves. Neither half alone catches every
-    /// "operator inserted the wrong card" case; together they
-    /// raise the floor.
+    /// Promote a bound session into [`PinManagementCardContext`].
     #[must_use]
     pub const fn into_pin_management_context(self) -> PinManagementCardContext {
         PinManagementCardContext { session: self }
@@ -408,53 +523,42 @@ impl BoundCardSession {
 /// Card session promoted from a bound base into the
 /// "operator intends a PIN-management operation on an
 /// already-activated card" typestate.
-///
-/// The type is opaque: there is no public field set, only a
-/// borrow path back to the inner [`BoundCardSession`].
-/// Construct via
-/// [`BoundCardSession::into_pin_management_context`] from
-/// the CLI's `card change-pin*` / `card unblock-pin*`
-/// dispatch. Code in the `card activate` dispatch cannot
-/// produce this typestate by construction.
 #[derive(Debug, Clone)]
 pub struct PinManagementCardContext {
-    /// Inner bound session this context was promoted from.
-    /// Held privately so callers can only reach
-    /// reader id / identity / serial via the inherent methods,
-    /// preventing accidental construction of an unrelated
-    /// `PinManagementCardContext` from a stale session value.
     session: BoundCardSession,
 }
 
 impl PinManagementCardContext {
     /// Borrow the reader id this context is bound to.
     #[must_use]
-    pub const fn reader_id(&self) -> &refineid_lib_core::backend::ReaderId {
+    pub const fn reader_id(&self) -> &ReaderId {
         &self.session.reader_id
     }
+
     /// Borrow the person identity captured at session open.
     #[must_use]
-    pub const fn identity(&self) -> &refineid_lib_core::identity::CredentialIdentity {
+    pub const fn identity(&self) -> &CredentialIdentity {
         &self.session.identity
     }
+
     /// Borrow the PKCS#15 long serial bound at session open.
-    /// `re_verify_session` compares the on-card serial against
-    /// this value before every modify APDU.
     #[must_use]
-    pub const fn bound_serial(&self) -> &refineid_lib_core::identity::TokenSerial {
+    pub const fn bound_serial(&self) -> &TokenSerial {
         &self.session.bound_serial
     }
-    /// ATR-classified FINEID card model captured at session
-    /// open. `Copy` because [`FineidCardModel`] is a small enum.
+
+    /// ATR-classified FINEID card model captured at session open.
     #[must_use]
     pub const fn model(&self) -> FineidCardModel {
         self.session.model
     }
+
     /// The credential-reference numbering captured at session open.
     #[must_use]
     pub const fn numbering(&self) -> PinReferenceScheme {
         self.session.numbering
     }
+
     /// The activation scheme captured at session open.
     #[must_use]
     pub const fn scheme(&self) -> ActivationScheme {
@@ -464,23 +568,6 @@ impl PinManagementCardContext {
 
 /// Open and bind a card session on the picked reader.
 ///
-/// Phases (in order):
-/// 1. Pick the FINEID-shape reader (or apply `reader_filter`).
-/// 2. Open the transport, read the ATR, classify against the
-///    recognised `FineidCardModel` set.
-/// 3. SELECT the PKCS#15 application.
-/// 4. Capture the PKCS#15 long serial for session binding.
-/// 5. Resolve the card's reference numbering with the counter-safe
-///    VERIFY probe, and decide its activation scheme: the
-///    organization numbering means §4.6.1; under the citizen
-///    numbering the authentication certificate's validity start
-///    decides it.
-///
-/// Returns a [`BoundCardSession`] the caller flows into the
-/// modify step. The transport from this call is dropped; the
-/// caller re-opens against `session.reader_id` and uses
-/// `re_verify_session` before each modify APDU.
-///
 /// # Errors
 /// - `CardModelNotSupported` -- ATR didn't classify.
 /// - `CardSerialUnavailable` -- PKCS#15 serial unavailable.
@@ -489,12 +576,10 @@ pub fn establish_card_session(
     backend: PcscBackend,
     reader_filter: Option<&ReaderFilter>,
 ) -> Result<BoundCardSession, CardPinError> {
-    use refineid_lib_core::transport::CardTransport as _;
-
     let FineidReaderPick {
         reader_id,
         identity,
-    } = backend.pick_fineid_reader(reader_filter)?;
+    } = pick_fineid_reader(&backend, reader_filter)?;
     let mut transport = backend.open_exclusive(&reader_id, ReaderAccessCap::Read)?;
 
     // ATR classify -- public protocol-level signal; rejects
@@ -508,17 +593,11 @@ pub fn establish_card_session(
         .select_pkcs15_application()
         .map_err(|e| CardPinError::Pkcs15Select(format!("{e}")))?;
 
-    // Bind the PKCS#15 long serial; `re_verify_session` checks
-    // against this on every subsequent step. The serial is
-    // session state (binds this transport to a specific
-    // physical card for swap detection), not person identity,
-    // so it doesn't live on `CredentialIdentity` -- read it
-    // here directly from EF.TokenInfo.
     let token = transport
         .read_token_info()
         .map_err(|e| CardPinError::Transport(format!("EF.TokenInfo read: {e}")))?;
-    let bound_serial = match token.serial_number_hex {
-        Some(hex) => refineid_lib_core::identity::render_token_serial(hex),
+    let bound_serial = match token.serial_number_hex().cloned() {
+        Some(hex) => TokenSerial::new(render_core_token_serial(hex).as_str().to_owned()),
         None => {
             return Err(CardPinError::CardSerialUnavailable {
                 description: "card did not publish a PKCS#15 serial; can't pin session identity"
@@ -530,14 +609,15 @@ pub fn establish_card_session(
     transport
         .select_pkcs15_application()
         .map_err(|e| CardPinError::Pkcs15Select(format!("{e}")))?;
-    let numbering = transport
+    let core_numbering = transport
         .resolve_pin_reference_scheme()
-        .map_err(auth_to_card_pin)?;
+        .map_err(core_auth_to_card_pin)?;
+    let numbering = from_core_scheme(core_numbering)?;
     let validity_start = match numbering {
         PinReferenceScheme::Organizational => None,
         PinReferenceScheme::Citizen => {
             let der = transport
-                .read_certificate(CertSlot::Authentication)
+                .read_certificate(CoreCertSlot::Authentication)
                 .map_err(|e| CardPinError::Transport(format!("auth cert read: {e}")))?;
             let cert = OwnedCert::from_der(der.as_bytes())
                 .map_err(|e| CardPinError::Transport(format!("auth cert parse: {e}")))?;
@@ -559,28 +639,24 @@ pub fn establish_card_session(
 
 /// Read one PIN's counter-safe probes under the session's numbering
 /// and judge whether it awaits activation.
-///
-/// Returns the raw status probe alongside the verdict so a refusal
-/// can carry it.
-fn probe_pin_activation<T: refineid_lib_core::transport::CardTransport>(
+fn probe_pin_activation<T: CardTransport>(
     transport: &mut T,
     numbering: PinReferenceScheme,
     scheme: ActivationScheme,
     slot: PinSlot,
 ) -> (Option<PinStatus>, PinActivation) {
-    let status = transport.pin_status_with_scheme(numbering, slot).ok();
-    let changed = transport
-        .pin_changed_flag_with_scheme(numbering, slot)
+    let status = transport
+        .pin_status_with_scheme(to_core_scheme(numbering), to_core_slot(slot))
         .ok()
-        .flatten();
+        .map(convert_core_pin_status);
+    let changed = probe_pin_changed_flag(transport, numbering, slot);
     (status, PinActivation::judge(scheme, changed, status))
 }
 
 /// The status of a PIN that does not await its activation, or the
 /// refusal for one that does ([`PinActivation::judge`]) or whose
-/// status probe returned no status word. The retry floor then
-/// applies to the returned status.
-fn require_activated<T: refineid_lib_core::transport::CardTransport>(
+/// status probe returned no status word.
+fn require_activated<T: CardTransport>(
     transport: &mut T,
     ctx: &PinManagementCardContext,
     slot: PinManageSlot,
@@ -599,8 +675,8 @@ fn require_activated<T: refineid_lib_core::transport::CardTransport>(
 /// (wrong-current-PIN with retries-left, locked, etc.) is
 /// surfaced via [`ChangePinReport::outcome`], not as an error.
 ///
-/// `options` is taken by value so both embedded [`PinBytes`]
-/// drop (and zeroize) when this returns.
+/// Runs inside a single [`refineid_pcsc::PcscCard::pin_sequence`] transaction
+/// that resets the card on exit.
 ///
 /// # Errors
 /// PC/SC / PKCS#15 / local-policy / transport failures.
@@ -609,42 +685,49 @@ pub fn change_pin_first(
     ctx: PinManagementCardContext,
     options: ChangePinOptions,
 ) -> Result<ChangePinReport, CardPinError> {
-    // The typestate parameter `ctx` proves the caller is on a
-    // PIN-management command path (operator intent: card is
-    // activated). The compiler refuses to let
-    // `ActivationCardContext` flow into this signature; the
-    // `card activate` dispatch cannot reach this function.
     let person = ctx.identity().person_string();
     let card_serial = ctx.identity().best_serial().unwrap_or("").to_owned();
+    let reader_name = ctx.reader_id().as_str().to_owned();
+    let manage_slot = options.slot;
+    let slot = manage_slot.as_pin_slot();
+    let core_scheme = to_core_scheme(ctx.numbering());
 
-    // Re-open against the bound reader, SELECT, and re-verify
-    // the bound serial -- catches a card swap between the
-    // session open and the modify APDU.
-    let mut transport = backend.open_exclusive(ctx.reader_id(), ReaderAccessCap::Read)?;
-    transport
-        .select_pkcs15_application()
-        .map_err(|e| CardPinError::Pkcs15Select(format!("{e}")))?;
-    re_verify_session(&mut transport, ctx.bound_serial())?;
-    let lengths = transport
-        .read_card_pin_lengths()
-        .map_err(auth_to_card_pin)?;
+    let card = backend.open_exclusive(ctx.reader_id(), ReaderAccessCap::PinSequence)?;
+    let outcome = card.pin_sequence(|mut tx| -> Result<ChangePinOutcome, CardPinError> {
+        tx.select_pkcs15_application()
+            .map_err(|e| CardPinError::Pkcs15Select(format!("{e}")))?;
+        re_verify_session(&mut tx, ctx.bound_serial())?;
+        let lengths = tx
+            .read_card_pin_lengths_with_scheme(core_scheme)
+            .map_err(core_auth_to_card_pin)?;
 
-    // Counter-safe probes: the PIN must show activated, and its
-    // counter must clear the retry floor.
-    let slot = options.slot.as_pin_slot();
-    let status = require_activated(&mut transport, &ctx, options.slot)?;
-    check_retry_floor(slot.into(), status).map_err(CardPinError::RetryFloor)?;
+        let status = require_activated(&mut tx, &ctx, manage_slot)?;
+        check_retry_floor(slot.into(), status).map_err(CardPinError::RetryFloor)?;
 
-    re_verify_session(&mut transport, ctx.bound_serial())?;
+        re_verify_session(&mut tx, ctx.bound_serial())?;
 
-    let outcome = transport
-        .change_pin(&lengths, slot, options.current.clone(), options.new.clone())
-        .map_err(auth_to_card_pin)?;
+        let manage_outcome = match slot {
+            PinSlot::Pin1 => {
+                let current = reconstruct_pin1(&options.current)?;
+                let new = reconstruct_pin1(&options.new)?;
+                tx.change_pin1(&lengths, current, new)
+                    .map_err(core_auth_to_card_pin)?
+            }
+            PinSlot::Pin2 => {
+                let current = reconstruct_pin2(&options.current)?;
+                let new = reconstruct_pin2(&options.new)?;
+                tx.change_pin2(&lengths, current, new)
+                    .map_err(core_auth_to_card_pin)?
+            }
+        };
+        Ok(convert_manage_to_change(manage_outcome))
+    })??;
+
     let report = ChangePinReport {
-        reader: ctx.reader_id().as_str().to_owned(),
+        reader: reader_name,
         card_serial,
         person,
-        slot: options.slot,
+        slot: manage_slot,
         outcome,
     };
     drop(options);
@@ -654,24 +737,13 @@ pub fn change_pin_first(
 
 /// PUK-driven unblock + replace PIN in `options.slot`.
 ///
-/// **Danger:** a wrong PUK decrements the PUK try counter. Once
-/// exhausted the card is dead -- no software recovery, DVV
-/// reissue required. The card's own outcome (wrong-PUK with
-/// retries-left, PUK locked, etc.) is surfaced via
-/// [`UnblockPinReport::outcome`]. The PUK is presented at five, four or
-/// three PUK tries left, never at two or one, and again at zero or when
-/// the card reports it blocked: the card then answers for itself and
-/// spends nothing, and the card may still accept the code as an
-/// activation code. The target PIN's counter does not gate the reset.
+/// Runs inside a single [`refineid_pcsc::PcscCard::pin_sequence`] transaction
+/// that resets the card on exit.
 ///
 /// # Errors
 /// PC/SC / PKCS#15 / local-policy / transport failures, and
 /// [`CardPinError::RetryFloor`] for a PUK at two or one tries left or
 /// with a counter the card did not report.
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "UnblockPinOptions embeds PUK + new-PIN PinBytes; consumed by value so both drop+zeroize at function return."
-)]
 pub fn unblock_pin_first(
     backend: PcscBackend,
     ctx: PinManagementCardContext,
@@ -679,37 +751,49 @@ pub fn unblock_pin_first(
 ) -> Result<UnblockPinReport, CardPinError> {
     let person = ctx.identity().person_string();
     let card_serial = ctx.identity().best_serial().unwrap_or("").to_owned();
+    let reader_name = ctx.reader_id().as_str().to_owned();
+    let manage_slot = options.slot;
+    let slot = manage_slot.as_pin_slot();
+    let core_scheme = to_core_scheme(ctx.numbering());
 
-    let mut transport = backend.open_exclusive(ctx.reader_id(), ReaderAccessCap::Read)?;
-    transport
-        .select_pkcs15_application()
-        .map_err(|e| CardPinError::Pkcs15Select(format!("{e}")))?;
-    re_verify_session(&mut transport, ctx.bound_serial())?;
-    let lengths = transport
-        .read_card_pin_lengths()
-        .map_err(auth_to_card_pin)?;
+    let card = backend.open_exclusive(ctx.reader_id(), ReaderAccessCap::PinSequence)?;
+    let outcome = card.pin_sequence(|mut tx| -> Result<UnblockOutcome, CardPinError> {
+        tx.select_pkcs15_application()
+            .map_err(|e| CardPinError::Pkcs15Select(format!("{e}")))?;
+        re_verify_session(&mut tx, ctx.bound_serial())?;
+        let lengths = tx
+            .read_card_pin_lengths_with_scheme(core_scheme)
+            .map_err(core_auth_to_card_pin)?;
 
-    let slot = options.slot.as_pin_slot();
-    require_activated(&mut transport, &ctx, options.slot)?;
+        require_activated(&mut tx, &ctx, manage_slot)?;
+        re_verify_session(&mut tx, ctx.bound_serial())?;
 
-    re_verify_session(&mut transport, ctx.bound_serial())?;
+        let puk = reconstruct_puk(&options.puk.to_pin_bytes())?;
+        let manage_outcome = match slot {
+            PinSlot::Pin1 => {
+                let new = reconstruct_pin1(&options.new_pin)?;
+                tx.unblock_pin1(&lengths, puk, new)
+                    .map_err(core_auth_to_card_pin)?
+            }
+            PinSlot::Pin2 => {
+                let new = reconstruct_pin2(&options.new_pin)?;
+                tx.unblock_pin2(&lengths, puk, new)
+                    .map_err(core_auth_to_card_pin)?
+            }
+        };
+        Ok(convert_manage_to_unblock(manage_outcome))
+    })??;
 
-    puk_retry_floor(&mut transport, ctx.numbering())?;
-
-    // Bridge typed Puk to the auth primitive's PinBytes. The
-    // transient PinBytes zeroizes on drop, same as every other
-    // secret material.
-    let puk_bytes = options.puk.to_pin_bytes();
-    let outcome = transport
-        .reset_retry_counter(&lengths, slot, puk_bytes, options.new_pin.clone())
-        .map_err(auth_to_card_pin)?;
-    Ok(UnblockPinReport {
-        reader: ctx.reader_id().as_str().to_owned(),
+    let report = UnblockPinReport {
+        reader: reader_name,
         card_serial,
         person,
-        slot: options.slot,
+        slot: manage_slot,
         outcome,
-    })
+    };
+    drop(options);
+    drop(ctx);
+    Ok(report)
 }
 
 impl fmt::Display for ChangePinReport {
@@ -783,35 +867,21 @@ impl fmt::Display for UnblockPinReport {
 // ---- card activate -- first-time setup flow --------------------
 
 /// Pre-activation card context.
-///
-/// The activation flow uses its [`ActivationScheme`] to name the
-/// expected activation-code length and to choose the activation
-/// command.
-///
-/// The context also pins the **session identity** -- reader
-/// name + card's long serial -- captured at session open.
-/// Any subsequent step in the activation flow re-reads the
-/// card's serial and refuses to continue if it doesn't match
-/// (or if the transport fails outright, which covers card
-/// removal / reader unplug / reader rename). The binding does not
-/// survive a physical-state change.
 #[derive(Debug, Clone)]
 pub struct ActivationCardContext {
     /// PC/SC reader id captured at session open; subsequent
     /// re-opens in the activate flow use exactly this id.
-    pub reader_id: refineid_lib_core::backend::ReaderId,
+    pub reader_id: ReaderId,
     /// Person identity extracted from the auth cert's subject DN
     /// at session open. Surfaced in activate report output.
-    pub identity: refineid_lib_core::identity::CredentialIdentity,
+    pub identity: CredentialIdentity,
     /// The credential-reference numbering the card answered to.
     pub numbering: PinReferenceScheme,
     /// The card's activation scheme ([`ActivationScheme::for_card`]).
     pub scheme: ActivationScheme,
     /// PKCS#15 EF.TokenInfo serial (long form) captured at
-    /// session open. Any subsequent operation re-reads this
-    /// and must match -- a different value means a card swap
-    /// happened mid-flow, which revokes the session.
-    pub bound_serial: refineid_lib_core::identity::TokenSerial,
+    /// session open.
+    pub bound_serial: TokenSerial,
     /// The FINEID card model identified by ATR matching at
     /// session open, from refineid's recognised set.
     pub model: FineidCardModel,
@@ -851,20 +921,12 @@ pub fn classify_card_for_activation(
 /// one we picked, the card's still there, and its long serial
 /// still matches what we bound at session open.
 ///
-/// Called before every card-touching step in the activation
-/// flow so a card swap / reader unplug / card removal between
-/// session open and the modify APDU is detected and refused.
-///
 /// # Errors
-/// `CardSessionRevoked` on any divergence. The binding cannot
-/// be re-established by retrying -- the operator must re-run
-/// the whole command.
-pub(crate) fn re_verify_session<T: refineid_lib_core::transport::CardTransport>(
+/// `CardSessionRevoked` on any divergence.
+pub(crate) fn re_verify_session<T: CardTransport>(
     transport: &mut T,
-    bound_serial: &refineid_lib_core::identity::TokenSerial,
+    bound_serial: &TokenSerial,
 ) -> Result<(), CardPinError> {
-    use refineid_lib_core::identity::render_token_serial;
-    use refineid_lib_core::pkcs15::Pkcs15Ops as _;
     let token = transport
         .read_token_info()
         .map_err(|e| CardPinError::CardSessionRevoked {
@@ -872,12 +934,12 @@ pub(crate) fn re_verify_session<T: refineid_lib_core::transport::CardTransport>(
         })?;
     let now_serial =
         token
-            .serial_number_hex
-            .as_ref()
+            .serial_number_hex()
+            .cloned()
             .ok_or_else(|| CardPinError::CardSessionRevoked {
                 reason: "card no longer publishes EF.TokenInfo serial".to_owned(),
             })?;
-    let current_full = render_token_serial(now_serial.clone());
+    let current_full = TokenSerial::new(render_core_token_serial(now_serial).as_str().to_owned());
     if &current_full != bound_serial {
         return Err(CardPinError::CardSessionRevoked {
             reason: format!(
@@ -889,17 +951,10 @@ pub(crate) fn re_verify_session<T: refineid_lib_core::transport::CardTransport>(
     Ok(())
 }
 
-/// Inputs for `card activate` -- the one-time DVV activation flow
-/// that consumes the activation PIN (aktivointitunnusluku) from
-/// the activation letter and sets the initial values of PIN1 and
-/// PIN2.
+/// Inputs for `card activate` -- the one-time DVV activation flow.
 #[derive(Debug)]
 pub struct ActivateOptions {
     /// The activation PIN from the DVV activation letter, as typed.
-    /// [`activate_first`] reads it as the card's scheme takes it
-    /// ([`ActivationCode::for_scheme`]); a length the scheme does not
-    /// take is reported as [`CardPinError::ActivationLengthMismatch`]
-    /// before any command is sent.
     pub activation_code: PinBytes,
     /// New basic PIN (PIN1, of a length the card accepts), given exactly when PIN1
     /// awaits activation.
@@ -907,11 +962,7 @@ pub struct ActivateOptions {
     /// New signature PIN (PIN2, of a length the card accepts), given exactly when PIN2
     /// awaits activation.
     pub new_pin2: Option<PinBytes>,
-    /// Override the pre-flight refusal when no PIN awaits its
-    /// activation, and set every PIN given. Defaults to refuse; flip
-    /// to `true` only when the operator genuinely intends to overwrite
-    /// an active card's PINs (requires the activation PIN to still
-    /// be valid).
+    /// Override the pre-flight refusal when no PIN awaits its activation.
     pub allow_reactivate: bool,
 }
 
@@ -919,18 +970,12 @@ pub struct ActivateOptions {
 #[derive(Debug, Clone)]
 pub struct ActivateReport {
     /// PC/SC reader name the activation APDUs landed against.
-    /// Tier 0 `String` from `ReaderId::as_str().to_owned()`.
     pub reader: String,
-    /// The per-PIN pre-flight verdict. Surfaced so the operator
-    /// can see what refineid found when it ran.
+    /// The per-PIN pre-flight verdict.
     pub preflight: ActivatePreflightOutcome,
-    /// Card's outcome for the PIN1 activation command. `None` when
-    /// no command went to PIN1: the pre-flight refused, or PIN1 did
-    /// not await its activation and was not given.
+    /// Card's outcome for the PIN1 activation command.
     pub pin1_outcome: Option<UnblockOutcome>,
-    /// Same for PIN2. Also `None` when PIN1 setup failed (we don't
-    /// burn a second activation attempt against a card that's
-    /// already rejected the code).
+    /// Card's outcome for the PIN2 activation command.
     pub pin2_outcome: Option<UnblockOutcome>,
 }
 
@@ -957,8 +1002,7 @@ pub enum ActivatePreflightOutcome {
 }
 
 impl ActivatePreflightOutcome {
-    /// `true` when no PIN awaits its activation. The CLI uses this
-    /// to abort activation unless `--allow-reactivate` was passed.
+    /// `true` when no PIN awaits its activation.
     #[must_use]
     pub const fn looks_activated(&self) -> bool {
         matches!(self, Self::NothingAwaits { .. })
@@ -1001,14 +1045,6 @@ pub const fn judge_activation(pin1: PinActivation, pin2: PinActivation) -> Activ
 
 /// Which PINs an activation sets, from the per-PIN verdicts and the
 /// new PINs entered.
-///
-/// Without `allow_reactivate` the entries must name exactly the PINs
-/// that await activation. With it, every PIN entered is set. Either
-/// way at least one PIN must be entered.
-///
-/// # Errors
-/// [`CardPinError::ActivationEntriesMismatch`] when the entries do not
-/// match; nothing is sent to the card.
 const fn activation_targets(
     pin1: PinActivation,
     pin2: PinActivation,
@@ -1029,14 +1065,14 @@ const fn activation_targets(
     }
 }
 
-/// Map a `CHANGE REFERENCE DATA` outcome onto the
-/// `UnblockOutcome` shape so [`ActivateReport`] can carry either
-/// scheme's per-slot result behind a single field. The user-
-/// facing semantics line up: a wrong "current PIN" on the §4.6.2
-/// scheme decrements the same five-try budget that a wrong PUK
-/// burns on the §4.6.1 scheme, and the recovery path on either
-/// terminal failure is the same DVV PUK-order procedure (S4-1
-/// v4.2 §4.6.2 "When PIN(s) is/are blocked").
+/// Map a `CHANGE REFERENCE DATA` outcome onto the `UnblockOutcome` shape.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "kept to document and unit-test variant equivalence between ChangePinOutcome and UnblockOutcome"
+    )
+)]
 const fn change_to_unblock(o: ChangePinOutcome) -> UnblockOutcome {
     match o {
         ChangePinOutcome::Ok => UnblockOutcome::Ok,
@@ -1049,78 +1085,50 @@ const fn change_to_unblock(o: ChangePinOutcome) -> UnblockOutcome {
     }
 }
 
-/// Read the PUK's counter under `numbering` without spending a try
-/// and apply the retry floor to it, before anything that presents the
-/// PUK is sent: refused at two or one tries left and at an unreadable
-/// counter; sent at zero or blocked, where the card answers for itself.
-fn puk_retry_floor<T: refineid_lib_core::transport::CardTransport>(
+/// Per-slot setup for [`activate_first`]: dispatch the scheme's command under
+/// the card's numbering through `refineid-auth` (which enforces the card
+/// lengths and retry floor before any credential APDU goes out).
+fn activate_slot_setup<T: CardTransport>(
     transport: &mut T,
-    numbering: PinReferenceScheme,
-) -> Result<(), CardPinError> {
-    let status = transport
-        .puk_status_with_scheme(numbering)
-        .map_err(auth_to_card_pin)?;
-    check_puk_retry_floor(status).map_err(CardPinError::RetryFloor)
-}
-
-/// Per-slot setup for [`activate_first`]: dispatch the
-/// scheme's command under the card's numbering and return the
-/// typed [`UnblockOutcome`].
-///
-/// - §4.6.2 ([`ActivationScheme::PresetActivationPin`]):
-///   `CHANGE REFERENCE DATA` from the preset activation PIN, behind
-///   the slot's last-tries rule: refused at two or one tries left and
-///   at an unreadable counter, sent at zero or blocked.
-/// - §4.6.1 ([`ActivationScheme::ActivationCodeIsPuk`]):
-///   `RESET RETRY COUNTER` presenting the activation PIN as the
-///   PUK, behind the PUK's retry floor, which reads the same.
-///
-/// Either way the card answers an exhausted or blocked credential for
-/// itself and spends nothing, and the code in the holder's hand may be
-/// the other scheme's; the software does not close a recovery the card
-/// would allow.
-///
-/// `new_pin` is consumed by value so the PIN material drops +
-/// zeroizes at function return; the activation PIN's transient copy
-/// zeroizes on drop.
-fn activate_slot_setup<T: refineid_lib_core::transport::CardTransport>(
-    transport: &mut T,
-    lengths: &CardPinLengths,
+    lengths: &CoreCardPinLengths,
     slot: PinSlot,
     activation_code: &ActivationCode,
-    new_pin: PinBytes,
+    new_pin: &PinBytes,
 ) -> Result<UnblockOutcome, CardPinError> {
-    match activation_code {
-        ActivationCode::Seven(_) => {
-            // The activation PIN is the slot's current PIN: a wrong one
-            // spends that slot's tries, so its counter is the floor's.
-            let status = transport
-                .pin_status_with_scheme(lengths.numbering(), slot)
-                .map_err(auth_to_card_pin)?;
-            check_retry_floor(slot.into(), status).map_err(CardPinError::RetryFloor)?;
+    let outcome = match (activation_code, slot) {
+        (ActivationCode::Seven(_), PinSlot::Pin1) => {
+            let current = reconstruct_pin1(&activation_code.to_pin_bytes())?;
+            let new = reconstruct_pin1(new_pin)?;
             transport
-                .change_pin(lengths, slot, activation_code.to_pin_bytes(), new_pin)
-                .map(change_to_unblock)
-                .map_err(auth_to_card_pin)
+                .change_pin1(lengths, current, new)
+                .map_err(core_auth_to_card_pin)?
         }
-        ActivationCode::Eight(_) => {
-            // The activation PIN is presented as the PUK, under the
-            // PUK's counter.
-            puk_retry_floor(transport, lengths.numbering())?;
+        (ActivationCode::Seven(_), PinSlot::Pin2) => {
+            let current = reconstruct_pin2(&activation_code.to_pin_bytes())?;
+            let new = reconstruct_pin2(new_pin)?;
             transport
-                .reset_retry_counter(lengths, slot, activation_code.to_pin_bytes(), new_pin)
-                .map_err(auth_to_card_pin)
+                .change_pin2(lengths, current, new)
+                .map_err(core_auth_to_card_pin)?
         }
-    }
+        (ActivationCode::Eight(_), PinSlot::Pin1) => {
+            let puk = reconstruct_puk(&activation_code.to_pin_bytes())?;
+            let new = reconstruct_pin1(new_pin)?;
+            transport
+                .unblock_pin1(lengths, puk, new)
+                .map_err(core_auth_to_card_pin)?
+        }
+        (ActivationCode::Eight(_), PinSlot::Pin2) => {
+            let puk = reconstruct_puk(&activation_code.to_pin_bytes())?;
+            let new = reconstruct_pin2(new_pin)?;
+            transport
+                .unblock_pin2(lengths, puk, new)
+                .map_err(core_auth_to_card_pin)?
+        }
+    };
+    Ok(convert_manage_to_unblock(outcome))
 }
 
-/// Check every activation entry against the card's lengths before any
-/// command: each new PIN given, and the activation PIN in the role it is
-/// presented as -- the PIN's current value under the preset activation
-/// PIN scheme, the PUK otherwise.
-///
-/// # Errors
-/// [`CardPinError::PinPolicy`] for an entry the card does not accept.
+/// Check every activation entry against the card's lengths before any command.
 fn check_activation_entries(
     lengths: &CardPinLengths,
     activation_code: &ActivationCode,
@@ -1149,10 +1157,6 @@ const fn activation_continues_after_pin1(outcome: UnblockOutcome) -> bool {
 }
 
 /// Read the typed activation PIN as the card's scheme takes it.
-///
-/// # Errors
-/// [`CardPinError::ActivationLengthMismatch`] for a length the scheme
-/// does not take; nothing is sent to the card.
 fn activation_code_for(
     scheme: ActivationScheme,
     code: PinBytes,
@@ -1170,145 +1174,110 @@ fn activation_code_for(
     })
 }
 
-/// Drive the `card activate` flow: bound card -> activation
-/// code from the letter -> fresh PIN1/PIN2.
+/// Drive the `card activate` flow: bound card -> activation code -> fresh PIN1/PIN2.
 ///
-/// Two activation schemes per FINEID S4-1 v4.2 §4.6, sent under the
-/// card's reference numbering:
-///
-/// - **§4.6.1, [`ActivationScheme::ActivationCodeIsPuk`]:** PIN1
-///   and PIN2 ship BLOCKED. The 8-digit activation PIN is the
-///   PUK that unblocks them: `RESET RETRY COUNTER` per PIN. An
-///   organization card takes this scheme.
-/// - **§4.6.2, [`ActivationScheme::PresetActivationPin`]:** PIN1
-///   and PIN2 ship SET to the same 7-digit activation PIN:
-///   `CHANGE REFERENCE DATA` per PIN with
-///   `(current=activation_pin, new=new_pin)`.
-///
-/// Steps:
-///
-///   1. Read the typed code as the scheme takes it; a wrong length
-///      is refused before the reader is opened.
-///   2. Open a transport session against the bound reader and
-///      re-verify the session binding.
-///   3. Judge each PIN from its counter-safe probes (PIN changed
-///      flag and status, [`PinActivation::judge`]).
-///   4. Refuse without `--allow-reactivate` when no PIN awaits its
-///      activation, and refuse when the new PINs entered are not
-///      exactly the PINs that await it.
-///   5. Set each PIN entered. A PIN1 outcome other than `Ok` stops
-///      the flow before PIN2.
-///
-/// `options` (and the inner [`PinBytes`]) is consumed by value
-/// so on return the activation PIN + new PIN1/PIN2 are zeroized.
+/// Runs inside a single [`refineid_pcsc::PcscCard::pin_sequence`] transaction
+/// that resets the card on exit.
 ///
 /// # Errors
-/// PC/SC, PKCS#15-SELECT, reader-pick, length or local-policy
-/// failures. Card-side outcomes (wrong activation PIN, locked, etc.)
-/// are surfaced via [`ActivateReport`], not as `Err`.
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "ActivateOptions embeds activation PIN + new PIN1/PIN2 PinBytes; consumed by value so all drop+zeroize at function return."
-)]
+/// PC/SC, PKCS#15-SELECT, reader-pick, length or local-policy failures.
 pub fn activate_first(
     backend: PcscBackend,
     ctx: ActivationCardContext,
     options: ActivateOptions,
 ) -> Result<ActivateReport, CardPinError> {
-    // Read the code as the scheme takes it *before* opening the
-    // reader, so a wrong length costs nothing.
+    let ActivateOptions {
+        activation_code: raw_code,
+        new_pin1,
+        new_pin2,
+        allow_reactivate,
+    } = options;
     let reader_label = ctx.reader_id.as_str().to_owned();
-    let activation_code = activation_code_for(ctx.scheme, options.activation_code.clone())?;
+    let activation_code = activation_code_for(ctx.scheme, raw_code)?;
+    let core_scheme = to_core_scheme(ctx.numbering);
 
-    let mut transport = backend.open_exclusive(&ctx.reader_id, ReaderAccessCap::Read)?;
-    transport
-        .select_pkcs15_application()
-        .map_err(|e| CardPinError::Pkcs15Select(format!("{e}")))?;
+    let card = backend.open_exclusive(&ctx.reader_id, ReaderAccessCap::PinSequence)?;
+    let report = card.pin_sequence(|mut tx| -> Result<ActivateReport, CardPinError> {
+        tx.select_pkcs15_application()
+            .map_err(|e| CardPinError::Pkcs15Select(format!("{e}")))?;
 
-    // Session re-verification: the card we are about to touch
-    // must be the same physical card the session was bound to.
-    // A card swap / reader rename / reader unplug between session
-    // open and here revokes the session before any modify APDU
-    // lands.
-    re_verify_session(&mut transport, &ctx.bound_serial)?;
-    let lengths = transport
-        .read_card_pin_lengths()
-        .map_err(auth_to_card_pin)?;
+        re_verify_session(&mut tx, &ctx.bound_serial)?;
+        let core_lengths = tx
+            .read_card_pin_lengths_with_scheme(core_scheme)
+            .map_err(core_auth_to_card_pin)?;
+        let legacy_lengths = convert_core_lengths(core_lengths, ctx.numbering);
 
-    let (_, pin1) = probe_pin_activation(&mut transport, ctx.numbering, ctx.scheme, PinSlot::Pin1);
-    let (_, pin2) = probe_pin_activation(&mut transport, ctx.numbering, ctx.scheme, PinSlot::Pin2);
-    let preflight = classify_preflight(pin1, pin2);
+        let (_, pin1) = probe_pin_activation(&mut tx, ctx.numbering, ctx.scheme, PinSlot::Pin1);
+        let (_, pin2) = probe_pin_activation(&mut tx, ctx.numbering, ctx.scheme, PinSlot::Pin2);
+        let preflight = classify_preflight(pin1, pin2);
 
-    if !options.allow_reactivate && preflight.looks_activated() {
-        return Ok(ActivateReport {
-            reader: reader_label,
-            preflight,
-            pin1_outcome: None,
-            pin2_outcome: None,
-        });
-    }
-    activation_targets(
-        pin1,
-        pin2,
-        options.new_pin1.is_some(),
-        options.new_pin2.is_some(),
-        options.allow_reactivate,
-    )?;
-    check_activation_entries(
-        &lengths,
-        &activation_code,
-        options.new_pin1.as_ref(),
-        options.new_pin2.as_ref(),
-    )?;
-
-    let mut pin1_outcome = None;
-    if let Some(new_pin1) = options.new_pin1 {
-        // Re-verify session before the first modify APDU.
-        re_verify_session(&mut transport, &ctx.bound_serial)?;
-        let outcome = activate_slot_setup(
-            &mut transport,
-            &lengths,
-            PinSlot::Pin1,
-            &activation_code,
-            new_pin1,
-        )?;
-        pin1_outcome = Some(outcome);
-        // Single-shot: if PIN1 setup rejected the activation PIN
-        // (wrong code, locked slot, anything other than Ok), don't
-        // burn a second card-side try on the PIN2 slot. The operator
-        // re-runs after fixing the input.
-        if !activation_continues_after_pin1(outcome) {
+        if !allow_reactivate && preflight.looks_activated() {
             return Ok(ActivateReport {
                 reader: reader_label,
                 preflight,
-                pin1_outcome,
+                pin1_outcome: None,
                 pin2_outcome: None,
             });
         }
-    }
-
-    let pin2_outcome = if let Some(new_pin2) = options.new_pin2 {
-        // Re-verify session before the PIN2 modify APDU. A card swap
-        // between PIN1 and PIN2 setup is the canonical TOCTOU case
-        // this gate defends against.
-        re_verify_session(&mut transport, &ctx.bound_serial)?;
-        Some(activate_slot_setup(
-            &mut transport,
-            &lengths,
-            PinSlot::Pin2,
+        activation_targets(
+            pin1,
+            pin2,
+            new_pin1.is_some(),
+            new_pin2.is_some(),
+            allow_reactivate,
+        )?;
+        check_activation_entries(
+            &legacy_lengths,
             &activation_code,
-            new_pin2,
-        )?)
-    } else {
-        None
-    };
+            new_pin1.as_ref(),
+            new_pin2.as_ref(),
+        )?;
 
-    Ok(ActivateReport {
-        reader: reader_label,
-        preflight,
-        pin1_outcome,
-        pin2_outcome,
-    })
+        let mut pin1_outcome = None;
+        if let Some(new_pin1) = new_pin1 {
+            re_verify_session(&mut tx, &ctx.bound_serial)?;
+            let outcome = activate_slot_setup(
+                &mut tx,
+                &core_lengths,
+                PinSlot::Pin1,
+                &activation_code,
+                &new_pin1,
+            )?;
+            pin1_outcome = Some(outcome);
+            if !activation_continues_after_pin1(outcome) {
+                return Ok(ActivateReport {
+                    reader: reader_label,
+                    preflight,
+                    pin1_outcome,
+                    pin2_outcome: None,
+                });
+            }
+        }
+
+        let pin2_outcome = if let Some(new_pin2) = new_pin2 {
+            re_verify_session(&mut tx, &ctx.bound_serial)?;
+            Some(activate_slot_setup(
+                &mut tx,
+                &core_lengths,
+                PinSlot::Pin2,
+                &activation_code,
+                &new_pin2,
+            )?)
+        } else {
+            None
+        };
+
+        Ok(ActivateReport {
+            reader: reader_label,
+            preflight,
+            pin1_outcome,
+            pin2_outcome,
+        })
+    })??;
+
+    drop(activation_code);
+    drop(ctx);
+    Ok(report)
 }
 
 impl fmt::Display for ActivateReport {
@@ -1365,20 +1334,10 @@ impl fmt::Display for ActivateReport {
     }
 }
 
-/// Helpers hosted on a unit struct (no free
-/// functions with borrowed parameters).
+/// Helpers hosted on a unit struct.
 struct CardPinHelpers;
 
 impl CardPinHelpers {
-    /// Render an [`UnblockOutcome`] for the activation / PIN-
-    /// change reports.
-    ///
-    /// Each variant names the card-side condition in a way
-    /// the operator can act on: `Ok` confirms counter reset,
-    /// `WrongPuk` shows the remaining attempts, `PukLocked`
-    /// names the DVV-paid reissue path, etc. `LengthError`
-    /// is a host-side bug -- if the card returned `6700`,
-    /// refineid sent a malformed APDU.
     fn fmt_unblock(o: UnblockOutcome, label: &str) -> String {
         match o {
             UnblockOutcome::Ok => format!("ok ({label} set; retry counter reset to max)"),
@@ -1403,47 +1362,48 @@ impl CardPinHelpers {
 
 #[cfg(test)]
 mod activate_tests {
-    use refineid_atr::{Atr, AtrError, MINIMAL_DIRECT_ATR};
+    use refineid_apdu::{
+        CardTransport, CommandApdu, CredentialCommand, PinRetries, ResponseApdu, StatusWord,
+        TransportOutcome,
+    };
+    use refineid_auth::manage::RESET_RETRY_COUNTER_INS;
+    use refineid_auth::verify::VERIFY_INS;
+    use refineid_auth::{
+        CardPinLengths as CoreCardPinLengths, PIN1_REFERENCE, PIN1_REFERENCE_ORGANIZATIONAL,
+        PUK_REFERENCE_ORGANIZATIONAL,
+    };
     use refineid_lib_core::activation::{ActivationScheme, PinActivation};
-    use refineid_lib_core::apdu::status_word::{PinRetries, StatusWord};
-    use refineid_lib_core::auth::commands::{GetPinInfo, ResetRetryCounter, Verify};
-    use refineid_lib_core::auth::{
-        PIN1_REFERENCE_ORGANIZATIONAL, PIN1_REFERENCE_PKCS15, PUK_REFERENCE_ORGANIZATIONAL,
-        PinReferenceScheme,
-    };
+    use refineid_lib_core::auth::PinReferenceScheme;
+    use refineid_lib_core::auth::commands::GetPinInfo;
     use refineid_lib_core::pin::{ActivationCode, PinBytes};
-    use refineid_lib_core::transport::{
-        CardTransport, CommandApdu, ResponseApdu, TransportOutcome,
-    };
 
     use super::{
         ActivatePreflightOutcome, ActivationEvidence, CardPinError, ChangePinOutcome, PinSlot,
         RetryFloorRefusal, UnblockOutcome, activate_slot_setup, activation_code_for,
         activation_continues_after_pin1, activation_targets, change_to_unblock, classify_preflight,
-        judge_activation, probe_pin_activation,
+        judge_activation, probe_pin_activation, to_core_scheme,
     };
     use crate::test_util::{TestResult, check_true};
 
     /// Tries left at which a PIN attempt is served.
     const SERVED: [u8; 3] = [5, 4, 3];
-    /// Tries left at which an activation code is not presented, as the
-    /// PUK or as a preset activation PIN; at zero the card answers for
-    /// itself.
+    /// Tries left at which an activation code is not presented.
     const LAST_TWO_TRIES: [u8; 2] = [2, 1];
     /// A full counter.
     const FULL_COUNTER: u8 = 5;
     /// A counter with no tries left (`63C0`).
     const NO_TRIES: u8 = 0;
-    /// APDUs a served preset-PIN activation sends: the status probe and
-    /// `CHANGE REFERENCE DATA`.
+    /// APDUs a served preset-PIN activation sends: status probe and `CHANGE REFERENCE DATA`.
     const PROBE_AND_CHANGE: usize = 2;
-    /// APDUs a refused activation sends: the counter-safe probe only.
+    /// APDUs a refused activation sends on a single-probe path.
     const PROBE_ONLY: usize = 1;
-    /// APDUs a served citizen PUK-code activation sends: the PUK probe
-    /// and `RESET RETRY COUNTER`.
+    /// Counter-safe probes on citizen unreadable PUK: Case 1 VERIFY PUK + GET DATA fallback.
+    const CITIZEN_UNREADABLE_PUK_PROBES: usize = 2;
+    /// Zero credential commands sent on refusal.
+    const NO_CREDENTIAL_COMMANDS: usize = 0;
+    /// APDUs a served citizen PUK-code activation sends: PUK probe and `RESET RETRY COUNTER`.
     const PROBE_AND_RESET: usize = 2;
-    /// APDUs an organization PUK-code activation sends when the PUK is
-    /// refused: the PUK probe and the PUK VERIFY.
+    /// APDUs an organization PUK-code activation sends when the PUK is refused.
     const PROBE_AND_VERIFY: usize = 2;
     /// Index of the second recorded command.
     const SECOND_COMMAND: usize = 1;
@@ -1470,10 +1430,11 @@ mod activate_tests {
     /// PIN changed flag: changed.
     const PIN_CHANGED: u8 = 1;
 
-    /// Answers every command with one status word and records them.
+    /// Answers every command with one status word and records plain/credential headers.
     struct FixedStatusTransport {
         status: StatusWord,
         sent: Vec<Vec<u8>>,
+        credential_count: usize,
     }
 
     impl FixedStatusTransport {
@@ -1481,28 +1442,39 @@ mod activate_tests {
             Self {
                 status,
                 sent: Vec::new(),
+                credential_count: 0,
             }
+        }
+
+        fn reply(&self) -> TransportOutcome {
+            let [sw1, sw2] = self.status.as_u16().to_be_bytes();
+            TransportOutcome::Response(ResponseApdu {
+                body: Vec::new(),
+                sw1,
+                sw2,
+            })
         }
     }
 
     impl CardTransport for FixedStatusTransport {
         type Error = String;
 
-        fn transmit_outcome(
-            &mut self,
-            apdu: &CommandApdu,
-        ) -> Result<TransportOutcome, Self::Error> {
+        fn transmit(&mut self, apdu: &CommandApdu) -> Result<TransportOutcome, Self::Error> {
             self.sent.push(apdu.as_bytes().to_vec());
-            let [sw1, sw2] = self.status.as_u16().to_be_bytes();
-            Ok(TransportOutcome::Response(ResponseApdu {
-                body: Vec::new(),
-                sw1,
-                sw2,
-            }))
+            Ok(self.reply())
         }
 
-        fn atr(&self) -> Result<Atr, AtrError> {
-            Atr::new(MINIMAL_DIRECT_ATR)
+        fn transmit_credential(
+            &mut self,
+            command: CredentialCommand,
+        ) -> Result<TransportOutcome, Self::Error> {
+            self.credential_count += 1;
+            command.expose_wire(|wire| {
+                // Record only the 4-byte APDU header (CLA INS P1 P2), never credential bytes.
+                let header_len = wire.len().min(P2_INDEX + 1);
+                self.sent.push(wire[..header_len].to_vec());
+            });
+            Ok(self.reply())
         }
     }
 
@@ -1527,10 +1499,7 @@ mod activate_tests {
     impl CardTransport for ProbeTransport {
         type Error = String;
 
-        fn transmit_outcome(
-            &mut self,
-            apdu: &CommandApdu,
-        ) -> Result<TransportOutcome, Self::Error> {
+        fn transmit(&mut self, apdu: &CommandApdu) -> Result<TransportOutcome, Self::Error> {
             let bytes = apdu.as_bytes().to_vec();
             let instruction = bytes.get(INS_INDEX).copied();
             self.sent.push(bytes);
@@ -1551,8 +1520,11 @@ mod activate_tests {
             Ok(TransportOutcome::Response(ResponseApdu { body, sw1, sw2 }))
         }
 
-        fn atr(&self) -> Result<Atr, AtrError> {
-            Atr::new(MINIMAL_DIRECT_ATR)
+        fn transmit_credential(
+            &mut self,
+            _command: CredentialCommand,
+        ) -> Result<TransportOutcome, Self::Error> {
+            Err("probe transport must never receive credentials".to_owned())
         }
     }
 
@@ -1580,10 +1552,10 @@ mod activate_tests {
         let new_pin = PinBytes::new(NEW_PIN.to_vec())?;
         Ok(activate_slot_setup(
             transport,
-            &refineid_lib_core::auth::CardPinLengths::not_listed(numbering),
+            &CoreCardPinLengths::not_listed(to_core_scheme(numbering)),
             PinSlot::Pin1,
             &code(scheme)?,
-            new_pin,
+            &new_pin,
         ))
     }
 
@@ -1656,15 +1628,16 @@ mod activate_tests {
                 transport.sent.len() == PROBE_ONLY,
                 "only the counter-safe probe sent below the floor",
             )?;
+            check_true(
+                transport.credential_count == NO_CREDENTIAL_COMMANDS,
+                "no credential APDU sent below the floor",
+            )?;
         }
         Ok(())
     }
 
     #[test]
     fn preset_pin_activation_at_zero_tries_reaches_the_card() -> TestResult {
-        // The card answers for itself and spends nothing; the code may
-        // be a PUK the card still accepts. Here it answers `63C0`, the
-        // PIN blocked.
         let mut transport = FixedStatusTransport::new(tries(NO_TRIES)?);
         let outcome = setup(
             &mut transport,
@@ -1672,7 +1645,11 @@ mod activate_tests {
             ActivationScheme::PresetActivationPin,
         )?;
         check_true(
-            matches!(outcome, Ok(UnblockOutcome::PukLocked)),
+            matches!(
+                outcome,
+                Ok(UnblockOutcome::WrongPuk { retries_left })
+                    if retries_left.get() == NO_TRIES
+            ),
             "the card's own answer is reported",
         )?;
         check_true(
@@ -1727,6 +1704,10 @@ mod activate_tests {
                 "unreadable counter refused",
             )?;
             check_true(transport.sent.len() == PROBE_ONLY, "only the probe sent")?;
+            check_true(
+                transport.credential_count == NO_CREDENTIAL_COMMANDS,
+                "no credential APDU sent on unreadable counter",
+            )?;
         }
         Ok(())
     }
@@ -1776,14 +1757,16 @@ mod activate_tests {
                 transport.sent.len() == PROBE_ONLY,
                 "only the counter-safe PUK probe sent below the floor",
             )?;
+            check_true(
+                transport.credential_count == NO_CREDENTIAL_COMMANDS,
+                "no credential APDU sent below the PUK floor",
+            )?;
         }
         Ok(())
     }
 
     #[test]
     fn puk_code_activation_at_zero_puk_tries_reaches_the_card() -> TestResult {
-        // The card answers for itself and spends nothing; the code may
-        // still be an activation code it accepts. Here it answers `63C0`.
         for (numbering, sent) in [
             (PinReferenceScheme::Citizen, PROBE_AND_RESET),
             (PinReferenceScheme::Organizational, PROBE_AND_VERIFY),
@@ -1812,12 +1795,9 @@ mod activate_tests {
 
     #[test]
     fn puk_code_activation_on_a_blocked_puk_reports_the_cards_answer() -> TestResult {
-        for (status, answer) in [
-            (StatusWord::AuthenticationBlocked, UnblockOutcome::PukLocked),
-            (
-                StatusWord::ReferenceDataInvalidated,
-                UnblockOutcome::Invalidated,
-            ),
+        for status in [
+            StatusWord::AuthenticationBlocked,
+            StatusWord::ReferenceDataInvalidated,
         ] {
             let mut transport = FixedStatusTransport::new(status);
             let outcome = setup(
@@ -1826,8 +1806,8 @@ mod activate_tests {
                 ActivationScheme::ActivationCodeIsPuk,
             )?;
             check_true(
-                matches!(outcome, Ok(reported) if reported == answer),
-                "the card's own answer is reported",
+                matches!(outcome, Ok(UnblockOutcome::PukLocked)),
+                "the card's own blocked answer is reported",
             )?;
             check_true(
                 transport.sent.len() == PROBE_AND_RESET,
@@ -1839,7 +1819,6 @@ mod activate_tests {
 
     #[test]
     fn puk_code_activation_is_refused_on_an_unreadable_puk_counter() -> TestResult {
-        // Success with no PIN container body carries no counter.
         for status in [StatusWord::Success, StatusWord::from_u16(UNMODELED_SW)] {
             let mut transport = FixedStatusTransport::new(status);
             let outcome = setup(
@@ -1856,7 +1835,14 @@ mod activate_tests {
                 ),
                 "unreadable PUK counter refused",
             )?;
-            check_true(transport.sent.len() == PROBE_ONLY, "only the probe sent")?;
+            check_true(
+                transport.sent.len() == CITIZEN_UNREADABLE_PUK_PROBES,
+                "only counter-safe VERIFY and GET DATA probes sent",
+            )?;
+            check_true(
+                transport.credential_count == NO_CREDENTIAL_COMMANDS,
+                "no credential APDU sent on unreadable PUK counter",
+            )?;
         }
         Ok(())
     }
@@ -1864,8 +1850,6 @@ mod activate_tests {
     #[test]
     fn organization_activation_speaks_the_organization_numbering() -> TestResult {
         let mut transport = FixedStatusTransport::new(StatusWord::Success);
-        // The organization PUK probe answers with no counter, so the
-        // floor refuses after the probe alone.
         let refused = setup(
             &mut transport,
             PinReferenceScheme::Organizational,
@@ -1910,14 +1894,14 @@ mod activate_tests {
                 .get(SECOND_COMMAND)
                 .and_then(|apdu| apdu.get(INS_INDEX))
                 .copied()
-                == Some(Verify::INS),
+                == Some(VERIFY_INS),
             "the code is verified as the PUK first",
         )?;
         check_true(
             transport
                 .sent
                 .iter()
-                .all(|apdu| apdu.get(INS_INDEX).copied() != Some(ResetRetryCounter::INS)),
+                .all(|apdu| apdu.get(INS_INDEX).copied() != Some(RESET_RETRY_COUNTER_INS)),
             "no RESET RETRY COUNTER was sent",
         )
     }
@@ -2004,7 +1988,7 @@ mod activate_tests {
     #[test]
     fn the_probes_speak_the_session_numbering() -> TestResult {
         for (numbering, reference) in [
-            (PinReferenceScheme::Citizen, PIN1_REFERENCE_PKCS15),
+            (PinReferenceScheme::Citizen, PIN1_REFERENCE),
             (
                 PinReferenceScheme::Organizational,
                 PIN1_REFERENCE_ORGANIZATIONAL,
@@ -2113,10 +2097,6 @@ mod activate_tests {
         )
     }
 
-    /// Preset-PIN setup uses `CHANGE REFERENCE DATA`; the
-    /// outcome is `ChangePinOutcome`. `ActivateReport` carries
-    /// the unified `UnblockOutcome` form -- check the variant
-    /// mapping covers every case.
     #[test]
     fn change_to_unblock_covers_every_variant() -> TestResult {
         let three = PinRetries::from_nibble(3).ok_or("PinRetries::from_nibble(3)")?;

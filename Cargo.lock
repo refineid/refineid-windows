@@ -991,11 +991,13 @@ source = "git+https://github.com/refineid/refineid-core.git?branch=main#a3bfe1a7
 name = "refineid-card-manager-core"
 version = "26.11.23"
 dependencies = [
+ "const-oid",
+ "refineid-apdu",
  "refineid-atr",
  "refineid-auth",
+ "refineid-ber",
  "refineid-dev-errors",
  "refineid-lib-core",
- "refineid-lib-pcsc",
  "refineid-pace",
  "refineid-pcsc",
  "refineid-pkcs15",
@@ -1109,22 +1111,11 @@ dependencies = [
  "refineid-ber",
  "refineid-cms",
  "refineid-digest",
- "refineid-pace",
  "refineid-pkcs15",
  "sha2 0.11.1",
  "spki",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "refineid-lib-pcsc"
-version = "26.11.23"
-dependencies = [
- "pcsc",
- "refineid-atr",
- "refineid-dev-errors",
- "refineid-lib-core",
 ]
 
 [[package]]
