@@ -11,8 +11,7 @@ card and network I/O happen behind ports (traits) that adapter crates implement.
   `pkcs15.rs` (on-card file layout), `pin.rs` (zeroizing PIN containers), `sign.rs` (PSO sign/decipher operations).
 - **PACE**: `pace.rs` (PACE key agreement), `secure_messaging.rs` (AES CBC/CMAC session channel),
   `card_access.rs`, `can.rs`.
-- **PKI**: `x509.rs`, `cert_state.rs`
-  -- parsing plus signature verification, with "verified" wrapper types so unchecked data cannot be consumed.
+- **PKI**: `x509.rs` (re-exporting `refineid-cms::x509` plus FINEID DN accessors).
 - **Primitives**: `ber.rs` (BER-TLV), `oid.rs` (typed OIDs, compile-time dotted-decimal constants),
   `crypto/` (AES/CMAC/ECDH containers, Brainpool P-384 math for PACE), `identity.rs` (typed card-holder fields),
   `iso8601.rs`, `hex.rs`, `rng.rs`.

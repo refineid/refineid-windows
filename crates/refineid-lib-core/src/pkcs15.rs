@@ -667,7 +667,7 @@ pub trait Pkcs15Ops: CardTransport {
     fn read_certificate(
         &mut self,
         slot: CertSlot,
-    ) -> Result<crate::cert_state::CertDer, Pkcs15Error<TxError<Self>>>
+    ) -> Result<refineid_pkcs15::UnvalidatedCertificate, Pkcs15Error<TxError<Self>>>
     where
         Self: Sized,
     {
@@ -689,7 +689,7 @@ pub trait Pkcs15Ops: CardTransport {
                 self.read_binary_der_object(slot.label())?
             }
         };
-        Ok(crate::cert_state::CertDer::new(bytes))
+        Ok(refineid_pkcs15::UnvalidatedCertificate::new(bytes))
     }
 
     /// Read + parse `EF.TokenInfo` (`5032`).

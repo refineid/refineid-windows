@@ -449,7 +449,7 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
         {
             Ok(cert) => (
                 CardSessionTransport::plain(raw_transport),
-                cert.into_bytes(),
+                cert.as_bytes().to_vec(),
             ),
             Err(_plain_error) => {
                 let can = match read_can(&raw_transport.atr) {
@@ -481,7 +481,7 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
                 };
                 let mut protected = CardSessionTransport::protected(raw_transport, pace_session);
                 let cert = match protected.read_certificate(CertSlot::Authentication) {
-                    Ok(cert) => cert.into_bytes(),
+                    Ok(cert) => cert.as_bytes().to_vec(),
                     Err(error) => {
                         refineid_dev_errors::report!(
                             CardModule,
@@ -495,7 +495,7 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
             }
         };
         let signature_cert_der = match transport.read_certificate(CertSlot::Signature) {
-            Ok(cert) => cert.into_bytes(),
+            Ok(cert) => cert.as_bytes().to_vec(),
             Err(error) => {
                 refineid_dev_errors::report!(CardModule, "signature certificate not read", error);
                 return SCARD_F_INTERNAL_ERROR;
