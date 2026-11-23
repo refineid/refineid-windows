@@ -49,47 +49,4 @@ impl Hex {
         }
         out
     }
-
-    /// Decode one ASCII hex digit at const-eval time.
-    #[cfg(test)]
-    #[expect(
-        clippy::arithmetic_side_effects,
-        clippy::panic,
-        reason = "the panic IS the validation: every caller is a const item, so a \
-                  non-hex digit or out-of-range subtraction fails the build instead \
-                  of ever reaching a citizen; match arms bound each subtraction"
-    )]
-    const fn nibble(digit: u8) -> u8 {
-        match digit {
-            b'0'..=b'9' => digit - b'0',
-            b'A'..=b'F' => digit - b'A' + 10,
-            b'a'..=b'f' => digit - b'a' + 10,
-            _ => panic!("hex constant contains a non-hex digit"),
-        }
-    }
-
-    /// Decode a hex string literal into a fixed-size byte array at
-    /// const-eval time for KAT test fixtures.
-    #[cfg(test)]
-    #[expect(
-        clippy::indexing_slicing,
-        clippy::arithmetic_side_effects,
-        reason = "const-eval hex decode: the length assert above the loop bounds every \
-                  index and product, and every caller is a const item, so any slip is \
-                  a compile error rather than a runtime panic"
-    )]
-    pub(crate) const fn decode_const<const N: usize>(hex_digits: &str) -> [u8; N] {
-        let src = hex_digits.as_bytes();
-        assert!(
-            src.len() == 2 * N,
-            "hex constant length does not match the declared byte width"
-        );
-        let mut out = [0_u8; N];
-        let mut i = 0;
-        while i < N {
-            out[i] = (Self::nibble(src[2 * i]) << 4_u32) | Self::nibble(src[2 * i + 1]);
-            i += 1;
-        }
-        out
-    }
 }

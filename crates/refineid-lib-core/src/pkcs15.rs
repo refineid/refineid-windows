@@ -1287,11 +1287,24 @@ where
     B::Error: core::fmt::Display,
 {
     use crate::backend::ReaderAccessCap;
-    use crate::card_access::CardAccessOps as _;
 
-    backend
-        .open_exclusive(reader_id, ReaderAccessCap::Read)
-        .is_ok_and(|mut transport| transport.read_card_access().is_ok())
+    let Ok(mut transport) = backend.open_exclusive(reader_id, ReaderAccessCap::Read) else {
+        return false;
+    };
+    if transport.select_mf().is_err() {
+        return false;
+    }
+    if transport
+        .select_ef(refineid_pace::EF_CARD_ACCESS_FID.to_be_bytes())
+        .is_err()
+    {
+        return false;
+    }
+    let Ok(bytes) = transport.read_binary_to_end(None) else {
+        return false;
+    };
+    refineid_pace::CardAccess::parse(refineid_pace::UnvalidatedCardAccess::from_card_bytes(bytes))
+        .is_ok()
 }
 
 /// Every connected reader whose card serves `EF.CardAccess` on

@@ -12,22 +12,13 @@
 // implied. See the License for the specific language governing
 // permissions and limitations under the License.
 
-//! Cryptographic primitives the protocol layer needs but the
-//! `RustCrypto` stack does not currently ship as a single
-//! integrated piece.
+//! Typed cryptographic containers and signature-verification re-exports.
 //!
-//! - [`brainpool_p384`] -- `BrainpoolP384r1` over `crypto-bigint`.
-//!   Not in `RustCrypto/elliptic-curves` at our toolchain version.
-//! - [`rsa`] -- PKCS#1 v1.5 SHA-256 signature verification.
-//!   Verify-only; no key generation or signing here. Used by
-//!   the cert chain / CRL / OCSP signature checks.
-//! - [`symmetric`] -- AES-256 CBC / ECB + AES-256-CMAC + the ICAO
-//!   Doc 9303 Part 11 KDF. Combines the `aes`, `cbc`, `cmac`, and
-//!   `sha2` crates into the small surface PACE and secure
-//!   messaging actually use.
+//! - [`container`] -- typed ciphertext/plaintext containers for card
+//!   operations.
+//! - [`ecdsa`] / [`rsa`] -- signature-verification primitives re-exported
+//!   from `refineid-cms`.
 
-pub mod brainpool_p384;
 pub mod container;
 pub use refineid_cms::ecdsa;
 pub use refineid_cms::rsa;
-pub mod symmetric;

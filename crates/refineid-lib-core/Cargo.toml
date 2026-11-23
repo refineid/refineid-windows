@@ -17,11 +17,7 @@ refineid-atr.workspace = true
 refineid-ber.workspace = true
 refineid-cms.workspace = true
 refineid-digest.workspace = true
-# Crypto stack for PACE + secure messaging.
-aes.workspace = true
-cbc.workspace = true
-cmac.workspace = true
-crypto-bigint.workspace = true
+refineid-pace.workspace = true
 subtle.workspace = true
 # Standards-based ASN.1 / X.690 DER parsing (re-exports `der`).
 spki.workspace = true
