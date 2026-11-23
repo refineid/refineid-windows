@@ -24,6 +24,7 @@ refineid-apdu.workspace = true
 refineid-atr.workspace = true
 refineid-lib-core.workspace = true
 refineid-pace.workspace = true
+refineid-pkcs15.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 refineid-apdu.workspace = true
@@ -33,6 +34,7 @@ refineid-dev-errors.workspace = true
 refineid-digest.workspace = true
 refineid-lib-core.workspace = true
 refineid-pace.workspace = true
+refineid-pkcs15.workspace = true
 refineid-rapp-core.workspace = true
 refineid-windows-credential-store.workspace = true
 zeroize.workspace = true

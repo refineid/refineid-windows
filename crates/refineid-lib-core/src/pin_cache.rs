@@ -36,9 +36,9 @@ use subtle::ConstantTimeEq as _;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::auth::{PinSlot, PinStatus};
-use crate::identity::TokenSerial;
 use crate::pin::PinBytes;
 use crate::pin_retry_risk::{pin1_status_permits_reusable_cache, reports_no_tries_left};
+use refineid_pkcs15::TokenSerial;
 
 /// A previously card-rejected PIN was offered again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

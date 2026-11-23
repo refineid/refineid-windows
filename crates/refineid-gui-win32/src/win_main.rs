@@ -757,7 +757,10 @@ fn on_create(main: HWND) -> windows::core::Result<()> {
     // Test hook: a debug build prefills the CAN from the environment
     // when it parses.
     if let Some(prefill) = test_can()
-        && refineid_lib_core::can::Can::new(&prefill).is_ok()
+        && refineid_pace::Can::reconstruct(refineid_pace::UnvalidatedCan::from_owned_text(
+            prefill.clone(),
+        ))
+        .is_ok()
     {
         set_text(identity_can, &prefill);
     }

@@ -43,7 +43,7 @@ use refineid_lib_core::auth::{
     PukStatus, UnblockOutcome,
 };
 use refineid_lib_core::fineid_card::{CardClassificationError, FineidCardModel};
-use refineid_lib_core::identity::{CredentialIdentity, TokenSerial};
+use refineid_lib_core::identity::CredentialIdentity;
 use refineid_lib_core::pin::{ActivationCode, PinBytes, PinRoleError, Puk};
 use refineid_lib_core::pin_retry_risk::{FlooredCredential, RetryFloorRefusal, check_retry_floor};
 use refineid_lib_core::x509::OwnedCert;
@@ -51,9 +51,7 @@ use refineid_pcsc::{
     PcscBackend, PcscError, ReaderAccessCap, ReaderBackend as _, ReaderFilter, ReaderId,
     ReaderPickError,
 };
-use refineid_pkcs15::{
-    CertSlot as CoreCertSlot, Pkcs15Ops as _, render_token_serial as render_core_token_serial,
-};
+use refineid_pkcs15::{CertSlot as CoreCertSlot, Pkcs15Ops as _, TokenSerial, render_token_serial};
 
 use crate::reader_pick::{FineidReaderPick, pick_fineid_reader};
 
@@ -597,7 +595,7 @@ pub fn establish_card_session(
         .read_token_info()
         .map_err(|e| CardPinError::Transport(format!("EF.TokenInfo read: {e}")))?;
     let bound_serial = match token.serial_number_hex().cloned() {
-        Some(hex) => TokenSerial::new(render_core_token_serial(hex).as_str().to_owned()),
+        Some(hex) => render_token_serial(hex),
         None => {
             return Err(CardPinError::CardSerialUnavailable {
                 description: "card did not publish a PKCS#15 serial; can't pin session identity"
@@ -939,7 +937,7 @@ pub(crate) fn re_verify_session<T: CardTransport>(
             .ok_or_else(|| CardPinError::CardSessionRevoked {
                 reason: "card no longer publishes EF.TokenInfo serial".to_owned(),
             })?;
-    let current_full = TokenSerial::new(render_core_token_serial(now_serial).as_str().to_owned());
+    let current_full = render_token_serial(now_serial);
     if &current_full != bound_serial {
         return Err(CardPinError::CardSessionRevoked {
             reason: format!(

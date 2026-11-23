@@ -874,10 +874,10 @@ pub struct TokenInfo {
     pub version: Option<u32>,
     /// `EF.TokenInfo.serialNumber` -- the chip-side PKCS#15
     /// long serial. Surfaced as the typed
-    /// [`crate::identity::TokenSerial`] (kept distinct from the
+    /// [`refineid_pkcs15::TokenSerial`] (kept distinct from the
     /// plastic-printed `PrintedSerial` and the X.509
     /// `CertSerial`).
-    pub serial_number_hex: Option<crate::identity::TokenSerial>,
+    pub serial_number_hex: Option<refineid_pkcs15::TokenSerial>,
     /// `EF.TokenInfo.manufacturerID` per PKCS#15 §6.6.1
     /// (`UTF8String`). Tier 0 `String` -- a tighter form would be
     /// `ManufacturerId` enforcing the length cap; not enforced
@@ -943,7 +943,7 @@ impl TokenInfo {
         if let Some(Ok(serial_any)) = it.next()
             && let Ok(serial_tlv) = serial_any.expect::<OctetString>()
         {
-            info.serial_number_hex = Some(crate::identity::TokenSerial::new(
+            info.serial_number_hex = Some(refineid_pkcs15::TokenSerial::new(
                 crate::hex::Hex::encode(serial_tlv.value()),
             ));
         }

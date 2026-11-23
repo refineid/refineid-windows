@@ -31,8 +31,8 @@
 use core::fmt;
 
 #[cfg(windows)]
-use refineid_lib_core::can::CAN_DIGITS;
-use refineid_lib_core::can::Can;
+use refineid_pace::UnvalidatedCan;
+use refineid_pace::{CAN_DIGITS, Can};
 
 #[cfg(windows)]
 use zeroize::Zeroize as _;
@@ -198,16 +198,16 @@ impl Drop for CredentialGuard {
     }
 }
 
-/// Save a validated CAN for the PC/SC contactless ATR.
+/// Save a validated six-digit CAN for the PC/SC contactless ATR.
 ///
 /// The generic credential is scoped to the current Windows user's credential
 /// set and persists across that user's logon sessions. It is written only
 /// after the caller has proved the CAN against the card with PACE.
 ///
 /// # Errors
-/// Invalid ATR input or a Windows Credential Manager failure.
+/// Invalid ATR or CAN input, or a Windows Credential Manager failure.
 #[cfg(windows)]
-pub fn save_can(atr: &[u8], can: &Can) -> Result<(), CredentialStoreError> {
+pub fn save_can(atr: &[u8], can_digits: &[u8; CAN_DIGITS]) -> Result<(), CredentialStoreError> {
     use core::ptr;
 
     use windows_sys::Win32::Foundation::GetLastError;
@@ -215,8 +215,11 @@ pub fn save_can(atr: &[u8], can: &Can) -> Result<(), CredentialStoreError> {
         CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredWriteW,
     };
 
-    let mut target = target_name_wide(atr)?;
-    let mut blob = can.as_bytes().to_vec();
+    if !can_digits.iter().all(u8::is_ascii_digit) {
+        return Err(CredentialStoreError::InvalidStoredCan);
+    }
+    let mut target = zeroize::Zeroizing::new(target_name_wide(atr)?);
+    let mut blob = zeroize::Zeroizing::new(can_digits.to_vec());
     let blob_size =
         u32::try_from(blob.len()).map_err(|_error| CredentialStoreError::InvalidStoredCan)?;
     let credential = CREDENTIALW {
@@ -240,8 +243,8 @@ pub fn save_can(atr: &[u8], can: &Can) -> Result<(), CredentialStoreError> {
     } else {
         0
     };
-    blob.zeroize();
-    target.zeroize();
+    drop(blob);
+    drop(target);
     if written == 0 {
         return Err(CredentialStoreError::Windows { code: error_code });
     }
@@ -307,7 +310,7 @@ pub fn read_can(atr: &[u8]) -> Result<Option<Can>, CredentialStoreError> {
     digits.copy_from_slice(blob);
     let parsed = core::str::from_utf8(&digits)
         .ok()
-        .and_then(|value| Can::new(value).ok())
+        .and_then(|value| Can::reconstruct(UnvalidatedCan::from_owned_text(value.to_owned())).ok())
         .ok_or(CredentialStoreError::InvalidStoredCan);
     digits.zeroize();
     parsed.map(Some)
@@ -350,7 +353,10 @@ pub fn delete_can(atr: &[u8]) -> Result<(), CredentialStoreError> {
 ///
 /// # Errors
 /// Always fails: the Windows Credential Manager is unavailable off Windows.
-pub const fn save_can(_atr: &[u8], _can: &Can) -> Result<(), CredentialStoreError> {
+pub const fn save_can(
+    _atr: &[u8],
+    _can_digits: &[u8; CAN_DIGITS],
+) -> Result<(), CredentialStoreError> {
     Err(CredentialStoreError::UnsupportedPlatform)
 }
 
@@ -429,11 +435,12 @@ mod tests {
     #[test]
     #[ignore = "writes and immediately removes one synthetic Windows credential"]
     fn windows_credential_manager_round_trip() {
-        use refineid_lib_core::can::Can;
+        use refineid_pace::CAN_DIGITS;
 
         use super::{delete_can, read_can, save_can};
 
         const SYNTHETIC_ATR: [u8; MAX_ATR_BYTES] = [0xA5; MAX_ATR_BYTES];
+        const SYNTHETIC_CAN: [u8; CAN_DIGITS] = *b"135790";
 
         struct Cleanup;
 
@@ -445,16 +452,17 @@ mod tests {
 
         delete_can(&SYNTHETIC_ATR).expect("synthetic credential cleanup before test");
         let _cleanup = Cleanup;
-        let can = Can::new("135790").expect("synthetic CAN");
-        save_can(&SYNTHETIC_ATR, &can).expect("save synthetic credential");
-        assert_eq!(
-            read_can(&SYNTHETIC_ATR).expect("read synthetic credential"),
-            Some(can)
+        save_can(&SYNTHETIC_ATR, &SYNTHETIC_CAN).expect("save synthetic credential");
+        assert!(
+            read_can(&SYNTHETIC_ATR)
+                .expect("read synthetic credential")
+                .is_some()
         );
         delete_can(&SYNTHETIC_ATR).expect("delete synthetic credential");
-        assert_eq!(
-            read_can(&SYNTHETIC_ATR).expect("confirm synthetic credential deletion"),
-            None
+        assert!(
+            read_can(&SYNTHETIC_ATR)
+                .expect("confirm synthetic credential deletion")
+                .is_none()
         );
     }
 }
