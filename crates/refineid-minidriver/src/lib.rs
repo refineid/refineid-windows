@@ -97,6 +97,8 @@ mod ksp_verify;
 // Pure byte codecs: compiled on the host too so `cargo test` covers them.
 #[cfg(any(windows, test))]
 mod ksp_codec;
+#[cfg(any(windows, test))]
+mod pin_scheme;
 #[cfg(all(windows, debug_assertions))]
 mod reported;
 #[cfg(windows)]
@@ -147,8 +149,8 @@ use refineid_agent_pipe::{RemoteKey, in_process_operation};
 use refineid_digest::{Sha256, Sha384};
 #[cfg(windows)]
 use refineid_lib_core::auth::{
-    AuthError, CardPinLengths, ChangePinOutcome, PIN_MAX_LENGTH, PIN_MIN_LENGTH, PUK_MAX_LENGTH,
-    PUK_MIN_LENGTH, PinOps, PinReferenceScheme, PinSlot, PinStatus, UnblockOutcome, VerifyOutcome,
+    AuthError, ChangePinOutcome, PIN_MAX_LENGTH, PIN_MIN_LENGTH, PUK_MAX_LENGTH, PUK_MIN_LENGTH,
+    PinOps, PinReferenceScheme, PinSlot, PinStatus, PukStatus, UnblockOutcome, VerifyOutcome,
 };
 #[cfg(windows)]
 use refineid_lib_core::crypto::container::{Ciphertext, RsaPkcs1};
@@ -194,34 +196,28 @@ fn live_token_serial(tx: &mut CardSessionTransport) -> Result<TokenSerial, DWORD
 }
 
 #[cfg(windows)]
-fn live_pin_status(
-    tx: &mut CardSessionTransport,
-    slot: PinSlot,
-    scheme: PinReferenceScheme,
-) -> Result<PinStatus, DWORD> {
-    tx.select_pkcs15_application()
-        .map_err(|_error| SCARD_F_INTERNAL_ERROR)?;
-    tx.pin_status_with_scheme(scheme, slot)
-        .map_err(|_error| SCARD_F_INTERNAL_ERROR)
+fn report_prepare_failure(failure: pin_scheme::PinPrepareFailure) -> DWORD {
+    if failure == pin_scheme::PinPrepareFailure::PinLengths {
+        refineid_dev_errors::report!(
+            CardModule,
+            "PIN lengths not read",
+            "the card session failed"
+        );
+    }
+    SCARD_F_INTERNAL_ERROR
 }
 
-/// The credential numbering `slot` is verified under, and its counter
-/// once the retry floor admits it. PIN 2 asks the card with
-/// counter-safe probes: under the organizational numbering its VERIFY
-/// makes DF.ESIGN current, where the qualified key signs. PIN 1 keeps
-/// the citizen numbering.
+/// Resolve the card's credential numbering, probe `slot`'s counter
+/// without spending a try, and apply the retry floor.
 #[cfg(windows)]
 fn live_verify_floor(
     tx: &mut CardSessionTransport,
     slot: PinSlot,
 ) -> Result<(PinReferenceScheme, PinStatus), DWORD> {
-    let scheme = match slot {
-        PinSlot::Pin1 => PinReferenceScheme::Citizen,
-        PinSlot::Pin2 => tx
-            .resolve_pin_reference_scheme()
-            .map_err(|_error| SCARD_F_INTERNAL_ERROR)?,
-    };
-    Ok((scheme, live_retry_floor(tx, slot, scheme)?))
+    let (scheme, status) =
+        pin_scheme::prepare_pin_verify(tx, slot).map_err(report_prepare_failure)?;
+    retry_floor_answer(slot, status)?;
+    Ok((scheme, status))
 }
 
 /// Apply the retry floor to `slot` before any command that can spend one
@@ -252,18 +248,15 @@ fn retry_floor_answer(slot: PinSlot, status: PinStatus) -> Result<(), DWORD> {
     })
 }
 
-/// Read the PUK's counter without spending a try and apply the retry
-/// floor to it before anything that presents the PUK. A PUK at two or
+/// Apply the PUK retry floor to a counter read under the card's resolved
+/// numbering before anything that presents the PUK. A PUK at two or
 /// one tries left answers `SCARD_W_CHV_BLOCKED`; a counter the card did
 /// not report answers `SCARD_F_INTERNAL_ERROR`. At zero tries left or a
 /// blocked PUK the floor admits the command: the card answers for
 /// itself and spends nothing, and [`map_unblock_outcome`] reports its
 /// answer. The target PIN's counter does not gate the unblock.
 #[cfg(windows)]
-fn puk_floor_answer(tx: &mut CardSessionTransport) -> Result<(), DWORD> {
-    tx.select_pkcs15_application()
-        .map_err(|_error| SCARD_F_INTERNAL_ERROR)?;
-    let status = tx.puk_status().map_err(|_error| SCARD_F_INTERNAL_ERROR)?;
+fn puk_floor_answer(status: PukStatus) -> Result<(), DWORD> {
     check_puk_retry_floor(status).map_err(|refusal| match refusal {
         RetryFloorRefusal::TriesBelowFloor { .. } => {
             refineid_dev_errors::report!(
@@ -284,21 +277,6 @@ fn puk_floor_answer(tx: &mut CardSessionTransport) -> Result<(), DWORD> {
     })
 }
 
-/// Read the lengths the card accepts for its PINs and the PUK, once per
-/// PIN change or reset; the card is addressed under the numbering they
-/// were read by.
-#[cfg(windows)]
-fn card_pin_lengths(tx: &mut CardSessionTransport) -> Result<CardPinLengths, DWORD> {
-    tx.read_card_pin_lengths().map_err(|_error| {
-        refineid_dev_errors::report!(
-            CardModule,
-            "PIN lengths not read",
-            "the card session failed"
-        );
-        SCARD_F_INTERNAL_ERROR
-    })
-}
-
 /// The answer for a PIN change or reset the card service refused: an
 /// entry of a length the card does not accept is an invalid parameter,
 /// as a malformed entry is; a transport failure is internal.
@@ -308,18 +286,6 @@ fn manage_error_answer<TE>(error: &AuthError<TE>) -> DWORD {
         AuthError::PinPolicy(_reason) => SCARD_E_INVALID_PARAMETER,
         AuthError::Transport(_error) => SCARD_F_INTERNAL_ERROR,
     }
-}
-
-/// Read the live status of `slot` and apply [`retry_floor_answer`].
-#[cfg(windows)]
-fn live_retry_floor(
-    tx: &mut CardSessionTransport,
-    slot: PinSlot,
-    scheme: PinReferenceScheme,
-) -> Result<PinStatus, DWORD> {
-    let status = live_pin_status(tx, slot, scheme)?;
-    retry_floor_answer(slot, status)?;
-    Ok(status)
 }
 
 /// Hold a just-verified PIN 1: reusable when the counter read before the
@@ -925,11 +891,11 @@ fn reverify_cached_pin(
             return Some(error);
         }
     };
-    let status = match live_pin_status(tx, PinSlot::Pin1, PinReferenceScheme::Citizen) {
-        Ok(status) => status,
-        Err(error) => {
+    let (scheme, status) = match pin_scheme::prepare_pin_verify(tx, PinSlot::Pin1) {
+        Ok(prepared) => prepared,
+        Err(failure) => {
             reset_card_state(pin1_authenticated, pin2_authenticated);
-            return Some(error);
+            return Some(report_prepare_failure(failure));
         }
     };
     if let Err(error) = retry_floor_answer(PinSlot::Pin1, status) {
@@ -961,7 +927,7 @@ fn reverify_cached_pin(
         );
         return Some(SCARD_W_WRONG_CHV);
     }
-    let outcome = tx.verify_pin1(pin.clone());
+    let outcome = tx.verify_pin_with_scheme(scheme, PinSlot::Pin1, pin.clone());
     match outcome {
         Ok(VerifyOutcome::Ok) => {
             let _ = with_pin_safety(|cache| checkout.restore_after_success(cache));
@@ -1480,11 +1446,7 @@ fn verify_card_pin(
     if is_rejected {
         return (SCARD_W_WRONG_CHV, None);
     }
-    let outcome = if slot == PinSlot::Pin1 {
-        tx.verify_pin1(pin.clone())
-    } else {
-        tx.verify_pin_with_scheme(scheme, slot, pin.clone())
-    };
+    let outcome = tx.verify_pin_with_scheme(scheme, slot, pin.clone());
     drop(tx);
     let is_ok = matches!(outcome, Ok(VerifyOutcome::Ok));
     if matches!(outcome, Ok(VerifyOutcome::WrongPin { .. })) {
@@ -1541,10 +1503,13 @@ fn change_card_pin(
         Ok(serial) => serial,
         Err(error) => return (error, None),
     };
-    let status = match live_retry_floor(&mut tx, slot, PinReferenceScheme::Citizen) {
-        Ok(status) => status,
-        Err(error) => return (error, None),
+    let (lengths, status) = match pin_scheme::prepare_pin_change(&mut *tx, slot) {
+        Ok(prepared) => prepared,
+        Err(failure) => return (report_prepare_failure(failure), None),
     };
+    if let Err(error) = retry_floor_answer(slot, status) {
+        return (error, None);
+    }
     let is_rejected = with_pin_safety(|cache| {
         cache.bars_presenting(&serial, slot, current_pin, status)
             || cache.bars_presenting(&serial, slot, &new_pin, status)
@@ -1553,10 +1518,6 @@ fn change_card_pin(
     if is_rejected {
         return (SCARD_W_WRONG_CHV, None);
     }
-    let lengths = match card_pin_lengths(&mut tx) {
-        Ok(lengths) => lengths,
-        Err(error) => return (error, None),
-    };
     let outcome = tx.change_pin(&lengths, slot, current_pin.clone(), new_pin);
     drop(tx);
     match outcome {
@@ -1612,13 +1573,13 @@ fn unblock_card_pin(
     if let Err(error) = live_token_serial(&mut tx) {
         return error;
     }
-    if let Err(error) = puk_floor_answer(&mut tx) {
+    let (lengths, status) = match pin_scheme::prepare_pin_unblock(&mut *tx) {
+        Ok(prepared) => prepared,
+        Err(failure) => return report_prepare_failure(failure),
+    };
+    if let Err(error) = puk_floor_answer(status) {
         return error;
     }
-    let lengths = match card_pin_lengths(&mut tx) {
-        Ok(lengths) => lengths,
-        Err(error) => return error,
-    };
     let outcome = tx.reset_retry_counter(&lengths, target_slot, puk, new_pin);
     drop(tx);
     match outcome {

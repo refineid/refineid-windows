@@ -19,6 +19,10 @@ name = "refineid_minidriver"
 # intentionally empty (keeps the cross-platform workspace build green).
 # Dependencies are gated to windows so a non-windows build declares
 # none (satisfies `unused_crate_dependencies`).
+[target.'cfg(not(windows))'.dev-dependencies]
+refineid-atr.workspace = true
+refineid-lib-core.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 refineid-apdu.workspace = true
 refineid-atr.workspace = true
