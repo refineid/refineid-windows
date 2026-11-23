@@ -44,7 +44,7 @@ use refineid_lib_core::pin_retry_risk::{
 };
 use refineid_lib_core::pkcs15::{CertSlot, FineidReaderPick};
 use refineid_lib_core::pkcs15::{FineidReaderPicker as _, Pkcs15Ops as _};
-use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
+use refineid_lib_core::x509::OwnedCert;
 use refineid_lib_pcsc::{PcscBackend, PcscError};
 
 /// Which PIN slot a manage-PIN operation targets. Thin layer over
@@ -539,7 +539,7 @@ pub fn establish_card_session(
             let der = transport
                 .read_certificate(CertSlot::Authentication)
                 .map_err(|e| CardPinError::Transport(format!("auth cert read: {e}")))?;
-            let cert = OwnedCert::from_der(UnvalidatedCertificate::new(der.as_bytes().to_vec()))
+            let cert = OwnedCert::from_der(der.as_bytes())
                 .map_err(|e| CardPinError::Transport(format!("auth cert parse: {e}")))?;
             Some(cert.view().not_before)
         }

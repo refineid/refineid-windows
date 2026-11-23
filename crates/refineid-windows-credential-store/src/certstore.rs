@@ -42,7 +42,7 @@ use refineid_rapp_core::store::PairingRecord;
 #[cfg(windows)]
 use crate::CredentialStoreError;
 #[cfg(windows)]
-use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
+use refineid_lib_core::x509::OwnedCert;
 #[cfg(windows)]
 use refineid_rapp_core::store::{PairingStore, offer_stands};
 
@@ -268,9 +268,7 @@ pub fn offered_phone_certificate<S: PairingStore + ?Sized>(
     browser_entries()
         .into_iter()
         .filter(|entry| entry.name == name)
-        .filter_map(|entry| {
-            OwnedCert::from_der(UnvalidatedCertificate::new(entry.certificate)).ok()
-        })
+        .filter_map(|entry| OwnedCert::from_der(&entry.certificate).ok())
         .find(|certificate| offer_stands(store, pair_id, certificate, now_ms))
 }
 

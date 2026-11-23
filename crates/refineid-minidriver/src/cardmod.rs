@@ -33,7 +33,7 @@ use crate::ffi::{
 use crate::transport::CardSessionTransport;
 use refineid_lib_core::auth::PinReferenceScheme;
 use refineid_lib_core::x509::{
-    EcCurve, OwnedCert, PublicKeyAlgorithm, UnvalidatedCertificate, parse_subject_public_key_info,
+    EcCurve, OwnedCert, PublicKeyAlgorithm, parse_subject_public_key_info,
 };
 
 /// Per-`CardAcquireContext` state, stored behind `CARD_DATA`'s
@@ -339,7 +339,7 @@ impl CardModel {
                 bits: u16::try_from(modulus_bits).ok()?,
             }),
             PublicKeyAlgorithm::Ec(curve) => Some(KeyAlgorithm::Ec(curve)),
-            _ => None,
+            PublicKeyAlgorithm::Other => None,
         }
     }
 
@@ -404,11 +404,9 @@ impl CardModel {
         auth_cert_der: Vec<u8>,
         signature_cert_der: Vec<u8>,
     ) -> Option<CardCapabilityModel> {
-        let auth_cert =
-            OwnedCert::from_der(UnvalidatedCertificate::new(auth_cert_der.clone())).ok()?;
+        let auth_cert = OwnedCert::from_der(&auth_cert_der).ok()?;
         let auth_key_alg = Self::detect_key_algorithm(&auth_cert)?;
-        let signature_cert =
-            OwnedCert::from_der(UnvalidatedCertificate::new(signature_cert_der.clone())).ok()?;
+        let signature_cert = OwnedCert::from_der(&signature_cert_der).ok()?;
         let signature_key_alg = Self::detect_key_algorithm(&signature_cert)?;
         let auth_container = ContainerDescriptor {
             index: CARD_DEFAULT_CONTAINER,

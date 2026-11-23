@@ -656,11 +656,11 @@ impl PartialEq<&str> for Surname {
 pub struct CertSerial(Vec<u8>);
 
 impl CertSerial {
-    /// Wrap a borrowed byte slice. No structural check; the
-    /// type tags an already-extracted INTEGER content as
+    /// Wrap a byte iterator as a certificate serial number. No structural
+    /// check; the type tags already-extracted INTEGER content as
     /// semantically the cert's serial.
     #[must_use]
-    pub(crate) fn from_bytes<I>(bytes: I) -> Self
+    pub fn from_bytes<I>(bytes: I) -> Self
     where
         I: IntoIterator<Item = u8>,
     {
@@ -766,6 +766,8 @@ impl fmt::Display for EmailAddressError {
 impl core::error::Error for EmailAddressError {}
 
 impl EmailAddress {
+    /// Validate and construct an [`EmailAddress`].
+    ///
     /// # Errors
     /// [`EmailAddressError`] variants for empty input, length
     /// over 254 octets, missing or duplicated `@`, empty
@@ -777,7 +779,7 @@ impl EmailAddress {
     /// least one element (the first call to `.next()` is
     /// guaranteed `Some`); this is a proven invariant of the
     /// Rust stdlib, not an assumption about the input.
-    pub(crate) fn new(s: &str) -> Result<Self, EmailAddressError> {
+    pub fn new(s: &str) -> Result<Self, EmailAddressError> {
         const MAX_LEN: usize = 254;
         if s.is_empty() {
             return Err(EmailAddressError::Empty);

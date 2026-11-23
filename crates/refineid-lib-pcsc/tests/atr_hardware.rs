@@ -18,7 +18,7 @@ use refineid_lib_core::backend::{ReaderAccessCap, ReaderBackend as _};
 use refineid_lib_core::fineid_card::FineidCardModel;
 use refineid_lib_core::pkcs15::{CertSlot, Pkcs15Ops as _};
 use refineid_lib_core::transport::CardTransport as _;
-use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
+use refineid_lib_core::x509::OwnedCert;
 use refineid_lib_pcsc::PcscBackend;
 
 #[test]
@@ -57,7 +57,7 @@ fn present_fineid_card_public_auth_certificate_is_read_and_parsed() {
             let der = card
                 .read_certificate(CertSlot::Authentication)
                 .unwrap_or_else(|_| panic!("public authentication certificate read failed"));
-            OwnedCert::from_der(UnvalidatedCertificate::new(der.as_bytes().to_vec()))
+            OwnedCert::from_der(der.as_bytes())
                 .unwrap_or_else(|_| panic!("public authentication certificate parsing failed"));
             return;
         }

@@ -48,9 +48,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use refineid_agent_pipe::client::request_signature;
 use refineid_agent_pipe::wire::{SignAnswer, SignRequest};
 use refineid_agent_pipe::{PipeError, SIGNATURE_DEADLINE};
-use refineid_lib_core::x509::{
-    EcCurve, OwnedCert, PublicKeyAlgorithm, UnvalidatedCertificate, extract_rsa_public_key,
-};
+use refineid_lib_core::x509::{EcCurve, OwnedCert, PublicKeyAlgorithm, extract_rsa_public_key};
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::operations::{KeyProfile, SignatureAlgorithm};
 use refineid_windows_credential_store::{
@@ -148,7 +146,7 @@ fn key_kind(certificate: &OwnedCert) -> Option<KeyKind> {
 /// with.
 fn key_from_entry(entry: BrowserEntry) -> Option<OpenKey> {
     let pair_id = browser_key_pair_id(&entry.name)?;
-    let certificate = OwnedCert::from_der(UnvalidatedCertificate::new(entry.certificate)).ok()?;
+    let certificate = OwnedCert::from_der(&entry.certificate).ok()?;
     let kind = key_kind(&certificate)?;
     Some(OpenKey {
         name: entry.name,

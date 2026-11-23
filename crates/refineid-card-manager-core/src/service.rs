@@ -26,7 +26,7 @@ use refineid_lib_core::pace::run_pace_with_can;
 use refineid_lib_core::pkcs15::{CertSlot, FineidReaderPicker as _, Pkcs15Ops as _};
 use refineid_lib_core::secure_messaging::SmTransport;
 use refineid_lib_core::transport::CardTransport as _;
-use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
+use refineid_lib_core::x509::{FineidNameExt as _, OwnedCert};
 use refineid_lib_pcsc::{PcscBackend, PcscError};
 
 use crate::card_pin::{
@@ -317,11 +317,9 @@ fn inspected_contactless(
             .map_err(|error| {
                 CardPinError::Transport(format!("protected auth cert read: {error}"))
             })?;
-        let cert_owned =
-            OwnedCert::from_der(UnvalidatedCertificate::new(auth_der.as_bytes().to_vec()))
-                .map_err(|error| {
-                    CardPinError::Transport(format!("protected auth cert parse: {error}"))
-                })?;
+        let cert_owned = OwnedCert::from_der(auth_der.as_bytes()).map_err(|error| {
+            CardPinError::Transport(format!("protected auth cert parse: {error}"))
+        })?;
         let cert = cert_owned.view();
         let scheme = ActivationScheme::from_validity_start(cert.not_before);
         let person = identity_from_certificate(&cert).holder_line();

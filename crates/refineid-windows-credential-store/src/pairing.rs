@@ -1168,7 +1168,7 @@ const fn delete_pairing_set_in(_directory: &Path) -> Result<(), CredentialStoreE
 /// Synthetic records for this crate's tests, on every platform.
 #[cfg(test)]
 pub mod test_records {
-    use refineid_lib_core::x509::{OwnedCert, UnvalidatedCertificate};
+    use refineid_lib_core::x509::OwnedCert;
     use refineid_rapp::noise::x25519_public_key;
     use refineid_rapp::{
         DisplayName, EndpointRole, PairRecord, ProfileName, X25519_KEY_SIZE, compute_grants_hash,
@@ -1218,7 +1218,7 @@ pub mod test_records {
 
     /// The fixtures' certificate, parsed.
     pub fn certificate() -> OwnedCert {
-        OwnedCert::from_der(UnvalidatedCertificate::new(CERTIFICATE.to_vec())).expect("certificate")
+        OwnedCert::from_der(CERTIFICATE).expect("certificate")
     }
 
     /// [`PAIR`], created at [`CREATED_AT_MS`].
