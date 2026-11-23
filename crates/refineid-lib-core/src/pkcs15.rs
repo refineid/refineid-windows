@@ -381,7 +381,7 @@ pub trait Pkcs15Ops: CardTransport {
             .transmit(apdu.as_bytes())
             .map_err(Pkcs15Error::Transport)?;
         if !r.is_ok() {
-            return Err(Pkcs15Error::Sw(r.sw()));
+            return Err(Pkcs15Error::Sw(r.status_word().as_u16()));
         }
         Ok(())
     }
@@ -418,7 +418,7 @@ pub trait Pkcs15Ops: CardTransport {
             if response.is_ok() {
                 return Ok(());
             }
-            last_sw = response.sw();
+            last_sw = response.status_word().as_u16();
         }
         Err(Pkcs15Error::Sw(last_sw))
     }
@@ -551,7 +551,7 @@ pub trait Pkcs15Ops: CardTransport {
                 .map_err(Pkcs15Error::Transport)?;
             let eof = matches!(r.status_word(), StatusWord::EndOfFile);
             if !r.is_ok() && !eof {
-                return Err(Pkcs15Error::Sw(r.sw()));
+                return Err(Pkcs15Error::Sw(r.status_word().as_u16()));
             }
             let body_len = r.body.len();
             collected.extend_from_slice(&r.body);
@@ -616,7 +616,7 @@ pub trait Pkcs15Ops: CardTransport {
                 .map_err(Pkcs15Error::Transport)?;
             let eof = matches!(response.status_word(), StatusWord::EndOfFile);
             if !response.is_ok() && !eof {
-                return Err(Pkcs15Error::Sw(response.sw()));
+                return Err(Pkcs15Error::Sw(response.status_word().as_u16()));
             }
             if response.body.len() > usize::from(want) {
                 return Err(Pkcs15Error::InvalidData(what));
