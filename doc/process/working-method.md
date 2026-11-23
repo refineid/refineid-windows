@@ -71,10 +71,18 @@ developer or an agent. The loops are:
   <https://github.com/refineid/refineid-core/blob/main/doc/stpa.md>. The
   record: <https://github.com/refineid/refineid-core/blob/main/doc/security/stpa-rapp.md>.
 
-A finding from any loop is either fixed in the current change or filed as
-an issue, with the evidence, in the repository whose code it concerns.
-A known defect is not parked as a future issue: the issue records it
-and the fix is queued behind the current change, each in its own branch.
+As soon as a confirmed defect or quality gap in existing code, tests,
+scripts, documentation, or hardware behavior is observed in any loop, the
+front agent files a GitHub issue (`gh issue create`, with
+`-R <owner>/<repo>` when filing from another checkout) immediately in the
+owning repository, with sanitized evidence, without waiting for user
+permission or the end of the task (following the repository's secrecy, personal-data, and security-reporting
+rules in `AGENTS.md`). Do not file issues for
+defects in the current branch's own unmerged changes; fix those in the
+branch. An implementation agent reports observed problems in its handoff
+for the front agent to confirm and file. A known defect is not parked as a
+future issue: the issue records it and the fix is queued behind the current
+change, each in its own branch.
 
 Disagreement is feedback too. When a request conflicts with a
 specification, the front agent says so to the owner and gives an honest
@@ -140,8 +148,8 @@ the implementation agent rules.
 10. Evidence required: base revision, commands, exit status,
     untested items.
 11. What to report: files changed, decisions made, results with commands,
-    open questions, a suggested commit message, and deferred findings for
-    the front agent to file.
+    open questions, a suggested commit message, and any observed problems
+    for the front agent to confirm and file.
 
 ### An implementation agent
 
@@ -157,9 +165,9 @@ the implementation agent rules.
 - Runs the gate and test commands from AGENTS.md by hand in the worktree.
 - An AI implementation agent runs sandboxed.
 - Does not commit, push, open pull requests, merge, review, file
-  issues, or install. It leaves the change uncommitted and reports
-  findings in its handoff for the front agent to file. An explicit
-  owner order may grant
+  issues, or install. It leaves the change uncommitted and reports any
+  observed problems in its handoff for the front agent to confirm and
+  file immediately. An explicit owner order may grant
   commit on and push to the assigned task branch, for one run only,
   with the commit and scan rules in the brief; opening pull requests,
   review, issue filing,
@@ -185,9 +193,14 @@ the implementation agent rules.
   evidence against the final code, not the report. Re-runs checks when the
   evidence is missing, stale, or affected by subsequent edits. Hardware
   acceptance remains required where AGENTS.md requires it.
-- Files deferred findings reported in worker handoffs: searches
-  existing issues first, then files each confirmed defect or quality
-  gap in the owning repository.
+- Files GitHub issues (`gh issue create`) immediately as soon as it
+  observes a confirmed defect or quality gap -- or confirms one reported
+  in a worker handoff -- without waiting for user permission or the end
+  of the task: searches existing open issues first, follows the
+  repository's secrecy, personal-data, and security-reporting rules, and
+  files each confirmed defect or quality gap in the owning repository with
+  sanitized evidence. Do not file issues for defects in the current
+  branch's own unmerged changes; fix those in the branch.
 - Verifies commits and pushes directly in its own session using git
   log and status, never from an agent's report. If the owner drives an
   agent directly, it stands down rather than fight for the machine.
