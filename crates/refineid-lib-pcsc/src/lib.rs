@@ -395,7 +395,11 @@ fn run_t0_exchange<T: T0Transmitter>(
             let mut chained_sw1: u8;
             let mut chained_sw2: u8;
             loop {
-                let get_resp = GetResponse::new(ApduClass::Plain, next_le).into_apdu();
+                let get_resp = GetResponse {
+                    class: ApduClass::Plain,
+                    le: next_le,
+                }
+                .into_apdu();
                 let chain_resp = match transmitter.transmit(get_resp.as_bytes(), &mut chain_buf) {
                     Ok(response) => response,
                     Err(TransmitBreak::Outcome(outcome)) => return Ok(outcome),
@@ -863,7 +867,11 @@ mod tests {
 
     #[test]
     fn wrong_le_6c_retry_rewrites_last_byte_and_resends() {
-        let apdu = GetResponse::new(ApduClass::Plain, 0).into_apdu();
+        let apdu = GetResponse {
+            class: ApduClass::Plain,
+            le: 0,
+        }
+        .into_apdu();
         let body = vec![0x11_u8; 0x1A];
         let (outcome, sent) = drive(
             vec![reply(&[], SW1_WRONG_LE, 0x1A), reply(&body, 0x90, 0x00)],
@@ -933,7 +941,11 @@ mod tests {
 
     #[test]
     fn second_wrong_le_is_terminal_after_one_retry() {
-        let apdu = GetResponse::new(ApduClass::Plain, 0).into_apdu();
+        let apdu = GetResponse {
+            class: ApduClass::Plain,
+            le: 0,
+        }
+        .into_apdu();
         let (outcome, sent) = drive(
             vec![
                 reply(&[], SW1_WRONG_LE, 0x10),
