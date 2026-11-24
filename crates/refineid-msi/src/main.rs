@@ -37,7 +37,7 @@ fn main() {
 mod windows_main {
     use std::path::{Path, PathBuf};
 
-    use refineid_msi::cards::{CALAIS, CARDS};
+    use refineid_msi::cards::{CALAIS, CARDS, PIN_PROMPT_VALUES};
     use refineid_msi::inf::{self, DriverVersion};
     use refineid_msi::{
         Architecture, CustomAction, DriverPackage, Guid, Package, RegistryData, RegistryValue,
@@ -283,10 +283,14 @@ mod windows_main {
         Ok(())
     }
 
+    /// Base per-card registry values written before [`PIN_PROMPT_VALUES`].
+    const BASE_VALUES_PER_CARD: usize = 5;
+
     /// The Calais registration of every card, under `keys` in the order of
     /// [`CARDS`], and the agent's Run value.
     fn registry_values(keys: &[String]) -> Vec<RegistryValue<'_>> {
-        let mut registry = Vec::with_capacity(CARDS.len() * 5);
+        let values_per_card = BASE_VALUES_PER_CARD + PIN_PROMPT_VALUES.len();
+        let mut registry = Vec::with_capacity(CARDS.len() * values_per_card + 1);
         for (card, key) in CARDS.iter().zip(keys) {
             registry.extend([
                 RegistryValue {
@@ -315,6 +319,13 @@ mod windows_main {
                     data: RegistryData::Text(MODULE_FILE),
                 },
             ]);
+            for &(name, prompt) in PIN_PROMPT_VALUES {
+                registry.push(RegistryValue {
+                    key,
+                    name,
+                    data: RegistryData::Text(prompt),
+                });
+            }
         }
         registry.push(RegistryValue {
             key: RUN_KEY,

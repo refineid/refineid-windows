@@ -19,7 +19,7 @@
   "crates/refineid-msi/src/cabinet.rs": 1,
   "crates/refineid-msi/src/guid.rs": 39,
   "crates/refineid-msi/src/inf.rs": 1,
-  "crates/refineid-msi/src/main.rs": 2,
+  "crates/refineid-msi/src/main.rs": 1,
   "crates/refineid-pkcs11/src/wake.rs": 1,
   "crates/refineid-rapp-ble/src/gatt.rs": 2,
   "crates/refineid-rapp-cli/src/main.rs": 1,

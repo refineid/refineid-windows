@@ -26,6 +26,83 @@ use refineid_atr::fineid::FineidCardModel;
 /// Where Windows keeps per-card Smart Card Crypto Provider registrations.
 pub const CALAIS: &str = r"SOFTWARE\Microsoft\Cryptography\Calais\SmartCards";
 
+/// Registry value name for `SECRET_PURPOSE::AuthenticationPin` PIN prompt
+/// overrides under `Calais\SmartCards` (Microsoft Smart Card Minidriver
+/// Specification, "PIN Context Strings").
+pub const PIN_PROMPT_AUTH_VALUE: &str = "80000100";
+/// Registry value name for `SECRET_PURPOSE::DigitalSignaturePin`.
+pub const PIN_PROMPT_SIGNATURE_VALUE: &str = "80000101";
+/// Registry value name for `SECRET_PURPOSE::NonRepudiationPin` (PIN 2 in
+/// `refineid-minidriver`).
+pub const PIN_PROMPT_NON_REPUDIATION_VALUE: &str = "80000103";
+/// Registry value name for `SECRET_PURPOSE::PrimaryCardPin` (PIN 1 in
+/// `refineid-minidriver`).
+pub const PIN_PROMPT_PRIMARY_VALUE: &str = "80000105";
+/// Registry value name for `SECRET_PURPOSE::UnblockOnlyPin` (PUK in
+/// `refineid-minidriver`).
+pub const PIN_PROMPT_UNBLOCK_VALUE: &str = "80000106";
+
+/// Localized Windows Security PIN prompt for authentication (PIN 1),
+/// formatted as semicolon-separated `locale,message` pairs for the Base CSP
+/// and Smart Card KSP.
+pub const PIN_PROMPT_PIN1_LOCALIZED: &str = concat!(
+    "fi-FI,Anna PIN 1 tunnistautumista varten;",
+    "sv-FI,Ange PIN 1 för identifiering;",
+    "sv-SE,Ange PIN 1 för identifiering;",
+    "et-EE,Isikutuvastuseks sisesta PIN 1;",
+    "en-US,Enter PIN 1 for authentication;",
+    "en-GB,Enter PIN 1 for authentication;",
+    "en-AU,Enter PIN 1 for authentication;",
+    "en-CA,Enter PIN 1 for authentication;",
+    "en-IE,Enter PIN 1 for authentication;",
+    "en-IN,Enter PIN 1 for authentication;",
+    "en-NZ,Enter PIN 1 for authentication;",
+    "en-ZA,Enter PIN 1 for authentication",
+);
+
+/// Localized Windows Security PIN prompt for digital and qualified signing
+/// (PIN 2).
+pub const PIN_PROMPT_PIN2_LOCALIZED: &str = concat!(
+    "fi-FI,Anna PIN 2 allekirjoittamista varten;",
+    "sv-FI,Ange PIN 2 för signering;",
+    "sv-SE,Ange PIN 2 för signering;",
+    "et-EE,Allkirjastamiseks sisesta PIN 2;",
+    "en-US,Enter PIN 2 for signing;",
+    "en-GB,Enter PIN 2 for signing;",
+    "en-AU,Enter PIN 2 for signing;",
+    "en-CA,Enter PIN 2 for signing;",
+    "en-IE,Enter PIN 2 for signing;",
+    "en-IN,Enter PIN 2 for signing;",
+    "en-NZ,Enter PIN 2 for signing;",
+    "en-ZA,Enter PIN 2 for signing",
+);
+
+/// Localized Windows Security prompt for unblocking with the PUK.
+pub const PIN_PROMPT_PUK_LOCALIZED: &str = concat!(
+    "fi-FI,Anna PUK-koodi;",
+    "sv-FI,Ange PUK-kod;",
+    "sv-SE,Ange PUK-kod;",
+    "et-EE,Sisesta PUK-kood;",
+    "en-US,Enter PUK code;",
+    "en-GB,Enter PUK code;",
+    "en-AU,Enter PUK code;",
+    "en-CA,Enter PUK code;",
+    "en-IE,Enter PUK code;",
+    "en-IN,Enter PUK code;",
+    "en-NZ,Enter PUK code;",
+    "en-ZA,Enter PUK code",
+);
+
+/// Localized PIN prompt `(value_name, value_data)` pairs written under every
+/// `Calais\SmartCards` registration.
+pub const PIN_PROMPT_VALUES: &[(&str, &str)] = &[
+    (PIN_PROMPT_AUTH_VALUE, PIN_PROMPT_PIN1_LOCALIZED),
+    (PIN_PROMPT_PRIMARY_VALUE, PIN_PROMPT_PIN1_LOCALIZED),
+    (PIN_PROMPT_SIGNATURE_VALUE, PIN_PROMPT_PIN2_LOCALIZED),
+    (PIN_PROMPT_NON_REPUDIATION_VALUE, PIN_PROMPT_PIN2_LOCALIZED),
+    (PIN_PROMPT_UNBLOCK_VALUE, PIN_PROMPT_PUK_LOCALIZED),
+];
+
 /// A card family Windows should bind to this Card Module.
 #[derive(Debug, Clone, Copy)]
 pub struct CardRegistration {
@@ -97,7 +174,14 @@ pub const CARDS: &[CardRegistration] = &[
 
 #[cfg(test)]
 mod tests {
-    use super::{CARDS, CardRegistration};
+    use std::collections::HashSet;
+
+    use super::{
+        CARDS, CardRegistration, PIN_PROMPT_PIN1_LOCALIZED, PIN_PROMPT_PIN2_LOCALIZED,
+        PIN_PROMPT_PUK_LOCALIZED, PIN_PROMPT_VALUES,
+    };
+
+    const REQUIRED_LOCALES: &[&str] = &["fi-FI", "sv-FI", "sv-SE", "et-EE", "en-US", "en-GB"];
 
     /// The v4.0 registration.
     fn v4_0() -> &'static CardRegistration {
@@ -142,5 +226,44 @@ mod tests {
         let card = v4_0();
         let truncated = card.atr.split_last().map(|(_, rest)| rest).expect("ATR");
         assert!(!card.binds(truncated));
+    }
+
+    #[test]
+    fn pin_prompt_strings_cover_required_locales_without_quotes_or_duplicates() {
+        let mut names = HashSet::new();
+        for &(name, value) in PIN_PROMPT_VALUES {
+            assert!(names.insert(name), "duplicate registry value name {name}");
+            assert!(
+                !value.contains('"'),
+                "Windows parses quotes literally in {name}"
+            );
+            let mut seen_locales = HashSet::new();
+            for entry in value.split(';') {
+                let (locale, message) = entry
+                    .split_once(',')
+                    .unwrap_or_else(|| panic!("malformed entry in {name}: {entry}"));
+                assert!(!locale.is_empty(), "empty locale in {name}");
+                assert!(!message.is_empty(), "empty message for {locale} in {name}");
+                assert!(
+                    seen_locales.insert(locale),
+                    "duplicate locale {locale} in {name}"
+                );
+            }
+            for &required in REQUIRED_LOCALES {
+                assert!(
+                    seen_locales.contains(required),
+                    "missing locale {required} in {name}"
+                );
+            }
+        }
+        for entry in PIN_PROMPT_PIN1_LOCALIZED.split(';') {
+            assert!(entry.contains("PIN 1"), "PIN 1 label missing in {entry}");
+        }
+        for entry in PIN_PROMPT_PIN2_LOCALIZED.split(';') {
+            assert!(entry.contains("PIN 2"), "PIN 2 label missing in {entry}");
+        }
+        for entry in PIN_PROMPT_PUK_LOCALIZED.split(';') {
+            assert!(entry.contains("PUK"), "PUK label missing in {entry}");
+        }
     }
 }

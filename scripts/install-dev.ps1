@@ -1,4 +1,4 @@
-# Copyright 2026 Petri Koistinen
+﻿# Copyright 2026 Petri Koistinen
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -123,6 +123,51 @@ function ConvertFrom-AtrHex([string]$Hex) {
     $bytes
 }
 
+$pinPromptPin1 = @(
+    'fi-FI,Anna PIN 1 tunnistautumista varten'
+    'sv-FI,Ange PIN 1 för identifiering'
+    'sv-SE,Ange PIN 1 för identifiering'
+    'et-EE,Isikutuvastuseks sisesta PIN 1'
+    'en-US,Enter PIN 1 for authentication'
+    'en-GB,Enter PIN 1 for authentication'
+    'en-AU,Enter PIN 1 for authentication'
+    'en-CA,Enter PIN 1 for authentication'
+    'en-IE,Enter PIN 1 for authentication'
+    'en-IN,Enter PIN 1 for authentication'
+    'en-NZ,Enter PIN 1 for authentication'
+    'en-ZA,Enter PIN 1 for authentication'
+) -join ';'
+
+$pinPromptPin2 = @(
+    'fi-FI,Anna PIN 2 allekirjoittamista varten'
+    'sv-FI,Ange PIN 2 för signering'
+    'sv-SE,Ange PIN 2 för signering'
+    'et-EE,Allkirjastamiseks sisesta PIN 2'
+    'en-US,Enter PIN 2 for signing'
+    'en-GB,Enter PIN 2 for signing'
+    'en-AU,Enter PIN 2 for signing'
+    'en-CA,Enter PIN 2 for signing'
+    'en-IE,Enter PIN 2 for signing'
+    'en-IN,Enter PIN 2 for signing'
+    'en-NZ,Enter PIN 2 for signing'
+    'en-ZA,Enter PIN 2 for signing'
+) -join ';'
+
+$pinPromptPuk = @(
+    'fi-FI,Anna PUK-koodi'
+    'sv-FI,Ange PUK-kod'
+    'sv-SE,Ange PUK-kod'
+    'et-EE,Sisesta PUK-kood'
+    'en-US,Enter PUK code'
+    'en-GB,Enter PUK code'
+    'en-AU,Enter PUK code'
+    'en-CA,Enter PUK code'
+    'en-IE,Enter PUK code'
+    'en-IN,Enter PUK code'
+    'en-NZ,Enter PUK code'
+    'en-ZA,Enter PUK code'
+) -join ';'
+
 function Set-CardRegistration(
     [string]$Name,
     [byte[]]$Atr,
@@ -139,6 +184,16 @@ function Set-CardRegistration(
         -Force | Out-Null
     New-ItemProperty -Path $key -Name '80000001' -PropertyType String `
         -Value $moduleFile -Force | Out-Null
+    New-ItemProperty -Path $key -Name '80000100' -PropertyType String `
+        -Value $pinPromptPin1 -Force | Out-Null
+    New-ItemProperty -Path $key -Name '80000105' -PropertyType String `
+        -Value $pinPromptPin1 -Force | Out-Null
+    New-ItemProperty -Path $key -Name '80000101' -PropertyType String `
+        -Value $pinPromptPin2 -Force | Out-Null
+    New-ItemProperty -Path $key -Name '80000103' -PropertyType String `
+        -Value $pinPromptPin2 -Force | Out-Null
+    New-ItemProperty -Path $key -Name '80000106' -PropertyType String `
+        -Value $pinPromptPuk -Force | Out-Null
 }
 
 function Invoke-ProviderEntry([string]$Module, [string]$Entry) {
