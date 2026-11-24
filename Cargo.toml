@@ -76,7 +76,6 @@ socket2 = "0.6"
 # Lists the interfaces an mDNS browse asks on. Pure Rust over
 # GetAdaptersAddresses and getifaddrs; the link-local feature stays off.
 if-addrs = "0.15"
-spki = "0.8"
 subtle = "2"
 syn = { version = "2", features = ["full", "visit"] }
 walkdir = "2"

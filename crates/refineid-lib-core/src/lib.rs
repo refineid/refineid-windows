@@ -12,47 +12,12 @@
 // implied. See the License for the specific language governing
 // permissions and limitations under the License.
 
-//! FINEID smartcard protocol -- language-agnostic, transport-
-//! agnostic.
+//! Legacy FINEID smartcard protocol core retained only while
+//! `refineid-minidriver` completes its migration onto `refineid-core`.
 //!
-//! Layered from the card edge upwards. The [`transport`] module
-//! defines the card transport port legacy callers still depend on. The
-//! crypto, protocol, and use-case layers (PACE, secure messaging,
-//! eMRTD, the `Session` verb API) land on top as they are ported.
-//!
-//! Initial monorepo scope is the **eMRTD-read floor** plus the
-//! **public-certificate read path** (no PACE, no PIN required).
-//! The cert-read path is the live-validation entry point: it
-//! exercises real card I/O, PKCS#15 file-system navigation, and
-//! X.509 parsing without touching any PIN-protected flow. PIN /
-//! signing paths (`auth`, `sign`, `rsa`, `pin`) still wait on live
-//! validation once `pkcs15` + `x509` have proven against real
-//! hardware.
-//!
-//! ## Typing-discipline backbone
-//!
-//! Two modules carry the type-level safety this codebase
-//! leans on (see refineid-core's [refinement types] for the
-//! full position):
-//!
-//! - [`oid`] -- typed [`Oid<'a>`] wrapper over OBJECT
-//!   IDENTIFIER content bytes, plus a `known` submodule of
-//!   spec-cited static `Oid<'static>` constants. The `Oid` ->
-//!   bare-`&[u8]` migration is in progress; new code uses
-//!   `Oid` directly.
-//! - [`fineid_card`] -- card-identity types ([`Ats`], [`CardType`],
-//!   [`CardVendor`], [`FineidCardModel`]) and the shared [`Atr`] parser
-//!   that project DVV's ATR/ATS technote and the wider FINEID
-//!   card-model taxonomy onto the type system. The classifier
-//!   refuses an unrecognised card before any modify APDU.
-//!
-//! [`Oid<'a>`]: oid::Oid
-//! [`Atr`]: refineid_atr::Atr
-//! [`Ats`]: fineid_card::Ats
-//! [`CardType`]: fineid_card::CardType
-//! [`CardVendor`]: fineid_card::CardVendor
-//! [`FineidCardModel`]: fineid_card::FineidCardModel
-//! [refinement types]: https://github.com/refineid/refineid-core/blob/main/doc/architecture/refinement-types.md
+//! The [`transport`] module defines the card transport port legacy callers
+//! still depend on. All other workspace crates now consume `refineid-core`
+//! directly.
 
 // `clippy::pub_use` fires on every `pub use submodule::Item;` at
 // the crate root.  Those re-exports are the library-facade
@@ -74,10 +39,7 @@ pub mod apdu;
 pub mod auth;
 pub(crate) use refineid_ber as ber;
 pub mod crypto;
-pub mod fineid_card;
 pub mod hex;
-pub mod identity;
-pub mod oid;
 pub mod pin;
 pub mod pin_cache;
 pub mod pin_retry_risk;
@@ -85,9 +47,6 @@ pub mod pkcs15;
 pub mod rng;
 pub mod sign;
 pub mod transport;
-pub mod x509;
 
-/// Crate version surfaced to upper layers (PKCS#11 callers will
-/// reflect this through `C_GetTokenInfo` once the cdylib port
-/// lands).
+/// Crate version surfaced to upper layers.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

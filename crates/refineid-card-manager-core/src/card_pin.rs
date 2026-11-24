@@ -30,6 +30,7 @@
 use alloc::fmt;
 
 use refineid_apdu::{CardTransport, StatusWord};
+use refineid_atr::fineid::{CardClassificationError, FineidCardModel};
 use refineid_auth::credentials::{CredentialRole, PIN_MAX_LENGTH, PIN_MIN_LENGTH};
 use refineid_auth::{
     ActivationCode, ActivationScheme, AuthError, CardPinLengths, CredentialInputError,
@@ -37,17 +38,82 @@ use refineid_auth::{
     PinReferenceScheme, PinSlot, PinStatus, Puk, RetryFloorRefusal, UnvalidatedSecret,
     check_retry_floor, pin_awaits_activation, read_pin_change_record,
 };
+use refineid_cms::identity::SubjectIdentity;
 use refineid_cms::x509::{DateTime, OwnedCert};
-use refineid_lib_core::fineid_card::{CardClassificationError, FineidCardModel};
-use refineid_lib_core::identity::CredentialIdentity;
 use refineid_pcsc::{
     PcscBackend, PcscError, ReaderAccessCap, ReaderBackend as _, ReaderFilter, ReaderId,
     ReaderPickError,
 };
-use refineid_pkcs15::{CertSlot as CoreCertSlot, Pkcs15Ops as _, TokenSerial, render_token_serial};
+use refineid_pkcs15::{
+    CertSlot as CoreCertSlot, Pkcs15Ops as _, PrintedSerial, TokenSerial, render_token_serial,
+};
 use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::reader_pick::{FineidReaderPick, pick_fineid_reader};
+
+/// Cardholder subject identity paired with the card's printed serial number.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CredentialIdentity {
+    /// Subject attributes extracted from the authentication certificate.
+    pub subject: SubjectIdentity,
+    /// Printed card serial derived from `EF.TokenInfo`, when available.
+    pub printed_serial: Option<PrintedSerial>,
+}
+
+impl CredentialIdentity {
+    /// Construct an empty identity.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Construct from certificate subject attributes.
+    #[must_use]
+    pub const fn from_subject(subject: SubjectIdentity) -> Self {
+        Self {
+            subject,
+            printed_serial: None,
+        }
+    }
+
+    /// Attach the card's printed serial and return `self`.
+    #[must_use]
+    pub fn with_printed_serial(mut self, serial: PrintedSerial) -> Self {
+        self.printed_serial = Some(serial);
+        self
+    }
+
+    /// Best available serial for human-facing render paths.
+    #[must_use]
+    pub fn best_serial(&self) -> Option<&str> {
+        self.printed_serial.as_deref()
+    }
+
+    /// Surname and given names, space-separated.
+    #[must_use]
+    pub fn person_string(&self) -> String {
+        self.subject.person_string()
+    }
+
+    /// Holder line for window display: person name followed by organization
+    /// when present.
+    #[must_use]
+    pub fn holder_line(&self) -> String {
+        self.subject.holder_line()
+    }
+}
+
+impl fmt::Display for CredentialIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let subject = self.subject.to_string();
+        match (subject.is_empty(), self.best_serial()) {
+            (false, Some(serial)) if !serial.is_empty() => write!(f, "{subject} {serial}"),
+            (false, _) => f.write_str(&subject),
+            (true, Some(serial)) => f.write_str(serial),
+            (true, None) => Ok(()),
+        }
+    }
+}
 
 /// Which PIN slot a manage-PIN operation targets. Thin layer over
 /// [`PinSlot`] that also carries the user-facing label so error

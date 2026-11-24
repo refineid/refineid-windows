@@ -18,10 +18,6 @@ refineid-ber.workspace = true
 refineid-cms.workspace = true
 refineid-digest.workspace = true
 subtle.workspace = true
-# Standards-based ASN.1 / X.690 DER parsing (re-exports `der`).
-spki.workspace = true
-# Compile-time dotted-decimal OID parser for the `oid::known` table.
-const-oid.workspace = true
 sha2.workspace = true
 # PACE ephemeral-key randomness (run_pace_step_3).
 getrandom.workspace = true

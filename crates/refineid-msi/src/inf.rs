@@ -349,7 +349,7 @@ mod tests {
     };
     use crate::cards::{CARDS, CardRegistration};
     use refineid_atr::Atr;
-    use refineid_lib_core::fineid_card::FineidCardModel;
+    use refineid_atr::fineid::FineidCardModel;
 
     /// The hardware ID Device Manager showed for a FINEID S4-1 v4.0 card
     /// (chip revision 2.0.0) in an ACS ACR1581 contact slot on Windows 11
