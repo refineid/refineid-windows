@@ -46,51 +46,51 @@ pub const PIN_PROMPT_UNBLOCK_VALUE: &str = "80000106";
 /// formatted as semicolon-separated `locale,message` pairs for the Base CSP
 /// and Smart Card KSP.
 pub const PIN_PROMPT_PIN1_LOCALIZED: &str = concat!(
-    "fi-FI,Anna PIN 1 tunnistautumista varten;",
-    "sv-FI,Ange PIN 1 för identifiering;",
-    "sv-SE,Ange PIN 1 för identifiering;",
-    "et-EE,Isikutuvastuseks sisesta PIN 1;",
-    "en-US,Enter PIN 1 for authentication;",
-    "en-GB,Enter PIN 1 for authentication;",
-    "en-AU,Enter PIN 1 for authentication;",
-    "en-CA,Enter PIN 1 for authentication;",
-    "en-IE,Enter PIN 1 for authentication;",
-    "en-IN,Enter PIN 1 for authentication;",
-    "en-NZ,Enter PIN 1 for authentication;",
-    "en-ZA,Enter PIN 1 for authentication",
+    "fi-FI,Anna PIN 1 tunnistautumista varten.;",
+    "sv-FI,Ange PIN 1 för identifiering.;",
+    "sv-SE,Ange PIN 1 för identifiering.;",
+    "et-EE,Isikutuvastuseks sisesta PIN 1.;",
+    "en-US,Enter PIN 1 for authentication.;",
+    "en-GB,Enter PIN 1 for authentication.;",
+    "en-AU,Enter PIN 1 for authentication.;",
+    "en-CA,Enter PIN 1 for authentication.;",
+    "en-IE,Enter PIN 1 for authentication.;",
+    "en-IN,Enter PIN 1 for authentication.;",
+    "en-NZ,Enter PIN 1 for authentication.;",
+    "en-ZA,Enter PIN 1 for authentication.",
 );
 
 /// Localized Windows Security PIN prompt for digital and qualified signing
 /// (PIN 2).
 pub const PIN_PROMPT_PIN2_LOCALIZED: &str = concat!(
-    "fi-FI,Anna PIN 2 allekirjoittamista varten;",
-    "sv-FI,Ange PIN 2 för signering;",
-    "sv-SE,Ange PIN 2 för signering;",
-    "et-EE,Allkirjastamiseks sisesta PIN 2;",
-    "en-US,Enter PIN 2 for signing;",
-    "en-GB,Enter PIN 2 for signing;",
-    "en-AU,Enter PIN 2 for signing;",
-    "en-CA,Enter PIN 2 for signing;",
-    "en-IE,Enter PIN 2 for signing;",
-    "en-IN,Enter PIN 2 for signing;",
-    "en-NZ,Enter PIN 2 for signing;",
-    "en-ZA,Enter PIN 2 for signing",
+    "fi-FI,Anna PIN 2 allekirjoittamista varten.;",
+    "sv-FI,Ange PIN 2 för signering.;",
+    "sv-SE,Ange PIN 2 för signering.;",
+    "et-EE,Allkirjastamiseks sisesta PIN 2.;",
+    "en-US,Enter PIN 2 for signing.;",
+    "en-GB,Enter PIN 2 for signing.;",
+    "en-AU,Enter PIN 2 for signing.;",
+    "en-CA,Enter PIN 2 for signing.;",
+    "en-IE,Enter PIN 2 for signing.;",
+    "en-IN,Enter PIN 2 for signing.;",
+    "en-NZ,Enter PIN 2 for signing.;",
+    "en-ZA,Enter PIN 2 for signing.",
 );
 
 /// Localized Windows Security prompt for unblocking with the PUK.
 pub const PIN_PROMPT_PUK_LOCALIZED: &str = concat!(
-    "fi-FI,Anna PUK-koodi;",
-    "sv-FI,Ange PUK-kod;",
-    "sv-SE,Ange PUK-kod;",
-    "et-EE,Sisesta PUK-kood;",
-    "en-US,Enter PUK code;",
-    "en-GB,Enter PUK code;",
-    "en-AU,Enter PUK code;",
-    "en-CA,Enter PUK code;",
-    "en-IE,Enter PUK code;",
-    "en-IN,Enter PUK code;",
-    "en-NZ,Enter PUK code;",
-    "en-ZA,Enter PUK code",
+    "fi-FI,Anna PUK-koodi.;",
+    "sv-FI,Ange PUK-kod.;",
+    "sv-SE,Ange PUK-kod.;",
+    "et-EE,Sisesta PUK-kood.;",
+    "en-US,Enter PUK code.;",
+    "en-GB,Enter PUK code.;",
+    "en-AU,Enter PUK code.;",
+    "en-CA,Enter PUK code.;",
+    "en-IE,Enter PUK code.;",
+    "en-IN,Enter PUK code.;",
+    "en-NZ,Enter PUK code.;",
+    "en-ZA,Enter PUK code.",
 );
 
 /// Localized PIN prompt `(value_name, value_data)` pairs written under every
@@ -181,7 +181,10 @@ mod tests {
         PIN_PROMPT_PUK_LOCALIZED, PIN_PROMPT_VALUES,
     };
 
-    const REQUIRED_LOCALES: &[&str] = &["fi-FI", "sv-FI", "sv-SE", "et-EE", "en-US", "en-GB"];
+    const REQUIRED_LOCALES: &[&str] = &[
+        "fi-FI", "sv-FI", "sv-SE", "et-EE", "en-US", "en-GB", "en-AU", "en-CA", "en-IE", "en-IN",
+        "en-NZ", "en-ZA",
+    ];
 
     /// The v4.0 registration.
     fn v4_0() -> &'static CardRegistration {
@@ -244,6 +247,10 @@ mod tests {
                     .unwrap_or_else(|| panic!("malformed entry in {name}: {entry}"));
                 assert!(!locale.is_empty(), "empty locale in {name}");
                 assert!(!message.is_empty(), "empty message for {locale} in {name}");
+                assert!(
+                    message.ends_with('.'),
+                    "prompt for {locale} in {name} must end with a period: {message}"
+                );
                 assert!(
                     seen_locales.insert(locale),
                     "duplicate locale {locale} in {name}"
