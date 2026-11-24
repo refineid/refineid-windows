@@ -52,9 +52,8 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
+use refineid_cms::identity::holder_line;
 use refineid_cms::x509::{OwnedCert, extract_key_usage};
-use refineid_lib_core::identity::holder_line;
-use refineid_lib_core::x509::FineidNameExt as _;
 use refineid_rapp::ProfileName;
 use refineid_rapp_core::clock::unix_time_ms;
 use refineid_rapp_core::engine::{

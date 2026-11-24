@@ -47,7 +47,6 @@
 //! another program included, is neither marked nor touched.
 
 use refineid_cms::x509::{Certificate, Name, OwnedCert, extract_basic_constraints};
-use refineid_lib_core::x509::FineidNameExt as _;
 
 /// The word DVV puts in the name of every test CA, as in the issuing CA
 /// "DVV TEST Certificates - G5R" of test organization cards.

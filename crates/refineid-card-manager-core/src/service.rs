@@ -14,12 +14,12 @@
 
 //! UI-toolkit-independent card-management facade.
 
+use refineid_atr::fineid::FineidCardModel;
 use refineid_auth::{
     ActivationScheme, CardPinLengths, PinChangeRecord, PinManageOps as _, PinOps as _,
     PinReferenceScheme, PinSlot, PinStatus,
 };
 use refineid_cms::x509::OwnedCert;
-use refineid_lib_core::fineid_card::FineidCardModel;
 use refineid_pace::{Can, SmTransport, read_card_access, run_pace};
 use refineid_pcsc::{PcscBackend, PcscError, ReaderAccessCap, ReaderBackend as _, ReaderPickError};
 use refineid_pkcs15::{CertSlot as CoreCertSlot, Pkcs15Ops as _, TokenSerial, render_token_serial};
@@ -31,7 +31,7 @@ use crate::card_pin::{
     ChangePinReport, PinActivation, UnblockPinOptions, UnblockPinReport,
     activation_scheme_for_card, probe_pin_change_record,
 };
-use crate::reader_pick::{identity_from_certificate, pick_contactless_reader};
+use crate::reader_pick::pick_contactless_reader;
 
 /// Read-only state shown by the Windows settings app.
 #[derive(Debug, Clone)]
@@ -319,7 +319,7 @@ fn inspected_contactless(
                     "protected auth cert validity start could not be converted".to_owned(),
                 )
             })?;
-        let person = identity_from_certificate(&cert).holder_line();
+        let person = cert.subject.subject_identity().holder_line();
 
         transport
             .select_pkcs15_application()

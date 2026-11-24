@@ -15,8 +15,6 @@
 //! FINEID and contactless (PACE-first) reader selection over [`refineid_pcsc`].
 
 use refineid_cms::x509::Certificate;
-use refineid_lib_core::identity::CredentialIdentity;
-use refineid_lib_core::x509::FineidNameExt as _;
 use refineid_pace::read_card_access;
 use refineid_pcsc::{
     ReaderAccessCap, ReaderBackend, ReaderFilter, ReaderId, ReaderInfo, ReaderPickError,
@@ -24,6 +22,8 @@ use refineid_pcsc::{
 use refineid_pkcs15::{
     CertSlot as CoreCertSlot, Pkcs15Ops as _, derive_printed_serial, render_token_serial,
 };
+
+use crate::card_pin::CredentialIdentity;
 
 /// Output of [`pick_fineid_reader`]: a reader plus the best-effort identity of
 /// the card currently inserted in it.
@@ -38,26 +38,7 @@ pub struct FineidReaderPick {
 /// Extract a [`CredentialIdentity`] from a parsed X.509 certificate's subject.
 #[must_use]
 pub fn identity_from_certificate(certificate: &Certificate<'_>) -> CredentialIdentity {
-    let subject = certificate.subject;
-    let given_names = subject.given_names();
-    let mut identity = CredentialIdentity::new();
-    if let Some(value) = subject.surname() {
-        identity = identity.with_surname(value);
-    }
-    if let Some(value) = given_names.first {
-        identity = identity.with_first_name(value);
-    }
-    if let Some(value) = given_names.second {
-        identity = identity.with_second_name(value);
-    }
-    identity = identity.with_additional_names(given_names.additional);
-    if let Some(value) = subject.peuin() {
-        identity = identity.with_peuin(value);
-    }
-    if let Some(value) = subject.organization_name() {
-        identity = identity.with_organization(value);
-    }
-    identity
+    CredentialIdentity::from_subject(certificate.subject.subject_identity())
 }
 
 /// Pick exactly one FINEID-responding reader, enforcing multi-card safety.

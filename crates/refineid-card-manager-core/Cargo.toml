@@ -17,7 +17,6 @@ refineid-atr.workspace = true
 refineid-auth.workspace = true
 refineid-cms.workspace = true
 refineid-dev-errors.workspace = true
-refineid-lib-core.workspace = true
 refineid-pace.workspace = true
 refineid-pcsc.workspace = true
 refineid-pkcs15.workspace = true

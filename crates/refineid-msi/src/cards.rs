@@ -21,7 +21,7 @@
 //! Process). These registrations are the package's product; the Device
 //! Manager names in [`crate::inf`] are derived from them.
 
-use refineid_lib_core::fineid_card::FineidCardModel;
+use refineid_atr::fineid::FineidCardModel;
 
 /// Where Windows keeps per-card Smart Card Crypto Provider registrations.
 pub const CALAIS: &str = r"SOFTWARE\Microsoft\Cryptography\Calais\SmartCards";

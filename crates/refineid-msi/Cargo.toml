@@ -19,7 +19,6 @@ path = "src/main.rs"
 # their tests run on any host.
 [dependencies]
 refineid-atr.workspace = true
-refineid-lib-core.workspace = true
 
 # The package writer is `#[cfg(windows)]`; the Windows Installer database
 # API exists only there.
