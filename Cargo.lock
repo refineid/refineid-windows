@@ -923,7 +923,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-agent"
-version = "26.11.23"
+version = "26.11.24"
 dependencies = [
  "pcsc",
  "refineid-agent-pipe",
@@ -940,7 +940,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-agent-pipe"
-version = "26.11.23"
+version = "26.11.24"
 dependencies = [
  "refineid-dev-errors",
  "refineid-rapp",
@@ -989,7 +989,7 @@ source = "git+https://github.com/refineid/refineid-core.git?branch=main#53962164
 
 [[package]]
 name = "refineid-card-manager-core"
-version = "26.11.23"
+version = "26.11.24"
 dependencies = [
  "const-oid",
  "refineid-apdu",
@@ -1025,7 +1025,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-dev-errors"
-version = "26.11.23"
+version = "26.11.24"
 dependencies = [
  "windows-sys",
 ]
@@ -1080,7 +1080,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-gui-win32"
-version = "26.11.23"
+version = "26.11.24"
 dependencies = [
  "pcsc",
  "refineid-card-manager-core",
@@ -1100,7 +1100,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-lib-core"
-version = "26.11.23"
+version = "26.11.24"
 dependencies = [
  "const-oid",
  "getrandom 0.4.3",
@@ -1121,7 +1121,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-minidriver"
-version = "26.11.23"
+version = "26.11.24"
 dependencies = [
  "refineid-agent-pipe",
  "refineid-apdu",
@@ -1140,7 +1140,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-msi"
-version = "26.11.23"
+version = "26.11.24"
 dependencies = [
  "refineid-atr",
  "refineid-lib-core",
@@ -1183,19 +1183,6 @@ dependencies = [
 [[package]]
 name = "refineid-pkcs11"
 version = "26.11.23"
-dependencies = [
- "refineid-agent-pipe",
- "refineid-cms",
- "refineid-dev-errors",
- "refineid-pkcs11 26.11.23 (git+https://github.com/refineid/refineid-core.git?branch=main)",
- "refineid-rapp-core",
- "refineid-remote",
- "refineid-windows-credential-store",
-]
-
-[[package]]
-name = "refineid-pkcs11"
-version = "26.11.23"
 source = "git+https://github.com/refineid/refineid-core.git?branch=main#53962164e5c0c6421257f904bace5e16caa260de"
 dependencies = [
  "getrandom 0.4.3",
@@ -1212,6 +1199,19 @@ dependencies = [
  "rustix",
  "spki",
  "zeroize",
+]
+
+[[package]]
+name = "refineid-pkcs11"
+version = "26.11.24"
+dependencies = [
+ "refineid-agent-pipe",
+ "refineid-cms",
+ "refineid-dev-errors",
+ "refineid-pkcs11 26.11.23",
+ "refineid-rapp-core",
+ "refineid-remote",
+ "refineid-windows-credential-store",
 ]
 
 [[package]]
@@ -1241,7 +1241,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-rapp-ble"
-version = "26.11.23"
+version = "26.11.24"
 dependencies = [
  "refineid-dev-errors",
  "refineid-rapp",
@@ -1251,7 +1251,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-rapp-cli"
-version = "26.11.23"
+version = "26.11.24"
 dependencies = [
  "getrandom 0.4.3",
  "hex",
@@ -1270,7 +1270,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-rapp-core"
-version = "26.11.23"
+version = "26.11.24"
 dependencies = [
  "getrandom 0.4.3",
  "if-addrs",
@@ -1287,7 +1287,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-rapp-ffi"
-version = "26.11.23"
+version = "26.11.24"
 dependencies = [
  "getrandom 0.4.3",
  "hex",
@@ -1311,7 +1311,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-settings-ffi"
-version = "26.11.23"
+version = "26.11.24"
 dependencies = [
  "refineid-card-manager-core",
  "refineid-dev-errors",
@@ -1341,11 +1341,11 @@ dependencies = [
 
 [[package]]
 name = "refineid-stamp"
-version = "26.11.23"
+version = "26.11.24"
 
 [[package]]
 name = "refineid-windows-credential-store"
-version = "26.11.23"
+version = "26.11.24"
 dependencies = [
  "refineid-cms",
  "refineid-dev-errors",
@@ -1361,7 +1361,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-windows-doc-sign"
-version = "26.11.23"
+version = "26.11.24"
 dependencies = [
  "hex",
  "refineid-dev-errors",
@@ -1379,7 +1379,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-windows-driver-probe"
-version = "26.11.23"
+version = "26.11.24"
 dependencies = [
  "pcsc",
  "windows-sys",
@@ -1920,7 +1920,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "26.11.23"
+version = "26.11.24"
 dependencies = [
  "proc-macro2",
  "rustc_lexer",

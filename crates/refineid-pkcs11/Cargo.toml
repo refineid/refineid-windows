@@ -16,12 +16,15 @@ crate-type = ["cdylib"]
 name = "refineid_pkcs11"
 
 [dependencies]
-refineid-dev-errors.workspace = true
 refineid-pkcs11.workspace = true
-refineid-remote.workspace = true
+
+[target.'cfg(not(windows))'.dev-dependencies]
+refineid-dev-errors.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 refineid-agent-pipe.workspace = true
 refineid-cms.workspace = true
+refineid-dev-errors.workspace = true
 refineid-rapp-core.workspace = true
+refineid-remote.workspace = true
 refineid-windows-credential-store.workspace = true
