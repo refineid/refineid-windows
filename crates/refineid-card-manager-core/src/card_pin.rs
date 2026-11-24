@@ -30,28 +30,22 @@
 use alloc::fmt;
 
 use refineid_apdu::{CardTransport, StatusWord};
+use refineid_auth::credentials::{CredentialRole, PIN_MAX_LENGTH, PIN_MIN_LENGTH};
 use refineid_auth::{
-    AuthError as CoreAuthError, CardPinLengths as CoreCardPinLengths, CredentialInputError,
-    FlooredCredential as CoreFlooredCredential, ManageOutcome, Pin1, Pin2, PinChangeRecord,
-    PinLengthRefusal, PinManageOps as _, PinOps as _, PinReferenceScheme as CorePinReferenceScheme,
-    PinSlot as CorePinSlot, PinStatus as CorePinStatus, Puk as CorePuk,
-    RetryFloorRefusal as CoreRetryFloorRefusal, UnvalidatedSecret, read_pin_change_record,
+    ActivationCode, ActivationScheme, AuthError, CardPinLengths, CredentialInputError,
+    ManageOutcome, Pin1, Pin2, PinChangeRecord, PinLengthRefusal, PinManageOps as _, PinOps as _,
+    PinReferenceScheme, PinSlot, PinStatus, Puk, RetryFloorRefusal, UnvalidatedSecret,
+    check_retry_floor, pin_awaits_activation, read_pin_change_record,
 };
-use refineid_cms::x509::OwnedCert;
-use refineid_lib_core::activation::{ActivationScheme, PinActivation};
-use refineid_lib_core::auth::{
-    CardPinLengths, ChangePinOutcome, PinPolicyReason, PinReferenceScheme, PinSlot, PinStatus,
-    PukStatus, UnblockOutcome,
-};
+use refineid_cms::x509::{DateTime, OwnedCert};
 use refineid_lib_core::fineid_card::{CardClassificationError, FineidCardModel};
 use refineid_lib_core::identity::CredentialIdentity;
-use refineid_lib_core::pin::{ActivationCode, PinBytes, PinRoleError, Puk};
-use refineid_lib_core::pin_retry_risk::{FlooredCredential, RetryFloorRefusal, check_retry_floor};
 use refineid_pcsc::{
     PcscBackend, PcscError, ReaderAccessCap, ReaderBackend as _, ReaderFilter, ReaderId,
     ReaderPickError,
 };
 use refineid_pkcs15::{CertSlot as CoreCertSlot, Pkcs15Ops as _, TokenSerial, render_token_serial};
+use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::reader_pick::{FineidReaderPick, pick_fineid_reader};
 
@@ -67,8 +61,7 @@ pub enum PinManageSlot {
 }
 
 impl PinManageSlot {
-    /// Project to the lib-core [`PinSlot`] enum used by transport-
-    /// level APDU builders. Drops the CLI-only label.
+    /// Project to the [`PinSlot`] enum used by `refineid-auth`.
     #[must_use]
     pub const fn as_pin_slot(self) -> PinSlot {
         match self {
@@ -88,21 +81,83 @@ impl PinManageSlot {
     }
 }
 
+/// Whether one PIN still awaits its factory activation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinActivation {
+    /// The PIN still holds its factory state.
+    AwaitsActivation,
+    /// The PIN does not await activation.
+    Activated,
+}
+
+impl PinActivation {
+    /// Judge one PIN from its counter-safe probes, delegating to
+    /// [`refineid_auth::pin_awaits_activation`].
+    #[must_use]
+    pub const fn judge(
+        scheme: ActivationScheme,
+        record: PinChangeRecord,
+        status: Option<PinStatus>,
+    ) -> Self {
+        let effective_status = match status {
+            Some(status) => status,
+            None => PinStatus::NoInfo,
+        };
+        if pin_awaits_activation(scheme, record, effective_status) {
+            Self::AwaitsActivation
+        } else {
+            Self::Activated
+        }
+    }
+}
+
+/// Decide the card's [`ActivationScheme`] from its resolved credential
+/// numbering and authentication certificate validity start.
+#[must_use]
+pub(crate) fn activation_scheme_for_card(
+    numbering: PinReferenceScheme,
+    validity_start: Option<DateTime>,
+) -> Option<ActivationScheme> {
+    let validity_start_seconds =
+        validity_start.and_then(|start| i64::try_from(start.unix_duration().as_secs()).ok());
+    ActivationScheme::from_numbering_and_validity_start(numbering, validity_start_seconds)
+}
+
+/// Typed credentials for `card change-pin{1,2}`.
+#[derive(Debug)]
+pub enum ChangePinCredentials {
+    /// Rotate Basic PIN 1.
+    Pin1 {
+        /// Current PIN 1 value.
+        current: Pin1,
+        /// New PIN 1 value.
+        new: Pin1,
+    },
+    /// Rotate Signature PIN 2.
+    Pin2 {
+        /// Current PIN 2 value.
+        current: Pin2,
+        /// New PIN 2 value.
+        new: Pin2,
+    },
+}
+
+impl ChangePinCredentials {
+    /// Which PIN slot these credentials target.
+    #[must_use]
+    pub const fn slot(&self) -> PinManageSlot {
+        match self {
+            Self::Pin1 { .. } => PinManageSlot::Pin1,
+            Self::Pin2 { .. } => PinManageSlot::Pin2,
+        }
+    }
+}
+
 /// Inputs for `card change-pin{1,2}`.
 #[derive(Debug)]
 pub struct ChangePinOptions {
-    /// Which PIN slot to rotate. Drives both the APDU PIN
-    /// reference byte and the spec rule applied to the new PIN
-    /// length policy.
-    pub slot: PinManageSlot,
-    /// Current PIN value (the one the operator typed in the
-    /// "current PIN" prompt). Consumed and zeroized at function
-    /// return.
-    pub current: PinBytes,
-    /// New PIN value (the one the operator typed in the
-    /// "new PIN" prompt). Consumed and zeroized at function
-    /// return.
-    pub new: PinBytes,
+    /// Typed current and new PIN for the targeted slot.
+    pub credentials: ChangePinCredentials,
     /// Optional substring match against reader names. `None` accepts
     /// any single FINEID-responding reader (errors on ambiguity).
     pub reader_filter: Option<String>,
@@ -120,21 +175,36 @@ pub struct ChangePinReport {
     /// Which PIN slot the modify APDU targeted.
     pub slot: PinManageSlot,
     /// Card-side outcome from `CHANGE REFERENCE DATA`.
-    pub outcome: ChangePinOutcome,
+    pub outcome: ManageOutcome,
+}
+
+/// Target PIN slot and validated replacement value for `card unblock-pin{1,2}`.
+#[derive(Debug)]
+pub enum UnblockPinTarget {
+    /// Unblock and replace Basic PIN 1.
+    Pin1(Pin1),
+    /// Unblock and replace Signature PIN 2.
+    Pin2(Pin2),
+}
+
+impl UnblockPinTarget {
+    /// Which PIN slot this unblock targets.
+    #[must_use]
+    pub const fn slot(&self) -> PinManageSlot {
+        match self {
+            Self::Pin1(_) => PinManageSlot::Pin1,
+            Self::Pin2(_) => PinManageSlot::Pin2,
+        }
+    }
 }
 
 /// Inputs for `card unblock-pin{1,2}`.
 #[derive(Debug)]
 pub struct UnblockPinOptions {
-    /// Which PIN slot to unblock. One PUK recovers both PIN1 and
-    /// PIN2.
-    pub slot: PinManageSlot,
-    /// The PUK code. Typed [`Puk`] forces construction
-    /// via [`Puk::new`] at the operator-input boundary.
+    /// The PUK code validated through [`Puk::reconstruct`].
     pub puk: Puk,
-    /// New PIN value to set after the unblock succeeds. Consumed
-    /// and zeroized at function return.
-    pub new_pin: PinBytes,
+    /// Target PIN slot and new PIN value to set after the unblock succeeds.
+    pub new_pin: UnblockPinTarget,
     /// Optional substring match against reader names.
     pub reader_filter: Option<String>,
 }
@@ -151,7 +221,95 @@ pub struct UnblockPinReport {
     /// Which PIN slot the unblock APDU targeted.
     pub slot: PinManageSlot,
     /// Card-side outcome from `RESET RETRY COUNTER`.
-    pub outcome: UnblockOutcome,
+    pub outcome: ManageOutcome,
+}
+
+/// Syntactically validated activation code entered before the card's
+/// [`ActivationScheme`] has been read.
+///
+/// Enforces ASCII-digit shape (`4..=12` digits) at the input boundary and
+/// zeroizes on drop; exact scheme length (7 or 8 digits) is verified through
+/// [`ActivationCode::reconstruct`] once the card session decides the scheme.
+pub struct ActivationInput(Zeroizing<Vec<u8>>);
+
+impl ActivationInput {
+    /// Validate and take ownership of `bytes` as an activation code candidate.
+    ///
+    /// # Errors
+    /// Returns [`CredentialInputError`] unless `bytes` contains
+    /// `PIN_MIN_LENGTH..=PIN_MAX_LENGTH` ASCII digits.
+    pub fn new(mut bytes: Vec<u8>) -> Result<Self, CredentialInputError> {
+        let role = CredentialRole::ActivationCode;
+        if bytes.is_empty() {
+            bytes.zeroize();
+            return Err(CredentialInputError::Empty { role });
+        }
+        if bytes.len() < PIN_MIN_LENGTH || bytes.len() > PIN_MAX_LENGTH {
+            bytes.zeroize();
+            return Err(CredentialInputError::WrongLength {
+                role,
+                expected_min: PIN_MIN_LENGTH,
+                expected_max: PIN_MAX_LENGTH,
+            });
+        }
+        if bytes.iter().any(|byte| !byte.is_ascii_digit()) {
+            bytes.zeroize();
+            return Err(CredentialInputError::NonDigit { role });
+        }
+        Ok(Self(Zeroizing::new(bytes)))
+    }
+}
+
+impl fmt::Debug for ActivationInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ActivationInput([redacted])")
+    }
+}
+
+/// Activation code validated against the card's [`ActivationScheme`] via
+/// [`ActivationCode::reconstruct`] and held only inside `card_pin` so both
+/// PIN 1 and PIN 2 setup steps can construct their typed `refineid-auth`
+/// credentials inside one transaction.
+struct ValidatedActivationCode {
+    digits: Zeroizing<Vec<u8>>,
+    scheme: ActivationScheme,
+}
+
+impl ValidatedActivationCode {
+    fn for_scheme(scheme: ActivationScheme, input: ActivationInput) -> Result<Self, CardPinError> {
+        let _verified: ActivationCode = ActivationCode::reconstruct(
+            UnvalidatedSecret::from_owned_bytes(input.0.to_vec()),
+            scheme,
+        )
+        .map_err(|error| match error {
+            CredentialInputError::NonDigit { .. } => CardPinError::PinInput(error),
+            CredentialInputError::Empty { .. } | CredentialInputError::WrongLength { .. } => {
+                CardPinError::ActivationLengthMismatch {
+                    scheme,
+                    expected: scheme.activation_entry_digit_count(),
+                }
+            }
+        })?;
+        Ok(Self {
+            digits: input.0,
+            scheme,
+        })
+    }
+
+    fn as_pin1(&self) -> Result<Pin1, CardPinError> {
+        Pin1::reconstruct(UnvalidatedSecret::from_owned_bytes(self.digits.to_vec()))
+            .map_err(CardPinError::PinInput)
+    }
+
+    fn as_pin2(&self) -> Result<Pin2, CardPinError> {
+        Pin2::reconstruct(UnvalidatedSecret::from_owned_bytes(self.digits.to_vec()))
+            .map_err(CardPinError::PinInput)
+    }
+
+    fn as_puk(&self) -> Result<Puk, CardPinError> {
+        Puk::reconstruct(UnvalidatedSecret::from_owned_bytes(self.digits.to_vec()))
+            .map_err(CardPinError::PinInput)
+    }
 }
 
 /// Error returned from the PIN-management entrypoints
@@ -162,9 +320,10 @@ pub enum CardPinError {
     ReaderPick(ReaderPickError),
     /// PC/SC transport / transmit error.
     Pcsc(PcscError),
-    /// Local-policy rejection (length / non-digit) before any
-    /// APDU went out. Retry counter is unaffected.
-    PinPolicy(PinPolicyReason),
+    /// Local credential-shape rejection before any APDU went out.
+    PinInput(CredentialInputError),
+    /// Card PIN-length policy rejection before any APDU went out.
+    PinLength(PinLengthRefusal),
     /// Couldn't SELECT the PKCS#15 application. FINEID gates the
     /// PIN-management INS bytes behind app SELECT.
     Pkcs15Select(String),
@@ -229,7 +388,8 @@ impl fmt::Display for CardPinError {
         match self {
             Self::ReaderPick(e) => write!(f, "{e}"),
             Self::Pcsc(e) => write!(f, "PC/SC: {e}"),
-            Self::PinPolicy(r) => write!(f, "PIN / PUK rejected locally: {r}"),
+            Self::PinInput(r) => write!(f, "PIN / PUK rejected locally: {r}"),
+            Self::PinLength(r) => write!(f, "PIN / PUK rejected locally: {r}"),
             Self::Pkcs15Select(s) => write!(f, "SELECT PKCS#15 app: {s}"),
             Self::Transport(s) => write!(f, "transport: {s}"),
             Self::AccessNumberRejected(s) => write!(f, "access number rejected: {s}"),
@@ -300,186 +460,32 @@ impl From<ReaderPickError> for CardPinError {
     }
 }
 
-pub(crate) const fn to_core_slot(slot: PinSlot) -> CorePinSlot {
-    match slot {
-        PinSlot::Pin1 => CorePinSlot::Pin1,
-        PinSlot::Pin2 => CorePinSlot::Pin2,
-    }
-}
-
-pub(crate) const fn to_core_scheme(scheme: PinReferenceScheme) -> CorePinReferenceScheme {
-    match scheme {
-        PinReferenceScheme::Citizen => CorePinReferenceScheme::Citizen,
-        PinReferenceScheme::Organizational => CorePinReferenceScheme::Organizational,
-    }
-}
-
-fn from_core_scheme(scheme: CorePinReferenceScheme) -> Result<PinReferenceScheme, CardPinError> {
-    match scheme {
-        CorePinReferenceScheme::Citizen => Ok(PinReferenceScheme::Citizen),
-        CorePinReferenceScheme::Organizational => Ok(PinReferenceScheme::Organizational),
-        CorePinReferenceScheme::Estonian => Err(CardPinError::Transport(
-            "non-FINEID PIN reference scheme is not supported by FINEID PIN management".to_owned(),
-        )),
-    }
-}
-
-pub(crate) const fn convert_core_pin_status(status: CorePinStatus) -> PinStatus {
-    match status {
-        CorePinStatus::Verified => PinStatus::Verified,
-        CorePinStatus::Remaining(retries) => PinStatus::Remaining(retries),
-        CorePinStatus::NoInfo => PinStatus::NoInfo,
-        CorePinStatus::Locked => PinStatus::Locked,
-        CorePinStatus::Other(sw) => PinStatus::Other(sw.as_u16()),
-    }
-}
-
-pub(crate) const fn convert_core_puk_status(status: CorePinStatus) -> PukStatus {
-    match status {
-        CorePinStatus::Remaining(retries) => PukStatus::Remaining(retries),
-        CorePinStatus::Verified | CorePinStatus::NoInfo => PukStatus::NoInfo,
-        CorePinStatus::Locked => PukStatus::Locked,
-        CorePinStatus::Other(sw) => PukStatus::Other(sw.as_u16()),
-    }
-}
-
-pub(crate) const fn convert_core_lengths(
-    lengths: CoreCardPinLengths,
-    numbering: PinReferenceScheme,
-) -> CardPinLengths {
-    CardPinLengths::from_accepted(
-        numbering,
-        lengths.pin1().accepted(),
-        lengths.pin2().accepted(),
-        lengths.puk().accepted(),
-    )
-}
-
-const fn convert_core_floored_credential(credential: CoreFlooredCredential) -> FlooredCredential {
-    match credential {
-        CoreFlooredCredential::Pin1 => FlooredCredential::Pin1,
-        CoreFlooredCredential::Pin2 => FlooredCredential::Pin2,
-        CoreFlooredCredential::Puk => FlooredCredential::Puk,
-    }
-}
-
-const fn convert_core_retry_floor(refusal: CoreRetryFloorRefusal) -> RetryFloorRefusal {
-    match refusal {
-        CoreRetryFloorRefusal::TriesBelowFloor {
-            credential,
-            remaining,
-        } => RetryFloorRefusal::TriesBelowFloor {
-            credential: convert_core_floored_credential(credential),
-            remaining,
-        },
-        CoreRetryFloorRefusal::CounterUnreadable { credential } => {
-            RetryFloorRefusal::CounterUnreadable {
-                credential: convert_core_floored_credential(credential),
-            }
-        }
-    }
-}
-
-const fn convert_core_pin_length(refusal: PinLengthRefusal) -> PinPolicyReason {
-    match refusal {
-        PinLengthRefusal::OutsideAcceptedRange { accepted, .. } => PinPolicyReason::WrongLength {
-            got: 0,
-            min: accepted.min(),
-            max: accepted.max(),
-        },
-        PinLengthRefusal::NoAcceptedLength { .. } => PinPolicyReason::NoAcceptedLength,
-    }
-}
-
-const fn convert_credential_input_error(error: CredentialInputError) -> PinPolicyReason {
-    match error {
-        CredentialInputError::Empty { .. } => PinPolicyReason::WrongLength {
-            got: 0,
-            min: refineid_auth::credentials::PIN_MIN_LENGTH,
-            max: refineid_auth::credentials::PIN_MAX_LENGTH,
-        },
-        CredentialInputError::WrongLength {
-            expected_min,
-            expected_max,
-            ..
-        } => PinPolicyReason::WrongLength {
-            got: 0,
-            min: expected_min,
-            max: expected_max,
-        },
-        CredentialInputError::NonDigit { .. } => PinPolicyReason::NonDigit { byte_offset: 0 },
-    }
-}
-
-const fn convert_manage_to_change(outcome: ManageOutcome) -> ChangePinOutcome {
-    match outcome {
-        ManageOutcome::Ok => ChangePinOutcome::Ok,
-        ManageOutcome::WrongCredential { retries_left } => {
-            ChangePinOutcome::WrongCurrentPin { retries_left }
-        }
-        ManageOutcome::Locked => ChangePinOutcome::Locked,
-        ManageOutcome::Other(StatusWord::WrongLength) => ChangePinOutcome::LengthError,
-        ManageOutcome::Other(sw) => ChangePinOutcome::Other(sw.as_u16()),
-    }
-}
-
-const fn convert_manage_to_unblock(outcome: ManageOutcome) -> UnblockOutcome {
-    match outcome {
-        ManageOutcome::Ok => UnblockOutcome::Ok,
-        ManageOutcome::WrongCredential { retries_left } => {
-            UnblockOutcome::WrongPuk { retries_left }
-        }
-        ManageOutcome::Locked => UnblockOutcome::PukLocked,
-        ManageOutcome::Other(StatusWord::WrongLength) => UnblockOutcome::LengthError,
-        ManageOutcome::Other(sw) => UnblockOutcome::Other(sw.as_u16()),
-    }
-}
-
-/// Map a `refineid-auth` [`CoreAuthError`] into [`CardPinError`].
-fn core_auth_to_card_pin(e: CoreAuthError<impl fmt::Display>) -> CardPinError {
+/// Map a `refineid-auth` [`AuthError`] into [`CardPinError`].
+fn auth_to_card_pin(e: AuthError<impl fmt::Display>) -> CardPinError {
     match e {
-        CoreAuthError::Transport(t) => CardPinError::Transport(format!("{t}")),
-        CoreAuthError::Outcome(o) => CardPinError::Transport(format!("{o}")),
-        CoreAuthError::Command(c) => CardPinError::Transport(format!("{c}")),
-        CoreAuthError::RetryFloor(r) => CardPinError::RetryFloor(convert_core_retry_floor(r)),
-        CoreAuthError::PinLength(r) => CardPinError::PinPolicy(convert_core_pin_length(r)),
-        CoreAuthError::UnsupportedSlot { scheme, slot } => {
+        AuthError::Transport(t) => CardPinError::Transport(format!("{t}")),
+        AuthError::Outcome(o) => CardPinError::Transport(format!("{o}")),
+        AuthError::Command(c) => CardPinError::Transport(format!("{c}")),
+        AuthError::RetryFloor(r) => CardPinError::RetryFloor(r),
+        AuthError::PinLength(r) => CardPinError::PinLength(r),
+        AuthError::UnsupportedSlot { scheme, slot } => {
             CardPinError::Transport(format!("{slot:?} is not supported under {scheme:?}"))
         }
     }
 }
 
-fn reconstruct_pin1(pin: &PinBytes) -> Result<Pin1, CardPinError> {
-    Pin1::reconstruct(UnvalidatedSecret::from_owned_bytes(pin.as_bytes().to_vec()))
-        .map_err(|error| CardPinError::PinPolicy(convert_credential_input_error(error)))
-}
-
-fn reconstruct_pin2(pin: &PinBytes) -> Result<Pin2, CardPinError> {
-    Pin2::reconstruct(UnvalidatedSecret::from_owned_bytes(pin.as_bytes().to_vec()))
-        .map_err(|error| CardPinError::PinPolicy(convert_credential_input_error(error)))
-}
-
-fn reconstruct_puk(puk: &PinBytes) -> Result<CorePuk, CardPinError> {
-    CorePuk::reconstruct(UnvalidatedSecret::from_owned_bytes(puk.as_bytes().to_vec()))
-        .map_err(|error| CardPinError::PinPolicy(convert_credential_input_error(error)))
-}
-
-/// Read the citizen card's PIN-changed flag (`DF 2F`), returning `None` on
-/// organizational cards (which do not support the citizen PIN container) or
-/// when the card does not report the flag.
-pub(crate) fn probe_pin_changed_flag<T: CardTransport>(
+/// Read the citizen card's PIN-changed record (`DF 2F`), returning
+/// [`PinChangeRecord::Unreadable`] on non-citizen cards (which do not support
+/// the citizen PIN container) or when the card does not report the flag.
+pub(crate) fn probe_pin_change_record<T: CardTransport>(
     transport: &mut T,
     numbering: PinReferenceScheme,
     slot: PinSlot,
-) -> Option<bool> {
+) -> PinChangeRecord {
     if numbering != PinReferenceScheme::Citizen {
-        return None;
+        return PinChangeRecord::Unreadable;
     }
-    match read_pin_change_record(transport, to_core_slot(slot)).ok()? {
-        PinChangeRecord::Changed => Some(true),
-        PinChangeRecord::Unchanged => Some(false),
-        PinChangeRecord::Unreadable => None,
-    }
+    read_pin_change_record(transport, slot).unwrap_or(PinChangeRecord::Unreadable)
 }
 
 /// Bound card session.
@@ -506,7 +512,7 @@ pub struct BoundCardSession {
     pub model: FineidCardModel,
     /// The credential-reference numbering the card answered to.
     pub numbering: PinReferenceScheme,
-    /// The card's activation scheme ([`ActivationScheme::for_card`]).
+    /// The card's activation scheme.
     pub scheme: ActivationScheme,
 }
 
@@ -607,10 +613,9 @@ pub fn establish_card_session(
     transport
         .select_pkcs15_application()
         .map_err(|e| CardPinError::Pkcs15Select(format!("{e}")))?;
-    let core_numbering = transport
+    let numbering = transport
         .resolve_pin_reference_scheme()
-        .map_err(core_auth_to_card_pin)?;
-    let numbering = from_core_scheme(core_numbering)?;
+        .map_err(auth_to_card_pin)?;
     let validity_start = match numbering {
         PinReferenceScheme::Organizational => None,
         PinReferenceScheme::Citizen => {
@@ -621,8 +626,14 @@ pub fn establish_card_session(
                 .map_err(|e| CardPinError::Transport(format!("auth cert parse: {e}")))?;
             Some(cert.view().not_before)
         }
+        PinReferenceScheme::Estonian => {
+            return Err(CardPinError::Transport(
+                "non-FINEID PIN reference scheme is not supported by FINEID PIN management"
+                    .to_owned(),
+            ));
+        }
     };
-    let scheme = ActivationScheme::for_card(numbering, validity_start)
+    let scheme = activation_scheme_for_card(numbering, validity_start)
         .ok_or_else(|| CardPinError::Transport("auth cert gives no validity start".to_owned()))?;
 
     Ok(BoundCardSession {
@@ -643,12 +654,9 @@ fn probe_pin_activation<T: CardTransport>(
     scheme: ActivationScheme,
     slot: PinSlot,
 ) -> (Option<PinStatus>, PinActivation) {
-    let status = transport
-        .pin_status_with_scheme(to_core_scheme(numbering), to_core_slot(slot))
-        .ok()
-        .map(convert_core_pin_status);
-    let changed = probe_pin_changed_flag(transport, numbering, slot);
-    (status, PinActivation::judge(scheme, changed, status))
+    let status = transport.pin_status_with_scheme(numbering, slot).ok();
+    let record = probe_pin_change_record(transport, numbering, slot);
+    (status, PinActivation::judge(scheme, record, status))
 }
 
 /// The status of a PIN that does not await its activation, or the
@@ -669,7 +677,7 @@ fn require_activated<T: CardTransport>(
     }
 }
 
-/// Rotate the PIN in `options.slot`. The card's own outcome
+/// Rotate the PIN in `options.credentials`. The card's own outcome
 /// (wrong-current-PIN with retries-left, locked, etc.) is
 /// surfaced via [`ChangePinReport::outcome`], not as an error.
 ///
@@ -686,39 +694,37 @@ pub fn change_pin_first(
     let person = ctx.identity().person_string();
     let card_serial = ctx.identity().best_serial().unwrap_or("").to_owned();
     let reader_name = ctx.reader_id().as_str().to_owned();
-    let manage_slot = options.slot;
+    let manage_slot = options.credentials.slot();
     let slot = manage_slot.as_pin_slot();
-    let core_scheme = to_core_scheme(ctx.numbering());
+    let numbering = ctx.numbering();
+    if numbering == PinReferenceScheme::Estonian {
+        return Err(CardPinError::Transport(
+            "non-FINEID PIN reference scheme is not supported by FINEID PIN management".to_owned(),
+        ));
+    }
 
     let card = backend.open_exclusive(ctx.reader_id(), ReaderAccessCap::PinSequence)?;
-    let outcome = card.pin_sequence(|mut tx| -> Result<ChangePinOutcome, CardPinError> {
+    let outcome = card.pin_sequence(|mut tx| -> Result<ManageOutcome, CardPinError> {
         tx.select_pkcs15_application()
             .map_err(|e| CardPinError::Pkcs15Select(format!("{e}")))?;
         re_verify_session(&mut tx, ctx.bound_serial())?;
         let lengths = tx
-            .read_card_pin_lengths_with_scheme(core_scheme)
-            .map_err(core_auth_to_card_pin)?;
+            .read_card_pin_lengths_with_scheme(numbering)
+            .map_err(auth_to_card_pin)?;
 
         let status = require_activated(&mut tx, &ctx, manage_slot)?;
         check_retry_floor(slot.into(), status).map_err(CardPinError::RetryFloor)?;
 
         re_verify_session(&mut tx, ctx.bound_serial())?;
 
-        let manage_outcome = match slot {
-            PinSlot::Pin1 => {
-                let current = reconstruct_pin1(&options.current)?;
-                let new = reconstruct_pin1(&options.new)?;
-                tx.change_pin1(&lengths, current, new)
-                    .map_err(core_auth_to_card_pin)?
-            }
-            PinSlot::Pin2 => {
-                let current = reconstruct_pin2(&options.current)?;
-                let new = reconstruct_pin2(&options.new)?;
-                tx.change_pin2(&lengths, current, new)
-                    .map_err(core_auth_to_card_pin)?
-            }
-        };
-        Ok(convert_manage_to_change(manage_outcome))
+        match options.credentials {
+            ChangePinCredentials::Pin1 { current, new } => tx
+                .change_pin1(&lengths, current, new)
+                .map_err(auth_to_card_pin),
+            ChangePinCredentials::Pin2 { current, new } => tx
+                .change_pin2(&lengths, current, new)
+                .map_err(auth_to_card_pin),
+        }
     })??;
 
     let report = ChangePinReport {
@@ -728,12 +734,11 @@ pub fn change_pin_first(
         slot: manage_slot,
         outcome,
     };
-    drop(options);
     drop(ctx);
     Ok(report)
 }
 
-/// PUK-driven unblock + replace PIN in `options.slot`.
+/// PUK-driven unblock + replace PIN in `options.new_pin`.
 ///
 /// Runs inside a single [`refineid_pcsc::PcscCard::pin_sequence`] transaction
 /// that resets the card on exit.
@@ -750,36 +755,34 @@ pub fn unblock_pin_first(
     let person = ctx.identity().person_string();
     let card_serial = ctx.identity().best_serial().unwrap_or("").to_owned();
     let reader_name = ctx.reader_id().as_str().to_owned();
-    let manage_slot = options.slot;
-    let slot = manage_slot.as_pin_slot();
-    let core_scheme = to_core_scheme(ctx.numbering());
+    let manage_slot = options.new_pin.slot();
+    let numbering = ctx.numbering();
+    if numbering == PinReferenceScheme::Estonian {
+        return Err(CardPinError::Transport(
+            "non-FINEID PIN reference scheme is not supported by FINEID PIN management".to_owned(),
+        ));
+    }
 
     let card = backend.open_exclusive(ctx.reader_id(), ReaderAccessCap::PinSequence)?;
-    let outcome = card.pin_sequence(|mut tx| -> Result<UnblockOutcome, CardPinError> {
+    let outcome = card.pin_sequence(|mut tx| -> Result<ManageOutcome, CardPinError> {
         tx.select_pkcs15_application()
             .map_err(|e| CardPinError::Pkcs15Select(format!("{e}")))?;
         re_verify_session(&mut tx, ctx.bound_serial())?;
         let lengths = tx
-            .read_card_pin_lengths_with_scheme(core_scheme)
-            .map_err(core_auth_to_card_pin)?;
+            .read_card_pin_lengths_with_scheme(numbering)
+            .map_err(auth_to_card_pin)?;
 
         require_activated(&mut tx, &ctx, manage_slot)?;
         re_verify_session(&mut tx, ctx.bound_serial())?;
 
-        let puk = reconstruct_puk(&options.puk.to_pin_bytes())?;
-        let manage_outcome = match slot {
-            PinSlot::Pin1 => {
-                let new = reconstruct_pin1(&options.new_pin)?;
-                tx.unblock_pin1(&lengths, puk, new)
-                    .map_err(core_auth_to_card_pin)?
-            }
-            PinSlot::Pin2 => {
-                let new = reconstruct_pin2(&options.new_pin)?;
-                tx.unblock_pin2(&lengths, puk, new)
-                    .map_err(core_auth_to_card_pin)?
-            }
-        };
-        Ok(convert_manage_to_unblock(manage_outcome))
+        match options.new_pin {
+            UnblockPinTarget::Pin1(new) => tx
+                .unblock_pin1(&lengths, options.puk, new)
+                .map_err(auth_to_card_pin),
+            UnblockPinTarget::Pin2(new) => tx
+                .unblock_pin2(&lengths, options.puk, new)
+                .map_err(auth_to_card_pin),
+        }
     })??;
 
     let report = UnblockPinReport {
@@ -789,7 +792,6 @@ pub fn unblock_pin_first(
         slot: manage_slot,
         outcome,
     };
-    drop(options);
     drop(ctx);
     Ok(report)
 }
@@ -805,21 +807,23 @@ impl fmt::Display for ChangePinReport {
         }
         let label = self.slot.label();
         match &self.outcome {
-            ChangePinOutcome::Ok => writeln!(
+            ManageOutcome::Ok => writeln!(
                 f,
                 "{label} changed; retry counter reset; re-VERIFY required for further ops"
             )?,
-            ChangePinOutcome::WrongCurrentPin { retries_left } => {
+            ManageOutcome::WrongCredential { retries_left } => {
                 writeln!(f, "current {label} was wrong ({retries_left} retries left)")?;
             }
-            ChangePinOutcome::Locked => writeln!(
+            ManageOutcome::Locked => writeln!(
                 f,
                 "{label} is blocked -- use the PUK to unblock before retrying"
             )?,
-            ChangePinOutcome::LengthError => {
+            ManageOutcome::Other(StatusWord::WrongLength) => {
                 writeln!(f, "card rejected APDU length (SW=6700) -- host bug")?;
             }
-            ChangePinOutcome::Other(sw) => writeln!(f, "card returned unexpected SW={sw:#06X}")?,
+            ManageOutcome::Other(sw) => {
+                writeln!(f, "card returned unexpected SW={:#06X}", sw.as_u16())?;
+            }
         }
         Ok(())
     }
@@ -836,27 +840,25 @@ impl fmt::Display for UnblockPinReport {
         }
         let label = self.slot.label();
         match &self.outcome {
-            UnblockOutcome::Ok => writeln!(
+            ManageOutcome::Ok => writeln!(
                 f,
                 "{label} unblocked; retry counter reset to max; re-VERIFY required for further ops"
             )?,
-            UnblockOutcome::WrongPuk { retries_left } => writeln!(
+            ManageOutcome::WrongCredential { retries_left } => writeln!(
                 f,
                 "PUK was wrong ({retries_left} retries left on the PUK itself; \
                  exhausting it permanently bricks the card)"
             )?,
-            UnblockOutcome::PukLocked => writeln!(
+            ManageOutcome::Locked => writeln!(
                 f,
                 "PUK is itself blocked -- card needs DVV reissue, no software recovery"
             )?,
-            UnblockOutcome::Invalidated => writeln!(
-                f,
-                "PIN unblock counter or PUK usage counter exhausted -- card needs DVV reissue"
-            )?,
-            UnblockOutcome::LengthError => {
+            ManageOutcome::Other(StatusWord::WrongLength) => {
                 writeln!(f, "card rejected APDU length (SW=6700) -- host bug")?;
             }
-            UnblockOutcome::Other(sw) => writeln!(f, "card returned unexpected SW={sw:#06X}")?,
+            ManageOutcome::Other(sw) => {
+                writeln!(f, "card returned unexpected SW={:#06X}", sw.as_u16())?;
+            }
         }
         Ok(())
     }
@@ -875,7 +877,7 @@ pub struct ActivationCardContext {
     pub identity: CredentialIdentity,
     /// The credential-reference numbering the card answered to.
     pub numbering: PinReferenceScheme,
-    /// The card's activation scheme ([`ActivationScheme::for_card`]).
+    /// The card's activation scheme.
     pub scheme: ActivationScheme,
     /// PKCS#15 EF.TokenInfo serial (long form) captured at
     /// session open.
@@ -953,13 +955,13 @@ pub(crate) fn re_verify_session<T: CardTransport>(
 #[derive(Debug)]
 pub struct ActivateOptions {
     /// The activation PIN from the DVV activation letter, as typed.
-    pub activation_code: PinBytes,
+    pub activation_code: ActivationInput,
     /// New basic PIN (PIN1, of a length the card accepts), given exactly when PIN1
     /// awaits activation.
-    pub new_pin1: Option<PinBytes>,
+    pub new_pin1: Option<Pin1>,
     /// New signature PIN (PIN2, of a length the card accepts), given exactly when PIN2
     /// awaits activation.
-    pub new_pin2: Option<PinBytes>,
+    pub new_pin2: Option<Pin2>,
     /// Override the pre-flight refusal when no PIN awaits its activation.
     pub allow_reactivate: bool,
 }
@@ -972,9 +974,9 @@ pub struct ActivateReport {
     /// The per-PIN pre-flight verdict.
     pub preflight: ActivatePreflightOutcome,
     /// Card's outcome for the PIN1 activation command.
-    pub pin1_outcome: Option<UnblockOutcome>,
+    pub pin1_outcome: Option<ManageOutcome>,
     /// Card's outcome for the PIN2 activation command.
-    pub pin2_outcome: Option<UnblockOutcome>,
+    pub pin2_outcome: Option<ManageOutcome>,
 }
 
 /// What the per-PIN pre-flight saw before any modification was
@@ -1063,113 +1065,73 @@ const fn activation_targets(
     }
 }
 
-/// Map a `CHANGE REFERENCE DATA` outcome onto the `UnblockOutcome` shape.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "kept to document and unit-test variant equivalence between ChangePinOutcome and UnblockOutcome"
-    )
-)]
-const fn change_to_unblock(o: ChangePinOutcome) -> UnblockOutcome {
-    match o {
-        ChangePinOutcome::Ok => UnblockOutcome::Ok,
-        ChangePinOutcome::WrongCurrentPin { retries_left } => {
-            UnblockOutcome::WrongPuk { retries_left }
-        }
-        ChangePinOutcome::Locked => UnblockOutcome::PukLocked,
-        ChangePinOutcome::LengthError => UnblockOutcome::LengthError,
-        ChangePinOutcome::Other(sw) => UnblockOutcome::Other(sw),
-    }
-}
-
 /// Per-slot setup for [`activate_first`]: dispatch the scheme's command under
 /// the card's numbering through `refineid-auth` (which enforces the card
 /// lengths and retry floor before any credential APDU goes out).
 fn activate_slot_setup<T: CardTransport>(
     transport: &mut T,
-    lengths: &CoreCardPinLengths,
-    slot: PinSlot,
-    activation_code: &ActivationCode,
-    new_pin: &PinBytes,
-) -> Result<UnblockOutcome, CardPinError> {
-    let outcome = match (activation_code, slot) {
-        (ActivationCode::Seven(_), PinSlot::Pin1) => {
-            let current = reconstruct_pin1(&activation_code.to_pin_bytes())?;
-            let new = reconstruct_pin1(new_pin)?;
-            transport
-                .change_pin1(lengths, current, new)
-                .map_err(core_auth_to_card_pin)?
-        }
-        (ActivationCode::Seven(_), PinSlot::Pin2) => {
-            let current = reconstruct_pin2(&activation_code.to_pin_bytes())?;
-            let new = reconstruct_pin2(new_pin)?;
-            transport
-                .change_pin2(lengths, current, new)
-                .map_err(core_auth_to_card_pin)?
-        }
-        (ActivationCode::Eight(_), PinSlot::Pin1) => {
-            let puk = reconstruct_puk(&activation_code.to_pin_bytes())?;
-            let new = reconstruct_pin1(new_pin)?;
-            transport
-                .unblock_pin1(lengths, puk, new)
-                .map_err(core_auth_to_card_pin)?
-        }
-        (ActivationCode::Eight(_), PinSlot::Pin2) => {
-            let puk = reconstruct_puk(&activation_code.to_pin_bytes())?;
-            let new = reconstruct_pin2(new_pin)?;
-            transport
-                .unblock_pin2(lengths, puk, new)
-                .map_err(core_auth_to_card_pin)?
-        }
-    };
-    Ok(convert_manage_to_unblock(outcome))
+    lengths: &CardPinLengths,
+    activation_code: &ValidatedActivationCode,
+    target: UnblockPinTarget,
+) -> Result<ManageOutcome, CardPinError> {
+    match (activation_code.scheme, target) {
+        (ActivationScheme::PresetActivationPin, UnblockPinTarget::Pin1(new)) => transport
+            .change_pin1(lengths, activation_code.as_pin1()?, new)
+            .map_err(auth_to_card_pin),
+        (ActivationScheme::PresetActivationPin, UnblockPinTarget::Pin2(new)) => transport
+            .change_pin2(lengths, activation_code.as_pin2()?, new)
+            .map_err(auth_to_card_pin),
+        (ActivationScheme::ActivationCodeIsPuk, UnblockPinTarget::Pin1(new)) => transport
+            .unblock_pin1(lengths, activation_code.as_puk()?, new)
+            .map_err(auth_to_card_pin),
+        (ActivationScheme::ActivationCodeIsPuk, UnblockPinTarget::Pin2(new)) => transport
+            .unblock_pin2(lengths, activation_code.as_puk()?, new)
+            .map_err(auth_to_card_pin),
+    }
 }
 
 /// Check every activation entry against the card's lengths before any command.
 fn check_activation_entries(
     lengths: &CardPinLengths,
-    activation_code: &ActivationCode,
-    new_pin1: Option<&PinBytes>,
-    new_pin2: Option<&PinBytes>,
+    activation_code: &ValidatedActivationCode,
+    new_pin1: Option<&Pin1>,
+    new_pin2: Option<&Pin2>,
 ) -> Result<(), CardPinError> {
-    let code_length = activation_code.to_pin_bytes().digit_count();
-    for (slot, pin) in [(PinSlot::Pin1, new_pin1), (PinSlot::Pin2, new_pin2)] {
-        let Some(pin) = pin else {
-            continue;
-        };
-        match activation_code {
-            ActivationCode::Seven(_) => lengths.check_pin(slot, code_length),
-            ActivationCode::Eight(_) => lengths.check_puk(code_length),
+    if let Some(pin1) = new_pin1 {
+        match activation_code.scheme {
+            ActivationScheme::PresetActivationPin => {
+                let current = activation_code.as_pin1()?;
+                lengths
+                    .check_pin1(&current)
+                    .map_err(CardPinError::PinLength)?;
+            }
+            ActivationScheme::ActivationCodeIsPuk => {
+                let puk = activation_code.as_puk()?;
+                lengths.check_puk(&puk).map_err(CardPinError::PinLength)?;
+            }
         }
-        .map_err(CardPinError::PinPolicy)?;
-        lengths
-            .check_pin(slot, pin.digit_count())
-            .map_err(CardPinError::PinPolicy)?;
+        lengths.check_pin1(pin1).map_err(CardPinError::PinLength)?;
+    }
+    if let Some(pin2) = new_pin2 {
+        match activation_code.scheme {
+            ActivationScheme::PresetActivationPin => {
+                let current = activation_code.as_pin2()?;
+                lengths
+                    .check_pin2(&current)
+                    .map_err(CardPinError::PinLength)?;
+            }
+            ActivationScheme::ActivationCodeIsPuk => {
+                let puk = activation_code.as_puk()?;
+                lengths.check_puk(&puk).map_err(CardPinError::PinLength)?;
+            }
+        }
+        lengths.check_pin2(pin2).map_err(CardPinError::PinLength)?;
     }
     Ok(())
 }
 
-const fn activation_continues_after_pin1(outcome: UnblockOutcome) -> bool {
-    matches!(outcome, UnblockOutcome::Ok)
-}
-
-/// Read the typed activation PIN as the card's scheme takes it.
-fn activation_code_for(
-    scheme: ActivationScheme,
-    code: PinBytes,
-) -> Result<ActivationCode, CardPinError> {
-    ActivationCode::for_scheme(scheme, code).map_err(|error| match error {
-        PinRoleError::NonDigit { at } => {
-            CardPinError::PinPolicy(PinPolicyReason::NonDigit { byte_offset: at })
-        }
-        PinRoleError::Empty | PinRoleError::WrongLength { .. } => {
-            CardPinError::ActivationLengthMismatch {
-                scheme,
-                expected: scheme.activation_entry_digit_count(),
-            }
-        }
-    })
+const fn activation_continues_after_pin1(outcome: ManageOutcome) -> bool {
+    matches!(outcome, ManageOutcome::Ok)
 }
 
 /// Drive the `card activate` flow: bound card -> activation code -> fresh PIN1/PIN2.
@@ -1191,8 +1153,12 @@ pub fn activate_first(
         allow_reactivate,
     } = options;
     let reader_label = ctx.reader_id.as_str().to_owned();
-    let activation_code = activation_code_for(ctx.scheme, raw_code)?;
-    let core_scheme = to_core_scheme(ctx.numbering);
+    if ctx.numbering == PinReferenceScheme::Estonian {
+        return Err(CardPinError::Transport(
+            "non-FINEID PIN reference scheme is not supported by FINEID PIN management".to_owned(),
+        ));
+    }
+    let activation_code = ValidatedActivationCode::for_scheme(ctx.scheme, raw_code)?;
 
     let card = backend.open_exclusive(&ctx.reader_id, ReaderAccessCap::PinSequence)?;
     let report = card.pin_sequence(|mut tx| -> Result<ActivateReport, CardPinError> {
@@ -1200,10 +1166,9 @@ pub fn activate_first(
             .map_err(|e| CardPinError::Pkcs15Select(format!("{e}")))?;
 
         re_verify_session(&mut tx, &ctx.bound_serial)?;
-        let core_lengths = tx
-            .read_card_pin_lengths_with_scheme(core_scheme)
-            .map_err(core_auth_to_card_pin)?;
-        let legacy_lengths = convert_core_lengths(core_lengths, ctx.numbering);
+        let lengths = tx
+            .read_card_pin_lengths_with_scheme(ctx.numbering)
+            .map_err(auth_to_card_pin)?;
 
         let (_, pin1) = probe_pin_activation(&mut tx, ctx.numbering, ctx.scheme, PinSlot::Pin1);
         let (_, pin2) = probe_pin_activation(&mut tx, ctx.numbering, ctx.scheme, PinSlot::Pin2);
@@ -1225,7 +1190,7 @@ pub fn activate_first(
             allow_reactivate,
         )?;
         check_activation_entries(
-            &legacy_lengths,
+            &lengths,
             &activation_code,
             new_pin1.as_ref(),
             new_pin2.as_ref(),
@@ -1236,10 +1201,9 @@ pub fn activate_first(
             re_verify_session(&mut tx, &ctx.bound_serial)?;
             let outcome = activate_slot_setup(
                 &mut tx,
-                &core_lengths,
-                PinSlot::Pin1,
+                &lengths,
                 &activation_code,
-                &new_pin1,
+                UnblockPinTarget::Pin1(new_pin1),
             )?;
             pin1_outcome = Some(outcome);
             if !activation_continues_after_pin1(outcome) {
@@ -1256,10 +1220,9 @@ pub fn activate_first(
             re_verify_session(&mut tx, &ctx.bound_serial)?;
             Some(activate_slot_setup(
                 &mut tx,
-                &core_lengths,
-                PinSlot::Pin2,
+                &lengths,
                 &activation_code,
-                &new_pin2,
+                UnblockPinTarget::Pin2(new_pin2),
             )?)
         } else {
             None
@@ -1308,7 +1271,7 @@ impl fmt::Display for ActivateReport {
                 f,
                 "{} setup: {}",
                 PinManageSlot::Pin1.label(),
-                CardPinHelpers::fmt_unblock(o, PinManageSlot::Pin1.label())
+                CardPinHelpers::fmt_activation(o, PinManageSlot::Pin1.label())
             )?,
             None => writeln!(f, "{} setup: not attempted", PinManageSlot::Pin1.label())?,
         }
@@ -1317,7 +1280,7 @@ impl fmt::Display for ActivateReport {
                 f,
                 "{} setup: {}",
                 PinManageSlot::Pin2.label(),
-                CardPinHelpers::fmt_unblock(o, PinManageSlot::Pin2.label())
+                CardPinHelpers::fmt_activation(o, PinManageSlot::Pin2.label())
             )?,
             (Some(o), None) if !activation_continues_after_pin1(o) => writeln!(
                 f,
@@ -1336,24 +1299,21 @@ impl fmt::Display for ActivateReport {
 struct CardPinHelpers;
 
 impl CardPinHelpers {
-    fn fmt_unblock(o: UnblockOutcome, label: &str) -> String {
+    fn fmt_activation(o: ManageOutcome, label: &str) -> String {
         match o {
-            UnblockOutcome::Ok => format!("ok ({label} set; retry counter reset to max)"),
-            UnblockOutcome::WrongPuk { retries_left } => {
+            ManageOutcome::Ok => format!("ok ({label} set; retry counter reset to max)"),
+            ManageOutcome::WrongCredential { retries_left } => {
                 format!(
                     "WRONG activation PIN ({retries_left} card-side tries left; lockout pending)"
                 )
             }
-            UnblockOutcome::PukLocked => {
+            ManageOutcome::Locked => {
                 "ACTIVATION PIN LOCKED -- order a PUK from DVV to recover (paid)".to_owned()
             }
-            UnblockOutcome::Invalidated => {
-                "card invalidated the activation PIN -- DVV reissue may be required".to_owned()
-            }
-            UnblockOutcome::LengthError => {
+            ManageOutcome::Other(StatusWord::WrongLength) => {
                 "card rejected APDU length (SW=6700) -- host bug".to_owned()
             }
-            UnblockOutcome::Other(sw) => format!("card returned unexpected SW={sw:#06X}"),
+            ManageOutcome::Other(sw) => format!("card returned unexpected SW={:#06X}", sw.as_u16()),
         }
     }
 }
@@ -1367,28 +1327,33 @@ mod activate_tests {
     use refineid_auth::manage::RESET_RETRY_COUNTER_INS;
     use refineid_auth::verify::VERIFY_INS;
     use refineid_auth::{
-        CardPinLengths as CoreCardPinLengths, PIN1_REFERENCE, PIN1_REFERENCE_ORGANIZATIONAL,
-        PUK_REFERENCE_ORGANIZATIONAL,
+        ActivationScheme, CardPinLengths, ManageOutcome, PIN1_REFERENCE,
+        PIN1_REFERENCE_ORGANIZATIONAL, PUK_REFERENCE_ORGANIZATIONAL, Pin1, PinReferenceScheme,
+        PinSlot, RetryFloorRefusal, UnvalidatedSecret,
     };
-    use refineid_lib_core::activation::{ActivationScheme, PinActivation};
-    use refineid_lib_core::auth::PinReferenceScheme;
-    use refineid_lib_core::auth::commands::GetPinInfo;
-    use refineid_lib_core::pin::{ActivationCode, PinBytes};
 
     use super::{
-        ActivatePreflightOutcome, ActivationEvidence, CardPinError, ChangePinOutcome, PinSlot,
-        RetryFloorRefusal, UnblockOutcome, activate_slot_setup, activation_code_for,
-        activation_continues_after_pin1, activation_targets, change_to_unblock, classify_preflight,
-        judge_activation, probe_pin_activation, to_core_scheme,
+        ActivatePreflightOutcome, ActivationEvidence, ActivationInput, CardPinError, PinActivation,
+        UnblockPinTarget, ValidatedActivationCode, activate_slot_setup,
+        activation_continues_after_pin1, activation_targets, classify_preflight, judge_activation,
+        probe_pin_activation,
     };
     use crate::test_util::{TestResult, check_true};
 
+    /// GET DATA instruction byte, odd variant (ISO 7816-4 section 11.4.2; FINEID S1 v4.2 section 3.15.2).
+    const GET_DATA_ODD_INS: u8 = 0xCB;
+    /// Count of served retry-counter levels in [`SERVED`].
+    const SERVED_COUNT: usize = 3;
     /// Tries left at which a PIN attempt is served.
-    const SERVED: [u8; 3] = [5, 4, 3];
+    const SERVED: [u8; SERVED_COUNT] = [5, 4, 3];
+    /// Count of refused retry-counter levels in [`LAST_TWO_TRIES`].
+    const LAST_TWO_TRIES_COUNT: usize = 2;
     /// Tries left at which an activation code is not presented.
-    const LAST_TWO_TRIES: [u8; 2] = [2, 1];
+    const LAST_TWO_TRIES: [u8; LAST_TWO_TRIES_COUNT] = [2, 1];
     /// A full counter.
     const FULL_COUNTER: u8 = 5;
+    /// A counter with three tries remaining.
+    const THREE_RETRIES: u8 = 3;
     /// A counter with no tries left (`63C0`).
     const NO_TRIES: u8 = 0;
     /// APDUs a served preset-PIN activation sends: status probe and `CHANGE REFERENCE DATA`.
@@ -1502,7 +1467,7 @@ mod activate_tests {
             let instruction = bytes.get(INS_INDEX).copied();
             self.sent.push(bytes);
             let (body, status) = match (instruction, self.changed) {
-                (Some(GetPinInfo::INS), Some(flag)) => (
+                (Some(GET_DATA_ODD_INS), Some(flag)) => (
                     vec![
                         PIN_CHANGED_TAG_HIGH,
                         PIN_CHANGED_TAG_LOW,
@@ -1511,7 +1476,7 @@ mod activate_tests {
                     ],
                     StatusWord::Success,
                 ),
-                (Some(GetPinInfo::INS), None) => (Vec::new(), StatusWord::ReferenceDataNotFound),
+                (Some(GET_DATA_ODD_INS), None) => (Vec::new(), StatusWord::ReferenceDataNotFound),
                 _ => (Vec::new(), self.status),
             };
             let [sw1, sw2] = status.as_u16().to_be_bytes();
@@ -1531,14 +1496,16 @@ mod activate_tests {
         Ok(StatusWord::PinIncorrect { retries })
     }
 
-    fn code(scheme: ActivationScheme) -> Result<ActivationCode, Box<dyn core::error::Error>> {
+    fn code(
+        scheme: ActivationScheme,
+    ) -> Result<ValidatedActivationCode, Box<dyn core::error::Error>> {
         let digits = match scheme {
             ActivationScheme::PresetActivationPin => PRESET_PIN,
             ActivationScheme::ActivationCodeIsPuk => PUK_CODE,
         };
-        Ok(activation_code_for(
+        Ok(ValidatedActivationCode::for_scheme(
             scheme,
-            PinBytes::new(digits.to_vec())?,
+            ActivationInput::new(digits.to_vec())?,
         )?)
     }
 
@@ -1546,14 +1513,13 @@ mod activate_tests {
         transport: &mut FixedStatusTransport,
         numbering: PinReferenceScheme,
         scheme: ActivationScheme,
-    ) -> Result<Result<UnblockOutcome, CardPinError>, Box<dyn core::error::Error>> {
-        let new_pin = PinBytes::new(NEW_PIN.to_vec())?;
+    ) -> Result<Result<ManageOutcome, CardPinError>, Box<dyn core::error::Error>> {
+        let new_pin = Pin1::reconstruct(UnvalidatedSecret::from_owned_bytes(NEW_PIN.to_vec()))?;
         Ok(activate_slot_setup(
             transport,
-            &CoreCardPinLengths::not_listed(to_core_scheme(numbering)),
-            PinSlot::Pin1,
+            &CardPinLengths::not_listed(numbering),
             &code(scheme)?,
-            &new_pin,
+            UnblockPinTarget::Pin1(new_pin),
         ))
     }
 
@@ -1573,7 +1539,8 @@ mod activate_tests {
             (ActivationScheme::PresetActivationPin, PUK_CODE),
             (ActivationScheme::ActivationCodeIsPuk, PRESET_PIN),
         ] {
-            let outcome = activation_code_for(scheme, PinBytes::new(digits.to_vec())?);
+            let outcome =
+                ValidatedActivationCode::for_scheme(scheme, ActivationInput::new(digits.to_vec())?);
             check_true(
                 matches!(
                     outcome,
@@ -1645,7 +1612,7 @@ mod activate_tests {
         check_true(
             matches!(
                 outcome,
-                Ok(UnblockOutcome::WrongPuk { retries_left })
+                Ok(ManageOutcome::WrongCredential { retries_left })
                     if retries_left.get() == NO_TRIES
             ),
             "the card's own answer is reported",
@@ -1669,7 +1636,7 @@ mod activate_tests {
                 ActivationScheme::PresetActivationPin,
             )?;
             check_true(
-                matches!(outcome, Ok(UnblockOutcome::PukLocked)),
+                matches!(outcome, Ok(ManageOutcome::Locked)),
                 "the card's own answer is reported",
             )?;
             check_true(
@@ -1778,7 +1745,7 @@ mod activate_tests {
             check_true(
                 matches!(
                     outcome,
-                    Ok(UnblockOutcome::WrongPuk { retries_left })
+                    Ok(ManageOutcome::WrongCredential { retries_left })
                         if retries_left.get() == NO_TRIES
                 ),
                 "the card's own answer is reported",
@@ -1804,7 +1771,7 @@ mod activate_tests {
                 ActivationScheme::ActivationCodeIsPuk,
             )?;
             check_true(
-                matches!(outcome, Ok(UnblockOutcome::PukLocked)),
+                matches!(outcome, Ok(ManageOutcome::Locked)),
                 "the card's own blocked answer is reported",
             )?;
             check_true(
@@ -1879,7 +1846,7 @@ mod activate_tests {
             ActivationScheme::ActivationCodeIsPuk,
         )?;
         check_true(
-            matches!(outcome, Ok(UnblockOutcome::WrongPuk { .. })),
+            matches!(outcome, Ok(ManageOutcome::WrongCredential { .. })),
             "a refused PUK VERIFY ends the flow",
         )?;
         check_true(
@@ -2096,59 +2063,19 @@ mod activate_tests {
     }
 
     #[test]
-    fn change_to_unblock_covers_every_variant() -> TestResult {
-        let three = PinRetries::from_nibble(3).ok_or("PinRetries::from_nibble(3)")?;
-        check_true(
-            matches!(change_to_unblock(ChangePinOutcome::Ok), UnblockOutcome::Ok),
-            "Ok -> Ok",
-        )?;
-        check_true(
-            matches!(
-                change_to_unblock(ChangePinOutcome::WrongCurrentPin {
-                    retries_left: three
-                }),
-                UnblockOutcome::WrongPuk { .. }
-            ),
-            "WrongCurrentPin -> WrongPuk",
-        )?;
-        check_true(
-            matches!(
-                change_to_unblock(ChangePinOutcome::Locked),
-                UnblockOutcome::PukLocked
-            ),
-            "Locked -> PukLocked",
-        )?;
-        check_true(
-            matches!(
-                change_to_unblock(ChangePinOutcome::LengthError),
-                UnblockOutcome::LengthError
-            ),
-            "LengthError -> LengthError",
-        )?;
-        check_true(
-            matches!(
-                change_to_unblock(ChangePinOutcome::Other(UNMODELED_SW)),
-                UnblockOutcome::Other(UNMODELED_SW)
-            ),
-            "Other -> Other",
-        )
-    }
-
-    #[test]
     fn activation_failure_never_proceeds_to_pin2() -> TestResult {
-        let three = PinRetries::from_nibble(3).ok_or("PinRetries::from_nibble(3)")?;
+        let three = PinRetries::from_nibble(THREE_RETRIES).ok_or("THREE_RETRIES fits a nibble")?;
         check_true(
-            activation_continues_after_pin1(UnblockOutcome::Ok),
+            activation_continues_after_pin1(ManageOutcome::Ok),
             "successful PIN1 activation proceeds to PIN2",
         )?;
         for outcome in [
-            UnblockOutcome::WrongPuk {
+            ManageOutcome::WrongCredential {
                 retries_left: three,
             },
-            UnblockOutcome::PukLocked,
-            UnblockOutcome::Invalidated,
-            UnblockOutcome::LengthError,
-            UnblockOutcome::Other(UNMODELED_SW),
+            ManageOutcome::Locked,
+            ManageOutcome::Other(StatusWord::WrongLength),
+            ManageOutcome::Other(StatusWord::from_u16(UNMODELED_SW)),
         ] {
             check_true(
                 !activation_continues_after_pin1(outcome),

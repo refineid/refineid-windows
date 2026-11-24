@@ -70,7 +70,6 @@
 #[cfg(test)]
 extern crate alloc;
 
-pub mod activation;
 pub mod apdu;
 pub mod auth;
 pub(crate) use refineid_ber as ber;

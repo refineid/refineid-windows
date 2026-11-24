@@ -1002,6 +1002,7 @@ dependencies = [
  "refineid-pace",
  "refineid-pcsc",
  "refineid-pkcs15",
+ "zeroize",
 ]
 
 [[package]]
@@ -1083,10 +1084,11 @@ name = "refineid-gui-win32"
 version = "26.11.24"
 dependencies = [
  "pcsc",
+ "refineid-apdu",
+ "refineid-auth",
  "refineid-card-manager-core",
  "refineid-doc-sign",
  "refineid-emrtd",
- "refineid-lib-core",
  "refineid-pace",
  "refineid-pcsc",
  "refineid-pkcs15",
@@ -1313,10 +1315,11 @@ dependencies = [
 name = "refineid-settings-ffi"
 version = "26.11.24"
 dependencies = [
+ "refineid-apdu",
+ "refineid-auth",
  "refineid-card-manager-core",
  "refineid-dev-errors",
  "refineid-doc-sign",
- "refineid-lib-core",
  "refineid-pace",
  "refineid-pkcs15",
  "refineid-windows-credential-store",

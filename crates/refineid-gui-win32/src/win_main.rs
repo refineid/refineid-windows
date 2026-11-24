@@ -48,12 +48,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR, w};
 
+use refineid_auth::{CardPinLengths, PinReferenceScheme};
 use refineid_doc_sign::document::Format;
 use refineid_doc_sign::identity::CommonName;
 use refineid_doc_sign::pades::StampLanguage;
 use refineid_doc_sign::pin::PinBytes;
 use refineid_doc_sign::service::SignReport;
-use refineid_lib_core::auth::{CardPinLengths, PinReferenceScheme};
 use refineid_rapp_core::engine::{PairingError, PairingSearchError, Requester, RequesterConfig};
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::limits::OFFER_TTL_MS;

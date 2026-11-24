@@ -14,10 +14,11 @@ path = "src/main.rs"
 [target.'cfg(windows)'.dependencies]
 pcsc.workspace = true
 zeroize.workspace = true
+refineid-apdu.workspace = true
+refineid-auth.workspace = true
 refineid-card-manager-core.workspace = true
 refineid-doc-sign.workspace = true
 refineid-emrtd.workspace = true
-refineid-lib-core.workspace = true
 refineid-pace.workspace = true
 refineid-pcsc.workspace = true
 refineid-pkcs15.workspace = true

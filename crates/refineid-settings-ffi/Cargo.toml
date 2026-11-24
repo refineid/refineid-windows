@@ -16,9 +16,10 @@ crate-type = ["cdylib"]
 name = "refineid_settings_ffi"
 
 [dependencies]
+refineid-apdu.workspace = true
+refineid-auth.workspace = true
 refineid-card-manager-core.workspace = true
 refineid-dev-errors.workspace = true
-refineid-lib-core.workspace = true
 refineid-pace.workspace = true
 refineid-pkcs15.workspace = true
 refineid-windows-credential-store.workspace = true
