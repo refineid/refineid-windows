@@ -16,7 +16,7 @@
 //!
 //! The Card Module API hands the minidriver an already-open
 //! `SCARDHANDLE` (and `SCARDCONTEXT`) in `CARD_DATA`. We wrap that
-//! into the shared `refineid-lib-core` `CardTransport` port so the
+//! into the shared `refineid-apdu` `CardTransport` port so the
 //! card-edge logic (cert read, PIN verify, PSO chain) runs unchanged
 //! across adapters.
 #![expect(
@@ -26,12 +26,13 @@
 
 use core::time::Duration;
 
-use refineid_apdu::CredentialCommand;
-use refineid_atr::{Atr, AtrError};
-use refineid_lib_core::transport::{
-    CardTransport, CommandApdu, ResponseApdu, TransportErrorExt, TransportErrorKind,
-    TransportOutcome,
+use refineid_apdu::{
+    CardTransport, CommandApdu, CredentialCommand, ResponseApdu, TransportErrorExt,
+    TransportErrorKind, TransportOutcome,
 };
+#[cfg(test)]
+use refineid_atr::{Atr, AtrError};
+use refineid_auth::Pin2;
 use refineid_pace::{OpenedByCan, PaceSession, SmError, SmTransport};
 use refineid_rapp_core::engine::{
     OperationOutcome, Requester, RequesterConfig, Session, SessionEnd, SessionError,
@@ -42,14 +43,18 @@ use refineid_rapp_core::operations::{CardOperation, CardOperationResult};
 use refineid_rapp_core::store::{PairingRecord, PairingStore};
 use refineid_rapp_core::stream::{DialCause, StreamError};
 use refineid_rapp_core::transport::TcpFrameTransport;
+use refineid_sign::{QualifiedSignSession, QualifiedUnlockError, SignScheme, SigningKey};
 use refineid_windows_credential_store::ProtectedPairingStore;
 
-use crate::apdu_bridge::{BridgedCoreCommand, decode_legacy_apdu, t0_case3_from_short_case4};
+use crate::apdu_bridge::t0_case3_from_short_case4;
 
 use crate::ffi::{
     DWORD, SCARD_E_COMM_DATA_LOST, SCARD_E_NO_KEY_CONTAINER, SCARD_F_INTERNAL_ERROR,
-    SCARD_W_CANCELLED_BY_USER, SCARD_W_REMOVED_CARD, SCARDHANDLE,
+    SCARD_W_CANCELLED_BY_USER, SCARD_W_REMOVED_CARD, SCARD_W_WRONG_CHV, SCARDHANDLE,
 };
+
+/// Sentinel `SCARDHANDLE` representing an absent or invalidated card handle.
+const INVALID_HANDLE: SCARDHANDLE = 0;
 
 /// PC/SC `SCARD_S_SUCCESS`: the winscard call returned no error.
 const SCARD_S_SUCCESS: u32 = 0;
@@ -186,15 +191,15 @@ impl ScardProtocol {
     }
 }
 
-/// RAII guard bracketing an APDU chain in a PC/SC transaction so no
-/// other card user interleaves between our SELECT / READ / GET
-/// RESPONSE steps. Ends the transaction on drop.
-struct ScardTransaction {
+/// RAII guard bracketing an APDU sequence in a PC/SC transaction so no
+/// other card user interleaves between SELECT / READ / VERIFY / MSE / PSO /
+/// GET RESPONSE steps. Ends the transaction on drop.
+pub(crate) struct ScardTransaction {
     h_card: SCARDHANDLE,
 }
 
 impl ScardTransaction {
-    fn begin(h_card: SCARDHANDLE) -> Result<Self, TransportError> {
+    pub(crate) fn begin(h_card: SCARDHANDLE) -> Result<Self, TransportError> {
         // SAFETY: `h_card` is the open handle the Base CSP gave us.
         let rc = unsafe { SCardBeginTransaction(h_card) };
         if rc != SCARD_S_SUCCESS {
@@ -214,16 +219,13 @@ impl Drop for ScardTransaction {
     }
 }
 
-/// `CardTransport` over an open winscard.dll handle. Cloneable so the
-/// Card Module entry points can hand copies to the use-case layer; the
-/// handle itself is owned by the Base CSP.
-#[derive(Clone)]
+/// `CardTransport` over an open winscard.dll handle. Owned exclusively by
+/// the Card Module context (not `Clone`) so no handle alias can send
+/// out-of-band APDUs while a sealed `QualifiedSignSession` is active.
 pub(crate) struct WinScardTransport {
     /// Open card handle from `CARD_DATA`.
     pub(crate) h_card: SCARDHANDLE,
-    /// Raw ATR bytes from `CARD_DATA`, parsed on demand in [`atr`].
-    ///
-    /// [`atr`]: CardTransport::atr
+    /// Raw ATR bytes from `CARD_DATA`, parsed on demand in [`Self::atr`].
     pub(crate) atr: Vec<u8>,
     /// Active transmission protocol of `h_card`.
     pub(crate) protocol: ScardProtocol,
@@ -605,6 +607,17 @@ impl CardSessionTransport {
         }
     }
 
+    /// Clear the cached PC/SC handle after observing an invalid/disconnected
+    /// handle so a later reuse of the same numeric handle value must go
+    /// through full handle refresh (including PACE re-establishment).
+    pub(crate) const fn invalidate_h_card(&mut self) {
+        match self {
+            Self::Plain(transport) => transport.h_card = INVALID_HANDLE,
+            Self::Protected { h_card, .. } => *h_card = INVALID_HANDLE,
+            Self::Remote(_) => {}
+        }
+    }
+
     /// Refresh a protected contactless session after Windows changed the card
     /// handle: runs `open_pace` on a fresh raw transport for `live_h_card` and
     /// installs the replacement `SmTransport` only if PACE succeeds.
@@ -642,6 +655,164 @@ impl CardSessionTransport {
             Self::Protected { atr, .. } => atr,
             Self::Remote(transport) => &transport.atr,
         }
+    }
+
+    /// Parsed ATR from `CARD_DATA`.
+    #[cfg(test)]
+    pub(crate) fn atr(&self) -> Result<Atr, AtrError> {
+        Atr::new(self.atr_bytes())
+    }
+}
+
+/// Read-only metadata snapshot retained beside a sealed
+/// [`QualifiedSignSession`] so handle-refresh and transport-kind queries
+/// never need access to the sealed inner transport.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct QualifiedSessionMeta {
+    pub(crate) h_card: SCARDHANDLE,
+}
+
+/// Why [`CardSessionSlot::open_qualified`] did not seal a qualified session.
+pub(crate) enum QualifiedOpenFailure {
+    /// Card-level or PIN 2 unlock failure returned by `refineid-sign`.
+    Unlock(QualifiedUnlockError<CardSessionTransportError>),
+    /// Slot was in an unusable transient state (fail-closed).
+    SessionUnavailable,
+}
+
+/// Per-context transport slot: either idle (`CardSessionTransport`) or
+/// sealed inside a single-use [`QualifiedSignSession`] after PIN 2
+/// verification.
+pub(crate) enum CardSessionSlot {
+    /// No pending qualified-signing session.
+    Idle(CardSessionTransport),
+    /// Sealed after a card-accepted Signature PIN 2 VERIFY (in `DF.ESIGN` on
+    /// organizational cards) until consumed by one qualified signature or
+    /// explicitly disarmed.
+    ///
+    /// Note on PC/SC transaction lifetime: the Windows Card Module ABI splits
+    /// PIN verification (`CardAuthenticateEx`) and signing (`CardSignData`)
+    /// into separate FFI calls owned by the Base CSP/KSP. Leaving an unmatched
+    /// `SCardBeginTransaction` across FFI return would deadlock the Base CSP
+    /// or leak an exclusive reader lock if the caller cancels after PIN entry,
+    /// while caching PIN 2 in memory is forbidden by policy. Instead, each FFI
+    /// entry point holds a transaction across its own multi-APDU sequence, and
+    /// any intervening card reset, handle change, or DF change fails closed on
+    /// the card while `sign_qualified_once` consumes this session unconditionally.
+    QualifiedVerified {
+        session: QualifiedSignSession<CardSessionTransport>,
+        meta: QualifiedSessionMeta,
+    },
+    /// Transient placeholder while a fallible ownership transition owns the
+    /// transport; never left behind on any normal return path.
+    Transitioning,
+}
+
+impl CardSessionSlot {
+    /// Wrap a freshly constructed [`CardSessionTransport`] with no pending
+    /// PIN 2 verification.
+    pub(crate) const fn idle(transport: CardSessionTransport) -> Self {
+        Self::Idle(transport)
+    }
+
+    /// Whether a local Signature PIN 2 session is currently armed for one
+    /// qualified signature.
+    pub(crate) const fn is_qualified_verified(&self) -> bool {
+        matches!(self, Self::QualifiedVerified { .. })
+    }
+
+    /// Whether this context represents a RAPP remote card.
+    pub(crate) const fn is_remote(&self) -> bool {
+        match self {
+            Self::Idle(transport) => transport.is_remote(),
+            Self::QualifiedVerified { .. } | Self::Transitioning => false,
+        }
+    }
+
+    /// Active PC/SC handle associated with this session.
+    pub(crate) const fn h_card(&self) -> SCARDHANDLE {
+        match self {
+            Self::Idle(transport) => transport.h_card(),
+            Self::QualifiedVerified { meta, .. } => meta.h_card,
+            Self::Transitioning => 0,
+        }
+    }
+
+    /// Reference to the remote card transport if idle and remote.
+    pub(crate) fn remote_ref(&self) -> Option<&RemoteCardTransport> {
+        match self {
+            Self::Idle(transport) => transport.remote_ref(),
+            Self::QualifiedVerified { .. } | Self::Transitioning => None,
+        }
+    }
+
+    /// Discard any pending Rust-side [`QualifiedSignSession`] capability and
+    /// return mutable access to the underlying [`CardSessionTransport`].
+    pub(crate) fn disarm_qualified(&mut self) -> Result<&mut CardSessionTransport, DWORD> {
+        if matches!(self, Self::QualifiedVerified { .. }) {
+            let prev = core::mem::replace(self, Self::Transitioning);
+            if let Self::QualifiedVerified { session, .. } = prev {
+                *self = Self::Idle(session.into_transport());
+            }
+        }
+        match self {
+            Self::Idle(transport) => Ok(transport),
+            Self::QualifiedVerified { .. } | Self::Transitioning => Err(SCARD_F_INTERNAL_ERROR),
+        }
+    }
+
+    /// Disarm any pending [`QualifiedSignSession`] and clear the cached PC/SC
+    /// handle after observing a disconnect or invalid handle.
+    pub(crate) fn invalidate_handle(&mut self) {
+        if let Ok(tx) = self.disarm_qualified() {
+            tx.invalidate_h_card();
+        }
+    }
+
+    /// Verify Signature PIN 2 and seal the transport into a single-use
+    /// [`QualifiedSignSession`]. On any error, the transport is returned to
+    /// [`Self::Idle`].
+    pub(crate) fn open_qualified(
+        &mut self,
+        scheme: SignScheme,
+        pin2: Pin2,
+    ) -> Result<(), QualifiedOpenFailure> {
+        let _ = self.disarm_qualified();
+        let prev = core::mem::replace(self, Self::Transitioning);
+        let Self::Idle(transport) = prev else {
+            return Err(QualifiedOpenFailure::SessionUnavailable);
+        };
+        let meta = QualifiedSessionMeta {
+            h_card: transport.h_card(),
+        };
+        match QualifiedSignSession::open(transport, scheme, pin2) {
+            Ok(session) => {
+                *self = Self::QualifiedVerified { session, meta };
+                Ok(())
+            }
+            Err((transport, error)) => {
+                *self = Self::Idle(transport);
+                Err(QualifiedOpenFailure::Unlock(error))
+            }
+        }
+    }
+
+    /// Consume the armed [`QualifiedSignSession`] for at most one qualified
+    /// signature and return the transport to [`Self::Idle`].
+    pub(crate) fn sign_qualified_once<R>(
+        &mut self,
+        sign: impl FnOnce(SigningKey<'_, CardSessionTransport>) -> R,
+    ) -> Result<R, DWORD> {
+        if !matches!(self, Self::QualifiedVerified { .. }) {
+            return Err(SCARD_W_WRONG_CHV);
+        }
+        let prev = core::mem::replace(self, Self::Transitioning);
+        let Self::QualifiedVerified { session, .. } = prev else {
+            return Err(SCARD_F_INTERNAL_ERROR);
+        };
+        let (transport, result) = session.sign_once(sign);
+        *self = Self::Idle(transport);
+        Ok(result)
     }
 }
 
@@ -776,11 +947,10 @@ impl WinScardTransport {
         Ok(Some((buf, sw1, sw2)))
     }
 
-    fn raw_transmit(
-        &self,
-        apdu: &CommandApdu,
-    ) -> Result<Option<(Vec<u8>, u8, u8)>, TransportError> {
-        self.raw_transmit_wire(apdu.as_bytes())
+    /// Parsed ATR from `CARD_DATA`.
+    #[cfg(test)]
+    pub(crate) fn atr(&self) -> Result<Atr, AtrError> {
+        Atr::new(&self.atr)
     }
 
     /// Settle a T=0 `61xx` `GET RESPONSE` chain onto `(body, sw1, sw2)`.
@@ -820,13 +990,10 @@ impl WinScardTransport {
     }
 }
 
-impl refineid_apdu::CardTransport for WinScardTransport {
+impl CardTransport for WinScardTransport {
     type Error = TransportError;
 
-    fn transmit(
-        &mut self,
-        command: &refineid_apdu::CommandApdu,
-    ) -> Result<TransportOutcome, Self::Error> {
+    fn transmit(&mut self, command: &CommandApdu) -> Result<TransportOutcome, Self::Error> {
         let _transaction = ScardTransaction::begin(self.h_card)?;
 
         let bytes = command.as_bytes();
@@ -895,64 +1062,15 @@ impl refineid_apdu::CardTransport for WinScardTransport {
     }
 }
 
-impl CardTransport for WinScardTransport {
-    type Error = TransportError;
-
-    fn transmit_outcome(&mut self, apdu: &CommandApdu) -> Result<TransportOutcome, TransportError> {
-        // The Base CSP hands us an already-open handle; we cannot
-        // choose its share mode, but we must bracket each APDU chain
-        // in a PC/SC transaction so no other user interleaves.
-        let _transaction = ScardTransaction::begin(self.h_card)?;
-
-        let bytes = apdu.as_bytes();
-        let Some((mut body, mut sw1, mut sw2)) = self.raw_transmit(apdu)? else {
-            return Ok(TransportOutcome::ProtocolDesync);
-        };
-
-        // Only builder-proven read-only case-2 commands permit one
-        // corrected retry. Raw and credential-bearing commands
-        // treat 6Cxx as terminal.
-        if self.protocol == ScardProtocol::T0
-            && sw1 == SW1_WRONG_LE
-            && let Some(retry_apdu) = apdu.corrected_wrong_le(sw2)
-        {
-            let Some((retry_body, retry_sw1, retry_sw2)) = self.raw_transmit(&retry_apdu)? else {
-                return Ok(TransportOutcome::ProtocolDesync);
-            };
-            body = retry_body;
-            sw1 = retry_sw1;
-            sw2 = retry_sw2;
-        }
-
-        // T=0 GET RESPONSE chain: `61 XX` -> issue GET RESPONSE for
-        // XX bytes. FINEID cert reads issue READ BINARY at multiple
-        // offsets, each of which may return `61 XX`; concatenate the
-        // chained bodies.
-        let initial_cla = bytes
-            .first()
-            .map_or(P_ZERO, |first| first & CLA_HIGH_NIBBLE_MASK);
-        self.settle_t0_response_chain(initial_cla, body, sw1, sw2)
-    }
-
-    fn atr(&self) -> Result<Atr, AtrError> {
-        Atr::new(&self.atr)
-    }
-}
-
-impl refineid_apdu::CardTransport for CardSessionTransport {
+impl CardTransport for CardSessionTransport {
     type Error = CardSessionTransportError;
 
-    fn transmit(
-        &mut self,
-        command: &refineid_apdu::CommandApdu,
-    ) -> Result<TransportOutcome, Self::Error> {
+    fn transmit(&mut self, command: &CommandApdu) -> Result<TransportOutcome, Self::Error> {
         match self {
-            Self::Plain(transport) => refineid_apdu::CardTransport::transmit(transport, command)
+            Self::Plain(transport) => CardTransport::transmit(transport, command)
                 .map_err(CardSessionTransportError::Plain),
-            Self::Protected { transport, .. } => {
-                refineid_apdu::CardTransport::transmit(transport, command)
-                    .map_err(CardSessionTransportError::Protected)
-            }
+            Self::Protected { transport, .. } => CardTransport::transmit(transport, command)
+                .map_err(CardSessionTransportError::Protected),
             Self::Remote(_) => Err(CardSessionTransportError::RemoteNotApdu),
         }
     }
@@ -973,44 +1091,12 @@ impl refineid_apdu::CardTransport for CardSessionTransport {
     }
 }
 
-impl CardTransport for CardSessionTransport {
-    type Error = CardSessionTransportError;
-
-    fn transmit_outcome(&mut self, apdu: &CommandApdu) -> Result<TransportOutcome, Self::Error> {
-        match self {
-            Self::Plain(transport) => transport
-                .transmit_outcome(apdu)
-                .map_err(CardSessionTransportError::Plain),
-            Self::Protected { transport, .. } => {
-                match decode_legacy_apdu(apdu.as_bytes())
-                    .map_err(CardSessionTransportError::Protected)?
-                {
-                    BridgedCoreCommand::Plain(command) => {
-                        refineid_apdu::CardTransport::transmit(transport, &command)
-                            .map_err(CardSessionTransportError::Protected)
-                    }
-                    BridgedCoreCommand::Credential(command) => {
-                        refineid_apdu::CardTransport::transmit_credential(transport, command)
-                            .map_err(CardSessionTransportError::Protected)
-                    }
-                }
-            }
-            Self::Remote(_) => Err(CardSessionTransportError::RemoteNotApdu),
-        }
-    }
-
-    fn atr(&self) -> Result<Atr, AtrError> {
-        Atr::new(self.atr_bytes())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         CardSessionTransport, REMOTE_SYNTHETIC_ATR, RemoteFailure, ScardProtocol, WinScardTransport,
     };
     use crate::ffi::{SCARD_E_NO_KEY_CONTAINER, SCARD_W_REMOVED_CARD};
-    use refineid_lib_core::transport::CardTransport as _;
 
     #[test]
     fn synthetic_card_atr_survives_both_transport_layers() {

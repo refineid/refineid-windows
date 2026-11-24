@@ -10,7 +10,7 @@ cargo fmt --all -- --check
 dotnet tool restore
 dotnet csharpier check .
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test -p refineid-lib-core
+cargo test --workspace
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Architecture x64,arm64
 ```
 
@@ -40,8 +40,8 @@ The hooks enforce standards locally:
   that resolve outside the repository (cross-repository references use the
   GitHub URL), then runs on every host to catch defects before committing:
   `cargo fmt`, `dotnet csharpier check`, `cargo clippy` (both native host and
-  `x86_64-pc-windows-msvc` for Windows-specific crates), and core unit tests
-  (`cargo test -p refineid-lib-core`).
+  `x86_64-pc-windows-msvc` for Windows-specific crates), and workspace unit tests
+  (`cargo test --workspace`).
 - **Pre-push (`.githooks/pre-push`)**: verifies that `Cargo.lock` matches the
   manifests and that every pinned revision is in Cargo's local cache or can be
   fetched from its remote (`cargo fetch --locked`).

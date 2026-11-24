@@ -11,7 +11,7 @@ below.
 
 RAPP is not an APDU tunnel: the proxy rejects arbitrary APDU bytes, and
 every operation is a typed request from a registered profile, authorized
-on the phone when it uses a key (RAPP v26.11.2 sections 8 and 9). The card-protocol stack in `refineid-lib-core` is
+on the phone when it uses a key (RAPP v26.11.2 sections 8 and 9). The card-protocol stack in `refineid-core` is
 deliberately the opposite altitude: everything is built over a raw-APDU
 `CardTransport`. A remote card therefore cannot be a `CardTransport`
 implementation, and must not be — that seam exists so a *local* card's

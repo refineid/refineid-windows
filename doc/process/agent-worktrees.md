@@ -73,7 +73,7 @@ which across dozens of worktrees can exhaust disk space quickly.
 1. Run the quality gates (`cargo fmt --all -- --check`,
    `dotnet csharpier check .`,
    `cargo clippy --workspace --all-targets -- -D warnings`,
-   `cargo test -p refineid-lib-core`) in the worktree.
+   `cargo test --workspace`) in the worktree.
 2. Commit on the task branch (subject and body only) and push.
 3. Open one pull request for the branch.
 4. Squash-merge after the mandatory local gates pass and the pull request is

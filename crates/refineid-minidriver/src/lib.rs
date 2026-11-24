@@ -17,7 +17,7 @@
 //! Sibling adapter to the PKCS#11 cdylib: hooks the FINEID card into
 //! the Microsoft Base CSP/KSP so Edge, Chrome, Schannel, .NET, VPN,
 //! RDP, and Wi-Fi EAP-TLS reach it through the OS smart-card stack.
-//! Card-edge work delegates to `refineid-lib-core` (one protocol
+//! Card-edge work delegates to `refineid-core` (one protocol
 //! implementation shared with the other adapters).
 //!
 //! Windows-only. The implementation lives behind `#[cfg(windows)]`;
@@ -94,15 +94,19 @@ mod ksp;
 mod ksp_register;
 #[cfg(windows)]
 mod ksp_verify;
-// Pure byte codecs: compiled on the host too so `cargo test` covers them.
+// Pure byte codecs and protocol dispatch: compiled on the host too so `cargo test` covers them.
 #[cfg(any(windows, test))]
 mod apdu_bridge;
 #[cfg(any(windows, test))]
 mod ksp_codec;
 #[cfg(any(windows, test))]
+mod pin_cache;
+#[cfg(any(windows, test))]
 mod pin_scheme;
 #[cfg(all(windows, debug_assertions))]
 mod reported;
+#[cfg(any(windows, test))]
+mod sign_dispatch;
 #[cfg(windows)]
 mod transport;
 
@@ -144,53 +148,52 @@ use cardmod::{
 )]
 use ffi::*;
 #[cfg(windows)]
+use pin_cache::{PinBytes, PinSafetyCache, reports_no_tries_left};
+#[cfg(windows)]
 use refineid_agent_pipe::identity::{calling_program, computer_name, interface_language};
 #[cfg(windows)]
 use refineid_agent_pipe::{RemoteKey, in_process_operation};
 #[cfg(windows)]
+use refineid_auth::credentials::{PIN_MAX_LENGTH, PIN_MIN_LENGTH, PUK_MAX_LENGTH, PUK_MIN_LENGTH};
+#[cfg(windows)]
+use refineid_auth::{
+    AuthError, FlooredCredential, ManageOutcome, PinManageOps, PinOps, PinReferenceScheme, PinSlot,
+    PinStatus, Puk, RetryFloorRefusal, UnvalidatedSecret, VerifyOutcome,
+    check_retry_floor_with_scheme,
+};
+#[cfg(windows)]
 use refineid_cms::x509::{EcCurve, OwnedCert, PublicKeyAlgorithm, extract_rsa_public_key};
-#[cfg(windows)]
-use refineid_digest::{Sha256, Sha384};
-#[cfg(windows)]
-use refineid_lib_core::auth::{
-    AuthError, ChangePinOutcome, PIN_MAX_LENGTH, PIN_MIN_LENGTH, PUK_MAX_LENGTH, PUK_MIN_LENGTH,
-    PinOps, PinReferenceScheme, PinSlot, PinStatus, PukStatus, UnblockOutcome, VerifyOutcome,
-};
-#[cfg(windows)]
-use refineid_lib_core::crypto::container::{Ciphertext, RsaPkcs1};
-#[cfg(windows)]
-use refineid_lib_core::pin::PinBytes;
-#[cfg(windows)]
-use refineid_lib_core::pin_cache::PinSafetyCache;
-#[cfg(windows)]
-use refineid_lib_core::pin_retry_risk::{
-    RetryFloorRefusal, check_puk_retry_floor, check_retry_floor, reports_no_tries_left,
-};
-#[cfg(windows)]
-use refineid_lib_core::pkcs15::{CertSlot, Pkcs15Ops};
-#[cfg(windows)]
-use refineid_lib_core::sign::{KeyRef, SignOps, commands::ExternalHashValue};
 #[cfg(windows)]
 use refineid_pace::{Can, OpenedByCan, PaceError, PaceSession, read_card_access, run_pace};
 #[cfg(windows)]
-use refineid_pkcs15::{TokenSerial, render_token_serial};
+use refineid_pkcs15::{CertSlot, Pkcs15Ops, TokenSerial, render_token_serial};
 #[cfg(windows)]
 use refineid_rapp_core::operations::{CardOperationResult, KeyProfile, SignatureAlgorithm};
+#[cfg(windows)]
+use refineid_sign::commands::DecipherAlgRef;
+#[cfg(windows)]
+use refineid_sign::{
+    KeyRef, QualifiedUnlockError, RSA_3072_MODULUS_BYTES, RsaCryptogram, SignOps, SignScheme,
+};
 #[cfg(windows)]
 use refineid_windows_credential_store::card_certificates::CardId;
 #[cfg(windows)]
 use refineid_windows_credential_store::{ProtectedPairingStore, read_can};
 #[cfg(windows)]
+use sign_dispatch::{LocalSignRequest, SigningKeyProfile, execute_local_sign};
+#[cfg(windows)]
 use transport::{
-    CardSessionTransport, RemoteCardTransport, SCARD_ATTR_CURRENT_PROTOCOL_TYPE, ScardProtocol,
-    WinScardTransport, is_remote_card,
+    CardSessionSlot, CardSessionTransport, QualifiedOpenFailure, RemoteCardTransport,
+    SCARD_ATTR_CURRENT_PROTOCOL_TYPE, ScardProtocol, ScardTransaction, WinScardTransport,
+    is_remote_card,
 };
 
 #[cfg(windows)]
 fn live_token_serial(tx: &mut CardSessionTransport) -> Result<TokenSerial, DWORD> {
     tx.read_token_info()
         .map_err(|_error| SCARD_F_INTERNAL_ERROR)?
-        .serial_number_hex
+        .serial_number_hex()
+        .cloned()
         .map(render_token_serial)
         .filter(|serial| !serial.as_str().is_empty())
         .ok_or(SCARD_F_INTERNAL_ERROR)
@@ -198,14 +201,18 @@ fn live_token_serial(tx: &mut CardSessionTransport) -> Result<TokenSerial, DWORD
 
 #[cfg(windows)]
 fn report_prepare_failure(failure: pin_scheme::PinPrepareFailure) -> DWORD {
-    if failure == pin_scheme::PinPrepareFailure::PinLengths {
-        refineid_dev_errors::report!(
-            CardModule,
-            "PIN lengths not read",
-            "the card session failed"
-        );
+    match failure {
+        pin_scheme::PinPrepareFailure::PinLengths => {
+            refineid_dev_errors::report!(
+                CardModule,
+                "PIN lengths not read",
+                "the card session failed"
+            );
+            SCARD_F_INTERNAL_ERROR
+        }
+        pin_scheme::PinPrepareFailure::UnsupportedSlot => SCARD_E_UNSUPPORTED_FEATURE,
+        pin_scheme::PinPrepareFailure::Session => SCARD_F_INTERNAL_ERROR,
     }
-    SCARD_F_INTERNAL_ERROR
 }
 
 /// Resolve the card's credential numbering, probe `slot`'s counter
@@ -217,8 +224,47 @@ fn live_verify_floor(
 ) -> Result<(PinReferenceScheme, PinStatus), DWORD> {
     let (scheme, status) =
         pin_scheme::prepare_pin_verify(tx, slot).map_err(report_prepare_failure)?;
-    retry_floor_answer(slot, status)?;
+    retry_floor_answer(slot, status, scheme)?;
     Ok((scheme, status))
+}
+
+#[cfg(windows)]
+fn retry_floor_refusal_status(refusal: RetryFloorRefusal) -> DWORD {
+    let is_puk = refusal.credential() == FlooredCredential::Puk;
+    match refusal {
+        RetryFloorRefusal::TriesBelowFloor { .. } => {
+            if is_puk {
+                refineid_dev_errors::report!(
+                    CardModule,
+                    "PUK not tried",
+                    "the retry counter is below its floor"
+                );
+            } else {
+                refineid_dev_errors::report!(
+                    CardModule,
+                    "PIN not tried",
+                    "the retry counter is below its floor"
+                );
+            }
+            SCARD_W_CHV_BLOCKED
+        }
+        RetryFloorRefusal::CounterUnreadable { .. } => {
+            if is_puk {
+                refineid_dev_errors::report!(
+                    CardModule,
+                    "PUK not tried",
+                    "the retry counter is unreadable"
+                );
+            } else {
+                refineid_dev_errors::report!(
+                    CardModule,
+                    "PIN not tried",
+                    "the retry counter is unreadable"
+                );
+            }
+            SCARD_F_INTERNAL_ERROR
+        }
+    }
 }
 
 /// Apply the retry floor to `slot` before any command that can spend one
@@ -228,64 +274,35 @@ fn live_verify_floor(
 /// presented. At zero tries left or a blocked PIN the command goes out and
 /// the card's answer reports it blocked.
 #[cfg(windows)]
-fn retry_floor_answer(slot: PinSlot, status: PinStatus) -> Result<(), DWORD> {
-    check_retry_floor(slot.into(), status).map_err(|refusal| match refusal {
-        RetryFloorRefusal::TriesBelowFloor { .. } => {
-            refineid_dev_errors::report!(
-                CardModule,
-                "PIN not tried",
-                "the retry counter is below its floor"
-            );
-            SCARD_W_CHV_BLOCKED
-        }
-        RetryFloorRefusal::CounterUnreadable { .. } => {
-            refineid_dev_errors::report!(
-                CardModule,
-                "PIN not tried",
-                "the retry counter is unreadable"
-            );
-            SCARD_F_INTERNAL_ERROR
-        }
-    })
+fn retry_floor_answer(
+    slot: PinSlot,
+    status: PinStatus,
+    scheme: PinReferenceScheme,
+) -> Result<(), DWORD> {
+    check_retry_floor_with_scheme(slot.into(), status, scheme).map_err(retry_floor_refusal_status)
 }
 
 /// Apply the PUK retry floor to a counter read under the card's resolved
-/// numbering before anything that presents the PUK. A PUK at two or
-/// one tries left answers `SCARD_W_CHV_BLOCKED`; a counter the card did
-/// not report answers `SCARD_F_INTERNAL_ERROR`. At zero tries left or a
-/// blocked PUK the floor admits the command: the card answers for
-/// itself and spends nothing, and [`map_unblock_outcome`] reports its
-/// answer. The target PIN's counter does not gate the unblock.
+/// numbering before anything that presents the PUK.
 #[cfg(windows)]
-fn puk_floor_answer(status: PukStatus) -> Result<(), DWORD> {
-    check_puk_retry_floor(status).map_err(|refusal| match refusal {
-        RetryFloorRefusal::TriesBelowFloor { .. } => {
-            refineid_dev_errors::report!(
-                CardModule,
-                "PUK not tried",
-                "the retry counter is below its floor"
-            );
-            SCARD_W_CHV_BLOCKED
-        }
-        RetryFloorRefusal::CounterUnreadable { .. } => {
-            refineid_dev_errors::report!(
-                CardModule,
-                "PUK not tried",
-                "the retry counter is unreadable"
-            );
-            SCARD_F_INTERNAL_ERROR
-        }
-    })
+fn puk_floor_answer(status: PinStatus, scheme: PinReferenceScheme) -> Result<(), DWORD> {
+    check_retry_floor_with_scheme(FlooredCredential::Puk, status, scheme)
+        .map_err(retry_floor_refusal_status)
 }
 
 /// The answer for a PIN change or reset the card service refused: an
-/// entry of a length the card does not accept is an invalid parameter,
-/// as a malformed entry is; a transport failure is internal.
+/// entry of a length the card does not accept is an invalid parameter;
+/// a retry-floor refusal maps to blocked/internal; unsupported slots
+/// answer unsupported feature; transport failures are internal.
 #[cfg(windows)]
 fn manage_error_answer<TE>(error: &AuthError<TE>) -> DWORD {
     match error {
-        AuthError::PinPolicy(_reason) => SCARD_E_INVALID_PARAMETER,
-        AuthError::Transport(_error) => SCARD_F_INTERNAL_ERROR,
+        AuthError::PinLength(_reason) => SCARD_E_INVALID_PARAMETER,
+        AuthError::UnsupportedSlot { .. } => SCARD_E_UNSUPPORTED_FEATURE,
+        AuthError::RetryFloor(refusal) => retry_floor_refusal_status(*refusal),
+        AuthError::Transport(_) | AuthError::Outcome(_) | AuthError::Command(_) => {
+            SCARD_F_INTERNAL_ERROR
+        }
     }
 }
 
@@ -295,10 +312,18 @@ fn manage_error_answer<TE>(error: &AuthError<TE>) -> DWORD {
 /// limit (FINEID S1 v4.2 section 3.5), so caching is allowed after that
 /// card-confirmed success even if the operation started at 4/5 or 3/5.
 /// Prior to verification success nothing is cached, and every subsequent
-/// checkout re-verifies the live serial and retry counter.
+/// checkout re-verifies the live serial, scheme, and retry counter.
 #[cfg(windows)]
-fn hold_verified_pin1(serial: TokenSerial, pin: PinBytes) {
-    let _ = with_pin_safety(|cache| cache.store_pin1(serial, pin));
+fn hold_verified_pin1(
+    serial: TokenSerial,
+    scheme: PinReferenceScheme,
+    pin: PinBytes,
+    expected_generation: u64,
+) -> Result<bool, DWORD> {
+    with_pin_safety(|cache| {
+        cache.store_pin1_if_generation(serial, scheme, pin, expected_generation)
+    })?
+    .map_err(|_| SCARD_F_INTERNAL_ERROR)
 }
 
 #[cfg(windows)]
@@ -404,6 +429,9 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
         let remote_tx = RemoteCardTransport::new(atr, pair_id);
         (CardSessionTransport::remote(remote_tx), auth_der, sig_der)
     } else {
+        let Ok(_acquire_tx) = ScardTransaction::begin(cd.hScard) else {
+            return SCARD_F_INTERNAL_ERROR;
+        };
         let mut raw_transport = WinScardTransport {
             h_card: cd.hScard,
             atr,
@@ -479,11 +507,10 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
     };
 
     let ctx = Box::new(Ctx {
-        transport: Mutex::new(transport),
+        session: Mutex::new(CardSessionSlot::idle(transport)),
         card,
         pin1_authenticated: false,
-        pin2_authenticated: false,
-        pin2_scheme: PinReferenceScheme::Citizen,
+        remote_pin2_authenticated: false,
     });
     cd.pvVendorSpecific = Box::into_raw(ctx).cast();
 
@@ -774,10 +801,8 @@ unsafe fn checked_card_data_and_ctx_mut<'a>(
 }
 
 #[cfg(windows)]
-fn lock_transport(
-    transport: &Mutex<CardSessionTransport>,
-) -> std::sync::MutexGuard<'_, CardSessionTransport> {
-    match transport.lock() {
+fn lock_session(session: &Mutex<CardSessionSlot>) -> std::sync::MutexGuard<'_, CardSessionSlot> {
+    match session.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     }
@@ -800,28 +825,33 @@ fn open_minidriver_pace(
 
 /// The Base CSP may reconnect and hand a different `SCARDHANDLE`
 /// between entry points. Refresh the transport handle from the live
-/// `CARD_DATA` and drop in-process PIN state on change -- a new
-/// handle means the card's security state was reset, so any prior
-/// PIN verification no longer holds card-side (legacy parity).
+/// `CARD_DATA` and drop in-process PIN state (including any sealed
+/// `QualifiedSignSession`) on change -- a new handle means the card's
+/// security state was reset, so any prior PIN verification no longer
+/// holds card-side (legacy parity).
 #[cfg(windows)]
 fn sync_transport_handle(
-    tx: &mut CardSessionTransport,
+    slot: &mut CardSessionSlot,
     pin1_authenticated: &mut bool,
-    pin2_authenticated: &mut bool,
+    remote_pin2_authenticated: &mut bool,
     live_h_card: SCARDHANDLE,
 ) -> Result<bool, DWORD> {
-    if tx.is_remote() {
+    if slot.is_remote() {
         return Ok(false);
     }
     if live_h_card == INVALID_SCARD_HANDLE {
+        *pin1_authenticated = false;
+        *remote_pin2_authenticated = false;
+        slot.invalidate_handle();
         return Err(SCARD_E_INVALID_HANDLE);
     }
-    if tx.h_card() == live_h_card {
+    if slot.h_card() == live_h_card {
         return Ok(false);
     }
 
     *pin1_authenticated = false;
-    *pin2_authenticated = false;
+    *remote_pin2_authenticated = false;
+    let tx = slot.disarm_qualified()?;
 
     if tx.is_protected() {
         let can = match read_can(tx.atr_bytes()) {
@@ -850,7 +880,49 @@ fn sync_transport_handle(
     Ok(true)
 }
 
-/// Access the process-wide PIN safety cache. Holds positive PIN caches
+/// Begin an operation-scoped PC/SC transaction on `live_h_card` before
+/// refreshing the transport handle so any protected PACE re-establishment and
+/// the entire multi-APDU card operation share one transaction.
+///
+/// When `disarm_first` is true (every local operation except qualified
+/// signing), any pending `QualifiedSignSession` is disarmed before the
+/// fallible transaction start. If starting the transaction fails, any pending
+/// `QualifiedSignSession` is also disarmed so failures fail closed.
+#[cfg(windows)]
+fn prepare_local_transaction(
+    slot: &mut CardSessionSlot,
+    pin1_authenticated: &mut bool,
+    remote_pin2_authenticated: &mut bool,
+    live_h_card: SCARDHANDLE,
+    disarm_first: bool,
+) -> Result<Option<ScardTransaction>, DWORD> {
+    if slot.is_remote() {
+        return Ok(None);
+    }
+    if disarm_first {
+        let _ = slot.disarm_qualified();
+    }
+    if live_h_card == INVALID_SCARD_HANDLE {
+        *pin1_authenticated = false;
+        *remote_pin2_authenticated = false;
+        slot.invalidate_handle();
+        return Err(SCARD_E_INVALID_HANDLE);
+    }
+    let Ok(pcsc_tx) = ScardTransaction::begin(live_h_card) else {
+        slot.invalidate_handle();
+        reset_card_state(pin1_authenticated, remote_pin2_authenticated);
+        return Err(SCARD_F_INTERNAL_ERROR);
+    };
+    sync_transport_handle(
+        slot,
+        pin1_authenticated,
+        remote_pin2_authenticated,
+        live_h_card,
+    )?;
+    Ok(Some(pcsc_tx))
+}
+
+/// Access the process-wide PIN safety cache. Holds positive PIN 1 state
 /// and process-lifetime rejection memory across Card Module contexts.
 #[cfg(windows)]
 #[expect(
@@ -868,111 +940,167 @@ fn with_pin_safety<R>(f: impl FnOnce(&mut PinSafetyCache) -> R) -> Result<R, DWO
     Ok(f(cache))
 }
 
-/// Re-verify the cached PIN on the card right before a private-key
-/// operation. The Base CSP can reset the card between the PIN entry
-/// and the sign call (each reconnect drops the card's security
-/// state), which surfaces as `NTE_INTERNAL_ERROR` from the KSP and
-/// `ERR_SSL_CLIENT_AUTH_SIGNATURE_FAILED` in Edge. Returns
-/// `Some(error)` when verification is required but fails.
+/// Result of atomically checking out the held PIN 1 and screening it against
+/// process-lifetime rejection memory.
 #[cfg(windows)]
-fn reverify_cached_pin(
+enum Pin1CheckoutDecision {
+    Ready(pin_cache::CheckedOutPin1),
+    Missing,
+    Rejected,
+}
+
+#[cfg(windows)]
+fn checkout_held_pin1(
+    serial: &TokenSerial,
+    scheme: PinReferenceScheme,
+    status: PinStatus,
     pin1_authenticated: &mut bool,
-    pin2_authenticated: &mut bool,
-    tx: &mut CardSessionTransport,
-    pin_id: DWORD,
-) -> Option<DWORD> {
-    if tx.is_remote() {
-        return None;
-    }
-    if pin_id == PIN_ID_QUALIFIED_SIG {
-        return if *pin2_authenticated {
-            None
-        } else {
-            Some(SCARD_W_WRONG_CHV)
+    remote_pin2_authenticated: &mut bool,
+) -> Result<pin_cache::CheckedOutPin1, DWORD> {
+    let decision = match with_pin_safety(|cache| {
+        let Some(checkout) = cache.checkout_pin1(serial, scheme, status) else {
+            return Pin1CheckoutDecision::Missing;
         };
+        if cache.is_rejected(serial, PinSlot::Pin1, checkout.pin()) {
+            cache.clear_positive();
+            return Pin1CheckoutDecision::Rejected;
+        }
+        Pin1CheckoutDecision::Ready(checkout)
+    }) {
+        Ok(decision) => decision,
+        Err(rc) => {
+            reset_card_state(pin1_authenticated, remote_pin2_authenticated);
+            return Err(rc);
+        }
+    };
+    match decision {
+        Pin1CheckoutDecision::Ready(checkout) => Ok(checkout),
+        // A held value is never handed out for a blocked PIN 1; the lock is
+        // reported as the reason, from this reading, with nothing presented.
+        Pin1CheckoutDecision::Missing => {
+            reset_card_state(pin1_authenticated, remote_pin2_authenticated);
+            Err(if reports_no_tries_left(status, scheme) {
+                SCARD_W_CHV_BLOCKED
+            } else {
+                SCARD_W_WRONG_CHV
+            })
+        }
+        Pin1CheckoutDecision::Rejected => {
+            clear_pin_state(pin1_authenticated, remote_pin2_authenticated);
+            refineid_dev_errors::report!(
+                CardModule,
+                "held PIN 1 not used",
+                "the card rejected it before"
+            );
+            Err(SCARD_W_WRONG_CHV)
+        }
     }
+}
+
+/// Re-verify the cached PIN 1 on the card right before an authentication-key
+/// private operation and return the resolved [`SignScheme`]. The Base CSP
+/// can reset the card between the PIN entry and the sign/decrypt call (each
+/// reconnect drops the card's security state), which surfaces as
+/// `NTE_INTERNAL_ERROR` from the KSP and
+/// `ERR_SSL_CLIENT_AUTH_SIGNATURE_FAILED` in Edge.
+#[cfg(windows)]
+fn reverify_cached_pin1(
+    pin1_authenticated: &mut bool,
+    remote_pin2_authenticated: &mut bool,
+    tx: &mut CardSessionTransport,
+) -> Result<SignScheme, DWORD> {
     // A failed read is a transport failure: the held PIN 1 stays, and the
     // retry counter read before its next use decides (RAPP v26.11.2
     // section 11 item 2).
     let serial = match live_token_serial(tx) {
         Ok(serial) => serial,
         Err(error) => {
-            reset_card_state(pin1_authenticated, pin2_authenticated);
-            return Some(error);
+            reset_card_state(pin1_authenticated, remote_pin2_authenticated);
+            return Err(error);
         }
     };
     let (scheme, status) = match pin_scheme::prepare_pin_verify(tx, PinSlot::Pin1) {
         Ok(prepared) => prepared,
         Err(failure) => {
-            reset_card_state(pin1_authenticated, pin2_authenticated);
-            return Some(report_prepare_failure(failure));
+            reset_card_state(pin1_authenticated, remote_pin2_authenticated);
+            return Err(report_prepare_failure(failure));
         }
     };
-    if let Err(error) = retry_floor_answer(PinSlot::Pin1, status) {
-        clear_pin_state(pin1_authenticated, pin2_authenticated);
-        return Some(error);
+    if let Err(error) = retry_floor_answer(PinSlot::Pin1, status, scheme) {
+        clear_pin_state(pin1_authenticated, remote_pin2_authenticated);
+        return Err(error);
     }
-    let slot = PinSlot::Pin1;
-    let checkout = with_pin_safety(|cache| cache.checkout_pin1(&serial, status))
-        .ok()
-        .flatten();
-    // A held value is never handed out for a blocked PIN 1; the lock is
-    // reported as the reason, from this reading, with nothing presented.
-    let Some(checkout) = checkout else {
-        return Some(if reports_no_tries_left(status) {
-            SCARD_W_CHV_BLOCKED
-        } else {
-            SCARD_W_WRONG_CHV
-        });
-    };
+    let checkout = checkout_held_pin1(
+        &serial,
+        scheme,
+        status,
+        pin1_authenticated,
+        remote_pin2_authenticated,
+    )?;
     let pin = checkout.pin().clone();
-    let is_rejected =
-        with_pin_safety(|cache| cache.is_rejected(&serial, slot, &pin)).unwrap_or(false);
-    if is_rejected {
-        clear_pin_state(pin1_authenticated, pin2_authenticated);
-        refineid_dev_errors::report!(
-            CardModule,
-            "held PIN 1 not used",
-            "the card rejected it before"
-        );
-        return Some(SCARD_W_WRONG_CHV);
-    }
-    let outcome = tx.verify_pin_with_scheme(scheme, PinSlot::Pin1, pin.clone());
+    let Ok(typed_pin1) = pin.to_pin1() else {
+        clear_pin_state(pin1_authenticated, remote_pin2_authenticated);
+        return Err(SCARD_F_INTERNAL_ERROR);
+    };
+    let outcome = tx.verify_pin1_with_scheme(scheme, typed_pin1);
     match outcome {
         Ok(VerifyOutcome::Ok) => {
-            let _ = with_pin_safety(|cache| checkout.restore_after_success(cache));
-            *pin1_authenticated = true;
-            None
+            match with_pin_safety(|cache| checkout.restore_after_success(cache)) {
+                Ok(true) => {
+                    *pin1_authenticated = true;
+                    Ok(SignScheme::from(scheme))
+                }
+                Ok(false) => {
+                    // Concurrent deauthentication or invalidation advanced the
+                    // generation while VERIFY was in flight; refuse the private
+                    // operation rather than authorizing under an invalidated checkout.
+                    reset_card_state(pin1_authenticated, remote_pin2_authenticated);
+                    Err(SCARD_W_WRONG_CHV)
+                }
+                Err(rc) => {
+                    reset_card_state(pin1_authenticated, remote_pin2_authenticated);
+                    Err(rc)
+                }
+            }
         }
         Ok(VerifyOutcome::WrongPin { .. }) => {
-            let _ = with_pin_safety(|cache| cache.record_rejected(&serial, slot, &pin));
-            clear_pin_state(pin1_authenticated, pin2_authenticated);
+            let _ = with_pin_safety(|cache| cache.record_rejected(&serial, PinSlot::Pin1, &pin));
+            clear_pin_state(pin1_authenticated, remote_pin2_authenticated);
             refineid_dev_errors::report!(
                 CardModule,
                 "held PIN 1 not verified",
                 "the card rejected it"
             );
-            Some(SCARD_W_WRONG_CHV)
+            Err(SCARD_W_WRONG_CHV)
         }
         Ok(VerifyOutcome::Locked) => {
-            clear_pin_state(pin1_authenticated, pin2_authenticated);
+            clear_pin_state(pin1_authenticated, remote_pin2_authenticated);
             refineid_dev_errors::report!(
                 CardModule,
                 "held PIN 1 not verified",
                 "the PIN is blocked"
             );
-            Some(SCARD_W_CHV_BLOCKED)
+            Err(SCARD_W_CHV_BLOCKED)
         }
-        Ok(other) => {
-            clear_pin_state(pin1_authenticated, pin2_authenticated);
-            refineid_dev_errors::report!(CardModule, "held PIN 1 not verified", other);
-            Some(SCARD_W_WRONG_CHV)
+        Ok(VerifyOutcome::Other(sw)) => {
+            clear_pin_state(pin1_authenticated, remote_pin2_authenticated);
+            refineid_dev_errors::report!(CardModule, "held PIN 1 not verified", sw);
+            Err(SCARD_W_WRONG_CHV)
+        }
+        Err(AuthError::RetryFloor(refusal)) => {
+            clear_pin_state(pin1_authenticated, remote_pin2_authenticated);
+            Err(retry_floor_refusal_status(refusal))
+        }
+        Err(err @ (AuthError::Transport(_) | AuthError::Outcome(_))) => {
+            let _ = with_pin_safety(|cache| checkout.restore_after_unanswered(cache));
+            reset_card_state(pin1_authenticated, remote_pin2_authenticated);
+            refineid_dev_errors::report!(CardModule, "held PIN 1 not verified", err);
+            Err(SCARD_F_INTERNAL_ERROR)
         }
         Err(err) => {
-            let _ = with_pin_safety(|cache| checkout.restore_after_unanswered(cache));
-            reset_card_state(pin1_authenticated, pin2_authenticated);
+            clear_pin_state(pin1_authenticated, remote_pin2_authenticated);
             refineid_dev_errors::report!(CardModule, "held PIN 1 not verified", err);
-            Some(SCARD_F_INTERNAL_ERROR)
+            Err(SCARD_F_INTERNAL_ERROR)
         }
     }
 }
@@ -1090,20 +1218,6 @@ unsafe fn pin_id_from_user_id(pwszUserId: LPWSTR) -> DWORD {
         PIN_ID_PUK
     } else {
         PIN_ID_AUTH
-    }
-}
-
-#[cfg(windows)]
-fn external_hash_from_alg_and_bytes(_alg: DWORD, bytes: &[u8]) -> Option<ExternalHashValue> {
-    match bytes.len() {
-        20 => Some(ExternalHashValue::Sha1(bytes.try_into().ok()?)),
-        32 => Some(ExternalHashValue::Sha256(bytes.try_into().ok()?)),
-        48 => Some(ExternalHashValue::Sha384(bytes.try_into().ok()?)),
-        64 => Some(ExternalHashValue::Sha512(bytes.try_into().ok()?)),
-        // Some callers omit aiHashAlg or pass an unexpected value;
-        // allow a length-based fallback so TLS-sign callers that
-        // hand a plain digest still proceed.
-        _ => None,
     }
 }
 
@@ -1256,7 +1370,11 @@ fn authenticated_pin_set(ctx: &Ctx) -> DWORD {
     if has_pin1 {
         pin_set |= create_pin_set(PIN_ID_AUTH);
     }
-    let has_pin2 = ctx.pin2_authenticated;
+    let has_pin2 = ctx.remote_pin2_authenticated
+        || ctx
+            .session
+            .lock()
+            .is_ok_and(|session| session.is_qualified_verified());
     if has_pin2 {
         pin_set |= create_pin_set(PIN_ID_QUALIFIED_SIG);
     }
@@ -1291,6 +1409,20 @@ unsafe fn checked_pin_bytes(ptr: PBYTE, len: DWORD, pin_id: DWORD) -> Result<Pin
 }
 
 #[cfg(windows)]
+unsafe fn checked_puk(ptr: PBYTE, len: DWORD) -> Result<Puk, DWORD> {
+    if ptr.is_null() || len == 0 {
+        return Err(SCARD_E_INVALID_PARAMETER);
+    }
+    let len_usize = usize::try_from(len).unwrap_or(usize::MAX);
+    if !(PUK_MIN_LENGTH..=PUK_MAX_LENGTH).contains(&len_usize) {
+        return Err(SCARD_E_INVALID_PARAMETER);
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(ptr, len_usize) }.to_vec();
+    Puk::reconstruct(UnvalidatedSecret::from_owned_bytes(bytes))
+        .map_err(|_| SCARD_E_INVALID_PARAMETER)
+}
+
+#[cfg(windows)]
 fn pin_slot_for_id(pin_id: DWORD) -> Option<PinSlot> {
     match pin_id {
         PIN_ID_AUTH => Some(PinSlot::Pin1),
@@ -1320,35 +1452,44 @@ enum VerifyCaller {
 
 #[cfg(windows)]
 fn clear_cached_pin(ctx: &mut Ctx) {
-    clear_pin_state(&mut ctx.pin1_authenticated, &mut ctx.pin2_authenticated);
+    let _ = lock_session(&ctx.session).disarm_qualified();
+    clear_pin_state(
+        &mut ctx.pin1_authenticated,
+        &mut ctx.remote_pin2_authenticated,
+    );
+}
+
+/// Disarm any local qualified session and clear only this context's
+/// authentication flags without mutating the process-wide PIN cache.
+/// Used by post-transaction outcome mappers once shared-cache updates have
+/// already run under the PC/SC transaction.
+#[cfg(windows)]
+fn reset_local_ctx_state(ctx: &mut Ctx) {
+    let _ = lock_session(&ctx.session).disarm_qualified();
+    reset_card_state(
+        &mut ctx.pin1_authenticated,
+        &mut ctx.remote_pin2_authenticated,
+    );
 }
 
 /// Destroys the held PIN 1 and forgets the card's verified state: the card
 /// rejected a PIN, reported a retry counter that forbids reuse, or a new PIN
 /// is being entered.
 #[cfg(windows)]
-fn clear_pin_state(pin1_authenticated: &mut bool, pin2_authenticated: &mut bool) {
+fn clear_pin_state(pin1_authenticated: &mut bool, remote_pin2_authenticated: &mut bool) {
     let _ = with_pin_safety(|cache| {
         cache.clear_positive();
     });
-    reset_card_state(pin1_authenticated, pin2_authenticated);
+    reset_card_state(pin1_authenticated, remote_pin2_authenticated);
 }
 
 /// Forgets the card's verified state after a transport failure or a failed
 /// command: the held PIN 1 stays, and the retry counter read before its next
 /// use decides (RAPP v26.11.2 section 11 item 2).
 #[cfg(windows)]
-const fn reset_card_state(pin1_authenticated: &mut bool, pin2_authenticated: &mut bool) {
+const fn reset_card_state(pin1_authenticated: &mut bool, remote_pin2_authenticated: &mut bool) {
     *pin1_authenticated = false;
-    *pin2_authenticated = false;
-}
-
-/// PIN 2 is entered for every signature and never held (RAPP v26.11.2
-/// section 11 item 2): the card spends it on one signature, and the next
-/// one asks again.
-#[cfg(windows)]
-const fn spend_pin2(ctx: &mut Ctx) {
-    ctx.pin2_authenticated = false;
+    *remote_pin2_authenticated = false;
 }
 
 #[cfg(windows)]
@@ -1366,17 +1507,13 @@ unsafe fn write_attempts_remaining(pcAttemptsRemaining: PDWORD, attempts: Option
 fn map_verify_outcome<E: core::fmt::Debug>(
     ctx: &mut Ctx,
     slot: PinSlot,
-    scheme: PinReferenceScheme,
     caller: VerifyCaller,
-    outcome: Result<VerifyOutcome, E>,
+    outcome: Result<VerifyOutcome, AuthError<E>>,
 ) -> (DWORD, Option<DWORD>) {
     match outcome {
         Ok(VerifyOutcome::Ok) => {
             if slot == PinSlot::Pin1 {
                 ctx.pin1_authenticated = true;
-            } else {
-                ctx.pin2_authenticated = true;
-                ctx.pin2_scheme = scheme;
             }
             (SCARD_S_SUCCESS, None)
         }
@@ -1388,7 +1525,7 @@ fn map_verify_outcome<E: core::fmt::Debug>(
                     "the card rejected the PIN"
                 );
             }
-            clear_cached_pin(ctx);
+            reset_local_ctx_state(ctx);
             (SCARD_W_WRONG_CHV, Some(DWORD::from(retries_left.get())))
         }
         Ok(VerifyOutcome::Locked) => {
@@ -1399,7 +1536,7 @@ fn map_verify_outcome<E: core::fmt::Debug>(
                     "the PIN is blocked"
                 );
             }
-            clear_cached_pin(ctx);
+            reset_local_ctx_state(ctx);
             let attempts = match caller {
                 VerifyCaller::AuthenticatePin => Some(NO_ATTEMPTS_REMAINING),
                 VerifyCaller::AuthenticateEx => None,
@@ -1408,19 +1545,84 @@ fn map_verify_outcome<E: core::fmt::Debug>(
         }
         Ok(VerifyOutcome::Other(sw)) => {
             if caller == VerifyCaller::AuthenticateEx {
-                let status = refineid_lib_core::apdu::status_word::StatusWord::from_u16(sw);
-                refineid_dev_errors::report!(CardModule, "CardAuthenticateEx failed", status);
+                refineid_dev_errors::report!(CardModule, "CardAuthenticateEx failed", sw);
             }
-            clear_cached_pin(ctx);
+            reset_local_ctx_state(ctx);
             (SCARD_W_WRONG_CHV, None)
+        }
+        Err(AuthError::RetryFloor(refusal)) => {
+            reset_local_ctx_state(ctx);
+            (retry_floor_refusal_status(refusal), None)
+        }
+        Err(AuthError::UnsupportedSlot { .. }) => {
+            reset_local_ctx_state(ctx);
+            (SCARD_E_UNSUPPORTED_FEATURE, None)
         }
         Err(error) => {
             if caller == VerifyCaller::AuthenticateEx {
                 refineid_dev_errors::report!(CardModule, "CardAuthenticateEx failed", error);
             }
-            clear_cached_pin(ctx);
+            reset_local_ctx_state(ctx);
             (SCARD_F_INTERNAL_ERROR, None)
         }
+    }
+}
+
+#[cfg(windows)]
+fn map_qualified_open_failure(
+    ctx: &mut Ctx,
+    caller: VerifyCaller,
+    failure: QualifiedOpenFailure,
+) -> (DWORD, Option<DWORD>) {
+    match failure {
+        QualifiedOpenFailure::SessionUnavailable => {
+            reset_local_ctx_state(ctx);
+            (SCARD_F_INTERNAL_ERROR, None)
+        }
+        QualifiedOpenFailure::Unlock(QualifiedUnlockError::UnsupportedScheme(_)) => {
+            reset_local_ctx_state(ctx);
+            (SCARD_E_UNSUPPORTED_FEATURE, None)
+        }
+        QualifiedOpenFailure::Unlock(QualifiedUnlockError::Directory(error)) => {
+            if caller == VerifyCaller::AuthenticateEx {
+                refineid_dev_errors::report!(CardModule, "CardAuthenticateEx failed", error);
+            }
+            reset_local_ctx_state(ctx);
+            (SCARD_F_INTERNAL_ERROR, None)
+        }
+        QualifiedOpenFailure::Unlock(QualifiedUnlockError::Verify(error)) => {
+            map_verify_outcome(ctx, PinSlot::Pin2, caller, Err(error))
+        }
+        QualifiedOpenFailure::Unlock(QualifiedUnlockError::PinRefused(refused)) => {
+            map_verify_outcome::<transport::CardSessionTransportError>(
+                ctx,
+                PinSlot::Pin2,
+                caller,
+                Ok(refused),
+            )
+        }
+    }
+}
+
+#[cfg(windows)]
+fn record_pin1_verify_cache_update<E>(
+    outcome: &Result<VerifyOutcome, AuthError<E>>,
+    serial: TokenSerial,
+    scheme: PinReferenceScheme,
+    pin: PinBytes,
+    pin1_generation: u64,
+) -> Result<(), DWORD> {
+    match outcome {
+        Ok(VerifyOutcome::Ok) => match hold_verified_pin1(serial, scheme, pin, pin1_generation) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(SCARD_W_WRONG_CHV),
+            Err(rc) => Err(rc),
+        },
+        Ok(VerifyOutcome::WrongPin { .. }) => {
+            let _ = with_pin_safety(|cache| cache.record_rejected(&serial, PinSlot::Pin1, &pin));
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 
@@ -1432,61 +1634,119 @@ fn verify_card_pin(
     pin: PinBytes,
     caller: VerifyCaller,
 ) -> (DWORD, Option<DWORD>) {
-    let mut tx = lock_transport(&ctx.transport);
-    if let Err(error) = sync_transport_handle(
-        &mut tx,
+    let mut session = lock_session(&ctx.session);
+    // Any new explicit PIN operation invalidates previous positive state and
+    // disarms any previously armed qualified session before fallible steps.
+    let _ = session.disarm_qualified();
+    reset_card_state(
         &mut ctx.pin1_authenticated,
-        &mut ctx.pin2_authenticated,
+        &mut ctx.remote_pin2_authenticated,
+    );
+    let pcsc_tx = match prepare_local_transaction(
+        &mut session,
+        &mut ctx.pin1_authenticated,
+        &mut ctx.remote_pin2_authenticated,
         live_h_card,
+        true,
     ) {
-        return (error, None);
-    }
-    // Any new explicit PIN operation invalidates previous positive state.
-    clear_pin_state(&mut ctx.pin1_authenticated, &mut ctx.pin2_authenticated);
-    let serial = match live_token_serial(&mut tx) {
+        Ok(guard) => guard,
+        Err(error) => return (error, None),
+    };
+    // Clear the shared positive cache and capture its generation INSIDE the
+    // PC/SC transaction so the generation covers the entire card sequence.
+    let pin1_generation = match with_pin_safety(|cache| {
+        cache.clear_positive();
+        cache.generation()
+    }) {
+        Ok(generation) => generation,
+        Err(error) => return (error, None),
+    };
+    let tx = match session.disarm_qualified() {
+        Ok(tx) => tx,
+        Err(error) => return (error, None),
+    };
+    let serial = match live_token_serial(tx) {
         Ok(serial) => serial,
         Err(error) => return (error, None),
     };
-    let (scheme, status) = match live_verify_floor(&mut tx, slot) {
+    let (scheme, status) = match live_verify_floor(tx, slot) {
         Ok(admitted) => admitted,
         Err(error) => return (error, None),
     };
-    let is_rejected = with_pin_safety(|cache| cache.bars_presenting(&serial, slot, &pin, status))
-        .unwrap_or(false);
+    let is_rejected =
+        match with_pin_safety(|cache| cache.bars_presenting(&serial, slot, &pin, status, scheme)) {
+            Ok(rejected) => rejected,
+            Err(error) => return (error, None),
+        };
     if is_rejected {
         return (SCARD_W_WRONG_CHV, None);
     }
-    let outcome = tx.verify_pin_with_scheme(scheme, slot, pin.clone());
-    drop(tx);
-    let is_ok = matches!(outcome, Ok(VerifyOutcome::Ok));
-    if matches!(outcome, Ok(VerifyOutcome::WrongPin { .. })) {
-        let _ = with_pin_safety(|cache| cache.record_rejected(&serial, slot, &pin));
+    match slot {
+        PinSlot::Pin1 => {
+            let Ok(typed_pin1) = pin.to_pin1() else {
+                return (SCARD_E_INVALID_PARAMETER, None);
+            };
+            let outcome = tx.verify_pin1_with_scheme(scheme, typed_pin1);
+            // Update rejection memory or generation-checked positive cache
+            // BEFORE releasing the PC/SC transaction so no concurrent context
+            // can replay a rejected PIN or observe a stale cached value.
+            let stored_pin1 =
+                record_pin1_verify_cache_update(&outcome, serial, scheme, pin, pin1_generation);
+            drop(pcsc_tx);
+            drop(session);
+            if let Err(rc) = stored_pin1 {
+                // Do not call `clear_cached_pin`: a generation mismatch means
+                // another context already invalidated or superseded the cache,
+                // so touching the process-wide cache here could erase a newer
+                // context's verified PIN 1. Reset only this context's flags.
+                reset_card_state(
+                    &mut ctx.pin1_authenticated,
+                    &mut ctx.remote_pin2_authenticated,
+                );
+                return (rc, None);
+            }
+            map_verify_outcome(ctx, slot, caller, outcome)
+        }
+        PinSlot::Pin2 => {
+            let Ok(typed_pin2) = pin.to_pin2() else {
+                return (SCARD_E_INVALID_PARAMETER, None);
+            };
+            let opened = session.open_qualified(SignScheme::from(scheme), typed_pin2);
+            if matches!(
+                opened,
+                Err(QualifiedOpenFailure::Unlock(
+                    QualifiedUnlockError::PinRefused(VerifyOutcome::WrongPin { .. })
+                ))
+            ) {
+                let _ = with_pin_safety(|cache| cache.record_rejected(&serial, slot, &pin));
+            }
+            drop(pcsc_tx);
+            drop(session);
+            match opened {
+                Ok(()) => (SCARD_S_SUCCESS, None),
+                Err(failure) => map_qualified_open_failure(ctx, caller, failure),
+            }
+        }
     }
-    let result = map_verify_outcome(ctx, slot, scheme, caller, outcome);
-    if is_ok && slot == PinSlot::Pin1 {
-        hold_verified_pin1(serial, pin);
-    }
-    result
 }
 
 #[cfg(windows)]
-fn map_change_pin_outcome(ctx: &mut Ctx, outcome: ChangePinOutcome) -> (DWORD, Option<DWORD>) {
+fn map_change_pin_outcome(ctx: &mut Ctx, outcome: ManageOutcome) -> (DWORD, Option<DWORD>) {
     match outcome {
-        ChangePinOutcome::Ok => {
-            clear_cached_pin(ctx);
+        ManageOutcome::Ok => {
+            reset_local_ctx_state(ctx);
             (SCARD_S_SUCCESS, None)
         }
-        ChangePinOutcome::WrongCurrentPin { retries_left } => {
-            clear_cached_pin(ctx);
+        ManageOutcome::WrongCredential { retries_left } => {
+            reset_local_ctx_state(ctx);
             (SCARD_W_WRONG_CHV, Some(DWORD::from(retries_left.get())))
         }
-        ChangePinOutcome::Locked => {
-            clear_cached_pin(ctx);
+        ManageOutcome::Locked => {
+            reset_local_ctx_state(ctx);
             (SCARD_W_CHV_BLOCKED, None)
         }
-        ChangePinOutcome::LengthError => (SCARD_E_INVALID_PARAMETER, None),
-        ChangePinOutcome::Other(_sw) => {
-            clear_cached_pin(ctx);
+        ManageOutcome::Other(_sw) => {
+            reset_local_ctx_state(ctx);
             (SCARD_F_INTERNAL_ERROR, None)
         }
     }
@@ -1498,68 +1758,99 @@ fn change_card_pin(
     live_h_card: SCARDHANDLE,
     slot: PinSlot,
     current_pin: &PinBytes,
-    new_pin: PinBytes,
+    new_pin: &PinBytes,
 ) -> (DWORD, Option<DWORD>) {
-    let mut tx = lock_transport(&ctx.transport);
-    if let Err(error) = sync_transport_handle(
-        &mut tx,
+    let mut session = lock_session(&ctx.session);
+    let pcsc_tx = match prepare_local_transaction(
+        &mut session,
         &mut ctx.pin1_authenticated,
-        &mut ctx.pin2_authenticated,
+        &mut ctx.remote_pin2_authenticated,
         live_h_card,
+        true,
     ) {
-        return (error, None);
-    }
-    let serial = match live_token_serial(&mut tx) {
+        Ok(guard) => guard,
+        Err(error) => return (error, None),
+    };
+    let tx = match session.disarm_qualified() {
+        Ok(tx) => tx,
+        Err(error) => return (error, None),
+    };
+    let serial = match live_token_serial(tx) {
         Ok(serial) => serial,
         Err(error) => return (error, None),
     };
-    let (lengths, status) = match pin_scheme::prepare_pin_change(&mut *tx, slot) {
+    let (lengths, status) = match pin_scheme::prepare_pin_change(tx, slot) {
         Ok(prepared) => prepared,
         Err(failure) => return (report_prepare_failure(failure), None),
     };
-    if let Err(error) = retry_floor_answer(slot, status) {
+    let scheme = lengths.numbering();
+    if let Err(error) = retry_floor_answer(slot, status, scheme) {
         return (error, None);
     }
-    let is_rejected = with_pin_safety(|cache| {
-        cache.bars_presenting(&serial, slot, current_pin, status)
-            || cache.bars_presenting(&serial, slot, &new_pin, status)
-    })
-    .unwrap_or(false);
-    if is_rejected {
+    let (current_rejected, new_rejected) = match with_pin_safety(|cache| {
+        (
+            cache.bars_presenting(&serial, slot, current_pin, status, scheme),
+            cache.is_rejected(&serial, slot, new_pin),
+        )
+    }) {
+        Ok(pair) => pair,
+        Err(error) => return (error, None),
+    };
+    if current_rejected {
         return (SCARD_W_WRONG_CHV, None);
     }
-    let outcome = tx.change_pin(&lengths, slot, current_pin.clone(), new_pin);
-    drop(tx);
-    match outcome {
-        Ok(o) => {
-            if matches!(o, ChangePinOutcome::WrongCurrentPin { .. }) {
-                let _ = with_pin_safety(|cache| {
-                    cache.record_rejected(&serial, slot, current_pin);
-                });
-            }
-            map_change_pin_outcome(ctx, o)
+    if new_rejected {
+        return (SCARD_E_INVALID_VALUE, None);
+    }
+    // Clear any cached PIN 1 under `pcsc_tx` BEFORE transmitting the
+    // credential-changing command so even a lost response cannot leave an old
+    // PIN cached for another context.
+    if let Err(error) = with_pin_safety(PinSafetyCache::clear_positive) {
+        return (error, None);
+    }
+    let outcome = match slot {
+        PinSlot::Pin1 => {
+            let (Ok(cur), Ok(next)) = (current_pin.to_pin1(), new_pin.to_pin1()) else {
+                return (SCARD_E_INVALID_PARAMETER, None);
+            };
+            tx.change_pin1(&lengths, cur, next)
         }
+        PinSlot::Pin2 => {
+            let (Ok(cur), Ok(next)) = (current_pin.to_pin2(), new_pin.to_pin2()) else {
+                return (SCARD_E_INVALID_PARAMETER, None);
+            };
+            tx.change_pin2(&lengths, cur, next)
+        }
+    };
+    if matches!(outcome, Ok(ManageOutcome::WrongCredential { .. })) {
+        let _ = with_pin_safety(|cache| {
+            cache.record_rejected(&serial, slot, current_pin);
+        });
+    }
+    drop(pcsc_tx);
+    drop(session);
+    match outcome {
+        Ok(o) => map_change_pin_outcome(ctx, o),
         Err(error) => (manage_error_answer(&error), None),
     }
 }
 
 #[cfg(windows)]
-fn map_unblock_outcome(ctx: &mut Ctx, outcome: UnblockOutcome) -> DWORD {
+fn map_unblock_outcome(ctx: &mut Ctx, outcome: ManageOutcome) -> DWORD {
     match outcome {
-        UnblockOutcome::Ok => {
-            clear_cached_pin(ctx);
+        ManageOutcome::Ok => {
+            reset_local_ctx_state(ctx);
             SCARD_S_SUCCESS
         }
-        UnblockOutcome::WrongPuk { .. } => {
-            clear_cached_pin(ctx);
+        ManageOutcome::WrongCredential { .. } => {
+            reset_local_ctx_state(ctx);
             SCARD_W_WRONG_CHV
         }
-        UnblockOutcome::PukLocked | UnblockOutcome::Invalidated => {
-            clear_cached_pin(ctx);
+        ManageOutcome::Locked => {
+            reset_local_ctx_state(ctx);
             SCARD_W_CHV_BLOCKED
         }
-        UnblockOutcome::LengthError => SCARD_E_INVALID_PARAMETER,
-        UnblockOutcome::Other(_sw) => SCARD_F_INTERNAL_ERROR,
+        ManageOutcome::Other(_sw) => SCARD_F_INTERNAL_ERROR,
     }
 }
 
@@ -1568,30 +1859,64 @@ fn unblock_card_pin(
     ctx: &mut Ctx,
     live_h_card: SCARDHANDLE,
     target_slot: PinSlot,
-    puk: PinBytes,
-    new_pin: PinBytes,
+    puk: Puk,
+    new_pin: &PinBytes,
 ) -> DWORD {
-    let mut tx = lock_transport(&ctx.transport);
-    if let Err(error) = sync_transport_handle(
-        &mut tx,
+    let mut session = lock_session(&ctx.session);
+    let pcsc_tx = match prepare_local_transaction(
+        &mut session,
         &mut ctx.pin1_authenticated,
-        &mut ctx.pin2_authenticated,
+        &mut ctx.remote_pin2_authenticated,
         live_h_card,
+        true,
     ) {
-        return error;
-    }
-    if let Err(error) = live_token_serial(&mut tx) {
-        return error;
-    }
-    let (lengths, status) = match pin_scheme::prepare_pin_unblock(&mut *tx) {
+        Ok(guard) => guard,
+        Err(error) => return error,
+    };
+    let tx = match session.disarm_qualified() {
+        Ok(tx) => tx,
+        Err(error) => return error,
+    };
+    let serial = match live_token_serial(tx) {
+        Ok(serial) => serial,
+        Err(error) => return error,
+    };
+    let (lengths, status) = match pin_scheme::prepare_pin_unblock(tx) {
         Ok(prepared) => prepared,
         Err(failure) => return report_prepare_failure(failure),
     };
-    if let Err(error) = puk_floor_answer(status) {
+    if let Err(error) = puk_floor_answer(status, lengths.numbering()) {
         return error;
     }
-    let outcome = tx.reset_retry_counter(&lengths, target_slot, puk, new_pin);
-    drop(tx);
+    let new_pin_rejected =
+        match with_pin_safety(|cache| cache.is_rejected(&serial, target_slot, new_pin)) {
+            Ok(rejected) => rejected,
+            Err(error) => return error,
+        };
+    if new_pin_rejected {
+        return SCARD_E_INVALID_VALUE;
+    }
+    // Clear any cached PIN 1 under `pcsc_tx` BEFORE transmitting the unblock
+    // command so even a lost response cannot leave an old PIN cached.
+    if let Err(error) = with_pin_safety(PinSafetyCache::clear_positive) {
+        return error;
+    }
+    let outcome = match target_slot {
+        PinSlot::Pin1 => {
+            let Ok(typed_pin1) = new_pin.to_pin1() else {
+                return SCARD_E_INVALID_PARAMETER;
+            };
+            tx.unblock_pin1(&lengths, puk, typed_pin1)
+        }
+        PinSlot::Pin2 => {
+            let Ok(typed_pin2) = new_pin.to_pin2() else {
+                return SCARD_E_INVALID_PARAMETER;
+            };
+            tx.unblock_pin2(&lengths, puk, typed_pin2)
+        }
+    };
+    drop(pcsc_tx);
+    drop(session);
     match outcome {
         Ok(o) => map_unblock_outcome(ctx, o),
         Err(error) => manage_error_answer(&error),
@@ -2079,10 +2404,10 @@ unsafe extern "system" fn CardAuthenticatePin(
         Ok(values) => values,
         Err(rc) => return rc,
     };
-    if ctx.transport.lock().is_ok_and(|tx| tx.is_remote()) {
+    if ctx.session.lock().is_ok_and(|s| s.is_remote()) {
         let pin_id = unsafe { pin_id_from_user_id(pwszUserId) };
         if pin_id == PIN_ID_QUALIFIED_SIG {
-            ctx.pin2_authenticated = true;
+            ctx.remote_pin2_authenticated = true;
         } else {
             ctx.pin1_authenticated = true;
         }
@@ -2137,23 +2462,43 @@ unsafe extern "system" fn CardSignData(
         return SCARD_E_NO_KEY_CONTAINER;
     };
 
-    let remote_arm = {
-        let (pin1, pin2) = (&mut ctx.pin1_authenticated, &mut ctx.pin2_authenticated);
-        let mut tx = lock_transport(&ctx.transport);
-        if let Err(rc) = sync_transport_handle(&mut tx, pin1, pin2, cd.hScard) {
-            return rc;
-        }
-        if tx.is_remote() {
-            tx.remote_ref().map(|r| (r.pair_id, r.atr.clone()))
+    // Inspect transport kind and handle metadata only here; any handle/PACE
+    // refresh runs inside `prepare_local_transaction` below under the
+    // operation-scoped PC/SC transaction.
+    let (remote_arm, local_pin2_armed) = {
+        let mut session = lock_session(&ctx.session);
+        if session.is_remote() {
+            (
+                session.remote_ref().map(|r| (r.pair_id, r.atr.clone())),
+                false,
+            )
+        } else if cd.hScard == INVALID_SCARD_HANDLE {
+            reset_card_state(
+                &mut ctx.pin1_authenticated,
+                &mut ctx.remote_pin2_authenticated,
+            );
+            session.invalidate_handle();
+            return SCARD_E_INVALID_HANDLE;
+        } else if session.h_card() != cd.hScard {
+            // A handle change invalidates any prior card-side auth state;
+            // disarm any pending qualified session and invalidate the cached
+            // handle without transmitting here, leaving the actual handle/PACE
+            // refresh to `prepare_local_transaction`.
+            reset_card_state(
+                &mut ctx.pin1_authenticated,
+                &mut ctx.remote_pin2_authenticated,
+            );
+            session.invalidate_handle();
+            (None, false)
         } else {
-            None
+            (None, session.is_qualified_verified())
         }
     };
 
     let authenticated = if remote_arm.is_some() {
         true
     } else if container.pin_id == PIN_ID_QUALIFIED_SIG {
-        ctx.pin2_authenticated
+        local_pin2_armed
     } else {
         ctx.pin1_authenticated
             || with_pin_safety(|cache| cache.has_positive_pin1()).unwrap_or(false)
@@ -2301,202 +2646,69 @@ unsafe extern "system" fn CardSignData(
         return SCARD_S_SUCCESS;
     }
 
-    let key_ref = if container.pin_id == PIN_ID_QUALIFIED_SIG {
-        KeyRef::Sign(ctx.pin2_scheme)
-    } else {
-        KeyRef::Auth
-    };
-
-    // RSA-PSS path: TLS 1.3 CertificateVerify (Firefox osclientcerts,
-    // CNG KSP callers) requires RSASSA-PSS. FINEID S1 v4.2 Table 6
-    // defines a native RSA-PSS algorithm reference, so send the digest
-    // through PSO:HASH and let the card perform PSS internally.
-    if let ParsedSigningPadding::Pss {
-        ref hash_name,
-        salt_len,
-    } = padding
-    {
-        if !container.allow_pss || !matches!(container.key_alg, KeyAlgorithm::Rsa { .. }) {
-            return SCARD_E_UNSUPPORTED_FEATURE;
-        }
-        let (digest_len, hash) = match hash_name.as_str() {
-            "SHA1" => (
-                20,
-                ExternalHashValue::Sha1(match in_bytes.try_into() {
-                    Ok(bytes) => bytes,
-                    Err(_) => return SCARD_E_INVALID_PARAMETER,
-                }),
-            ),
-            "SHA256" => (
-                32,
-                ExternalHashValue::Sha256(match in_bytes.try_into() {
-                    Ok(bytes) => bytes,
-                    Err(_) => return SCARD_E_INVALID_PARAMETER,
-                }),
-            ),
-            "SHA384" => (
-                48,
-                ExternalHashValue::Sha384(match in_bytes.try_into() {
-                    Ok(bytes) => bytes,
-                    Err(_) => return SCARD_E_INVALID_PARAMETER,
-                }),
-            ),
-            "SHA512" => (
-                64,
-                ExternalHashValue::Sha512(match in_bytes.try_into() {
-                    Ok(bytes) => bytes,
-                    Err(_) => return SCARD_E_INVALID_PARAMETER,
-                }),
-            ),
-            _ => return SCARD_E_INVALID_PARAMETER,
-        };
-        if salt_len != digest_len {
-            return SCARD_E_INVALID_PARAMETER;
-        }
-        let mut tx = lock_transport(&ctx.transport);
-        if let Err(rc) = sync_transport_handle(
-            &mut tx,
-            &mut ctx.pin1_authenticated,
-            &mut ctx.pin2_authenticated,
-            cd.hScard,
-        ) {
-            return rc;
-        }
-        // The card may have been reset since PIN verification (the
-        // Base CSP reconnects between calls); re-verify with the
-        // cached PIN inside the same transaction so the security
-        // state is guaranteed at PSO time (legacy parity).
-        if let Some(rc) = reverify_cached_pin(
-            &mut ctx.pin1_authenticated,
-            &mut ctx.pin2_authenticated,
-            &mut tx,
-            container.pin_id,
-        ) {
-            return rc;
-        }
-        let sig = tx.sign_pre_hashed_rsa_pss(key_ref, hash);
-        drop(tx);
-        let sig = match sig {
-            Ok(sig) => sig,
-            Err(err) => {
-                refineid_dev_errors::report!(CardModule, "RSA-PSS signature failed", err);
-                reset_card_state(&mut ctx.pin1_authenticated, &mut ctx.pin2_authenticated);
-                return SCARD_F_INTERNAL_ERROR;
-            }
-        };
-        // CryptoAPI expects RSA signature integers in little-endian order.
-        let mut sig_bytes = sig.as_bytes().to_vec();
-        sig_bytes.reverse();
-        let Some(sig_len) = try_dword_len(sig_bytes.len()) else {
-            return SCARD_F_INTERNAL_ERROR;
-        };
-        let Some(p) = (unsafe { alloc_copy(cd, &sig_bytes) }) else {
-            return SCARD_E_NO_MEMORY;
-        };
-        basic.pbSignedData = p;
-        basic.cbSignedData = sig_len;
-        if container.pin_id == PIN_ID_QUALIFIED_SIG {
-            spend_pin2(ctx);
-        }
-        return SCARD_S_SUCCESS;
-    }
-
-    let hash = if let ParsedSigningPadding::Pkcs1 {
-        hash_name: Some(name),
-    } = &padding
-    {
-        match name.as_str() {
-            "SHA1" => {
-                if in_bytes.len() != 20 {
-                    return SCARD_E_INVALID_PARAMETER;
-                }
-                match in_bytes.try_into() {
-                    Ok(b) => ExternalHashValue::Sha1(b),
-                    Err(_) => return SCARD_E_INVALID_PARAMETER,
-                }
-            }
-            "SHA256" => {
-                if in_bytes.len() != 32 {
-                    return SCARD_E_INVALID_PARAMETER;
-                }
-                match in_bytes.try_into() {
-                    Ok(b) => ExternalHashValue::Sha256(b),
-                    Err(_) => return SCARD_E_INVALID_PARAMETER,
-                }
-            }
-            "SHA384" => {
-                if in_bytes.len() != 48 {
-                    return SCARD_E_INVALID_PARAMETER;
-                }
-                match in_bytes.try_into() {
-                    Ok(b) => ExternalHashValue::Sha384(b),
-                    Err(_) => return SCARD_E_INVALID_PARAMETER,
-                }
-            }
-            "SHA512" => {
-                if in_bytes.len() != 64 {
-                    return SCARD_E_INVALID_PARAMETER;
-                }
-                match in_bytes.try_into() {
-                    Ok(b) => ExternalHashValue::Sha512(b),
-                    Err(_) => return SCARD_E_INVALID_PARAMETER,
-                }
-            }
-            _ => return SCARD_E_INVALID_PARAMETER,
-        }
-    } else {
-        let Some(h) = external_hash_from_alg_and_bytes(basic.aiHashAlg, in_bytes) else {
-            return SCARD_E_INVALID_PARAMETER;
-        };
-        h
-    };
-
-    let mut tx = lock_transport(&ctx.transport);
-    if let Err(rc) = sync_transport_handle(
-        &mut tx,
-        &mut ctx.pin1_authenticated,
-        &mut ctx.pin2_authenticated,
-        cd.hScard,
-    ) {
-        return rc;
-    }
-    if let Some(rc) = reverify_cached_pin(
-        &mut ctx.pin1_authenticated,
-        &mut ctx.pin2_authenticated,
-        &mut tx,
-        container.pin_id,
-    ) {
-        return rc;
-    }
-    let sig = match container.key_alg {
-        KeyAlgorithm::Rsa { .. } => tx
-            .sign_pre_hashed_rsa_pkcs1(key_ref, hash)
-            .map(|s| s.as_bytes().to_vec()),
-        KeyAlgorithm::Ec(curve) if curve.bits() == 256 => {
-            let ExternalHashValue::Sha256(bytes) = hash else {
-                return SCARD_E_INVALID_PARAMETER;
-            };
-            tx.sign_pre_hashed_sha256_ecdsa_p256(key_ref, Sha256::from_bytes(bytes))
-                .map(|s| s.as_bytes().to_vec())
-        }
-        KeyAlgorithm::Ec(curve) if curve.bits() == 384 => match hash {
-            ExternalHashValue::Sha256(bytes) => tx
-                .sign_pre_hashed_sha256_ecdsa_p384(key_ref, Sha256::from_bytes(bytes))
-                .map(|s| s.as_bytes().to_vec()),
-            ExternalHashValue::Sha384(bytes) => tx
-                .sign_pre_hashed_sha384_ecdsa_p384(key_ref, Sha384::from_bytes(bytes))
-                .map(|s| s.as_bytes().to_vec()),
-            _ => return SCARD_E_INVALID_PARAMETER,
+    let profile = match container.key_alg {
+        KeyAlgorithm::Rsa { .. } => SigningKeyProfile::Rsa {
+            allow_pss: container.allow_pss,
         },
-        KeyAlgorithm::Ec(_) => return SCARD_E_UNSUPPORTED_FEATURE,
+        KeyAlgorithm::Ec(EcCurve::Secp256r1) => SigningKeyProfile::EcP256,
+        KeyAlgorithm::Ec(EcCurve::Secp384r1) => SigningKeyProfile::EcP384,
+        KeyAlgorithm::Ec(_) => SigningKeyProfile::UnsupportedEc,
     };
-    drop(tx);
+    let request = match LocalSignRequest::parse(profile, &padding, basic.aiHashAlg, in_bytes) {
+        Ok(request) => request,
+        Err(rc) => return rc,
+    };
 
-    let Ok(mut sig_bytes) = sig else {
-        reset_card_state(&mut ctx.pin1_authenticated, &mut ctx.pin2_authenticated);
-        return SCARD_F_INTERNAL_ERROR;
+    let mut session = lock_session(&ctx.session);
+    let disarm_first = container.pin_id != PIN_ID_QUALIFIED_SIG;
+    let pcsc_tx = match prepare_local_transaction(
+        &mut session,
+        &mut ctx.pin1_authenticated,
+        &mut ctx.remote_pin2_authenticated,
+        cd.hScard,
+        disarm_first,
+    ) {
+        Ok(guard) => guard,
+        Err(rc) => return rc,
     };
-    if matches!(container.key_alg, KeyAlgorithm::Rsa { .. }) {
+    let sig = if container.pin_id == PIN_ID_QUALIFIED_SIG {
+        match session.sign_qualified_once(|key| execute_local_sign(key, request)) {
+            Ok(result) => result,
+            Err(rc) => return rc,
+        }
+    } else {
+        let tx = match session.disarm_qualified() {
+            Ok(tx) => tx,
+            Err(rc) => return rc,
+        };
+        let scheme = match reverify_cached_pin1(
+            &mut ctx.pin1_authenticated,
+            &mut ctx.remote_pin2_authenticated,
+            tx,
+        ) {
+            Ok(scheme) => scheme,
+            Err(rc) => return rc,
+        };
+        execute_local_sign(tx.authentication_key(scheme), request)
+    };
+    drop(pcsc_tx);
+    drop(session);
+
+    let mut sig_bytes = match sig {
+        Ok(sig_bytes) => sig_bytes,
+        Err(err) => {
+            if matches!(padding, ParsedSigningPadding::Pss { .. }) {
+                refineid_dev_errors::report!(CardModule, "RSA-PSS signature failed", err);
+            }
+            reset_card_state(
+                &mut ctx.pin1_authenticated,
+                &mut ctx.remote_pin2_authenticated,
+            );
+            return SCARD_F_INTERNAL_ERROR;
+        }
+    };
+    if request.is_rsa() {
+        // CryptoAPI expects RSA signature integers in little-endian order.
         sig_bytes.reverse();
     }
     let Some(needed) = try_dword_len(sig_bytes.len()) else {
@@ -2507,10 +2719,16 @@ unsafe extern "system" fn CardSignData(
     };
     basic.pbSignedData = p;
     basic.cbSignedData = needed;
-    if container.pin_id == PIN_ID_QUALIFIED_SIG {
-        spend_pin2(ctx);
-    }
     SCARD_S_SUCCESS
+}
+
+#[cfg(windows)]
+fn deauthenticate_ctx(ctx: &mut Ctx) {
+    if ctx.session.lock().is_ok_and(|s| s.is_remote()) {
+        reset_local_ctx_state(ctx);
+    } else {
+        clear_cached_pin(ctx);
+    }
 }
 
 #[cfg(windows)]
@@ -2523,8 +2741,7 @@ unsafe extern "system" fn CardDeauthenticate(
         Ok(values) => values,
         Err(rc) => return rc,
     };
-    ctx.pin1_authenticated = false;
-    ctx.pin2_authenticated = false;
+    deauthenticate_ctx(ctx);
     SCARD_S_SUCCESS
 }
 
@@ -2540,8 +2757,7 @@ unsafe extern "system" fn CardDeauthenticateEx(
     };
     match PinId {
         PIN_SET_ALL_ROLES | PIN_ID_AUTH | PIN_ID_QUALIFIED_SIG | PIN_ID_PUK | ROLE_EVERYONE => {
-            ctx.pin1_authenticated = false;
-            ctx.pin2_authenticated = false;
+            deauthenticate_ctx(ctx);
             SCARD_S_SUCCESS
         }
         _ => SCARD_E_INVALID_PARAMETER,
@@ -2560,7 +2776,7 @@ unsafe extern "system" fn CardRSADecrypt(pCardData: *mut CARD_DATA, pInfo: PVOID
         Ok(values) => values,
         Err(rc) => return rc,
     };
-    if ctx.transport.lock().is_ok_and(|tx| tx.is_remote()) {
+    if ctx.session.lock().is_ok_and(|s| s.is_remote()) {
         return SCARD_E_UNSUPPORTED_FEATURE;
     }
     let basic = unsafe { &mut *pInfo.cast::<CARD_RSA_DECRYPT_INFO_BASIC>() };
@@ -2570,33 +2786,52 @@ unsafe extern "system" fn CardRSADecrypt(pCardData: *mut CARD_DATA, pInfo: PVOID
     if !container.allow_decrypt {
         return SCARD_E_UNSUPPORTED_FEATURE;
     }
-    if basic.pbData.is_null() || basic.cbData == 0 {
+    let expected_modulus_len = container.key_alg.signature_len();
+    let Ok(data_len) = usize::try_from(basic.cbData) else {
+        return SCARD_E_INVALID_PARAMETER;
+    };
+    if basic.pbData.is_null()
+        || data_len != expected_modulus_len
+        || data_len != RSA_3072_MODULUS_BYTES
+    {
         return SCARD_E_INVALID_PARAMETER;
     }
 
-    let ciphertext =
-        unsafe { core::slice::from_raw_parts(basic.pbData, basic.cbData as usize) }.to_vec();
-    let mut tx = lock_transport(&ctx.transport);
-    if let Err(rc) = sync_transport_handle(
-        &mut tx,
+    let ciphertext = unsafe { core::slice::from_raw_parts(basic.pbData, data_len) }.to_vec();
+    let Ok(cryptogram) = RsaCryptogram::from_bytes(ciphertext) else {
+        return SCARD_E_INVALID_PARAMETER;
+    };
+    let mut session = lock_session(&ctx.session);
+    let pcsc_tx = match prepare_local_transaction(
+        &mut session,
         &mut ctx.pin1_authenticated,
-        &mut ctx.pin2_authenticated,
+        &mut ctx.remote_pin2_authenticated,
         cd.hScard,
+        true,
     ) {
-        return rc;
-    }
-    if let Some(rc) = reverify_cached_pin(
+        Ok(guard) => guard,
+        Err(rc) => return rc,
+    };
+    let tx = match session.disarm_qualified() {
+        Ok(tx) => tx,
+        Err(rc) => return rc,
+    };
+    let scheme = match reverify_cached_pin1(
         &mut ctx.pin1_authenticated,
-        &mut ctx.pin2_authenticated,
-        &mut tx,
-        PIN_ID_AUTH,
+        &mut ctx.remote_pin2_authenticated,
+        tx,
     ) {
-        return rc;
-    }
-    let plain = tx.decrypt_rsa_pkcs1_auth(Ciphertext::<RsaPkcs1>::new(ciphertext));
-    drop(tx);
+        Ok(scheme) => scheme,
+        Err(rc) => return rc,
+    };
+    let plain = tx.decipher_rsa(scheme, KeyRef::Auth, DecipherAlgRef::RSA_PKCS1, &cryptogram);
+    drop(pcsc_tx);
+    drop(session);
     let Ok(plaintext) = plain else {
-        reset_card_state(&mut ctx.pin1_authenticated, &mut ctx.pin2_authenticated);
+        reset_card_state(
+            &mut ctx.pin1_authenticated,
+            &mut ctx.remote_pin2_authenticated,
+        );
         return SCARD_F_INTERNAL_ERROR;
     };
     let plaintext_bytes = plaintext.as_bytes();
@@ -2745,7 +2980,7 @@ unsafe extern "system" fn CardGetProperty(
         if dwFlags != PIN_ID_AUTH && dwFlags != PIN_ID_QUALIFIED_SIG && dwFlags != PIN_ID_PUK {
             return SCARD_E_INVALID_PARAMETER;
         }
-        let is_remote = ctx.transport.lock().is_ok_and(|tx| tx.is_remote());
+        let is_remote = ctx.session.lock().is_ok_and(|s| s.is_remote());
         let info = PIN_INFO {
             dwVersion: PIN_INFO_CURRENT_VERSION,
             PinType: if is_remote {
@@ -2964,11 +3199,11 @@ unsafe extern "system" fn CardUnblockPin(
         Ok(values) => values,
         Err(rc) => return rc,
     };
-    if ctx.transport.lock().is_ok_and(|tx| tx.is_remote()) {
+    if ctx.session.lock().is_ok_and(|s| s.is_remote()) {
         return SCARD_E_UNSUPPORTED_FEATURE;
     }
-    clear_pin_state(&mut ctx.pin1_authenticated, &mut ctx.pin2_authenticated);
-    let puk = match unsafe { checked_pin_bytes(pbAuthData, cbAuth, PIN_ID_PUK) } {
+    reset_local_ctx_state(ctx);
+    let puk = match unsafe { checked_puk(pbAuthData, cbAuth) } {
         Ok(puk) => puk,
         Err(rc) => return rc,
     };
@@ -2976,7 +3211,7 @@ unsafe extern "system" fn CardUnblockPin(
         Ok(pin) => pin,
         Err(rc) => return rc,
     };
-    unblock_card_pin(ctx, cd.hScard, target_slot, puk, new_pin)
+    unblock_card_pin(ctx, cd.hScard, target_slot, puk, &new_pin)
 }
 
 #[cfg(windows)]
@@ -2999,10 +3234,10 @@ unsafe extern "system" fn CardChangeAuthenticator(
         Ok(values) => values,
         Err(rc) => return rc,
     };
-    if ctx.transport.lock().is_ok_and(|tx| tx.is_remote()) {
+    if ctx.session.lock().is_ok_and(|s| s.is_remote()) {
         return SCARD_E_UNSUPPORTED_FEATURE;
     }
-    clear_pin_state(&mut ctx.pin1_authenticated, &mut ctx.pin2_authenticated);
+    reset_local_ctx_state(ctx);
     let current_pin = match unsafe { checked_pin_bytes(pbCurrentAuth, cbCurrentAuth, pin_id) } {
         Ok(pin) => pin,
         Err(rc) => return rc,
@@ -3011,7 +3246,7 @@ unsafe extern "system" fn CardChangeAuthenticator(
         Ok(pin) => pin,
         Err(rc) => return rc,
     };
-    let (status, attempts) = change_card_pin(ctx, cd.hScard, slot, &current_pin, new_pin);
+    let (status, attempts) = change_card_pin(ctx, cd.hScard, slot, &current_pin, &new_pin);
     unsafe {
         write_attempts_remaining(pcAttemptsRemaining, attempts);
     }
@@ -3054,9 +3289,9 @@ unsafe extern "system" fn CardAuthenticateEx(
         Ok(values) => values,
         Err(rc) => return rc,
     };
-    if ctx.transport.lock().is_ok_and(|tx| tx.is_remote()) {
+    if ctx.session.lock().is_ok_and(|s| s.is_remote()) {
         if PinId == PIN_ID_QUALIFIED_SIG {
-            ctx.pin2_authenticated = true;
+            ctx.remote_pin2_authenticated = true;
         } else {
             ctx.pin1_authenticated = true;
         }
@@ -3091,18 +3326,16 @@ unsafe extern "system" fn CardChangeAuthenticatorEx(
         Ok(values) => values,
         Err(rc) => return rc,
     };
-    if ctx.transport.lock().is_ok_and(|tx| tx.is_remote()) {
+    if ctx.session.lock().is_ok_and(|s| s.is_remote()) {
         return SCARD_E_UNSUPPORTED_FEATURE;
     }
-    clear_pin_state(&mut ctx.pin1_authenticated, &mut ctx.pin2_authenticated);
+    reset_local_ctx_state(ctx);
 
     if dwAuthenticatingPinId == PIN_ID_PUK {
         let Some(target_slot) = pin_slot_for_id(dwTargetPinId) else {
             return SCARD_E_INVALID_PARAMETER;
         };
-        let puk = match unsafe {
-            checked_pin_bytes(pbAuthenticatingPinData, cbAuthenticatingPinData, PIN_ID_PUK)
-        } {
+        let puk = match unsafe { checked_puk(pbAuthenticatingPinData, cbAuthenticatingPinData) } {
             Ok(p) => p,
             Err(rc) => return rc,
         };
@@ -3111,7 +3344,7 @@ unsafe extern "system" fn CardChangeAuthenticatorEx(
             Ok(p) => p,
             Err(rc) => return rc,
         };
-        return unblock_card_pin(ctx, cd.hScard, target_slot, puk, new_pin);
+        return unblock_card_pin(ctx, cd.hScard, target_slot, puk, &new_pin);
     }
 
     if dwAuthenticatingPinId != dwTargetPinId {
@@ -3134,7 +3367,7 @@ unsafe extern "system" fn CardChangeAuthenticatorEx(
         Ok(p) => p,
         Err(rc) => return rc,
     };
-    let (status, attempts) = change_card_pin(ctx, cd.hScard, target_slot, &current_pin, new_pin);
+    let (status, attempts) = change_card_pin(ctx, cd.hScard, target_slot, &current_pin, &new_pin);
     unsafe {
         write_attempts_remaining(pcAttemptsRemaining, attempts);
     }
@@ -3687,20 +3920,22 @@ mod tests {
     mod windows_pin_helpers {
         use std::sync::Mutex;
 
-        use refineid_lib_core::apdu::status_word::{PinRetries, StatusWord};
-        use refineid_lib_core::auth::{
-            ChangePinOutcome, PIN_MAX_LENGTH, PIN_MIN_LENGTH, PUK_MAX_LENGTH, PUK_MIN_LENGTH,
-            PinReferenceScheme, PinSlot, UnblockOutcome, VerifyOutcome,
+        use refineid_apdu::{PinRetries, StatusWord};
+        use refineid_auth::credentials::{
+            PIN_MAX_LENGTH, PIN_MIN_LENGTH, PUK_MAX_LENGTH, PUK_MIN_LENGTH,
         };
+        use refineid_auth::{AuthError, ManageOutcome, PinSlot, VerifyOutcome};
 
         use crate::cardmod::{
             CardCapabilityModel, Ctx, PIN_ID_AUTH, PIN_ID_PUK, PIN_ID_QUALIFIED_SIG,
         };
         use crate::ffi::{
-            DWORD, ROLE_EVERYONE, SCARD_E_INVALID_HANDLE, SCARD_E_INVALID_PARAMETER,
-            SCARD_F_INTERNAL_ERROR, SCARD_S_SUCCESS, SCARD_W_CHV_BLOCKED, SCARD_W_WRONG_CHV,
+            DWORD, ROLE_EVERYONE, SCARD_E_INVALID_HANDLE, SCARD_F_INTERNAL_ERROR, SCARD_S_SUCCESS,
+            SCARD_W_CHV_BLOCKED, SCARD_W_WRONG_CHV,
         };
-        use crate::transport::{CardSessionTransport, ScardProtocol, WinScardTransport};
+        use crate::transport::{
+            CardSessionSlot, CardSessionTransport, ScardProtocol, WinScardTransport,
+        };
         use crate::{
             INVALID_SCARD_HANDLE, NO_ATTEMPTS_REMAINING, VerifyCaller, map_change_pin_outcome,
             map_unblock_outcome, map_verify_outcome, pin_len_bounds, pin_slot_for_id,
@@ -3712,21 +3947,22 @@ mod tests {
         const TWO_RETRIES: u8 = 2;
         const UNTOUCHED_ATTEMPTS_SENTINEL: DWORD = DWORD::MAX;
 
-        fn test_ctx(pin1_authenticated: bool, pin2_authenticated: bool) -> Ctx {
+        fn test_ctx(pin1_authenticated: bool, remote_pin2_authenticated: bool) -> Ctx {
             let transport = WinScardTransport {
                 h_card: Default::default(),
                 atr: Vec::new(),
                 protocol: ScardProtocol::T1,
             };
             Ctx {
-                transport: Mutex::new(CardSessionTransport::plain(transport)),
+                session: Mutex::new(CardSessionSlot::idle(CardSessionTransport::plain(
+                    transport,
+                ))),
                 card: CardCapabilityModel {
                     containers: Vec::new(),
                     cmapfile_records: Vec::new(),
                 },
                 pin1_authenticated,
-                pin2_authenticated,
-                pin2_scheme: PinReferenceScheme::Citizen,
+                remote_pin2_authenticated,
             }
         }
 
@@ -3759,66 +3995,47 @@ mod tests {
                 map_verify_outcome(
                     &mut v4_ctx,
                     PinSlot::Pin1,
-                    PinReferenceScheme::Citizen,
                     VerifyCaller::AuthenticatePin,
-                    Ok::<_, &str>(VerifyOutcome::Locked),
+                    Ok::<_, AuthError<&str>>(VerifyOutcome::Locked),
                 ),
                 (SCARD_W_CHV_BLOCKED, Some(NO_ATTEMPTS_REMAINING))
             );
             assert!(!v4_ctx.pin1_authenticated);
-            assert!(!v4_ctx.pin2_authenticated);
+            assert!(!v4_ctx.remote_pin2_authenticated);
 
             let mut v6_ctx = test_ctx(true, true);
             assert_eq!(
                 map_verify_outcome(
                     &mut v6_ctx,
                     PinSlot::Pin1,
-                    PinReferenceScheme::Citizen,
                     VerifyCaller::AuthenticateEx,
-                    Ok::<_, &str>(VerifyOutcome::Locked),
+                    Ok::<_, AuthError<&str>>(VerifyOutcome::Locked),
                 ),
                 (SCARD_W_CHV_BLOCKED, None)
             );
             assert!(!v6_ctx.pin1_authenticated);
-            assert!(!v6_ctx.pin2_authenticated);
+            assert!(!v6_ctx.remote_pin2_authenticated);
         }
 
         #[test]
-        fn verify_outcome_ok_sets_slot_authentication_and_pin2_scheme() {
+        fn verify_outcome_ok_sets_pin1_authentication() {
             let mut pin1_ctx = test_ctx(false, false);
             assert_eq!(
                 map_verify_outcome(
                     &mut pin1_ctx,
                     PinSlot::Pin1,
-                    PinReferenceScheme::Citizen,
                     VerifyCaller::AuthenticatePin,
-                    Ok::<_, &str>(VerifyOutcome::Ok),
+                    Ok::<_, AuthError<&str>>(VerifyOutcome::Ok),
                 ),
                 (SCARD_S_SUCCESS, None)
             );
             assert!(pin1_ctx.pin1_authenticated);
-            assert!(!pin1_ctx.pin2_authenticated);
-
-            let mut pin2_ctx = test_ctx(false, false);
-            assert_eq!(
-                map_verify_outcome(
-                    &mut pin2_ctx,
-                    PinSlot::Pin2,
-                    PinReferenceScheme::Organizational,
-                    VerifyCaller::AuthenticateEx,
-                    Ok::<_, &str>(VerifyOutcome::Ok),
-                ),
-                (SCARD_S_SUCCESS, None)
-            );
-            assert!(!pin2_ctx.pin1_authenticated);
-            assert!(pin2_ctx.pin2_authenticated);
-            assert_eq!(pin2_ctx.pin2_scheme, PinReferenceScheme::Organizational);
+            assert!(!pin1_ctx.remote_pin2_authenticated);
         }
 
         #[test]
         fn verify_outcome_failures_clear_state_and_surface_retries() {
             let retries = PinRetries::from_nibble(TWO_RETRIES).expect("valid retry count");
-            let unmodeled_sw = StatusWord::FileNotFound.as_u16();
 
             for caller in [VerifyCaller::AuthenticatePin, VerifyCaller::AuthenticateEx] {
                 let mut wrong_ctx = test_ctx(true, true);
@@ -3826,65 +4043,61 @@ mod tests {
                     map_verify_outcome(
                         &mut wrong_ctx,
                         PinSlot::Pin1,
-                        PinReferenceScheme::Citizen,
                         caller,
-                        Ok::<_, &str>(VerifyOutcome::WrongPin {
+                        Ok::<_, AuthError<&str>>(VerifyOutcome::WrongPin {
                             retries_left: retries,
                         }),
                     ),
                     (SCARD_W_WRONG_CHV, Some(DWORD::from(TWO_RETRIES)))
                 );
                 assert!(!wrong_ctx.pin1_authenticated);
-                assert!(!wrong_ctx.pin2_authenticated);
+                assert!(!wrong_ctx.remote_pin2_authenticated);
 
                 let mut other_ctx = test_ctx(true, true);
                 assert_eq!(
                     map_verify_outcome(
                         &mut other_ctx,
                         PinSlot::Pin2,
-                        PinReferenceScheme::Citizen,
                         caller,
-                        Ok::<_, &str>(VerifyOutcome::Other(unmodeled_sw)),
+                        Ok::<_, AuthError<&str>>(VerifyOutcome::Other(StatusWord::FileNotFound)),
                     ),
                     (SCARD_W_WRONG_CHV, None)
                 );
                 assert!(!other_ctx.pin1_authenticated);
-                assert!(!other_ctx.pin2_authenticated);
+                assert!(!other_ctx.remote_pin2_authenticated);
 
                 let mut err_ctx = test_ctx(true, true);
                 assert_eq!(
                     map_verify_outcome(
                         &mut err_ctx,
                         PinSlot::Pin1,
-                        PinReferenceScheme::Citizen,
                         caller,
-                        Err("transport lost"),
+                        Err(AuthError::Transport("transport lost")),
                     ),
                     (SCARD_F_INTERNAL_ERROR, None)
                 );
                 assert!(!err_ctx.pin1_authenticated);
-                assert!(!err_ctx.pin2_authenticated);
+                assert!(!err_ctx.remote_pin2_authenticated);
             }
         }
 
         #[test]
         fn change_pin_outcome_maps_status_attempts_and_context_state() {
             let retries = PinRetries::from_nibble(TWO_RETRIES).expect("valid retry count");
-            let unmodeled_sw = StatusWord::FileNotFound.as_u16();
 
             let mut ok_ctx = test_ctx(true, true);
             assert_eq!(
-                map_change_pin_outcome(&mut ok_ctx, ChangePinOutcome::Ok),
+                map_change_pin_outcome(&mut ok_ctx, ManageOutcome::Ok),
                 (SCARD_S_SUCCESS, None)
             );
             assert!(!ok_ctx.pin1_authenticated);
-            assert!(!ok_ctx.pin2_authenticated);
+            assert!(!ok_ctx.remote_pin2_authenticated);
 
             let mut wrong_ctx = test_ctx(true, true);
             assert_eq!(
                 map_change_pin_outcome(
                     &mut wrong_ctx,
-                    ChangePinOutcome::WrongCurrentPin {
+                    ManageOutcome::WrongCredential {
                         retries_left: retries,
                     },
                 ),
@@ -3894,21 +4107,17 @@ mod tests {
 
             let mut locked_ctx = test_ctx(true, true);
             assert_eq!(
-                map_change_pin_outcome(&mut locked_ctx, ChangePinOutcome::Locked),
+                map_change_pin_outcome(&mut locked_ctx, ManageOutcome::Locked),
                 (SCARD_W_CHV_BLOCKED, None)
             );
             assert!(!locked_ctx.pin1_authenticated);
 
-            let mut len_ctx = test_ctx(true, false);
-            assert_eq!(
-                map_change_pin_outcome(&mut len_ctx, ChangePinOutcome::LengthError),
-                (SCARD_E_INVALID_PARAMETER, None)
-            );
-            assert!(len_ctx.pin1_authenticated);
-
             let mut other_ctx = test_ctx(true, true);
             assert_eq!(
-                map_change_pin_outcome(&mut other_ctx, ChangePinOutcome::Other(unmodeled_sw)),
+                map_change_pin_outcome(
+                    &mut other_ctx,
+                    ManageOutcome::Other(StatusWord::FileNotFound)
+                ),
                 (SCARD_F_INTERNAL_ERROR, None)
             );
             assert!(!other_ctx.pin1_authenticated);
@@ -3917,21 +4126,20 @@ mod tests {
         #[test]
         fn unblock_outcome_maps_status_and_context_state() {
             let retries = PinRetries::from_nibble(TWO_RETRIES).expect("valid retry count");
-            let unmodeled_sw = StatusWord::FileNotFound.as_u16();
 
             let mut ok_ctx = test_ctx(true, true);
             assert_eq!(
-                map_unblock_outcome(&mut ok_ctx, UnblockOutcome::Ok),
+                map_unblock_outcome(&mut ok_ctx, ManageOutcome::Ok),
                 SCARD_S_SUCCESS
             );
             assert!(!ok_ctx.pin1_authenticated);
-            assert!(!ok_ctx.pin2_authenticated);
+            assert!(!ok_ctx.remote_pin2_authenticated);
 
             let mut wrong_ctx = test_ctx(true, true);
             assert_eq!(
                 map_unblock_outcome(
                     &mut wrong_ctx,
-                    UnblockOutcome::WrongPuk {
+                    ManageOutcome::WrongCredential {
                         retries_left: retries,
                     },
                 ),
@@ -3939,25 +4147,19 @@ mod tests {
             );
             assert!(!wrong_ctx.pin1_authenticated);
 
-            for blocked in [UnblockOutcome::PukLocked, UnblockOutcome::Invalidated] {
-                let mut blocked_ctx = test_ctx(true, true);
-                assert_eq!(
-                    map_unblock_outcome(&mut blocked_ctx, blocked),
-                    SCARD_W_CHV_BLOCKED
-                );
-                assert!(!blocked_ctx.pin1_authenticated);
-            }
-
-            let mut len_ctx = test_ctx(true, false);
+            let mut blocked_ctx = test_ctx(true, true);
             assert_eq!(
-                map_unblock_outcome(&mut len_ctx, UnblockOutcome::LengthError),
-                SCARD_E_INVALID_PARAMETER
+                map_unblock_outcome(&mut blocked_ctx, ManageOutcome::Locked),
+                SCARD_W_CHV_BLOCKED
             );
-            assert!(len_ctx.pin1_authenticated);
+            assert!(!blocked_ctx.pin1_authenticated);
 
             let mut other_ctx = test_ctx(true, false);
             assert_eq!(
-                map_unblock_outcome(&mut other_ctx, UnblockOutcome::Other(unmodeled_sw)),
+                map_unblock_outcome(
+                    &mut other_ctx,
+                    ManageOutcome::Other(StatusWord::FileNotFound)
+                ),
                 SCARD_F_INTERNAL_ERROR
             );
             assert!(other_ctx.pin1_authenticated);
@@ -3984,47 +4186,66 @@ mod tests {
         #[test]
         fn sync_transport_handle_refreshes_handle_and_clears_pin_state() {
             let mut ctx = test_ctx(true, true);
-            let tx = ctx.transport.get_mut().expect("unpoisoned");
-            tx.set_plain_h_card(INITIAL_H_CARD);
+            let slot = ctx.session.get_mut().expect("unpoisoned");
+            slot.disarm_qualified()
+                .expect("idle slot")
+                .set_plain_h_card(INITIAL_H_CARD);
             assert_eq!(
                 sync_transport_handle(
-                    tx,
+                    slot,
                     &mut ctx.pin1_authenticated,
-                    &mut ctx.pin2_authenticated,
-                    INVALID_SCARD_HANDLE,
-                ),
-                Err(SCARD_E_INVALID_HANDLE)
-            );
-            assert_eq!(tx.h_card(), INITIAL_H_CARD);
-            assert!(ctx.pin1_authenticated);
-            assert!(ctx.pin2_authenticated);
-
-            let tx = ctx.transport.get_mut().expect("unpoisoned");
-            assert_eq!(
-                sync_transport_handle(
-                    tx,
-                    &mut ctx.pin1_authenticated,
-                    &mut ctx.pin2_authenticated,
+                    &mut ctx.remote_pin2_authenticated,
                     INITIAL_H_CARD,
                 ),
                 Ok(false)
             );
             assert!(ctx.pin1_authenticated);
-            assert!(ctx.pin2_authenticated);
+            assert!(ctx.remote_pin2_authenticated);
 
-            let tx = ctx.transport.get_mut().expect("unpoisoned");
+            let slot = ctx.session.get_mut().expect("unpoisoned");
             assert_eq!(
                 sync_transport_handle(
-                    tx,
+                    slot,
                     &mut ctx.pin1_authenticated,
-                    &mut ctx.pin2_authenticated,
+                    &mut ctx.remote_pin2_authenticated,
                     RECONNECTED_H_CARD,
                 ),
                 Ok(true)
             );
-            assert_eq!(tx.h_card(), RECONNECTED_H_CARD);
+            assert_eq!(slot.h_card(), RECONNECTED_H_CARD);
             assert!(!ctx.pin1_authenticated);
-            assert!(!ctx.pin2_authenticated);
+            assert!(!ctx.remote_pin2_authenticated);
+
+            // An observed disconnect (INVALID_SCARD_HANDLE) must clear auth
+            // flags and invalidate the cached handle so reusing the same
+            // numeric handle later cannot bypass handle refresh.
+            ctx.pin1_authenticated = true;
+            ctx.remote_pin2_authenticated = true;
+            let slot = ctx.session.get_mut().expect("unpoisoned");
+            assert_eq!(
+                sync_transport_handle(
+                    slot,
+                    &mut ctx.pin1_authenticated,
+                    &mut ctx.remote_pin2_authenticated,
+                    INVALID_SCARD_HANDLE,
+                ),
+                Err(SCARD_E_INVALID_HANDLE)
+            );
+            assert_eq!(slot.h_card(), INVALID_SCARD_HANDLE);
+            assert!(!ctx.pin1_authenticated);
+            assert!(!ctx.remote_pin2_authenticated);
+
+            let slot = ctx.session.get_mut().expect("unpoisoned");
+            assert_eq!(
+                sync_transport_handle(
+                    slot,
+                    &mut ctx.pin1_authenticated,
+                    &mut ctx.remote_pin2_authenticated,
+                    RECONNECTED_H_CARD,
+                ),
+                Ok(true)
+            );
+            assert_eq!(slot.h_card(), RECONNECTED_H_CARD);
         }
     }
 }
