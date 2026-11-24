@@ -30,19 +30,21 @@ use std::ffi::CString;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 
+use refineid_apdu::{PinRetries, StatusWord};
+use refineid_auth::credentials::PIN_MAX_LENGTH;
+use refineid_auth::{
+    CardPinLengths, CredentialInputError, ManageOutcome, PasswordLengthRange, Pin1, Pin2,
+    PinReferenceScheme, PinStatus, Puk, UnvalidatedSecret,
+};
 use refineid_card_manager_core::card_pin::{
-    ActivateOptions, ActivatePreflightOutcome, ActivationEvidence, ChangePinOptions, PinManageSlot,
-    UnblockPinOptions,
+    ActivateOptions, ActivatePreflightOutcome, ActivationEvidence, ActivationInput,
+    ChangePinCredentials, ChangePinOptions, PinActivation, PinManageSlot, UnblockPinOptions,
+    UnblockPinTarget,
 };
 use refineid_card_manager_core::service::{self, CardSnapshot, ContactlessSnapshot};
 use refineid_doc_sign::document::Format;
 use refineid_doc_sign::pades::StampLanguage;
 use refineid_doc_sign::service::{LocalVerifyOutcome, SignReport};
-use refineid_lib_core::activation::PinActivation;
-use refineid_lib_core::apdu::status_word::PinRetries;
-use refineid_lib_core::auth::{CardPinLengths, PasswordLengthRange, PinReferenceScheme};
-use refineid_lib_core::auth::{ChangePinOutcome, PinStatus, PukStatus, UnblockOutcome};
-use refineid_lib_core::pin::{PinBytes, Puk};
 use refineid_pace::{CAN_DIGITS, Can, UnvalidatedCan};
 use refineid_pkcs15::TokenSerial;
 use refineid_windows_credential_store::{read_can, save_can};
@@ -51,6 +53,7 @@ use refineid_windows_doc_sign::sign::{DocumentSignRequest, sign};
 use refineid_windows_doc_sign::verify::{DocumentVerdict, VerifiedDocument, render, verify_file};
 use refineid_windows_driver_probe::{self, LocalCardSupport};
 use serde::Serialize;
+use zeroize::Zeroizing;
 
 /// JSON-view of the probe result exposed to the `WinUI` apps.
 #[derive(Serialize)]
@@ -61,7 +64,7 @@ struct LocalCardSupportReport {
 
 const MAX_READER_NAME_BYTES: usize = 1_024;
 const MAX_SERIAL_BYTES: usize = 256;
-const MAX_SECRET_BYTES: usize = PinBytes::MAX_LENGTH;
+const MAX_SECRET_BYTES: usize = PIN_MAX_LENGTH;
 const MAX_PATH_BYTES: usize = 4_096;
 const MAX_REASON_BYTES: usize = 256;
 const PIN1_SLOT: u8 = 1;
@@ -182,15 +185,15 @@ impl From<CardSnapshot> for CardSnapshotDto {
             model,
             organization_card: snapshot.numbering == PinReferenceScheme::Organizational,
             activation_code_length: snapshot.activation_code_length,
-            pin1_lengths: snapshot.lengths.pin1().map(LengthRangeDto::from),
-            pin2_lengths: snapshot.lengths.pin2().map(LengthRangeDto::from),
-            puk_lengths: snapshot.lengths.puk().map(LengthRangeDto::from),
+            pin1_lengths: snapshot.lengths.pin1().accepted().map(LengthRangeDto::from),
+            pin2_lengths: snapshot.lengths.pin2().accepted().map(LengthRangeDto::from),
+            puk_lengths: snapshot.lengths.puk().accepted().map(LengthRangeDto::from),
             activation_state: activation_state_label(snapshot.activation),
             pin1_awaits_activation: snapshot.pin1_activation == PinActivation::AwaitsActivation,
             pin2_awaits_activation: snapshot.pin2_activation == PinActivation::AwaitsActivation,
-            pin1: snapshot.pin1.map(CredentialStatusDto::from),
-            pin2: snapshot.pin2.map(CredentialStatusDto::from),
-            puk: snapshot.puk.map(CredentialStatusDto::from),
+            pin1: snapshot.pin1.map(CredentialStatusDto::from_pin_status),
+            pin2: snapshot.pin2.map(CredentialStatusDto::from_pin_status),
+            puk: snapshot.puk.map(CredentialStatusDto::from_puk_status),
             pin1_changed: snapshot.pin1_changed,
             pin2_changed: snapshot.pin2_changed,
         }
@@ -203,9 +206,9 @@ impl From<ContactlessSnapshot> for ContactlessSnapshotDto {
             reader: snapshot.reader,
             serial: snapshot.serial.as_str().to_owned(),
             person: snapshot.person,
-            pin1: snapshot.pin1.map(CredentialStatusDto::from),
-            pin2: snapshot.pin2.map(CredentialStatusDto::from),
-            puk: snapshot.puk.map(CredentialStatusDto::from),
+            pin1: snapshot.pin1.map(CredentialStatusDto::from_pin_status),
+            pin2: snapshot.pin2.map(CredentialStatusDto::from_pin_status),
+            puk: snapshot.puk.map(CredentialStatusDto::from_puk_status),
         }
     }
 }
@@ -223,46 +226,41 @@ impl From<ContactlessSnapshot> for CardSnapshotDto {
             model: "FINEID contactless".to_owned(),
             organization_card: false,
             activation_code_length: snapshot.activation_code_length(),
-            pin1_lengths: lengths.pin1().map(LengthRangeDto::from),
-            pin2_lengths: lengths.pin2().map(LengthRangeDto::from),
-            puk_lengths: lengths.puk().map(LengthRangeDto::from),
+            pin1_lengths: lengths.pin1().accepted().map(LengthRangeDto::from),
+            pin2_lengths: lengths.pin2().accepted().map(LengthRangeDto::from),
+            puk_lengths: lengths.puk().accepted().map(LengthRangeDto::from),
             activation_state: activation_state_label(snapshot.activation()),
             pin1_awaits_activation: snapshot.pin1_activation() == PinActivation::AwaitsActivation,
             pin2_awaits_activation: snapshot.pin2_activation() == PinActivation::AwaitsActivation,
-            pin1: snapshot.pin1.map(CredentialStatusDto::from),
-            pin2: snapshot.pin2.map(CredentialStatusDto::from),
-            puk: snapshot.puk.map(CredentialStatusDto::from),
+            pin1: snapshot.pin1.map(CredentialStatusDto::from_pin_status),
+            pin2: snapshot.pin2.map(CredentialStatusDto::from_pin_status),
+            puk: snapshot.puk.map(CredentialStatusDto::from_puk_status),
             pin1_changed: None,
             pin2_changed: None,
         }
     }
 }
 
-impl From<PinStatus> for CredentialStatusDto {
-    fn from(status: PinStatus) -> Self {
+impl CredentialStatusDto {
+    const fn from_pin_status(status: PinStatus) -> Self {
         match status {
             PinStatus::Verified => Self::plain("verified"),
             PinStatus::Remaining(retries) => Self::retries("ready", retries),
             PinStatus::NoInfo => Self::plain("no_information"),
             PinStatus::Locked => Self::plain("locked"),
-            PinStatus::Other(status_word) => Self::status_word("other", status_word),
+            PinStatus::Other(status_word) => Self::status_word("other", status_word.as_u16()),
         }
     }
-}
 
-impl From<PukStatus> for CredentialStatusDto {
-    fn from(status: PukStatus) -> Self {
+    const fn from_puk_status(status: PinStatus) -> Self {
         match status {
-            PukStatus::Remaining(retries) => Self::retries("ready", retries),
-            PukStatus::NoInfo => Self::plain("no_information"),
-            PukStatus::Locked => Self::plain("locked"),
-            PukStatus::Invalidated => Self::plain("invalidated"),
-            PukStatus::Other(status_word) => Self::status_word("other", status_word),
+            PinStatus::Remaining(retries) => Self::retries("ready", retries),
+            PinStatus::Verified | PinStatus::NoInfo => Self::plain("no_information"),
+            PinStatus::Locked => Self::plain("locked"),
+            PinStatus::Other(status_word) => Self::status_word("other", status_word.as_u16()),
         }
     }
-}
 
-impl CredentialStatusDto {
     const fn plain(state: &'static str) -> Self {
         Self {
             state,
@@ -499,9 +497,8 @@ pub unsafe extern "C" fn refineid_settings_sign_document(
         // would ask for one.
         let pin = match source {
             SigningSource::Reader if pin_length > 0 => {
-                // SAFETY: The secret is copied into PinBytes, whose
-                // constructor zeroizes its temporary Vec on both success and
-                // failure.
+                // SAFETY: The secret is copied into the signing service's
+                // zeroizing PinBytes type.
                 Some(unsafe { copy_signing_pin(pin, pin_length) }?)
             }
             SigningSource::Reader | SigningSource::Phone(_) => None,
@@ -626,15 +623,14 @@ pub unsafe extern "C" fn refineid_settings_prime_contactless(
         // SAFETY: The input is pointer-checked, bounded, and copied.
         let reader = unsafe { copy_utf8(reader, reader_length, MAX_READER_NAME_BYTES, "reader") }?;
         // SAFETY: The input is pointer-checked, bounded, and copied.
-        let can_bytes =
-            zeroize::Zeroizing::new(unsafe { copy_bytes(can, can_length, CAN_DIGITS, "CAN") }?);
+        let can_bytes = Zeroizing::new(unsafe { copy_bytes(can, can_length, CAN_DIGITS, "CAN") }?);
         if can_bytes.len() != CAN_DIGITS {
             return Err(ApiFailure::new(
                 "invalid_can",
                 format!("CAN must contain exactly {CAN_DIGITS} digits"),
             ));
         }
-        let mut can_digits = zeroize::Zeroizing::new([0_u8; CAN_DIGITS]);
+        let mut can_digits = Zeroizing::new([0_u8; CAN_DIGITS]);
         can_digits.copy_from_slice(&can_bytes);
         let can_text = core::str::from_utf8(can_digits.as_slice())
             .map_err(|_| ApiFailure::new("invalid_can", "The CAN must contain six digits."))?
@@ -680,22 +676,57 @@ pub unsafe extern "C" fn refineid_settings_change_pin(
         // SAFETY: See the comment above.
         let serial = unsafe { copy_utf8(serial, serial_length, MAX_SERIAL_BYTES, "card serial") }?;
         let slot = parse_slot(slot)?;
-        // SAFETY: Secret inputs are copied into PinBytes, whose constructor
-        // zeroizes its temporary Vec on both success and failure.
-        let current = unsafe { copy_pin(current_pin, current_pin_length, "current PIN") }?;
-        // SAFETY: As above.
-        let new = unsafe { copy_pin(new_pin, new_pin_length, "new PIN") }?;
-        // SAFETY: As above.
-        let confirmation =
-            unsafe { copy_pin(confirmation, confirmation_length, "PIN confirmation") }?;
-        require_confirmation(&new, &confirmation)?;
+        let credentials = match slot {
+            PinManageSlot::Pin1 => {
+                // SAFETY: Secret inputs are copied into zeroizing domain types.
+                let current = unsafe {
+                    copy_credential(
+                        current_pin,
+                        current_pin_length,
+                        "current PIN",
+                        Pin1::reconstruct,
+                    )
+                }?;
+                // SAFETY: As above.
+                let new = unsafe {
+                    copy_confirmed_credential(
+                        (new_pin, new_pin_length),
+                        (confirmation, confirmation_length),
+                        "new PIN",
+                        "PIN confirmation",
+                        Pin1::reconstruct,
+                    )
+                }?;
+                ChangePinCredentials::Pin1 { current, new }
+            }
+            PinManageSlot::Pin2 => {
+                // SAFETY: Secret inputs are copied into zeroizing domain types.
+                let current = unsafe {
+                    copy_credential(
+                        current_pin,
+                        current_pin_length,
+                        "current PIN",
+                        Pin2::reconstruct,
+                    )
+                }?;
+                // SAFETY: As above.
+                let new = unsafe {
+                    copy_confirmed_credential(
+                        (new_pin, new_pin_length),
+                        (confirmation, confirmation_length),
+                        "new PIN",
+                        "PIN confirmation",
+                        Pin2::reconstruct,
+                    )
+                }?;
+                ChangePinCredentials::Pin2 { current, new }
+            }
+        };
 
         let report = service::change_pin(
             &TokenSerial::new(serial),
             ChangePinOptions {
-                slot,
-                current,
-                new,
+                credentials,
                 reader_filter: Some(reader),
             },
         )
@@ -732,19 +763,37 @@ pub unsafe extern "C" fn refineid_settings_unblock_pin(
         let serial = unsafe { copy_utf8(serial, serial_length, MAX_SERIAL_BYTES, "card serial") }?;
         let slot = parse_slot(slot)?;
         // SAFETY: Secret inputs are copied into zeroizing domain types.
-        let puk = unsafe { copy_pin(puk, puk_length, "PUK") }
-            .and_then(|bytes| Puk::new(bytes).map_err(pin_role_error))?;
-        // SAFETY: As above.
-        let new_pin = unsafe { copy_pin(new_pin, new_pin_length, "new PIN") }?;
-        // SAFETY: As above.
-        let confirmation =
-            unsafe { copy_pin(confirmation, confirmation_length, "PIN confirmation") }?;
-        require_confirmation(&new_pin, &confirmation)?;
+        let puk = unsafe { copy_credential(puk, puk_length, "PUK", Puk::reconstruct) }?;
+        let new_pin = match slot {
+            PinManageSlot::Pin1 => {
+                // SAFETY: As above.
+                UnblockPinTarget::Pin1(unsafe {
+                    copy_confirmed_credential(
+                        (new_pin, new_pin_length),
+                        (confirmation, confirmation_length),
+                        "new PIN",
+                        "PIN confirmation",
+                        Pin1::reconstruct,
+                    )
+                }?)
+            }
+            PinManageSlot::Pin2 => {
+                // SAFETY: As above.
+                UnblockPinTarget::Pin2(unsafe {
+                    copy_confirmed_credential(
+                        (new_pin, new_pin_length),
+                        (confirmation, confirmation_length),
+                        "new PIN",
+                        "PIN confirmation",
+                        Pin2::reconstruct,
+                    )
+                }?)
+            }
+        };
 
         let report = service::unblock_pin(
             &TokenSerial::new(serial),
             UnblockPinOptions {
-                slot,
                 puk,
                 new_pin,
                 reader_filter: Some(reader),
@@ -788,26 +837,28 @@ pub unsafe extern "C" fn refineid_settings_activate(
         // SAFETY: See the comment above.
         let serial = unsafe { copy_utf8(serial, serial_length, MAX_SERIAL_BYTES, "card serial") }?;
         // SAFETY: Secret inputs are copied into zeroizing domain types.
-        let activation_code =
-            unsafe { copy_pin(activation_code, activation_code_length, "activation PIN") }?;
-        // SAFETY: As above.
+        let activation_code = unsafe {
+            copy_activation_input(activation_code, activation_code_length, "activation PIN")
+        }?;
         // SAFETY: As above; an empty pair names a PIN the card does not
         // ask for.
         let new_pin1 = unsafe {
-            copy_optional_pin_pair(
+            copy_optional_credential_pair(
                 (new_pin1, new_pin1_length),
                 (pin1_confirmation, pin1_confirmation_length),
                 "new Basic PIN 1",
                 "Basic PIN 1 confirmation",
+                Pin1::reconstruct,
             )
         }?;
         // SAFETY: As above.
         let new_pin2 = unsafe {
-            copy_optional_pin_pair(
+            copy_optional_credential_pair(
                 (new_pin2, new_pin2_length),
                 (pin2_confirmation, pin2_confirmation_length),
                 "new Signature PIN 2",
                 "Signature PIN 2 confirmation",
+                Pin2::reconstruct,
             )
         }?;
 
@@ -827,17 +878,17 @@ pub unsafe extern "C" fn refineid_settings_activate(
     })
 }
 
-fn change_result(outcome: ChangePinOutcome, slot: PinManageSlot) -> MutationResult {
+fn change_result(outcome: ManageOutcome, slot: PinManageSlot) -> MutationResult {
     let label = slot.label();
     match outcome {
-        ChangePinOutcome::Ok => MutationResult {
+        ManageOutcome::Ok => MutationResult {
             succeeded: true,
             outcome: "changed",
             message: format!("{label} was changed successfully."),
             attempts_remaining: None,
             status_word: None,
         },
-        ChangePinOutcome::WrongCurrentPin { retries_left } => MutationResult {
+        ManageOutcome::WrongCredential { retries_left } => MutationResult {
             succeeded: false,
             outcome: "wrong_current_pin",
             message: format!(
@@ -847,41 +898,44 @@ fn change_result(outcome: ChangePinOutcome, slot: PinManageSlot) -> MutationResu
             attempts_remaining: Some(retries_left.get()),
             status_word: None,
         },
-        ChangePinOutcome::Locked => MutationResult {
+        ManageOutcome::Locked => MutationResult {
             succeeded: false,
             outcome: "locked",
             message: format!("{label} is blocked. The PUK can set a new {label}."),
             attempts_remaining: None,
             status_word: None,
         },
-        ChangePinOutcome::LengthError => MutationResult {
+        ManageOutcome::Other(StatusWord::WrongLength) => MutationResult {
             succeeded: false,
             outcome: "host_length_error",
             message: "The card rejected the command shape. This is a software error.".to_owned(),
             attempts_remaining: None,
-            status_word: Some(0x6700),
+            status_word: Some(StatusWord::WrongLength.as_u16()),
         },
-        ChangePinOutcome::Other(status_word) => MutationResult {
-            succeeded: false,
-            outcome: "card_rejected",
-            message: format!("The card rejected the request (status {status_word:#06X})."),
-            attempts_remaining: None,
-            status_word: Some(status_word),
-        },
+        ManageOutcome::Other(status_word) => {
+            let raw = status_word.as_u16();
+            MutationResult {
+                succeeded: false,
+                outcome: "card_rejected",
+                message: format!("The card rejected the request (status {raw:#06X})."),
+                attempts_remaining: None,
+                status_word: Some(raw),
+            }
+        }
     }
 }
 
-fn unblock_result(outcome: UnblockOutcome, slot: PinManageSlot) -> MutationResult {
+fn unblock_result(outcome: ManageOutcome, slot: PinManageSlot) -> MutationResult {
     let label = slot.label();
     match outcome {
-        UnblockOutcome::Ok => MutationResult {
+        ManageOutcome::Ok => MutationResult {
             succeeded: true,
             outcome: "unblocked",
             message: format!("{label} was recovered and replaced successfully."),
             attempts_remaining: None,
             status_word: None,
         },
-        UnblockOutcome::WrongPuk { retries_left } => MutationResult {
+        ManageOutcome::WrongCredential { retries_left } => MutationResult {
             succeeded: false,
             outcome: "wrong_puk",
             message: format!(
@@ -891,34 +945,30 @@ fn unblock_result(outcome: UnblockOutcome, slot: PinManageSlot) -> MutationResul
             attempts_remaining: Some(retries_left.get()),
             status_word: None,
         },
-        UnblockOutcome::PukLocked => MutationResult {
+        ManageOutcome::Locked => MutationResult {
             succeeded: false,
             outcome: "puk_locked",
             message: "The recovery code is blocked. The card must be replaced.".to_owned(),
             attempts_remaining: None,
             status_word: None,
         },
-        UnblockOutcome::Invalidated => MutationResult {
-            succeeded: false,
-            outcome: "recovery_invalidated",
-            message: "Card recovery is no longer available. The card must be replaced.".to_owned(),
-            attempts_remaining: None,
-            status_word: None,
-        },
-        UnblockOutcome::LengthError => MutationResult {
+        ManageOutcome::Other(StatusWord::WrongLength) => MutationResult {
             succeeded: false,
             outcome: "host_length_error",
             message: "The card rejected the command shape. This is a software error.".to_owned(),
             attempts_remaining: None,
-            status_word: Some(0x6700),
+            status_word: Some(StatusWord::WrongLength.as_u16()),
         },
-        UnblockOutcome::Other(status_word) => MutationResult {
-            succeeded: false,
-            outcome: "card_rejected",
-            message: format!("The card rejected the request (status {status_word:#06X})."),
-            attempts_remaining: None,
-            status_word: Some(status_word),
-        },
+        ManageOutcome::Other(status_word) => {
+            let raw = status_word.as_u16();
+            MutationResult {
+                succeeded: false,
+                outcome: "card_rejected",
+                message: format!("The card rejected the request (status {raw:#06X})."),
+                attempts_remaining: None,
+                status_word: Some(raw),
+            }
+        }
     }
 }
 
@@ -940,8 +990,8 @@ fn activation_result(
         };
     }
     match (report.pin1_outcome, report.pin2_outcome) {
-        (Some(UnblockOutcome::Ok) | None, Some(UnblockOutcome::Ok))
-        | (Some(UnblockOutcome::Ok), None) => MutationResult {
+        (Some(ManageOutcome::Ok) | None, Some(ManageOutcome::Ok))
+        | (Some(ManageOutcome::Ok), None) => MutationResult {
             succeeded: true,
             outcome: "activated",
             message: "The card was activated and both PIN values were set.".to_owned(),
@@ -996,17 +1046,6 @@ fn parse_slot(slot: u8) -> Result<PinManageSlot, ApiFailure> {
     }
 }
 
-fn require_confirmation(value: &PinBytes, confirmation: &PinBytes) -> Result<(), ApiFailure> {
-    if value.as_bytes() == confirmation.as_bytes() {
-        Ok(())
-    } else {
-        Err(ApiFailure::new(
-            "confirmation_mismatch",
-            "The new PIN and its confirmation do not match.",
-        ))
-    }
-}
-
 fn pin_role_error(error: impl core::fmt::Display) -> ApiFailure {
     ApiFailure::new("invalid_secret_shape", error.to_string())
 }
@@ -1018,32 +1057,92 @@ fn pin_role_error(error: impl core::fmt::Display) -> ApiFailure {
 ///
 /// Each non-null pointer must address its accompanying number of
 /// readable bytes for the duration of the call.
-unsafe fn copy_optional_pin_pair(
+unsafe fn copy_optional_credential_pair<T, F>(
     (pin, pin_length): (*const u8, usize),
     (confirmation, confirmation_length): (*const u8, usize),
     pin_label: &'static str,
     confirmation_label: &'static str,
-) -> Result<Option<PinBytes>, ApiFailure> {
+    reconstruct: F,
+) -> Result<Option<T>, ApiFailure>
+where
+    F: Fn(UnvalidatedSecret) -> Result<T, CredentialInputError>,
+{
     if pin_length == 0 && confirmation_length == 0 {
         return Ok(None);
     }
-    // SAFETY: copy_pin applies the pointer and length checks before reading.
-    let pin = unsafe { copy_pin(pin, pin_length, pin_label) }?;
-    // SAFETY: As above.
-    let confirmation = unsafe { copy_pin(confirmation, confirmation_length, confirmation_label) }?;
-    require_confirmation(&pin, &confirmation)?;
+    // SAFETY: copy_confirmed_credential validates pointers and bounds before reading.
+    let pin = unsafe {
+        copy_confirmed_credential(
+            (pin, pin_length),
+            (confirmation, confirmation_length),
+            pin_label,
+            confirmation_label,
+            reconstruct,
+        )
+    }?;
     Ok(Some(pin))
 }
 
-unsafe fn copy_pin(
+unsafe fn copy_confirmed_credential<T, F>(
+    (pin, pin_length): (*const u8, usize),
+    (confirmation, confirmation_length): (*const u8, usize),
+    pin_label: &'static str,
+    confirmation_label: &'static str,
+    reconstruct: F,
+) -> Result<T, ApiFailure>
+where
+    F: Fn(UnvalidatedSecret) -> Result<T, CredentialInputError>,
+{
+    // SAFETY: copy_bytes validates null, length, and the public maximum before reading.
+    let pin_bytes =
+        Zeroizing::new(unsafe { copy_bytes(pin, pin_length, MAX_SECRET_BYTES, pin_label) }?);
+    let value = reconstruct(UnvalidatedSecret::from_owned_bytes(pin_bytes.to_vec()))
+        .map_err(pin_role_error)?;
+    // SAFETY: As above.
+    let confirmation_bytes = Zeroizing::new(unsafe {
+        copy_bytes(
+            confirmation,
+            confirmation_length,
+            MAX_SECRET_BYTES,
+            confirmation_label,
+        )
+    }?);
+    let _confirm = reconstruct(UnvalidatedSecret::from_owned_bytes(
+        confirmation_bytes.to_vec(),
+    ))
+    .map_err(pin_role_error)?;
+    if pin_bytes.as_slice() != confirmation_bytes.as_slice() {
+        return Err(ApiFailure::new(
+            "confirmation_mismatch",
+            "The new PIN and its confirmation do not match.",
+        ));
+    }
+    Ok(value)
+}
+
+unsafe fn copy_credential<T, F>(
     input: *const u8,
     length: usize,
     label: &'static str,
-) -> Result<PinBytes, ApiFailure> {
+    reconstruct: F,
+) -> Result<T, ApiFailure>
+where
+    F: FnOnce(UnvalidatedSecret) -> Result<T, CredentialInputError>,
+{
     // SAFETY: copy_bytes validates null, length, and the public maximum before
     // creating the temporary slice.
     let bytes = unsafe { copy_bytes(input, length, MAX_SECRET_BYTES, label) }?;
-    PinBytes::new(bytes).map_err(pin_role_error)
+    reconstruct(UnvalidatedSecret::from_owned_bytes(bytes)).map_err(pin_role_error)
+}
+
+unsafe fn copy_activation_input(
+    input: *const u8,
+    length: usize,
+    label: &'static str,
+) -> Result<ActivationInput, ApiFailure> {
+    // SAFETY: copy_bytes validates null, length, and the public maximum before reading.
+    let bytes = unsafe { copy_bytes(input, length, MAX_SECRET_BYTES, label) }?;
+    ActivationInput::new(bytes).map_err(pin_role_error)
 }
 
 /// The PIN 2 of a signing, copied once into the signing service's
@@ -1157,12 +1256,17 @@ mod tests {
     use refineid_doc_sign::document::Format;
     use std::path::Path;
 
+    /// Wire value outside the defined PIN slot range (`1..=2`).
+    const INVALID_SLOT: u8 = 3;
+    /// Wire value outside the defined document format range (`1..=2`).
+    const INVALID_FORMAT: u8 = 3;
+
     #[test]
     fn slot_values_are_closed() {
         assert_eq!(parse_slot(PIN1_SLOT).ok(), Some(PinManageSlot::Pin1));
         assert_eq!(parse_slot(PIN2_SLOT).ok(), Some(PinManageSlot::Pin2));
         assert!(parse_slot(0).is_err());
-        assert!(parse_slot(3).is_err());
+        assert!(parse_slot(INVALID_SLOT).is_err());
     }
 
     #[test]
@@ -1170,7 +1274,7 @@ mod tests {
         assert_eq!(parse_format(FORMAT_PADES).ok(), Some(Format::Pades));
         assert_eq!(parse_format(FORMAT_ASICE).ok(), Some(Format::AsicECades));
         assert!(parse_format(0).is_err());
-        assert!(parse_format(3).is_err());
+        assert!(parse_format(INVALID_FORMAT).is_err());
     }
 
     #[test]

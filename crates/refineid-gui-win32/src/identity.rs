@@ -1,9 +1,9 @@
 // Copyright 2026 Petri Koistinen. Licensed under the Apache License, Version 2.0.
 //! Identity screen backend: one-shot snapshot reads, rendered for display.
 //! Read-only; the photo path runs PACE with the operator-supplied CAN.
+use refineid_auth::PinStatus;
 use refineid_card_manager_core::service::{self, CardSnapshot};
 use refineid_emrtd::{CardFaceImage, EmrtdOps as _, ImageFormat};
-use refineid_lib_core::auth::{PinStatus, PukStatus};
 use refineid_pace::{Can, CanError, SmTransport, UnvalidatedCan, read_card_access, run_pace};
 use refineid_pcsc::{
     PcscBackend, ReaderAccessCap, ReaderBackend as _, ReaderBackendOps as _, ReaderFilter,
@@ -134,9 +134,9 @@ pub const fn pin_kind(status: Option<&PinStatus>) -> StateKind {
     }
 }
 
-pub const fn puk_kind(status: Option<&PukStatus>) -> StateKind {
+pub const fn puk_kind(status: Option<&PinStatus>) -> StateKind {
     match status {
-        Some(PukStatus::Remaining(retries)) => {
+        Some(PinStatus::Remaining(retries)) => {
             let left = retries.get();
             if left == 0 {
                 StateKind::Bad
@@ -146,8 +146,10 @@ pub const fn puk_kind(status: Option<&PukStatus>) -> StateKind {
                 StateKind::Ok
             }
         }
-        Some(PukStatus::Locked | PukStatus::Invalidated) => StateKind::Bad,
-        _ => StateKind::Neutral,
+        Some(PinStatus::Locked) => StateKind::Bad,
+        Some(PinStatus::Verified | PinStatus::NoInfo | PinStatus::Other(_)) | None => {
+            StateKind::Neutral
+        }
     }
 }
 
@@ -268,7 +270,7 @@ pub fn credential_label(status: Option<&PinStatus>, changed: Option<bool>) -> St
         Some(PinStatus::Remaining(retries)) => format!("ready ({} tries left)", retries.get()),
         Some(PinStatus::NoInfo) => String::from("no information"),
         Some(PinStatus::Locked) => String::from("blocked"),
-        Some(PinStatus::Other(word)) => format!("other (0x{word:04X})"),
+        Some(PinStatus::Other(word)) => format!("other ({:#06X})", word.as_u16()),
     };
     match changed {
         Some(true) => format!("{base}, changed"),
@@ -277,14 +279,13 @@ pub fn credential_label(status: Option<&PinStatus>, changed: Option<bool>) -> St
     }
 }
 
-pub fn puk_label(status: Option<&PukStatus>) -> String {
+pub fn puk_label(status: Option<&PinStatus>) -> String {
     match status {
         None => String::from("unknown"),
-        Some(PukStatus::Remaining(retries)) => format!("ready ({} tries left)", retries.get()),
-        Some(PukStatus::NoInfo) => String::from("no information"),
-        Some(PukStatus::Locked) => String::from("blocked"),
-        Some(PukStatus::Invalidated) => String::from("invalidated"),
-        Some(PukStatus::Other(word)) => format!("other (0x{word:04X})"),
+        Some(PinStatus::Remaining(retries)) => format!("ready ({} tries left)", retries.get()),
+        Some(PinStatus::Verified | PinStatus::NoInfo) => String::from("no information"),
+        Some(PinStatus::Locked) => String::from("blocked"),
+        Some(PinStatus::Other(word)) => format!("other ({:#06X})", word.as_u16()),
     }
 }
 

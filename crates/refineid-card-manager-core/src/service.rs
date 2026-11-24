@@ -14,10 +14,11 @@
 
 //! UI-toolkit-independent card-management facade.
 
-use refineid_auth::{PinManageOps as _, PinOps as _};
+use refineid_auth::{
+    ActivationScheme, CardPinLengths, PinChangeRecord, PinManageOps as _, PinOps as _,
+    PinReferenceScheme, PinSlot, PinStatus,
+};
 use refineid_cms::x509::OwnedCert;
-use refineid_lib_core::activation::{ActivationScheme, PinActivation};
-use refineid_lib_core::auth::{CardPinLengths, PinReferenceScheme, PinSlot, PinStatus, PukStatus};
 use refineid_lib_core::fineid_card::FineidCardModel;
 use refineid_pace::{Can, SmTransport, read_card_access, run_pace};
 use refineid_pcsc::{PcscBackend, PcscError, ReaderAccessCap, ReaderBackend as _, ReaderPickError};
@@ -27,8 +28,8 @@ pub use refineid_pcsc::ReaderFilter;
 
 use crate::card_pin::{
     ActivateOptions, ActivateReport, ActivationEvidence, CardPinError, ChangePinOptions,
-    ChangePinReport, UnblockPinOptions, UnblockPinReport, convert_core_lengths,
-    convert_core_pin_status, convert_core_puk_status, probe_pin_changed_flag, to_core_scheme,
+    ChangePinReport, PinActivation, UnblockPinOptions, UnblockPinReport,
+    activation_scheme_for_card, probe_pin_change_record,
 };
 use crate::reader_pick::{identity_from_certificate, pick_contactless_reader};
 
@@ -46,7 +47,7 @@ pub struct CardSnapshot {
     /// The credential-reference numbering the card answered to; the
     /// organization numbering marks an organization card.
     pub numbering: PinReferenceScheme,
-    /// The card's activation scheme ([`ActivationScheme::for_card`]).
+    /// The card's activation scheme.
     pub scheme: ActivationScheme,
     /// Exact activation-code length for the scheme.
     pub activation_code_length: usize,
@@ -66,7 +67,7 @@ pub struct CardSnapshot {
     /// Side-effect-free PIN2 status.
     pub pin2: Option<PinStatus>,
     /// Side-effect-free shared-PUK status.
-    pub puk: Option<PukStatus>,
+    pub puk: Option<PinStatus>,
     /// PIN1 changed flag (FINEID S1 v4.2 §3.15.3), when the card
     /// returns it.
     pub pin1_changed: Option<bool>,
@@ -98,7 +99,7 @@ pub struct ContactlessSnapshot {
     /// Always `None`: the Apple reference deliberately does not query
     /// the PUK over contactless secure messaging because FINEID cards
     /// can reject that query and end the secure channel.
-    pub puk: Option<PukStatus>,
+    pub puk: Option<PinStatus>,
 }
 
 impl ContactlessSnapshot {
@@ -114,13 +115,13 @@ impl ContactlessSnapshot {
     /// Whether PIN1 awaits its activation, judged without the flag.
     #[must_use]
     pub const fn pin1_activation(&self) -> PinActivation {
-        PinActivation::judge(self.scheme, None, self.pin1)
+        PinActivation::judge(self.scheme, PinChangeRecord::Unreadable, self.pin1)
     }
 
     /// Whether PIN2 awaits its activation, judged without the flag.
     #[must_use]
     pub const fn pin2_activation(&self) -> PinActivation {
-        PinActivation::judge(self.scheme, None, self.pin2)
+        PinActivation::judge(self.scheme, PinChangeRecord::Unreadable, self.pin2)
     }
 
     /// Exact activation-code length for the card's scheme.
@@ -191,31 +192,25 @@ fn inspected(reader_filter: Option<&ReaderFilter>) -> Result<CardSnapshot, CardP
         .map_err(|error| CardPinError::Pkcs15Select(format!("{error}")))?;
     crate::card_pin::re_verify_session(&mut transport, &context.bound_serial)?;
     let numbering = context.numbering;
-    let core_scheme = to_core_scheme(numbering);
     let scheme = context.scheme;
     let lengths = lengths_or_fineid_bounds(
-        transport
-            .read_card_pin_lengths_with_scheme(core_scheme)
-            .map(|read| convert_core_lengths(read, numbering)),
+        transport.read_card_pin_lengths_with_scheme(numbering),
         numbering,
     );
     let pin1 = transport
-        .pin_status_with_scheme(core_scheme, refineid_auth::PinSlot::Pin1)
-        .ok()
-        .map(convert_core_pin_status);
+        .pin_status_with_scheme(numbering, PinSlot::Pin1)
+        .ok();
     let pin2 = transport
-        .pin_status_with_scheme(core_scheme, refineid_auth::PinSlot::Pin2)
-        .ok()
-        .map(convert_core_pin_status);
-    let puk = transport
-        .probe_puk_status_with_scheme(core_scheme)
-        .ok()
-        .map(convert_core_puk_status);
-    let pin1_changed = probe_pin_changed_flag(&mut transport, numbering, PinSlot::Pin1);
-    let pin2_changed = probe_pin_changed_flag(&mut transport, numbering, PinSlot::Pin2);
+        .pin_status_with_scheme(numbering, PinSlot::Pin2)
+        .ok();
+    let puk = transport.probe_puk_status_with_scheme(numbering).ok();
+    let pin1_record = probe_pin_change_record(&mut transport, numbering, PinSlot::Pin1);
+    let pin2_record = probe_pin_change_record(&mut transport, numbering, PinSlot::Pin2);
+    let pin1_changed = pin_change_record_flag(pin1_record);
+    let pin2_changed = pin_change_record_flag(pin2_record);
     let activation_code_length = context.expected_activation_pin_length();
-    let pin1_activation = PinActivation::judge(scheme, pin1_changed, pin1);
-    let pin2_activation = PinActivation::judge(scheme, pin2_changed, pin2);
+    let pin1_activation = PinActivation::judge(scheme, pin1_record, pin1);
+    let pin2_activation = PinActivation::judge(scheme, pin2_record, pin2);
     let activation = crate::card_pin::judge_activation(pin1_activation, pin2_activation);
 
     Ok(CardSnapshot {
@@ -236,6 +231,15 @@ fn inspected(reader_filter: Option<&ReaderFilter>) -> Result<CardSnapshot, CardP
         pin1_changed,
         pin2_changed,
     })
+}
+
+/// Project a card's [`PinChangeRecord`] into the UI's optional boolean.
+const fn pin_change_record_flag(record: PinChangeRecord) -> Option<bool> {
+    match record {
+        PinChangeRecord::Changed => Some(true),
+        PinChangeRecord::Unchanged => Some(false),
+        PinChangeRecord::Unreadable => None,
+    }
 }
 
 /// The lengths `read` gave, or the FINEID bounds of `numbering` when the
@@ -309,20 +313,19 @@ fn inspected_contactless(
             CardPinError::Transport(format!("protected auth cert parse: {error}"))
         })?;
         let cert = cert_owned.view();
-        let scheme = ActivationScheme::from_validity_start(cert.not_before);
+        let scheme = activation_scheme_for_card(PinReferenceScheme::Citizen, Some(cert.not_before))
+            .ok_or_else(|| {
+                CardPinError::Transport(
+                    "protected auth cert validity start could not be converted".to_owned(),
+                )
+            })?;
         let person = identity_from_certificate(&cert).holder_line();
 
         transport
             .select_pkcs15_application()
             .map_err(|error| CardPinError::Pkcs15Select(format!("{error}")))?;
-        let pin1 = transport
-            .pin_status(refineid_auth::PinSlot::Pin1)
-            .ok()
-            .map(convert_core_pin_status);
-        let pin2 = transport
-            .pin_status(refineid_auth::PinSlot::Pin2)
-            .ok()
-            .map(convert_core_pin_status);
+        let pin1 = transport.pin_status(PinSlot::Pin1).ok();
+        let pin2 = transport.pin_status(PinSlot::Pin2).ok();
         // Keep parity with RefineID-Apple: PIN1 and PIN2 are safe probes,
         // but the PUK GET DATA query can answer 6988 over contactless and
         // make the next protected command fail with 6999.
@@ -470,7 +473,7 @@ pub fn reader_filter(reader: String) -> ReaderFilter {
 
 #[cfg(test)]
 mod tests {
-    use refineid_lib_core::auth::{CardPinLengths, PinReferenceScheme};
+    use refineid_auth::{CardPinLengths, PinReferenceScheme};
     use refineid_pkcs15::TokenSerial;
 
     use super::{ensure_serial, lengths_or_fineid_bounds};
