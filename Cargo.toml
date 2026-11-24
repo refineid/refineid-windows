@@ -7,7 +7,6 @@ members = [
     "crates/refineid-dev-errors",
     "crates/refineid-windows-driver-probe",
     "crates/refineid-gui-win32",
-    "crates/refineid-lib-core",
     "crates/refineid-minidriver",
     "crates/refineid-msi",
     "crates/refineid-pkcs11",
@@ -32,7 +31,6 @@ repository = "https://github.com/refineid/refineid-windows"
 
 [workspace.dependencies]
 refineid-agent-pipe = { path = "crates/refineid-agent-pipe", version = "26" }
-refineid-lib-core = { path = "crates/refineid-lib-core", version = "26" }
 refineid-card-manager-core = { path = "crates/refineid-card-manager-core", version = "26" }
 refineid-dev-errors = { path = "crates/refineid-dev-errors", version = "26" }
 refineid-rapp-core = { path = "crates/refineid-rapp-core", version = "26" }
@@ -56,17 +54,14 @@ refineid-pkcs11 = { git = "https://github.com/refineid/refineid-core.git", branc
 refineid-pkcs15 = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
 refineid-rapp = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
 refineid-remote = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
+refineid-sign = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
 refineid-x509 = { git = "https://github.com/refineid/refineid-core.git", branch = "main" }
 
 const-oid = { version = "0.10", default-features = false }
 getrandom = "0.4"
 hex = "0.4"
-# Terminal QR rendering for the RAPP pairing offer in the requester CLI.
-# Pure Rust; the image and SVG render features stay off.
-hmac = "0.13"
 pcsc = "2.9"
 proc-macro2 = { version = "1", features = ["span-locations"] }
-proptest = "1"
 rustc_lexer = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -76,7 +71,6 @@ socket2 = "0.6"
 # Lists the interfaces an mDNS browse asks on. Pure Rust over
 # GetAdaptersAddresses and getifaddrs; the link-local feature stays off.
 if-addrs = "0.15"
-subtle = "2"
 syn = { version = "2", features = ["full", "visit"] }
 walkdir = "2"
 # No default features: the `std` feature pulls `windows-future`,

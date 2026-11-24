@@ -256,6 +256,13 @@ pub(crate) struct CARD_SIGNING_INFO {
 pub(crate) const CARD_SIGNING_INFO_BASIC_VERSION: DWORD = 1;
 pub(crate) const CARD_SIGNING_INFO_CURRENT_VERSION: DWORD = 2;
 
+// WinCrypt ALG_ID hash values carried by CARD_SIGNING_INFO.aiHashAlg (wincrypt.h).
+pub(crate) const ALG_ID_NONE: DWORD = 0;
+pub(crate) const CALG_SHA1: DWORD = 0x0000_8004;
+pub(crate) const CALG_SHA_256: DWORD = 0x0000_800C;
+pub(crate) const CALG_SHA_384: DWORD = 0x0000_800D;
+pub(crate) const CALG_SHA_512: DWORD = 0x0000_800E;
+
 // dwKeySpec values
 pub(crate) const AT_KEYEXCHANGE: DWORD = 1;
 pub(crate) const AT_SIGNATURE: DWORD = 2;
@@ -816,5 +823,25 @@ mod tests {
             NTE_NO_KEY,
             NTE_BAD_KEYSET,
         ];
+    }
+
+    #[test]
+    fn hash_alg_id_constants_carry_their_sdk_values() {
+        assert_eq!(
+            CALG_SHA1,
+            windows_sys::Win32::Security::Cryptography::CALG_SHA1
+        );
+        assert_eq!(
+            CALG_SHA_256,
+            windows_sys::Win32::Security::Cryptography::CALG_SHA_256
+        );
+        assert_eq!(
+            CALG_SHA_384,
+            windows_sys::Win32::Security::Cryptography::CALG_SHA_384
+        );
+        assert_eq!(
+            CALG_SHA_512,
+            windows_sys::Win32::Security::Cryptography::CALG_SHA_512
+        );
     }
 }

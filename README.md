@@ -142,7 +142,7 @@ Run the host checks:
 ```powershell
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test -p refineid-lib-core
+cargo test --workspace
 ```
 
 ### Managing build cache

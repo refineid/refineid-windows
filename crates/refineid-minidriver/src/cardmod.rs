@@ -30,22 +30,19 @@ use crate::ffi::{
     CONTAINER_MAP_VALID_CONTAINER, DWORD, MAX_CONTAINER_NAME_LEN, PBYTE, PVOID, ROLE_ADMIN,
     ROLE_USER, SCARD_E_UNSUPPORTED_FEATURE, SCARD_S_SUCCESS,
 };
-use crate::transport::CardSessionTransport;
+use crate::transport::CardSessionSlot;
 use refineid_cms::x509::{EcCurve, OwnedCert, PublicKeyAlgorithm, parse_subject_public_key_info};
-use refineid_lib_core::auth::PinReferenceScheme;
 
 /// Per-`CardAcquireContext` state, stored behind `CARD_DATA`'s
 /// `pvVendorSpecific` for the life of the Card Module context.
 pub(crate) struct Ctx {
-    pub(crate) transport: Mutex<CardSessionTransport>,
+    pub(crate) session: Mutex<CardSessionSlot>,
     pub(crate) card: CardCapabilityModel,
     /// Whether PIN1 has been verified in this Card Module context.
     pub(crate) pin1_authenticated: bool,
-    /// Whether PIN2 has been verified for the current operation.
-    pub(crate) pin2_authenticated: bool,
-    /// The credential numbering PIN2 was verified under, which names
-    /// the qualified key the next signature uses.
-    pub(crate) pin2_scheme: PinReferenceScheme,
+    /// Whether PIN2 was acknowledged for a remote RAPP card context;
+    /// local cards track PIN2 solely via `CardSessionSlot::QualifiedVerified`.
+    pub(crate) remote_pin2_authenticated: bool,
 }
 
 /// PIN role IDs as the Base CSP addresses them. `ROLE_USER` /

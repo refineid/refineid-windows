@@ -2,7 +2,7 @@
 
 Windows smart-card minidriver (Card Module) for FINEID -- hooks the card into the Microsoft Base CSP/KSP
 so Edge, Chrome, Schannel, .NET, VPN, RDP, and Wi-Fi EAP-TLS reach it through the OS smart-card stack.
-Sibling to the PKCS#11 module; card-edge logic is shared with refineid-lib-core.
+Sibling to the PKCS#11 module; card-edge logic is shared with `refineid-core`.
 
 Windows-only: the crate compiles to an empty library on other targets.
 

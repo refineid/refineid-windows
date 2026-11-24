@@ -99,7 +99,7 @@ if rustup target list --installed | grep -q "x86_64-pc-windows-msvc"; then
     cargo clippy --target x86_64-pc-windows-msvc --workspace --all-targets -- -D warnings
 fi
 
-echo "pre-commit: cargo test -p refineid-lib-core -p xtask"
-RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }-D warnings" cargo test -p refineid-lib-core -p xtask
+echo "pre-commit: cargo test --workspace"
+RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }-D warnings" cargo test --workspace
 
 echo "pre-commit: ok (all quality checks passed)"
