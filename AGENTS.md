@@ -88,11 +88,12 @@ than the one that wrote the change.
 
 ## Rules live here, not in an agent's memory
 
-Every rule, decision and finding an agent should remember lives in this
-repository, never only in an agent's memory: a design rule in `doc/`, a
-defect in an issue, a working rule in this file. This file states each
-rule in a line and points to the reading behind it; the readings live
-in `doc/`, not here.
+Every rule, decision, finding, and reusable agent skill an agent should
+remember lives in this repository, never only in an agent's memory: a design
+rule in `doc/`, a defect in an issue, a working rule in this file, and
+reusable agent skills (Antigravity, Codex, Claude, etc.) under
+`.agents/skills/`. This file states each rule in a line and points to the
+reading behind it; the readings live in `doc/`, not here.
 
 ## Product
 
@@ -282,24 +283,65 @@ record for RAPP and its applications.
 ## Independent review
 
 - Review is tiered per the working method. Before a pull request
-  merges, review its diff independently with the first working
-  reviewer below from a different family than the one that wrote
-  it, unless the change is eligible for self-review. Try in this
-  order, strongest model each offers (see each CLI's model list):
-  the `codex` CLI (only when the maintainer has already authorized
-  its use), a Claude model via `agy`, DeepSeek via OpenCode,
-  Gemini via `agy`, and finally the `muse` CLI. Skip any reviewer
-  sharing the author's family or lacking authorization,
-  availability, or quota. If none remains, stop and report to the
-  owner instead of merging unreviewed.
-- A model family is the organization that trained the model. When
-  family membership is uncertain, treat the reviewer as
-  same-family and skip it.
-- Run the reviewer headless from an empty directory, with the diff
-  pasted into the prompt and no tool use; use each CLI's sandbox
-  and plan (no-edit) mode where it offers one, and never run a
-  reviewer with tools enabled. Frame the request as a code review
-  from the project's author.
+  merges, review its diff independently with a premier frontier model
+  from a family distinct from every family that authored any part of
+  the diff, unless the change is eligible for self-review.
+- Deep reviews -- protocol, cryptography, concurrency, state-machine,
+  security-critical, signing, or shared cross-platform contract
+  changes (and any change whose tier is unclear) -- require at least
+  two reviewers from distinct non-author families. Run all available
+  eligible premier families in parallel; if fewer than two eligible
+  premier families are available, fill the remaining required slot from
+  the fallback list below.
+- Premier reviewers (as of 2026-11; pick families distinct from every
+  authoring family at the strongest available reasoning tier):
+  - **Anthropic**: `agy` with `claude-opus-5-5-high`
+    (Claude Opus 5.5 / High).
+  - **Google**: `agy` with `gemini-4-carbon-high` (or
+    `gemini-4-neon-xhigh` / `gemini-4-neon-high` if ranked higher).
+  - **OpenAI**: `codex exec` with `--model gpt-6.2-astra
+    -c model_reasoning_effort=xhigh` (GPT-6.2-Astra / xhigh;
+    maintainer-authorized for this project when installed and within
+    quota).
+- Frontier rankings and CLI catalogs evolve over time; agents may
+  check <https://artificialanalysis.ai> alongside each CLI's model
+  list (for example `agy models` or Codex's available models) to pick
+  the strongest currently available frontier model per family instead
+  of using weaker reviewers while premier models are available.
+- Filter candidates first by family independence, authorization, and
+  availability, and fill required slots from eligible premier families
+  first. Use fallback harnesses -- `claude`, `opencode`, or `muse` --
+  only per unfilled required slot when no eligible premier family
+  remains available due to missing CLI, authorization, quota, outage,
+  or same-family exclusion, selecting the strongest listed model whose
+  training organization differs from every authoring family and from
+  every reviewer family already counted for the diff. If the required
+  minimum of independent reviewers (one for standard review, two for
+  deep review) cannot be met, stop and report to the owner instead of
+  merging unreviewed.
+- A model family is the organization that trained the model (human-only
+  authorship excludes no family). When a reviewer's family is
+  uncertain, treat it as same-family and skip it; if an AI author's
+  family is uncertain, ask the owner.
+- Run every reviewer headless from an empty scratch directory,
+  supplying the diff in the prompt (reading any prompt file into a
+  variable or stream and checking that the read succeeded before
+  launching) and explicitly instructing it not to use any tools. Use
+  each CLI's strictest read-only sandbox and plan/no-edit mode -- for
+  example, on POSIX shells `command agy --sandbox --mode plan
+  --disable-slash-commands --model <model> -p "$prompt"` and
+  `command codex exec --ignore-user-config --model gpt-6.2-astra
+  -c model_reasoning_effort=xhigh --ephemeral --skip-git-repo-check
+  --sandbox read-only --json -o OUT_FILE - < PROMPT_FILE`; on Windows
+  PowerShell resolve executables directly via `& (Get-Command agy
+  -CommandType Application)` with `-p (Get-Content -Raw -ErrorAction
+  Stop PROMPT_FILE)` or pipe `Get-Content -Raw -ErrorAction Stop
+  PROMPT_FILE | & (Get-Command codex -CommandType Application) exec
+  ... -`. Always bypass shell aliases or functions that add
+  `--dangerously-skip-permissions`,
+  `--dangerously-bypass-approvals-and-sandbox`, `--full-auto`, or
+  `--yolo`, never grant write or auto-approval permissions, and frame
+  the request as a code review from the project's author.
 - Check every finding against the code. Fix the real ones and list the
   rejected ones, with the reason, in the pull request description.
 
